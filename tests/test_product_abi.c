@@ -8,6 +8,11 @@
 
 _Static_assert(RPTADV_PRODUCT_ABI_VERSION == 7, "update product ABI probe deliberately");
 _Static_assert(RPTADV_HOST_ABI_VERSION == 10, "update host ABI probe deliberately");
+_Static_assert(RPTADV_PEER_PHONE == 3 && RPTADV_PEER_PRIVATE_CALL == 32,
+               "phone identity requires an explicit private-call capability");
+_Static_assert(RPTADV_PEER_INFO_PREFIX_SIZE == 80, "preserve the original peer metadata prefix");
+_Static_assert(RPTADV_PEER_INFO_PHONE_SIZE == 96,
+               "phone admission requires the complete account tail");
 _Static_assert(URP_AST_DIRECT_CALLBACKS_ABI_VERSION == 6,
                "use the canonical metadata-aware SDK callbacks");
 _Static_assert(sizeof(UrpNativeReceiveMetadata) == 72,

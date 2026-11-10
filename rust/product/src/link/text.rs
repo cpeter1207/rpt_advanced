@@ -57,7 +57,7 @@ impl TextRouter {
         let represented = message
             .represented_source
             .as_ref()
-            .map(|id| id.operator_alias());
+            .and_then(|id| id.operator_alias());
         if self.locals.contains(&message.source)
             || represented
                 .as_ref()

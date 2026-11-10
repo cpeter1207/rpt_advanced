@@ -108,7 +108,7 @@ is analysis-only; programme conversion remains in its inbound ring.
 - [x] Add failing timed-ring and shared-classifier tests, then implement the
   sized capabilities. Test source gaps, partial acceptance, discontinuity/reset,
   source-rate conversion and raw-voice versus hangtime independently.
-- [ ] Add phone latency policy to both `InboundPolicy` and
+- [x] Add phone latency policy to both `InboundPolicy` and
   `ReceiveState::should_render`; preserve ordinary 260 ms peer targets. Tests must
   show the phone path does not inherit those targets or stack another delay ring.
 - [x] Run targeted native provider tests, then formatting/lint/static/docs and
@@ -132,30 +132,35 @@ resolved settings, limits, the effective command map and target classification.
 `ActiveDtmfMacro` owns its source/generation, target, next step, start/due/deadline
 and invocation token. It returns ordinary source-tagged command operations.
 
-- [ ] Add failing config/compiler cases for `[dtmf_macro label]` and
+Completed in controller `v0.1.0-alpha23` after the native amd64/arm64 full gate,
+100% production line/branch coverage and signed package publication. The
+checklist below records the implemented current-node RF/IAX scope; phone and
+verified private remote targets remain dependent work.
+
+- [x] Add failing config/compiler cases for `[dtmf_macro label]` and
   `[dtmf_macro node label]`, direct `trigger`, `protected`, `commands`, global/node
   inheritance, invalid fallback and unchanged existing typed `[macro]` entries.
   Unconditionally redact command-string diagnostics, including rejected strings.
-- [ ] Implement the separate resolver/compiler. Use explicit `#` boundaries;
+- [x] Implement the separate resolver/compiler. Use explicit `#` boundaries;
   do not replay the human collector, which auto-executes some commands. Whitespace
   is insignificant, commas occur only after completed commands, repeated commas
   add checked durations, and selector `#` is consumed by selection.
-- [ ] Test exact 4096-symbol/120000-ms boundaries, overflow, missing terminator,
+- [x] Test exact 4096-symbol/120000-ms boundaries, overflow, missing terminator,
   remapped selectors/unlock/login, prefix collisions, nested invocation rejection,
   leading digits and short dial strings. Compile before generation publication.
-- [ ] Factor complete-command authorization from human collection. Preserve the
+- [x] Factor complete-command authorization from human collection. Preserve the
   live source grant; `for_source()` must not be used to clone it. Implement a
   macro self-revoke using the resolved bare lock operation, clearing only that
   source without storing a lock credential. Test lock then protected command.
-- [ ] Admit direct triggers through the combined command namespace. A protected
+- [x] Admit direct triggers through the combined command namespace. A protected
   macro requires live unlock on admission and after every pause; unprotected
   macros cannot elevate contained commands. Macro admission/pauses do not renew
   unlock expiry. Reject credential-bearing expansions after remapping/resolution.
-- [ ] Advance bounded work from the existing monotonic control pump after fresh
+- [x] Advance bounded work from the existing monotonic control pump after fresh
   input. Preserve actual RF-unkey survival; cancel on new live input, Lost,
   disconnect/replacement, permissions, reload, unload or explicit cancellation.
   Carry the invocation token through queued dispatch to reject canceled work.
-- [ ] Test fake-clock expiry, independent sources, no blocking during commas,
+- [x] Test fake-clock expiry, independent sources, no blocking during commas,
   unchanged human target selection, cancel-after-queue and same-process reload.
   Run focused core/runtime/product tests, then commit the integrated macro feature.
 
@@ -163,6 +168,15 @@ Focused commands: `cargo test --locked -p rpt-advanced-core dtmf_macro`, existin
 `runtime::dtmf_tests`/`runtime::links_tests`, and affected product pump tests.
 
 ### Task 3: Typed private phone source and command-only reply path
+
+Native alpha24 foundation checkpoint: typed call/source and compatible C metadata,
+command-only ownership, private status/login streams, salted mailbox PIN
+verification, exact retirement fences and the pure telephone grammar are
+implemented. Mailbox and timed-consumer leaves have native production coverage;
+the combined candidate still requires its full hosted gate. Other private
+report families, provider ownership, audio attachment/DSP and remote
+capability negotiation remain dependent work. This checkpoint is not complete
+phone support or complete Task 3.
 
 **Files:** `rust/core/src/link/identity.rs`, `runtime/links.rs`, `runtime/dtmf.rs`,
 `rust/product/include/rptadv_product.h`, `services.rs`, `link/session.rs`, host
@@ -173,13 +187,13 @@ generation; a typed `Phone` protocol/capability rather than decimal node identit
 An explicit control-only call reply sink is independent of RF audio attachment.
 Operations preserve actual ingress and generation through dispatch and replies.
 
-- [ ] Write failing tests admitting private phone sources with no ASL handshake,
+- [x] Write failing tests admitting private phone sources with no ASL handshake,
   directory/topology publication, accidental local/trusted `reply=None`, or RF
   demand. Retain ordinary ASL/Echo behavior and stale-connection tests.
-- [ ] Implement typed source admission and source-private control/reply routing
+- [x] Implement typed source admission and source-private control/reply routing
   using sized host ABI extensions only where existing extension points cannot
   carry it. Update host/table compatibility checks, package cohort and adapters.
-- [ ] Add command-only calls to the source-scoped collector/grant lifecycle.
+- [x] Add command-only calls to the source-scoped collector/grant lifecycle.
   Mailbox login cannot unlock node administration. No claimed origin is identity.
 - [ ] Negotiate remote call-origin, private-reply and retirement capabilities;
   retire collectors/grants when a call ends. Test bounded-origin exhaustion and
@@ -198,7 +212,7 @@ test-only provider fixtures and transport ADR.
 canonical source PCM to Task 3. Existing per-call ingress/egress own packet
 order, jitter, codec state, prepared packets and bounded deadlines.
 
-- [ ] Resolve and build a disposable native dependency probe before selection:
+- [x] Resolve and build a disposable native dependency probe before selection:
   candidate `rsipstack 0.8.2` signaling plus `sdp/rtp/rtcp/webrtc-srtp 0.17.3`
   leaf crates. Inspect actual licenses/MSRV/transitives; preserve Rust 1.85 claims
   until the graph proves them. Choose a supported compatible graph or a separately
@@ -267,7 +281,7 @@ source-private message catalog, command mappings, host call lifecycle and routin
 closing. Call-scoped isolation claims and unlock-authorized bypass are separate
 from the provider account and mailbox authentication.
 
-- [ ] Test/implement salted mailbox/PIN records with first name/callsign, bounded
+- [x] Test/implement salted mailbox/PIN records with first name/callsign, bounded
   attempts, private prompts and teardown. Every incoming caller authenticates.
 - [ ] Test/implement ordinary telephone digits, `*3` default/explicit attachment,
   local/remote `*4`, `**` one-symbol quoting, bare command-mode `#` exit and quoted

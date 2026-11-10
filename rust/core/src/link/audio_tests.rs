@@ -51,7 +51,7 @@ fn idle_peer_processing_follows_the_native_clock_without_consuming_media() {
             )
             .unwrap();
     }
-    let input = ClockedInput {
+    let mut input = ClockedInput {
         signals: PeerSignals::new(),
         available: 0,
         real: Some(0),
@@ -60,6 +60,12 @@ fn idle_peer_processing_follows_the_native_clock_without_consuming_media() {
         rendered_samples: 0,
         silent_samples: 0,
     };
+    assert!(!input.source_timing_available());
+    assert_eq!(input.render_timed_sample(), None);
+    assert_eq!(
+        input.renders, 0,
+        "absent timed capability cannot consume legacy input"
+    );
     let (writer, _reader) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new("200", Mode::TRANSCEIVE, input, writer, 960, 0).unwrap();
     let (mut links, _dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();

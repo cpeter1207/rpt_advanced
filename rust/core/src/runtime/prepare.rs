@@ -116,11 +116,21 @@ pub(super) fn streamed_status(
     morse_text: &str,
     speech_text: &str,
 ) -> Result<PreparedMedia, RuntimeError> {
+    PreparedMedia::new_stream(status_stream(station, settings, morse_text, speech_text)?)
+        .map_err(|_| RuntimeError::Preparation)
+}
+
+/// Prepare one existing status producer for either controller or call-private playback.
+pub(super) fn status_stream(
+    station: &mut dyn StationMediaSession,
+    settings: &ResolvedIdentifierSettings,
+    morse_text: &str,
+    speech_text: &str,
+) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
     let source = status_source(settings, morse_text, speech_text);
-    let stream = station
+    station
         .register_once(source)
-        .map_err(|_| RuntimeError::Preparation)?;
-    PreparedMedia::new_stream(stream).map_err(|_| RuntimeError::Preparation)
+        .map_err(|_| RuntimeError::Preparation)
 }
 
 /// Preserve the existing status speech settings and complete Morse substitute in a recipe.

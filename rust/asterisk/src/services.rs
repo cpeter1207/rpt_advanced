@@ -1254,13 +1254,15 @@ unsafe extern "C" fn peer_info(
     output: *mut ffi::rptadv_peer_info_v1,
 ) -> i32 {
     boundary(-1, || {
-        let (Some(peer), Some(output)) = (unsafe { peer.cast::<PeerHandle>().as_ref() }, unsafe {
-            output.as_mut()
-        }) else {
+        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
             return -1;
         };
-        if output.struct_size < size_of::<ffi::rptadv_peer_info_v1>() as u32
-            || output.abi_version != 1
+        if output.is_null() {
+            return -1;
+        }
+        let capacity = unsafe { ptr::addr_of!((*output).struct_size).read() } as usize;
+        if capacity < std::mem::offset_of!(ffi::rptadv_peer_info_v1, provider_account)
+            || unsafe { ptr::addr_of!((*output).abi_version).read() } != 1
         {
             return -1;
         }
@@ -1288,8 +1290,9 @@ unsafe extern "C" fn peer_info(
             },
             length: text.len(),
         };
-        *output = ffi::rptadv_peer_info_v1 {
-            struct_size: size_of::<ffi::rptadv_peer_info_v1>() as u32,
+        let written = capacity.min(size_of::<ffi::rptadv_peer_info_v1>());
+        let record = ffi::rptadv_peer_info_v1 {
+            struct_size: written as u32,
             abi_version: 1,
             protocol,
             capabilities,
@@ -1298,7 +1301,15 @@ unsafe extern "C" fn peer_info(
             remote: bytes(remote),
             callsign: bytes(callsign),
             local: bytes(local),
+            provider_account: bytes(""),
         };
+        unsafe {
+            ptr::copy_nonoverlapping(
+                ptr::from_ref(&record).cast::<u8>(),
+                output.cast::<u8>(),
+                written,
+            );
+        }
         0
     })
 }

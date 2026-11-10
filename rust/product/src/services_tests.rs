@@ -13,10 +13,50 @@ static PEER_DIAL_MODE: AtomicU8 = AtomicU8::new(0);
 static DIRECTORY_NOTICE: AtomicU8 = AtomicU8::new(0);
 #[path = "services_echo_tests.rs"]
 mod echo;
+#[path = "services_phone_tests.rs"]
+mod phone;
 #[path = "services_processing_tests.rs"]
 mod processing;
 #[path = "services_remote_tests.rs"]
 mod remote;
+
+#[test]
+fn phone_peer_metadata_admits_an_opaque_private_call() {
+    unsafe extern "C" fn phone_info(
+        context: *mut c_void,
+        peer: *const c_void,
+        output: *mut abi::rptadv_peer_info_v1,
+    ) -> i32 {
+        unsafe { crate::fixture::peer_info(context, peer, output) };
+        let output = unsafe { &mut *output };
+        output.protocol = 3;
+        output.capabilities = 32;
+        output.account_generation = 7;
+        output.qso_generation = 9;
+        output.provider_account = abi::rptadv_peer_bytes_v1 {
+            data: b"provider".as_ptr(),
+            length: 8,
+        };
+        output.remote = abi::rptadv_peer_bytes_v1 {
+            data: b"aabbccddeeff00112233445566778899".as_ptr(),
+            length: 32,
+        };
+        0
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let services = host_services(|table| table.peer_info = Some(phone_info));
+    let handle = crate::fixture::peer();
+    let admitted = unsafe { services.peer(handle) };
+    if admitted.is_err() {
+        unsafe { crate::fixture::release_peer(handle) };
+    }
+    assert!(
+        admitted.is_ok(),
+        "opaque private phone metadata was rejected"
+    );
+}
 
 unsafe extern "C" fn echo_info(
     _: *mut c_void,
@@ -55,6 +95,10 @@ fn mixed_protocol_host_dispatch_uses_each_peers_copied_capabilities() {
             capabilities: 0,
             account_generation: 0,
             qso_generation: 0,
+            provider_account: abi::rptadv_peer_bytes_v1 {
+                data: ptr::null(),
+                length: 0,
+            },
             remote: abi::rptadv_peer_bytes_v1 {
                 data: b"2000".as_ptr(),
                 length: 4,
@@ -88,7 +132,7 @@ fn mixed_protocol_host_dispatch_uses_each_peers_copied_capabilities() {
         !peer.prepared_media(),
         "a PCM peer must not use globally present codec callbacks"
     );
-    assert_eq!(peer.identity().node(), "2000");
+    assert_eq!(peer.identity().node(), Some("2000"));
     assert_eq!(peer.callsign(), "");
     assert_eq!(peer.generations(), (0, 0));
     assert!(matches!(

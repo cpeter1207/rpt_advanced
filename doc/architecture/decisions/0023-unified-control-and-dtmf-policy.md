@@ -6,7 +6,9 @@ Accepted amendment — 2026-11-09: [ADR 0044](0044-phone-peers-and-rf-presentati
 adds source-scoped direct-trigger DTMF macro sequences and private phone control.
 Explicit macro terminators/comma deadlines remain separate from human keypad
 collection. Call-private replies and verified remote origin lifecycle are required
-before command-only phone operation; these additions remain unimplemented.
+before command-only phone operation. Typed call-source/private-reply ownership
+is an unreleased foundation under ADR 0044; PIN verification, provider egress,
+telephone routing and verified remote private operation remain pending.
 
 Reaffirmed 2026-09-17: this record's source-scoped telemetry routing is the
 required behavior. ADR 0025's earlier all-local restriction was an intermediate

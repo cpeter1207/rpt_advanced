@@ -29,8 +29,8 @@ GPIOD = "librptadv_gpiod_adapter.so.1"
 HWMON = "librptadv_hwmon_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
 PRODUCT = "librptadv_product.so.2"
-RING_MINIMUM_VERSION = "3.0.0~alpha4"
-SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha2"
+RING_MINIMUM_VERSION = "3.0.0~alpha5"
+SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha3"
 TONE_MINIMUM_VERSION = "0.1.0~alpha1"
 MORSE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 DTMF_MINIMUM_VERSION = "0.1.0~alpha3-1"
@@ -352,8 +352,8 @@ def package(control: Path) -> None:
         assert token in contents, f"missing package dependency: {token}"
     for token in (
         f"librate-adjusting-pcm-ring3-dev (>= {RING_MINIMUM_VERSION})",
-        "libusbradioplus-product-dev (>= 0.1.0~alpha32-1)",
-        "libusbradioplus-product1 (>= 0.1.0~alpha32-1)",
+        "libusbradioplus-product-dev (>= 0.1.0~alpha33-1)",
+        "libusbradioplus-product1 (>= 0.1.0~alpha33-1)",
         f"librate-adjusting-pcm-ring3 (>= {RING_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter-dev (>= {SAMPLERATE_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter2 (>= {SAMPLERATE_MINIMUM_VERSION})",

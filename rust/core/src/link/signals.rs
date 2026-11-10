@@ -6,6 +6,8 @@ use std::sync::{
 
 #[derive(Debug)]
 struct ReplyState {
+    phone: Option<super::PhoneSource>,
+    phone_authenticated: AtomicBool,
     ended: AtomicBool,
     radio_keyed: AtomicBool,
     edge: AtomicU64,
@@ -23,6 +25,18 @@ impl PartialEq for PeerReply {
 }
 impl Eq for PeerReply {}
 impl PeerReply {
+    /// Exact private call source, absent for ordinary node peers.
+    pub fn phone_source(&self) -> Option<&super::PhoneSource> {
+        self.0.phone.as_ref()
+    }
+    /// Mailbox admission is separate from provider authentication and admin unlock.
+    pub fn phone_authenticated(&self) -> bool {
+        !self.ended() && self.0.phone_authenticated.load(Ordering::Acquire)
+    }
+    /// Revoke queued commands and replies before their owner reclaims the connection.
+    pub fn retire(&self) {
+        self.0.ended.store(true, Ordering::Release);
+    }
     /// Stable identity while the prepared response retains this connection.
     pub fn identity(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
@@ -61,10 +75,19 @@ impl Default for PeerSignals {
 impl PeerSignals {
     /// Prepare empty state before either endpoint is exposed.
     pub fn new() -> Self {
+        Self::with_phone(None)
+    }
+    /// Construct private control state before any radio attachment exists.
+    pub fn for_phone(source: super::PhoneSource) -> Self {
+        Self::with_phone(Some(source))
+    }
+    fn with_phone(phone: Option<super::PhoneSource>) -> Self {
         Self {
             pcm: AtomicU64::new(0),
             dtmf_muted: AtomicBool::new(false),
             reply: PeerReply(Arc::new(ReplyState {
+                phone,
+                phone_authenticated: AtomicBool::new(false),
                 ended: AtomicBool::new(false),
                 radio_keyed: AtomicBool::new(false),
                 edge: AtomicU64::new(0),
@@ -75,6 +98,18 @@ impl PeerSignals {
             source_edge: AtomicU64::new(0),
             source: std::array::from_fn(|_| AtomicU8::new(0)),
         }
+    }
+    /// Publish only a mailbox PIN result already verified by serialized control.
+    /// This never grants node-administration unlock and is not a PIN verifier.
+    pub fn authenticate_phone(&self) -> bool {
+        if self.reply.phone_source().is_none() || self.ended() {
+            return false;
+        }
+        self.reply
+            .0
+            .phone_authenticated
+            .store(true, Ordering::Release);
+        true
     }
     /// Publish only after real decoded samples become visible in the shared ring.
     pub fn publish_pcm(&self) {
@@ -105,7 +140,7 @@ impl PeerSignals {
     }
     /// Mark terminal transport failure before detachment or reclaim.
     pub fn end(&self) {
-        self.reply.0.ended.store(true, Ordering::Release);
+        self.reply.retire();
     }
     /// Terminal failure wins over any buffered activity.
     pub fn ended(&self) -> bool {

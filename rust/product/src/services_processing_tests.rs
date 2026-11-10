@@ -10,6 +10,7 @@ struct State {
     processed_samples: AtomicUsize,
     nonzero_samples: AtomicUsize,
     destroyed: AtomicUsize,
+    previous: std::sync::atomic::AtomicU32,
 }
 
 unsafe extern "C" fn process(context: *mut c_void, samples: *mut f32, count: usize) -> i32 {
@@ -26,7 +27,11 @@ unsafe extern "C" fn process(context: *mut c_void, samples: *mut f32, count: usi
         return -1;
     }
     for sample in samples {
-        *sample *= 0.5;
+        if state.mode == 10 {
+            *sample = f32::from_bits(state.previous.swap(sample.to_bits(), Ordering::Relaxed));
+        } else {
+            *sample *= 0.5;
+        }
     }
     0
 }
@@ -84,6 +89,7 @@ fn fixture(mode: usize) -> (Box<State>, HostServices) {
         processed_samples: AtomicUsize::new(0),
         nonzero_samples: AtomicUsize::new(0),
         destroyed: AtomicUsize::new(0),
+        previous: std::sync::atomic::AtomicU32::new(0),
     });
     let services = host_services(|table| {
         table.context = ptr::from_mut(state.as_mut()).cast();
@@ -110,6 +116,28 @@ impl Input for Source {
     fn source_rate(&self) -> u32 {
         8000
     }
+    fn source_timing_available(&self) -> bool {
+        true
+    }
+    fn render_timed_sample(&mut self) -> Option<rpt_advanced_core::link::TimedPeerSample> {
+        use rpt_advanced_core::link::{SampleProvenance, SourceCoordinate, TimedPeerSample};
+        self.real?;
+        self.renders += 1;
+        Some(TimedPeerSample {
+            sample: self.renders as f32 * 0.25,
+            provenance: Some(SampleProvenance {
+                position: Some(SourceCoordinate {
+                    generation: 7,
+                    frame: self.renders as u64,
+                    fraction_billionths: 0,
+                    negative: false,
+                }),
+                real: self.real != Some(0),
+                plc: self.real == Some(0),
+                ..SampleProvenance::default()
+            }),
+        })
+    }
     fn signals(&self) -> &PeerSignals {
         &self.signals
     }
@@ -124,6 +152,52 @@ impl Input for Source {
         samples.fill(0.5);
         self.real
     }
+}
+
+#[test]
+fn source_timing_survives_bypass_but_opaque_delayed_dsp_stays_unknown() {
+    let mut bypass = ProcessedPeer::new(Source::new(Some(1)), None);
+    assert!(bypass.source_timing_available());
+    let first = bypass.render_timed_sample().unwrap();
+    assert_eq!(first.sample, 0.25);
+    assert_eq!(first.provenance.unwrap().position.unwrap().frame, 1);
+    bypass.input.signals.set_dtmf_muted(true);
+    let muted = bypass.render_timed_sample().unwrap();
+    assert_eq!(muted.sample, 0.0);
+    assert!(muted.provenance.unwrap().muted);
+
+    let (state, services) = fixture(10);
+    let processor = services
+        .prepare_peer_processing(CONFIGURATION, "1000", 4)
+        .unwrap();
+    let mut delayed = ProcessedPeer::new(Source::new(Some(1)), processor);
+    assert!(!delayed.source_timing_available());
+    assert_eq!(delayed.render_timed_sample().unwrap().sample, 0.0);
+    let second = delayed.render_timed_sample().unwrap();
+    assert_eq!(
+        second.sample, 0.25,
+        "DSP output belongs to the previous input"
+    );
+    assert_eq!(
+        second.provenance, None,
+        "opaque DSP cannot relabel old PCM as current source"
+    );
+    delayed.input.signals.set_dtmf_muted(true);
+    let muted = delayed.render_timed_sample().unwrap();
+    assert_eq!((muted.sample, muted.provenance), (0.0, None));
+    assert_eq!(state.processed.load(Ordering::Relaxed), 3);
+    drop(delayed);
+    assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
+
+    let mut failed = ProcessedPeer::new(Source::new(None), None);
+    assert_eq!(failed.render_timed_sample(), None);
+    let (state, services) = fixture(7);
+    let processor = services
+        .prepare_peer_processing(CONFIGURATION, "1000", 4)
+        .unwrap();
+    let mut failed = ProcessedPeer::new(Source::new(Some(1)), processor);
+    assert_eq!(failed.render_timed_sample(), None);
+    assert_eq!(state.processed.load(Ordering::Relaxed), 1);
 }
 
 #[test]

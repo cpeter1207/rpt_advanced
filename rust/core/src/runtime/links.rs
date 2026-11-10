@@ -17,7 +17,7 @@ use crate::{
 
 /// Owned dial request. Carry this across external lookup/media/dial and return it for publication.
 pub struct ConnectAttempt {
-    macro_source: Option<DigitOperation>,
+    pending_source: Option<DigitOperation>,
     remote: String,
     mode: Mode,
     permanent: bool,
@@ -28,7 +28,7 @@ pub struct ConnectAttempt {
 
 /// Retry work retains a host-generation permit until external dial cleanup completes.
 pub struct RetryWork {
-    macro_source: Option<DigitOperation>,
+    pending_source: Option<DigitOperation>,
     attempt: RetryAttempt,
     work: GenerationWork,
 }
@@ -43,11 +43,11 @@ impl RetryWork {
     }
     /// Revalidate before each external operation.
     pub fn current(&self) -> bool {
-        self.work.is_current() && macro_source_current(self.macro_source.as_ref(), None)
+        self.work.is_current() && pending_source_current(self.pending_source.as_ref(), None)
     }
-    /// Revalidate an initial macro retry's source deadline before external dialing.
+    /// Revalidate an initial source-owned retry before external dialing.
     pub fn current_at(&self, now_ms: u64) -> bool {
-        self.work.is_current() && macro_source_current(self.macro_source.as_ref(), Some(now_ms))
+        self.work.is_current() && pending_source_current(self.pending_source.as_ref(), Some(now_ms))
     }
 }
 impl ConnectAttempt {
@@ -65,15 +65,15 @@ impl ConnectAttempt {
     }
     /// Recheck this after each external blocking preparation step.
     pub fn current(&self) -> bool {
-        self.work.is_current() && macro_source_current(self.macro_source.as_ref(), None)
+        self.work.is_current() && pending_source_current(self.pending_source.as_ref(), None)
     }
     /// Recheck source cancellation and the inclusive elapsed bound before external work.
     pub fn current_at(&self, now_ms: u64) -> bool {
-        self.work.is_current() && macro_source_current(self.macro_source.as_ref(), Some(now_ms))
+        self.work.is_current() && pending_source_current(self.pending_source.as_ref(), Some(now_ms))
     }
 }
 
-fn macro_source_current(source: Option<&DigitOperation>, now_ms: Option<u64>) -> bool {
+fn pending_source_current(source: Option<&DigitOperation>, now_ms: Option<u64>) -> bool {
     source.is_none_or(|source| {
         source.reply.as_ref().is_none_or(|reply| !reply.ended())
             && source.macro_permit.as_ref().is_none_or(|permit| {
@@ -131,7 +131,7 @@ pub struct NodeLinkControl {
     policy: AccessPolicy,
     commands: DtmfCommands,
     peer_commands: Vec<(String, PeerReply, DtmfCommands)>,
-    macro_retries: Vec<(String, DigitOperation)>,
+    pending_source_retries: Vec<(String, DigitOperation)>,
     digit_sequence: i32,
     schedule: Option<LinkScheduler>,
     groups: Vec<ConfiguredGroup>,
@@ -208,7 +208,7 @@ impl NodeLinkControl {
             policy,
             commands: DtmfCommands::new(commands),
             peer_commands: Vec::new(),
-            macro_retries: Vec::new(),
+            pending_source_retries: Vec::new(),
             digit_sequence: 0,
             schedule,
             groups,
@@ -224,7 +224,7 @@ impl NodeLinkControl {
         commands: DtmfCommandMap,
         schedule: Option<LinkScheduler>,
     ) {
-        for (remote, _) in self.macro_retries.drain(..) {
+        for (remote, _) in self.pending_source_retries.drain(..) {
             self.manager.cancel_retry(&remote);
         }
         self.groups = configured_groups(schedule.as_ref(), &self.groups);
@@ -315,8 +315,8 @@ impl NodeLinkControl {
         commands.is_some_and(|commands| commands.macro_operation_current(operation, now_ms))
     }
 
-    fn prune_macro_retries(&mut self, now_ms: u64) {
-        if self.macro_retries.is_empty() {
+    fn prune_pending_source_retries(&mut self, now_ms: u64) {
+        if self.pending_source_retries.is_empty() {
             return;
         }
         let pending = self
@@ -326,14 +326,14 @@ impl NodeLinkControl {
             .filter(|peer| peer.retrying)
             .map(|peer| peer.name)
             .collect::<std::collections::BTreeSet<_>>();
-        for (remote, source) in std::mem::take(&mut self.macro_retries) {
+        for (remote, source) in std::mem::take(&mut self.pending_source_retries) {
             if !pending.contains(&remote) {
                 continue;
             }
-            if macro_source_current(Some(&source), Some(now_ms))
+            if pending_source_current(Some(&source), Some(now_ms))
                 && self.macro_operation_current(&source, now_ms)
             {
-                self.macro_retries.push((remote, source));
+                self.pending_source_retries.push((remote, source));
             } else {
                 self.manager.cancel_retry(&remote);
             }
@@ -594,6 +594,32 @@ impl NodeLinkControl {
         }
         self.source_digit(remote, digit, now_ms, reply)
     }
+    /// Collect only an admitted private call's selected-node commands. No link
+    /// membership or RF attachment is created, and idle phone digits never regenerate.
+    /// The caller checks phone/destination selection permissions before this entry.
+    pub fn phone_digit(
+        &mut self,
+        source: &crate::link::PhoneSource,
+        digit: char,
+        now_ms: u64,
+        reply: PeerReply,
+    ) -> Option<DigitOutcome> {
+        if !self.admitting
+            || !reply.phone_authenticated()
+            || reply.phone_source() != Some(source)
+            || !crate::link::valid_digit(digit)
+        {
+            return None;
+        }
+        self.source_digit(&source.call_id().to_string(), digit, now_ms, reply)
+            .filter(|outcome| !matches!(outcome, DigitOutcome::Regenerate(_)))
+    }
+    /// Retire an actual private ingress before reclaiming its collectors and grants.
+    /// Already queued work retains this ended token and fails its dispatch fence.
+    pub fn retire_source(&mut self, reply: &PeerReply) {
+        reply.retire();
+        self.peer_commands.retain(|(_, source, _)| source != reply);
+    }
     fn source_digit(
         &mut self,
         origin: &str,
@@ -690,7 +716,7 @@ impl NodeLinkControl {
         now_ms: u64,
         directory_verified: bool,
     ) -> Result<LinkEffect, AdmissionError> {
-        self.prune_macro_retries(now_ms);
+        self.prune_pending_source_retries(now_ms);
         if !self.admitting || !work.is_current() {
             return Err(AdmissionError::Stale);
         }
@@ -699,6 +725,19 @@ impl NodeLinkControl {
         }
         if !self.macro_operation_current(&operation, now_ms) {
             return Err(AdmissionError::Stale);
+        }
+        if let Some((reply, source)) = operation
+            .reply
+            .as_ref()
+            .and_then(|reply| reply.phone_source().map(|source| (reply, source)))
+        {
+            if !reply.phone_authenticated()
+                || operation.origin.as_deref() != Some(source.call_id().to_string().as_str())
+                || operation.command.action == LinkAction::Command
+            {
+                // Legacy D envelopes provide neither private replies nor per-call retirement.
+                return Err(AdmissionError::Denied);
+            }
         }
         let remote = if matches!(
             operation.command.action,
@@ -777,7 +816,12 @@ impl NodeLinkControl {
                     return Err(AdmissionError::Loop);
                 }
                 LinkEffect::Connect(ConnectAttempt {
-                    macro_source: operation.macro_permit.as_ref().map(|_| operation.clone()),
+                    pending_source: (operation.macro_permit.is_some()
+                        || operation
+                            .reply
+                            .as_ref()
+                            .is_some_and(|reply| reply.phone_source().is_some()))
+                    .then(|| operation.clone()),
                     remote,
                     mode,
                     permanent,
@@ -983,7 +1027,7 @@ impl NodeLinkControl {
         let result = if !self.admitting
             || !attempt.current_at(now_ms)
             || attempt
-                .macro_source
+                .pending_source
                 .as_ref()
                 .is_some_and(|source| !self.macro_operation_current(source, now_ms))
             || !scheduled_current
@@ -1031,13 +1075,13 @@ impl NodeLinkControl {
             );
         }
         if result == Ok(true) {
-            self.macro_retries
+            self.pending_source_retries
                 .retain(|(remote, _)| remote != &attempt.remote);
         } else if topology_blocked || (result == Ok(false) && attempt.permanent) {
-            if let Some(source) = attempt.macro_source {
-                self.macro_retries
+            if let Some(source) = attempt.pending_source {
+                self.pending_source_retries
                     .retain(|(remote, _)| remote != &attempt.remote);
-                self.macro_retries.push((attempt.remote, source));
+                self.pending_source_retries.push((attempt.remote, source));
             }
         }
         result
@@ -1047,10 +1091,10 @@ impl NodeLinkControl {
         if !self.admitting || !work.is_current() {
             return None;
         }
-        self.prune_macro_retries(now_ms);
+        self.prune_pending_source_retries(now_ms);
         self.manager.take_retry(now_ms).map(|attempt| RetryWork {
-            macro_source: self
-                .macro_retries
+            pending_source: self
+                .pending_source_retries
                 .iter()
                 .find(|(remote, _)| remote == attempt.name())
                 .map(|(_, source)| source.clone()),
@@ -1068,7 +1112,7 @@ impl NodeLinkControl {
         let owns_attempt = self.manager.owns_retry(&retry.attempt);
         let source_valid = retry.current_at(now_ms)
             && retry
-                .macro_source
+                .pending_source
                 .as_ref()
                 .is_none_or(|source| self.macro_operation_current(source, now_ms));
         let attempt = retry.attempt;
@@ -1085,12 +1129,11 @@ impl NodeLinkControl {
         self.manager
             .finish_retry(attempt, matches!(result, Ok(true)), now_ms);
         if owns_attempt && (result == Ok(true) || !source_valid) {
-            if let Some(source) = &retry.macro_source {
-                self.macro_retries.retain(|(name, current)| {
-                    name != &remote || current.macro_permit != source.macro_permit
-                });
+            if let Some(source) = &retry.pending_source {
+                self.pending_source_retries
+                    .retain(|(name, current)| name != &remote || current != source);
             }
-            if !source_valid && retry.macro_source.is_some() {
+            if !source_valid && retry.pending_source.is_some() {
                 self.manager.cancel_retry(&remote);
             }
         }
@@ -1147,7 +1190,7 @@ impl NodeLinkControl {
             return Some(LinkEffect::Detach(vec![remote]));
         }
         Some(LinkEffect::Connect(ConnectAttempt {
-            macro_source: None,
+            pending_source: None,
             remote: reservation.remote().into(),
             mode: Mode::TRANSCEIVE,
             permanent: true,

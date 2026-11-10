@@ -940,6 +940,24 @@ fn receive_activity_primes_conceals_brief_gaps_drains_and_honors_eof() {
 }
 
 #[test]
+fn phone_receive_policy_uses_existing_preroll_without_the_ordinary_peer_target() {
+    use rpt_advanced_core::link::{ReceivePolicy, ReceiveState};
+    for rate in [8000, 16000, 48000] {
+        for frames in [1, 480, 960, 4096] {
+            let target = u64::from(rate) * 160 / 1000;
+            let mut phone = ReceiveState::with_policy(rate, ReceivePolicy::Phone).unwrap();
+            let mut ordinary = ReceiveState::new(rate).unwrap();
+            assert!(!phone.should_render(0, target, false, frames));
+            assert!(!phone.should_render(1, target - 1, false, frames));
+            assert!(!ordinary.should_render(1, target, false, frames));
+            assert!(phone.should_render(2, target, false, frames));
+            assert!(phone.rendered(Some(frames), frames));
+            assert!(!phone.should_render(3, target, true, frames));
+        }
+    }
+}
+
+#[test]
 fn peer_concealment_grace_uses_elapsed_native_samples_not_source_rate_or_ticks() {
     for rate in [8000, 48000] {
         for frames in [480, 960, 1440] {

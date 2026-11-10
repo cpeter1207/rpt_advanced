@@ -112,9 +112,19 @@ impl Peer {
     }
 }
 
+/// Immutable priming profile retained with an inbound media generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReceivePolicy {
+    /// Ordinary peer startup target, independently of codec source rate.
+    Peer,
+    /// Phone pre-roll within its existing inbound ring.
+    Phone,
+}
+
 /// Consumer-owned receive qualification; the shared ring alone supplies concealment.
 pub struct ReceiveState {
     rate: u64,
+    target_ms: u64,
     epoch: u64,
     age_native_samples: u64,
     primed: bool,
@@ -123,11 +133,20 @@ pub struct ReceiveState {
 impl ReceiveState {
     /// Establish source units; activity timing always advances at native 48 kHz.
     pub fn new(source_rate: u32) -> Result<Self, AdmissionError> {
+        Self::with_policy(source_rate, ReceivePolicy::Peer)
+    }
+
+    /// Retain the prepared input's latency policy without another delay owner.
+    pub fn with_policy(source_rate: u32, policy: ReceivePolicy) -> Result<Self, AdmissionError> {
         if source_rate == 0 || source_rate > 48000 {
             return Err(AdmissionError::Invalid);
         }
         Ok(Self {
             rate: u64::from(source_rate),
+            target_ms: match policy {
+                ReceivePolicy::Peer => 260,
+                ReceivePolicy::Phone => 160,
+            },
             epoch: 0,
             age_native_samples: 0,
             primed: false,
@@ -151,7 +170,7 @@ impl ReceiveState {
         let capacity = (self.rate * 300 / 1000).max(512);
         let source_frames = (native_frames as u64).saturating_mul(self.rate) / 48000;
         let remaining = capacity.saturating_sub(source_frames);
-        let target = (self.rate * 260 / 1000).min(remaining);
+        let target = (self.rate * self.target_ms / 1000).min(remaining);
         self.primed |= epoch != 0 && available >= target;
         self.draining |= self.primed && (new_pcm || available > 0);
         !ended && self.draining

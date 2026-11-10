@@ -547,6 +547,9 @@ impl PeerSession {
         remote: &str,
         dtmf_muting: bool,
     ) -> Result<(Self, PeerControl), Error> {
+        if io.identity().protocol() == rpt_advanced_core::link::ProtocolId::Phone {
+            return Err(Error::Admission);
+        }
         let peer = Peer::new(remote).map_err(|_| Error::Reservation)?;
         if rpt_advanced_core::config::NodeId::new(local).is_err() || local.contains('\0') {
             return Err(Error::Reservation);

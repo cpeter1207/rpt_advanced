@@ -2,7 +2,7 @@
 use crate::abi as ffi;
 use std::{
     ffi::CStr,
-    mem::size_of,
+    mem::offset_of,
     ptr::{self, NonNull},
 };
 
@@ -12,7 +12,7 @@ pub struct EgressError;
 
 /// One channel owner's persistent converter and bounded workspaces.
 pub struct Egress {
-    api: &'static ffi::rptadv_samplerate_adapter_descriptor,
+    api: ffi::rptadv_samplerate_adapter_descriptor,
     converter: NonNull<ffi::rptadv_samplerate_converter>,
     rate: u32,
     maximum: usize,
@@ -45,14 +45,24 @@ impl Egress {
         }
         // SAFETY: the installed shared library exports an immutable descriptor header.
         unsafe {
+            let prefix = offset_of!(
+                ffi::rptadv_samplerate_adapter_descriptor,
+                converter_input_delay
+            );
             if pointer.is_null()
-                || ptr::addr_of!((*pointer).struct_size).read()
-                    < size_of::<ffi::rptadv_samplerate_adapter_descriptor>() as u32
+                || ptr::addr_of!((*pointer).struct_size).read() < prefix as u32
                 || ptr::addr_of!((*pointer).abi_version).read() != 2
             {
                 return Err(EgressError);
             }
-            let api = &*pointer;
+            // Ordinary conversion does not require live-position or pacing tails.
+            // Copy its complete prefix without borrowing a larger Rust record.
+            let mut api: ffi::rptadv_samplerate_adapter_descriptor = std::mem::zeroed();
+            ptr::copy_nonoverlapping(
+                pointer.cast::<u8>(),
+                ptr::from_mut(&mut api).cast::<u8>(),
+                prefix,
+            );
             if api.capability_name.is_null()
                 || CStr::from_ptr(api.capability_name) != c"rptadv.samplerate"
                 || api.create.is_none()

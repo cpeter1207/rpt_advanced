@@ -1,5 +1,5 @@
 //! Generation-owned peer audio composition; no channel operations or locks.
-use super::{AdmissionError, Mode, PeerSignals, ReceiveState};
+use super::{AdmissionError, Mode, PeerSignals, ReceivePolicy, ReceiveState};
 use crate::{
     audio::{AudioSpan, LinkAudioProducer},
     controller::{NodeController, ParrotOutput, PeerReplySample},
@@ -102,10 +102,63 @@ impl LinkAudioStatus {
     }
 }
 
+/// Original producer coordinate, retaining negative startup and full u64 indices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceCoordinate {
+    /// Original producer generation; zero is a valid generation.
+    pub generation: u64,
+    /// Whole source frames in the coordinate magnitude.
+    pub frame: u64,
+    /// Magnitude fraction, strictly below one billion.
+    pub fraction_billionths: u32,
+    /// Sign of the coordinate; exact zero is never negative.
+    pub negative: bool,
+}
+
+/// Provenance of one actual emitted sample, independent of PCM amplitude.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SampleProvenance {
+    /// None for unmapped startup, untagged input or unlocated shortfall.
+    pub position: Option<SourceCoordinate>,
+    /// Existing real-PCM classification, including PLC recovery blends.
+    pub real: bool,
+    /// A PLC request for this slot, not fresh provenance of its historical waveform.
+    pub plc: bool,
+    /// The mapped slot belongs to a producer-published missing interval.
+    pub gap: bool,
+    /// Intentional source or current DTMF muting applies to this output.
+    pub muted: bool,
+    /// Startup FIR history before the first admitted source sample.
+    pub zero_extension: bool,
+}
+
+/// One emitted PCM sample with explicitly optional source provenance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimedPeerSample {
+    /// Actual rendered PCM, including silence and concealment.
+    pub sample: f32,
+    /// None when an intervening processor cannot prove its output provenance.
+    pub provenance: Option<SampleProvenance>,
+}
+
 /// Unique adapter-owned consumer of one released inbound ring.
 pub trait PeerInput: Send {
     /// Decoded source sample rate.
     fn source_rate(&self) -> u32;
+    /// Immutable priming policy prepared with this unique source consumer.
+    fn receive_policy(&self) -> ReceivePolicy {
+        ReceivePolicy::Peer
+    }
+    /// Whether this input can qualify source-timed output. Individual samples
+    /// can still have unmapped positions; opaque post-DSP timing remains absent.
+    fn source_timing_available(&self) -> bool {
+        false
+    }
+    /// Render one actual sample through the optional timed primitive. None
+    /// reports failure or absent capability; the default consumes nothing.
+    fn render_timed_sample(&mut self) -> Option<TimedPeerSample> {
+        None
+    }
     /// Shared PCM-before-epoch, activity and terminal snapshots.
     fn signals(&self) -> &PeerSignals;
     /// Queued source-rate samples, excluding converter and PLC lookahead.
@@ -158,7 +211,7 @@ impl<P: PeerInput> AudioPeer<P> {
         if !super::decimal_identity(direct) || maximum == 0 {
             return Err(AdmissionError::Invalid);
         }
-        let receive = ReceiveState::new(input.source_rate())?;
+        let receive = ReceiveState::with_policy(input.source_rate(), input.receive_policy())?;
         Ok(Self {
             direct: direct.into(),
             mode,

@@ -44,6 +44,13 @@ fn queue_status_media(
     reply: Option<crate::link::PeerReply>,
     cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<(), RuntimeError> {
+    if reply
+        .as_ref()
+        .is_some_and(|reply| reply.phone_source().is_some())
+    {
+        // Phone calls have no RF peer slot; only their explicit private outbox can deliver.
+        return Err(RuntimeError::Rejected);
+    }
     let station = station.as_mut().ok_or(RuntimeError::Preparation)?;
     let mut prepared =
         prepare::streamed_status(station.as_mut(), settings, morse, speech)?.reply_to(reply);
@@ -1399,9 +1406,95 @@ impl<A: Send, C: Send> Runtime<A, C> {
         clock: RuntimeClock,
         reply: Option<crate::link::PeerReply>,
     ) -> Result<(), RuntimeError> {
+        let (text, spoken) = self.status_forms(local, action, last_keyed, clock)?;
         let node = self
             .nodes
             .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        queue_status_media(
+            &mut node.control.telemetry,
+            &mut node.control.media_session,
+            &node.status,
+            &text,
+            &spoken,
+            reply,
+            None,
+        )
+    }
+    /// Prepare the same status producer for an authenticated call's private sink.
+    /// No controller telemetry queue, radio demand, or peer audio attachment is touched.
+    pub fn prepare_phone_status(
+        &mut self,
+        local: &str,
+        action: LinkAction,
+        last_keyed: Option<&str>,
+        clock: RuntimeClock,
+        reply: &crate::link::PeerReply,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
+        if reply.phone_source().is_none() || !reply.phone_authenticated() {
+            return Err(RuntimeError::Rejected);
+        }
+        let (text, spoken) = self.status_forms(local, action, last_keyed, clock)?;
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        prepare::status_stream(
+            node.control
+                .media_session
+                .as_mut()
+                .ok_or(RuntimeError::Preparation)?
+                .as_mut(),
+            &node.status,
+            &text,
+            &spoken,
+        )
+    }
+    /// Prepare credential-free authentication wording for a live private Phone token.
+    /// The caller must retain its exact call owner and queue this stream only to
+    /// that call. Login deliberately needs no prior mailbox authentication.
+    pub fn prepare_private_phone_prompt(
+        &mut self,
+        local: &str,
+        prompt: crate::messages::PhoneAuthenticationPrompt,
+        reply: &crate::link::PeerReply,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
+        if reply.phone_source().is_none() || reply.ended() {
+            return Err(RuntimeError::Rejected);
+        }
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let forms = node
+            .control
+            .catalog
+            .format(&crate::messages::Message::PhoneAuthentication { prompt })
+            .map_err(|_| RuntimeError::Preparation)?;
+        prepare::status_stream(
+            node.control
+                .media_session
+                .as_mut()
+                .ok_or(RuntimeError::Preparation)?
+                .as_mut(),
+            &node.status,
+            &forms.morse,
+            &forms.tts,
+        )
+    }
+    fn status_forms(
+        &self,
+        local: &str,
+        action: LinkAction,
+        last_keyed: Option<&str>,
+        clock: RuntimeClock,
+    ) -> Result<(String, String), RuntimeError> {
+        let node = self
+            .nodes
+            .iter()
             .find(|node| node.name == local)
             .ok_or(RuntimeError::MissingNode)?;
         let (text, spoken) = match action {
@@ -1441,15 +1534,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 (forms.morse, spoken)
             }
         };
-        queue_status_media(
-            &mut node.control.telemetry,
-            &mut node.control.media_session,
-            &node.status,
-            &text,
-            &spoken,
-            reply,
-            None,
-        )
+        Ok((text, spoken))
     }
     /// Queue one bounded pad report on the local transmitter after receiver unkey.
     pub fn queue_pad_test(

@@ -1,4 +1,4 @@
-//! Fluent-backed, bounded built-in RF messages, prepared only on the control plane.
+//! Fluent-backed bounded messages, prepared on control for their explicit audience.
 
 use crate::schedule::{CivilTime, Weekday};
 use fluent_bundle::{FluentArgs, FluentResource, concurrent::FluentBundle};
@@ -50,6 +50,7 @@ const REQUIRED_IDS: &[&str] = &[
     "loop-rejected",
     "remote-command-unsupported",
     "dtmf-macro-stopped",
+    "phone-authentication",
     "echo-peer-identity",
     "priority-group-selected",
     "priority-group-unavailable",
@@ -65,9 +66,14 @@ const REQUIRED_IDS: &[&str] = &[
     "incoming-text",
 ];
 
-/// A typed built-in RF message request; callers cannot select arbitrary Fluent IDs.
+/// A typed built-in message request; callers cannot select arbitrary Fluent IDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message<'a> {
+    /// Credential-free prompt prepared exclusively for an exact private call.
+    PhoneAuthentication {
+        /// Login/result stage; no caller-supplied digits can enter the catalog.
+        prompt: PhoneAuthenticationPrompt,
+    },
     /// Explain a denied or expired source-owned command expansion without its digits.
     DtmfMacroStopped,
     /// No keypad symbols were received during a local pad test.
@@ -192,6 +198,17 @@ pub enum Message<'a> {
         /// RMS dBFS rounded to the nearest integer.
         rms_dbfs: i32,
     },
+}
+
+/// Private login wording; no account, mailbox or credential arguments are accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneAuthenticationPrompt {
+    /// Ask every admitted caller for mailbox and PIN.
+    Login,
+    /// Generic failure, without revealing whether a mailbox exists.
+    Retry,
+    /// Confirm ordinary private access; this never promises node unlock.
+    Authenticated,
 }
 
 /// Ordered units used by localized compound durations.
@@ -457,7 +474,7 @@ impl MessageCatalog {
             let mut args = message.args();
             for (key, value) in &fields {
                 if crate::link::PeerIdentity::from_operator(value).is_ok_and(|id| {
-                    id.protocol() == crate::link::ProtocolId::EchoLink && id.node() == node
+                    id.protocol() == crate::link::ProtocolId::EchoLink && id.node() == Some(node)
                 }) {
                     args.set(*key, identity.attribute(attribute));
                 }
@@ -746,6 +763,7 @@ impl MessageCatalog {
 impl Message<'_> {
     fn id(&self) -> &'static str {
         match self {
+            Self::PhoneAuthentication { .. } => "phone-authentication",
             Self::DtmfMacroStopped => "dtmf-macro-stopped",
             Self::PadTestEmpty => "pad-test-empty",
             Self::PadTestOverflow => "pad-test-overflow",
@@ -784,6 +802,16 @@ impl Message<'_> {
     fn args(&self) -> FluentArgs<'_> {
         let mut args = FluentArgs::new();
         match self {
+            Self::PhoneAuthentication { prompt } => {
+                args.set(
+                    "state",
+                    match prompt {
+                        PhoneAuthenticationPrompt::Login => "login",
+                        PhoneAuthenticationPrompt::Retry => "retry",
+                        PhoneAuthenticationPrompt::Authenticated => "authenticated",
+                    },
+                );
+            }
             Self::NoLinks
             | Self::DtmfMacroStopped
             | Self::LastKeyedNone
@@ -962,6 +990,9 @@ fn required_sample_args(id: &str) -> FluentArgs<'static> {
         return args;
     }
     match id {
+        "phone-authentication" => {
+            args.set("state", "login");
+        }
         "echo-peer-identity" => {
             args.set("mode", "both");
             args.set("node", "123456");

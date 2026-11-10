@@ -16,6 +16,7 @@ pub mod dtmf_macro;
 pub mod link;
 pub mod media;
 pub mod messages;
+pub mod phone_dtmf;
 pub mod policy;
 pub mod remote_base_command;
 pub mod runtime;

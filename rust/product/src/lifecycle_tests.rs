@@ -809,6 +809,136 @@ fn incoming_preauthorization_never_adopts_a_foreign_or_already_owned_peer() {
 }
 
 #[test]
+fn public_phone_admission_borrows_real_metadata_then_transfers_only_the_exact_call() {
+    use std::sync::atomic::AtomicUsize;
+    static METADATA_MODE: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn phone_info(
+        context: *mut c_void,
+        peer: *const c_void,
+        output: *mut abi::rptadv_peer_info_v1,
+    ) -> i32 {
+        unsafe { crate::fixture::peer_info(context, peer, output) };
+        let output = unsafe { &mut *output };
+        output.protocol = 3;
+        output.capabilities = 32;
+        output.account_generation = 1;
+        output.qso_generation = 2;
+        output.remote = abi::rptadv_peer_bytes_v1 {
+            data: b"aabbccddeeff00112233445566778899".as_ptr(),
+            length: 32,
+        };
+        output.provider_account = abi::rptadv_peer_bytes_v1 {
+            data: b"provider".as_ptr(),
+            length: 8,
+        };
+        match METADATA_MODE.load(Ordering::Acquire) {
+            1 => {
+                output.protocol = 1;
+                output.capabilities = 12;
+                output.remote = abi::rptadv_peer_bytes_v1 {
+                    data: b"2000".as_ptr(),
+                    length: 4,
+                };
+            }
+            2 => {
+                output.local = abi::rptadv_peer_bytes_v1 {
+                    data: b"2000".as_ptr(),
+                    length: 4,
+                };
+            }
+            _ => {}
+        }
+        0
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.peer_info = Some(phone_info);
+    let source = active_configuration("");
+    assert_eq!(
+        unsafe {
+            descriptor().start.unwrap()(
+                &table,
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                source.as_ptr().cast(),
+                source.len(),
+            )
+        },
+        0
+    );
+    let before = crate::fixture::PEER_DROPS.load(Ordering::Acquire);
+    let peer = crate::fixture::peer();
+    let mut request = crate::fixture::incoming_request(
+        c"1000".as_ptr(),
+        4,
+        c"aabbccddeeff00112233445566778899".as_ptr(),
+        32,
+        c"claimed-origin".as_ptr(),
+        14,
+    );
+    request.protocol = 3;
+    assert_eq!(
+        unsafe { descriptor().authorize_incoming.unwrap()(&request, ptr::null_mut()) },
+        -1
+    );
+    assert_eq!(
+        unsafe { descriptor().authorize_incoming.unwrap()(&request, peer) },
+        0
+    );
+    assert_eq!(
+        crate::fixture::PEER_DROPS.load(Ordering::Acquire),
+        before,
+        "inspection must not adopt the pending handle"
+    );
+    request.remote = abi::rptadv_peer_bytes_v1 {
+        data: b"112233445566778899aabbccddeeff00".as_ptr(),
+        length: 32,
+    };
+    assert_eq!(
+        unsafe { descriptor().authorize_incoming.unwrap()(&request, peer) },
+        -1
+    );
+    request.remote = abi::rptadv_peer_bytes_v1 {
+        data: b"aabbccddeeff00112233445566778899".as_ptr(),
+        length: 32,
+    };
+    for mode in 1..=2 {
+        METADATA_MODE.store(mode, Ordering::Release);
+        let foreign = crate::fixture::peer();
+        let prior = crate::fixture::PEER_DROPS.load(Ordering::Acquire);
+        assert_eq!(
+            unsafe { descriptor().authorize_incoming.unwrap()(&request, foreign) },
+            -1
+        );
+        assert_eq!(crate::fixture::PEER_DROPS.load(Ordering::Acquire), prior);
+        assert_eq!(
+            unsafe { descriptor().incoming.unwrap()(&request, foreign) },
+            -1
+        );
+        assert_eq!(
+            crate::fixture::PEER_DROPS.load(Ordering::Acquire),
+            prior + 1
+        );
+    }
+    METADATA_MODE.store(0, Ordering::Release);
+    assert_eq!(unsafe { descriptor().incoming.unwrap()(&request, peer) }, 0);
+    assert_eq!(
+        crate::fixture::PEER_DROPS.load(Ordering::Acquire),
+        before + 2
+    );
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(
+        crate::fixture::PEER_DROPS.load(Ordering::Acquire),
+        before + 3
+    );
+}
+
+#[test]
 fn pad_test_dispatch_queues_local_telemetry() {
     use rpt_advanced_core::runtime::dtmf::{DigitOutcome, PadTestResult};
     let _serial = crate::fixture::LIFECYCLE
@@ -1290,13 +1420,56 @@ fn incoming_identity_rejects_foreign_headers_and_limits_before_borrowing_spans()
             2 => request.local.length = 33,
             3 => request.remote.length = 33,
             4 => request.source.length = 65,
-            _ => request.protocol = 3,
+            _ => request.protocol = 99,
         }
         assert!(
             unsafe { incoming_identity(&request) }.is_err(),
             "case {mode}"
         );
     }
+}
+
+#[test]
+fn phone_local_binding_request_preserves_configured_names_and_the_63_byte_limit() {
+    let long = "a".repeat(63);
+    for local in ["local-repeater", long.as_str(), "répéteur"] {
+        let mut request = crate::fixture::incoming_request(
+            local.as_ptr().cast(),
+            local.len(),
+            c"aabbccddeeff00112233445566778899".as_ptr(),
+            32,
+            ptr::null(),
+            0,
+        );
+        request.protocol = 3;
+        let (_, copied, _, _) =
+            unsafe { incoming_identity(&request) }.expect("valid phone local binding rejected");
+        assert_eq!(copied, local);
+    }
+    for local in ["", "bad name", "bad[node]", &"a".repeat(64)] {
+        let mut request = crate::fixture::incoming_request(
+            local.as_ptr().cast(),
+            local.len(),
+            c"aabbccddeeff00112233445566778899".as_ptr(),
+            32,
+            ptr::null(),
+            0,
+        );
+        request.protocol = 3;
+        assert!(unsafe { incoming_identity(&request) }.is_err());
+    }
+    let request = crate::fixture::incoming_request(
+        long.as_ptr().cast(),
+        long.len(),
+        c"2000".as_ptr(),
+        4,
+        ptr::null(),
+        0,
+    );
+    assert!(
+        unsafe { incoming_identity(&request) }.is_err(),
+        "ASL's existing wire bound is unchanged"
+    );
 }
 
 #[test]

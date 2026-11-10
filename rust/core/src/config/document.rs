@@ -3,7 +3,7 @@
 use super::{ConfigError, parse, scope};
 
 /// One option retained in source order with owned strings.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConfigEntry {
     /// Section containing this option.
     pub section: String,
@@ -13,6 +13,25 @@ pub struct ConfigEntry {
     pub value: String,
     /// One-based physical source line.
     pub line: usize,
+}
+
+impl std::fmt::Debug for ConfigEntry {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output
+            .debug_struct("ConfigEntry")
+            .field("section", &self.section)
+            .field("key", &self.key)
+            .field(
+                "value",
+                &if self.section.starts_with("mailbox ") {
+                    "<redacted mailbox value>"
+                } else {
+                    &self.value
+                },
+            )
+            .field("line", &self.line)
+            .finish()
+    }
 }
 
 /// A complete parsed configuration whose contents do not borrow the input text.

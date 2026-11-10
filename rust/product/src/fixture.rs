@@ -421,6 +421,10 @@ pub unsafe extern "C" fn peer_info(
         capabilities: 12,
         account_generation: 0,
         qso_generation: 0,
+        provider_account: crate::abi::rptadv_peer_bytes_v1 {
+            data: ptr::null(),
+            length: 0,
+        },
         remote: crate::abi::rptadv_peer_bytes_v1 {
             data: b"2000".as_ptr(),
             length: 4,

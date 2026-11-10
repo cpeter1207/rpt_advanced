@@ -1,7 +1,7 @@
 # ADR 0044: Private phone peers and bounded RF presentation pacing
 
-Status: Accepted by owner 2026-11-09; prerequisites and macro foundation
-implemented, phone/RF integration pending.
+Status: Accepted by owner 2026-11-09; media prerequisites released. Macro and
+private-call foundations implemented; phone/RF integration pending.
 
 ## Context
 
@@ -55,6 +55,57 @@ executing source. Existing typed link macros remain separate.
 
 ## Consequences and verification
 
+The first private-source slice admits a typed `PeerAddress::PhoneCall` and keeps
+provider account, mailbox, call token, provider/call generations, and actual
+product-assigned ingress distinct. Numeric node and operator-alias getters now
+return `Option`; current Rust callers explicitly handle the node case. A phone
+never receives a public ASL node alias. Ordinary ASL/Echo identities and wire
+behavior are retained.
+
+The existing sized `rptadv_peer_info_v1` record has one compatible provider-account
+span tail. Its original 80-byte prefix remains valid for node peers. Phone
+admission requires all 96 bytes, protocol 3, explicit private-call capability 32,
+and nonzero account/call generations. Both current hosts copy only the caller's
+declared capacity. Borrowed inspection does not adopt a pending handle.
+Phone local bindings use the configured `NodeId` semantics and 63-byte bound,
+including named nodes; ASL/Echo retain their existing decimal/wire constraints.
+No host table slot, descriptor revision, or SONAME changes: old products reject unknown
+phone protocol/capabilities, and new products reject incomplete phone metadata.
+This additive record extension does not authorize mixing an incompatible SDK
+cohort elsewhere.
+
+The product's bounded private call owner retains its handle without directory
+lookup, ASL handshake/topology, radio binding, or a radio-peer slot. Calls start
+unauthenticated. The serialized verifier checks the configured salted Argon2id
+hash before publishing the mailbox profile. Invalid records remain unavailable;
+three failed attempts or the absolute 60-second admission deadline retire the
+call. Hashes and PINs are redacted from diagnostics. Login never grants node
+administration. Selected-node
+collection retains the exact private reply token and actual source, suppresses
+idle RF regeneration, and rejects legacy remote forwarding without the required
+private-origin/reply/lifecycle profile. Retiring the source ends queued replies
+and source-owned grants/collectors; committed reload and stop retire all calls.
+
+Private status preparation reuses the existing status formatter and producer
+PCM stream. A bounded per-call queue feeds the existing `Playback` renderer,
+independently of `NodeController`, RF demand, and public peer fanout. Its source
+fence runs before and after rendering. Other private report families fail
+explicitly pending their prepared-stream routes. Phone tokens cannot enter the
+ordinary radio telemetry queue, including stopped-macro and route diagnostics;
+those paths return an explicit rejection until they have a private sink.
+Ordinary phone commands and macros retain the exact call token through lookup,
+dial, initial permanent retries and final publication. Ending the call revokes
+unfinished work; completed node-link commands keep their existing recovery rules.
+
+The inert telephone grammar emits typed routing, literal-digit and manual-key
+requests. It implements `*3`, `*4`, one-symbol `**` quoting and the existing
+collection bounds; syntax alone grants no authority or RF attachment. Its
+caller must retain the verified source and private reply on every dispatch.
+Provider egress, the private digit/media worker,
+grammar integration/configuration/allowlists, explicit `*3` media attachment,
+per-handle DSP ownership, and negotiated remote lifecycle remain dependent work;
+this foundation does not enable a usable phone provider or claim complete Task 3.
+
 ADRs 0003/0025/0035 retain exclusive inbound conversion/clock recovery while
 allowing this narrowly scoped RF presentation operation. There is no new drift
 estimator, audio worker, mixer, or DSP engine. EQ/dynamics/limiting remain shared
@@ -67,14 +118,25 @@ Source-timed ring rendering is released in ring `v3.0.0-alpha5`. All three
 providers passed their full native Debian 13 gates; their signed APT indexes
 and both architectures' runtime/dev package hashes match the release assets.
 Consumers must check each optional descriptor tail and use the released
-versioned libraries. These capabilities
-do not by themselves implement structured radio-off feedback or the RF
-presentation scheduler.
+versioned libraries. The consumer now preserves timed source coordinates and
+real/PLC/gap/muted/zero-extension classifications through the existing ring;
+opaque DSP output explicitly loses exact provenance. Phone policy uses the
+same ring with a 160 ms reserve/target, 300 ms capacity and 20 ms producer
+prefix, without inheriting the ordinary peer's 260 ms target. This policy alone
+does not qualify complete source age or enable phone audio attachment.
+SDK `v0.1.0-alpha33` adds structured output feedback;
+its signed packages and native installation checks are verified. Builds using
+the alpha33 descriptor headers require matching alpha33 build/runtime floors:
+the existing complete-record check safely rejects the smaller alpha32 table.
+Controller feedback consumption, phase/age qualification and the RF
+presentation scheduler remain separate work.
 
-The current-node RF/IAX macro foundation has source-owned cancellation,
-asynchronous attachment fencing and explicit command boundaries. Phone-private
-authentication, routing, RF deadline/age bounds and their integrated
-reload/unload behavior still need implementation and automated evidence.
+The released current-node RF/IAX macro foundation has source-owned cancellation,
+asynchronous attachment fencing and explicit command boundaries. IAX
+`v0.1.0-alpha10` adds outgoing provider account fields and verified call lifecycle;
+controller composition, registration and incoming provider accounts remain open.
+Phone routing, RF deadline/age bounds and their integrated reload/unload behavior
+still need implementation and automated evidence.
 Actual provider/NAT and physical switching/STE/listening acceptance remain
 separate. The [implementation plan](../../../docs/superpowers/plans/2026-11-09-phone-patch-implementation.md)
 records task ordering; this ADR does not claim completion or authorize deployment.
