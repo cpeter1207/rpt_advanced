@@ -115,6 +115,22 @@ typedef uint32_t (*rptadv_peer_source_gap_v1)(void *context, uint64_t source_sta
 /** Borrowed human text, separate from protocol control and claimed sender authority. */
 typedef void (*rptadv_peer_source_text_v1)(void *context, struct rptadv_peer_bytes_v1 sender,
                                            struct rptadv_peer_bytes_v1 body);
+/** Original packet receipt in the supplied host clock. Retain unchanged through
+ * rejected offers, partial credit, conversion and retries; never stamp at playout. */
+struct rptadv_source_birth_v1 {
+    uint32_t struct_size;      /**< At least this complete revision. */
+    uint32_t abi_version;      /**< Exactly 1. */
+    uint64_t host_clock_epoch; /**< Exact nonzero sink clock identity. */
+    uint64_t born_ns;          /**< No later than sink reference_now_ns. */
+};
+/** Timed source PCM. A null birth is explicitly unqualified. */
+typedef size_t (*rptadv_peer_source_audio_timed_v1)(void *context, uint64_t source_start,
+                                                    const float *pcm, size_t count,
+                                                    uint32_t concealed,
+                                                    const struct rptadv_source_birth_v1 *birth);
+/** Request actual media retirement. Zero completes, one means retry pending,
+ * negative is terminal. Retain the reset and offer no new PCM until complete. */
+typedef int32_t (*rptadv_peer_source_discontinuity_v1)(void *context);
 /** Synchronous source sink; callbacks cannot reenter the same peer. */
 struct rptadv_peer_source_sink_v1 {
     uint32_t struct_size;              /**< Complete readable size. */
@@ -122,7 +138,15 @@ struct rptadv_peer_source_sink_v1 {
     void *context;                     /**< Borrowed during one source-read call. */
     rptadv_peer_source_audio_v1 audio; /**< Accept a leading PCM prefix. */
     rptadv_peer_source_gap_v1 gap;     /**< Accept a leading missing-sample prefix. */
+    /** Optional tail; require struct_size through the field being accessed. */
+    uint64_t host_clock_epoch; /**< Stable controller I/O lifecycle, zero unqualified. */
+    uint64_t reference_now_ns; /**< Captured before entering the provider. */
+    rptadv_peer_source_audio_timed_v1 audio_timed;            /**< Retains original age. */
+    rptadv_peer_source_discontinuity_v1 source_discontinuity; /**< Actual reset receipt. */
 };
+/** Complete original sink prefix, supported by legacy unqualified providers. */
+#define RPTADV_PEER_SOURCE_SINK_PREFIX_SIZE                                                        \
+    offsetof(struct rptadv_peer_source_sink_v1, host_clock_epoch)
 /** Copied bounded source turn, not raw packet or heartbeat receive state. */
 struct rptadv_peer_source_result_v1 {
     uint32_t struct_size;    /**< Complete caller-provided size. */

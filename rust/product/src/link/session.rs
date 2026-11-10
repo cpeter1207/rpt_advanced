@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     Error,
-    services::{HostServices, PeerInput, PeerIo, SourceCompletion, SourceInput},
+    services::{HostServices, PeerInput, PeerIo, SourceCompletion, SourceInput, SourceTimeClock},
 };
 use rpt_advanced_core::{
     audio::LinkAudioConsumer,
@@ -269,6 +269,7 @@ pub struct PeerSession {
     replied_newkey: bool,
     radio_control: RadioControlState,
     async_epoch: Option<Instant>,
+    source_time_clock: Option<SourceTimeClock>,
     last_text_failure_ms: Option<u64>,
     #[cfg(test)]
     owner_thread: Arc<std::sync::Mutex<Option<thread::ThreadId>>>,
@@ -330,6 +331,7 @@ pub(crate) trait SerialSession: Send {
     fn wake(&self) -> PeerWake;
     fn epoch(&self) -> Option<Instant>;
     fn set_epoch(&mut self, epoch: Instant);
+    fn set_source_clock(&mut self, _clock: SourceTimeClock) {}
 }
 
 /// Bounded peer ownership: one round-robin thread for synchronous hosts, with
@@ -341,6 +343,7 @@ pub struct PeerIoWorker {
     thread: Option<JoinHandle<()>>,
     async_peers: Vec<AsyncPeer>,
     epoch: Instant,
+    source_clock: SourceTimeClock,
     #[cfg(test)]
     fail_next_spawn: bool,
 }
@@ -397,6 +400,8 @@ unsafe extern "C" fn retained_step<S: SerialSession>(context: *mut c_void) -> i3
 impl PeerIoWorker {
     /// Prepare the owner; a poll thread starts only for a synchronous host.
     pub fn start(epoch: Instant) -> std::io::Result<Self> {
+        let source_clock = SourceTimeClock::new(epoch)
+            .ok_or_else(|| std::io::Error::other("source clock identity exhausted"))?;
         let (pending, incoming) =
             RingBuffer::<Box<dyn SerialSession>>::new(PENDING_ATTACH_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
@@ -407,6 +412,7 @@ impl PeerIoWorker {
             thread: None,
             async_peers: Vec::new(),
             epoch,
+            source_clock,
             #[cfg(test)]
             fail_next_spawn: false,
         })
@@ -478,6 +484,7 @@ impl PeerIoWorker {
         if self.stop.load(Ordering::Acquire) {
             return Err(session);
         }
+        session.set_source_clock(self.source_clock);
         if let Some((services, peer)) = session.io().async_owner() {
             if self.async_peers.try_reserve(1).is_err() {
                 return Err(session);
@@ -670,6 +677,7 @@ impl PeerSession {
                     RadioControlState::Negotiating(None)
                 },
                 async_epoch: None,
+                source_time_clock: None,
                 last_text_failure_ms: None,
                 #[cfg(test)]
                 owner_thread,
@@ -805,7 +813,11 @@ impl PeerSession {
             let scratch = &mut self.pending_pcm;
             let peer = &mut self.peer;
             let finishing = self.source_finish.is_some();
-            let result = self.io.read_source(completion, |input| {
+            let reference = self
+                .source_time_clock
+                .map(SourceTimeClock::reference)
+                .unwrap_or_default();
+            let result = self.io.read_source_at(completion, reference, |input| {
                 // Future PCM must not advance detection or its current mute gate
                 // while the previous finite burst is still audible.
                 if finishing && !matches!(&input, SourceInput::Text { .. }) {
@@ -816,6 +828,7 @@ impl PeerSession {
                         start,
                         samples,
                         concealed,
+                        birth: _,
                     } => source.audio(
                         inbound,
                         scratch,
@@ -859,6 +872,10 @@ impl PeerSession {
                         }));
                         return 0;
                     }
+                    // This remains pending until the shared ring/DSP/RF
+                    // retirement ticket has completed; never acknowledge a reset
+                    // just because the provider requested one.
+                    SourceInput::Discontinuity => return 0,
                 };
                 match credit {
                     Ok(count) => {
@@ -1215,6 +1232,9 @@ impl SerialSession for PeerSession {
     }
     fn set_epoch(&mut self, epoch: Instant) {
         self.async_epoch = Some(epoch);
+    }
+    fn set_source_clock(&mut self, clock: SourceTimeClock) {
+        self.source_time_clock = Some(clock);
     }
 }
 

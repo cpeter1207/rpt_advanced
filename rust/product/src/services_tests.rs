@@ -21,6 +21,8 @@ mod phone;
 mod processing;
 #[path = "services_remote_tests.rs"]
 mod remote;
+#[path = "services_time_tests.rs"]
+mod source_time;
 
 #[test]
 fn phone_peer_metadata_admits_an_opaque_private_call() {
@@ -212,7 +214,9 @@ fn source_read_preserves_prefix_credit_provenance_and_finite_acknowledgement() {
                         start,
                         samples,
                         concealed,
+                        birth,
                     } => {
+                        assert_eq!(birth, None);
                         assert_eq!((start, samples, concealed), (12, &[0.25; 4][..], true));
                         seen.push("audio");
                     }
@@ -229,6 +233,7 @@ fn source_read_preserves_prefix_credit_provenance_and_finite_acknowledgement() {
                         assert_eq!(represented_node_number, 123456);
                         seen.push("text");
                     }
+                    SourceInput::Discontinuity => panic!("legacy source did not request a reset"),
                 }
                 2
             })

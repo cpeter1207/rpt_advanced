@@ -13,6 +13,11 @@ _Static_assert(RPTADV_PEER_PHONE == 3 && RPTADV_PEER_PRIVATE_CALL == 32,
 _Static_assert(RPTADV_PEER_INFO_PREFIX_SIZE == 80, "preserve the original peer metadata prefix");
 _Static_assert(RPTADV_PEER_INFO_PHONE_SIZE == 96,
                "phone admission requires the complete account tail");
+_Static_assert(RPTADV_PEER_SOURCE_SINK_PREFIX_SIZE == 32, "preserve legacy source sink callbacks");
+_Static_assert(sizeof(struct rptadv_peer_source_sink_v1) == 64,
+               "source birth and retirement are optional sink tails");
+_Static_assert(sizeof(struct rptadv_source_birth_v1) == 24,
+               "original source birth uses the host clock identity");
 _Static_assert(URP_AST_DIRECT_CALLBACKS_ABI_VERSION == 6,
                "use the canonical metadata-aware SDK callbacks");
 _Static_assert(sizeof(UrpNativeReceiveMetadata) == 72,

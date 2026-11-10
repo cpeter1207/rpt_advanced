@@ -1254,14 +1254,28 @@ unsafe extern "C" fn peer_read_source(
             return -1;
         };
         let output = unsafe { &mut *output };
-        let sink = unsafe { sink.as_ref() };
-        if sink.is_some_and(|sink| {
-            sink.struct_size < size_of::<abi::rptadv_peer_source_sink_v1>() as u32
-                || sink.abi_version != 1
-        }) {
-            return -1;
-        }
-        let sink = sink.map(|sink| echo::PcmSink {
+        // EchoLink uses only the legacy prefix. Never form a reference to an
+        // appended tail that an older controller did not allocate.
+        let sink = if sink.is_null() {
+            None
+        } else {
+            let prefix = std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, host_clock_epoch);
+            if unsafe { ptr::addr_of!((*sink).struct_size).read() } < prefix as u32
+                || unsafe { ptr::addr_of!((*sink).abi_version).read() } != 1
+            {
+                return -1;
+            }
+            let mut copied: abi::rptadv_peer_source_sink_v1 = unsafe { std::mem::zeroed() };
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    sink.cast::<u8>(),
+                    ptr::from_mut(&mut copied).cast(),
+                    prefix,
+                );
+            }
+            Some(copied)
+        };
+        let sink = sink.as_ref().map(|sink| echo::PcmSink {
             struct_size: size_of::<echo::PcmSink>() as u32,
             abi_version: 1,
             context: sink.context,

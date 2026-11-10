@@ -182,6 +182,10 @@ pub unsafe fn check(context: *mut c_void) {
             context: receive_context,
             audio: Some(audio),
             gap: Some(gap),
+            host_clock_epoch: 0,
+            reference_now_ns: 0,
+            audio_timed: None,
+            source_discontinuity: None,
         };
         let mut output: abi::rptadv_peer_source_result_v1 = std::mem::zeroed();
         output.struct_size = size_of::<abi::rptadv_peer_source_result_v1>() as u32;
@@ -215,6 +219,38 @@ pub unsafe fn check(context: *mut c_void) {
             );
         }
         assert_eq!((received.audio, received.gap, received.text), (3, 160, 3));
+        // An old controller allocated only these original fields. Both native
+        // hosts must forward this real shorter allocation without reading a tail.
+        #[repr(C)]
+        struct LegacySink {
+            struct_size: u32,
+            abi_version: u32,
+            context: *mut c_void,
+            audio: abi::rptadv_peer_source_audio_v1,
+            gap: abi::rptadv_peer_source_gap_v1,
+        }
+        let legacy = LegacySink {
+            struct_size: size_of::<LegacySink>() as u32,
+            abi_version: 1,
+            context: receive_context,
+            audio: Some(audio),
+            gap: Some(gap),
+        };
+        assert_eq!(size_of::<LegacySink>(), 32);
+        assert_eq!(
+            peer_read_source(
+                context,
+                handle,
+                0,
+                ptr::from_ref(&legacy).cast(),
+                Some(text),
+                receive_context,
+                &mut output,
+            ),
+            0,
+            "old controller source sink prefix remains supported",
+        );
+        assert_eq!((received.audio, received.gap, received.text), (6, 320, 4));
         assert_eq!(
             peer_read_source(
                 context,
@@ -329,6 +365,10 @@ unsafe fn rejected_records(context: *mut c_void, handle: *mut c_void) {
             context: ptr::null_mut(),
             audio: None,
             gap: None,
+            host_clock_epoch: 0,
+            reference_now_ns: 0,
+            audio_timed: None,
+            source_discontinuity: None,
         };
         let (mut peer, mut out) = (handle, ptr::from_mut(&mut output));
         match field {

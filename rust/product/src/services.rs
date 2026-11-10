@@ -11,6 +11,8 @@ use std::{
     mem::{offset_of, size_of, size_of_val},
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{self, NonNull},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
 };
 
 #[path = "services_remote.rs"]
@@ -43,6 +45,8 @@ pub enum SourceInput<'a> {
         samples: &'a [f32],
         /// Codec-native PLC, never fresh in-band detector input.
         concealed: bool,
+        /// Original packet receipt; absence cannot qualify bounded RF playout.
+        birth: Option<SourceBirth>,
     },
     /// Unresolved counted loss in the same source timeline.
     Gap {
@@ -60,6 +64,60 @@ pub enum SourceInput<'a> {
         /// Fresh represented identity from the same read turn, zero if unresolved.
         represented_node_number: u32,
     },
+    /// Retire the actual downstream media generation before more PCM.
+    /// Dispatch credit is one only after retirement completes, zero while pending.
+    Discontinuity,
+}
+
+/// Original packet receipt, preserved across retries and source conversion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceBirth {
+    /// Nonzero identity of the controller I/O clock lifecycle.
+    pub host_clock_epoch: u64,
+    /// Nanoseconds from that clock's original monotonic epoch.
+    pub born_ns: u64,
+}
+
+/// One clock reference captured before entering a synchronous source provider.
+#[derive(Clone, Copy, Default)]
+pub struct SourceTimeReference {
+    /// Stable nonzero controller I/O lifecycle; zero disables qualification.
+    pub host_clock_epoch: u64,
+    /// Nanoseconds from the same lifecycle's original monotonic epoch.
+    pub now_ns: u64,
+}
+
+static NEXT_SOURCE_CLOCK: AtomicU64 = AtomicU64::new(1);
+
+/// One I/O owner's monotonic epoch, retained across configuration replacement.
+#[derive(Clone, Copy)]
+pub(crate) struct SourceTimeClock {
+    identity: u64,
+    origin: Instant,
+}
+
+impl SourceTimeClock {
+    pub(crate) fn new(origin: Instant) -> Option<Self> {
+        let identity = NEXT_SOURCE_CLOCK
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .ok()?;
+        Some(Self { identity, origin })
+    }
+
+    pub(crate) fn reference(self) -> SourceTimeReference {
+        let Some(now_ns) = Instant::now()
+            .checked_duration_since(self.origin)
+            .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok())
+        else {
+            return SourceTimeReference::default();
+        };
+        SourceTimeReference {
+            host_clock_epoch: self.identity,
+            now_ns,
+        }
+    }
 }
 
 /// Exact disposition of the previously accepted product-ring prefix.
@@ -700,6 +758,7 @@ impl HostServices {
             account_generation: metadata.account_generation,
             qso_generation: metadata.qso_generation,
             provider_account: metadata.provider_account,
+            source_reset_pending: false,
         })
     }
     /// Copy admission metadata while borrowing a pending peer; never adopt or destroy it.
@@ -1132,6 +1191,7 @@ pub struct PeerIo {
     account_generation: u64,
     qso_generation: u64,
     provider_account: Option<PhoneAccountId>,
+    source_reset_pending: bool,
 }
 // SAFETY: the handle is uniquely moved to one owner thread.
 unsafe impl Send for PeerIo {}
@@ -1280,6 +1340,19 @@ impl PeerIo {
     where
         F: FnMut(SourceInput<'_>) -> usize,
     {
+        self.read_source_at(completion, SourceTimeReference::default(), dispatch)
+    }
+
+    /// Read with an original-age clock reference, captured before provider entry.
+    pub fn read_source_at<F>(
+        &mut self,
+        completion: SourceCompletion,
+        reference: SourceTimeReference,
+        dispatch: F,
+    ) -> Result<SourceRead, Error>
+    where
+        F: FnMut(SourceInput<'_>) -> usize,
+    {
         if !self.source_media() {
             return Err(Error::Operation);
         }
@@ -1287,7 +1360,9 @@ impl PeerIo {
             dispatch: F,
             failed: bool,
             completing: bool,
+            reset_pending: bool,
             text: Option<(String, String)>,
+            reference: SourceTimeReference,
         }
         fn accept<F: FnMut(SourceInput<'_>) -> usize>(
             state: &mut State<F>,
@@ -1296,7 +1371,14 @@ impl PeerIo {
         ) -> usize {
             // A prior burst's completion cannot acknowledge samples offered in
             // this same turn. The provider retains them for the next read.
-            if state.completing && !matches!(&input, SourceInput::Text { .. }) {
+            if state.failed
+                || (state.completing && !matches!(&input, SourceInput::Text { .. }))
+                || (state.reset_pending
+                    && !matches!(
+                        &input,
+                        SourceInput::Text { .. } | SourceInput::Discontinuity
+                    ))
+            {
                 return 0;
             }
             match catch_unwind(AssertUnwindSafe(|| (state.dispatch)(input))) {
@@ -1314,6 +1396,16 @@ impl PeerIo {
             count: usize,
             concealed: u32,
         ) -> usize {
+            unsafe { audio_timed::<F>(context, start, data, count, concealed, ptr::null()) }
+        }
+        unsafe extern "C" fn audio_timed<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+            start: u64,
+            data: *const f32,
+            count: usize,
+            concealed: u32,
+            time: *const abi::rptadv_source_birth_v1,
+        ) -> usize {
             let state = unsafe { &mut *context.cast::<State<F>>() };
             if count > 4096
                 || (data.is_null() && count != 0)
@@ -1323,6 +1415,29 @@ impl PeerIo {
                 state.failed = true;
                 return 0;
             }
+            let birth = if time.is_null() {
+                None
+            } else {
+                if unsafe { ptr::addr_of!((*time).struct_size).read() }
+                    < size_of::<abi::rptadv_source_birth_v1>() as u32
+                    || unsafe { ptr::addr_of!((*time).abi_version).read() } != 1
+                {
+                    state.failed = true;
+                    return 0;
+                }
+                let time = unsafe { &*time };
+                if time.host_clock_epoch == 0
+                    || time.host_clock_epoch != state.reference.host_clock_epoch
+                    || time.born_ns > state.reference.now_ns
+                {
+                    state.failed = true;
+                    return 0;
+                }
+                Some(SourceBirth {
+                    host_clock_epoch: time.host_clock_epoch,
+                    born_ns: time.born_ns,
+                })
+            };
             let samples = if count == 0 {
                 &[]
             } else {
@@ -1334,9 +1449,22 @@ impl PeerIo {
                     start,
                     samples,
                     concealed: concealed == 1,
+                    birth,
                 },
                 count,
             )
+        }
+        unsafe extern "C" fn discontinuity<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+        ) -> i32 {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            let complete = accept(state, SourceInput::Discontinuity, 1);
+            state.reset_pending = complete == 0;
+            if state.failed {
+                -1
+            } else {
+                i32::from(complete == 0)
+            }
         }
         unsafe extern "C" fn gap<F: FnMut(SourceInput<'_>) -> usize>(
             context: *mut c_void,
@@ -1384,7 +1512,9 @@ impl PeerIo {
             dispatch,
             failed: false,
             completing: completion != SourceCompletion::Pending,
+            reset_pending: self.source_reset_pending,
             text: None,
+            reference,
         };
         let context = ptr::from_mut(&mut state).cast();
         let sink = abi::rptadv_peer_source_sink_v1 {
@@ -1393,6 +1523,10 @@ impl PeerIo {
             context,
             audio: Some(audio::<F>),
             gap: Some(gap::<F>),
+            host_clock_epoch: reference.host_clock_epoch,
+            reference_now_ns: reference.now_ns,
+            audio_timed: Some(audio_timed::<F>),
+            source_discontinuity: Some(discontinuity::<F>),
         };
         let mut result: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
         result.struct_size = size_of_val(&result) as u32;
@@ -1408,6 +1542,7 @@ impl PeerIo {
                 &mut result,
             )
         };
+        self.source_reset_pending = state.reset_pending;
         if code != 0
             || state.failed
             || result.struct_size < size_of_val(&result) as u32
