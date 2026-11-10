@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
+#[path = "lifecycle_phone_tests.rs"]
+mod phone;
+
 fn descriptor() -> &'static abi::rptadv_product_descriptor_v1 {
     unsafe { &*rptadv_product_descriptor_v1() }
 }

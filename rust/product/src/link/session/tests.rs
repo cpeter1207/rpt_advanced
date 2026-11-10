@@ -15,6 +15,7 @@ pub(crate) enum Input {
 #[derive(Default)]
 pub(crate) struct State {
     pub(crate) rate: u32,
+    local: Option<Box<str>>,
     capabilities: u32,
     pub(crate) input: VecDeque<Input>,
     pub(crate) texts: Vec<Vec<u8>>,
@@ -25,6 +26,7 @@ pub(crate) struct State {
     pub(crate) fail_read: bool,
     pub(crate) fail_ready: bool,
     pub(crate) ready_without_input: bool,
+    pub(crate) duplicate_digit: bool,
     pub(crate) fail_write: bool,
     pub(crate) fail_bind: bool,
     pub(crate) bound_radio: Option<String>,
@@ -45,7 +47,7 @@ pub(crate) struct State {
     encoded_calls: usize,
     encoded_bytes: Option<usize>,
     encode_position: u64,
-    encode_unit: Option<usize>,
+    pub(crate) encode_unit: Option<usize>,
     encode_full: bool,
     encode_pending: Vec<f32>,
     encode_tail: usize,
@@ -55,7 +57,7 @@ pub(crate) struct State {
     prepared_frames: Vec<u32>,
     pub(crate) prepared_result: i32,
     call_elapsed: u32,
-    deadlines: Vec<u64>,
+    pub(crate) deadlines: Vec<u64>,
     source_position: u64,
     source_keyed: bool,
     source_closed: bool,
@@ -920,7 +922,12 @@ unsafe extern "C" fn read(
                 Input::Text(bytes) => {
                     event.unwrap()(context, 1, bytes.as_ptr().cast(), bytes.len())
                 }
-                Input::Digit(digit) => event.unwrap()(context, 2, ptr::from_ref(&digit).cast(), 1),
+                Input::Digit(digit) => {
+                    event.unwrap()(context, 2, ptr::from_ref(&digit).cast(), 1);
+                    if state.duplicate_digit {
+                        event.unwrap()(context, 2, ptr::from_ref(&digit).cast(), 1);
+                    }
+                }
                 Input::Audio(samples) | Input::Concealed(samples) => {
                     event.unwrap()(context, 3, samples.as_ptr().cast(), samples.len())
                 }
@@ -1408,6 +1415,12 @@ pub(crate) fn source_peer() -> (PeerIo, Shared) {
 pub(crate) fn phone_peer() -> (PeerIo, Shared) {
     make_peer(8000, false, false, false, false, true)
 }
+pub(crate) fn phone_peer_named(local: &str) -> (PeerIo, Shared) {
+    make_peer_with_local(8000, false, false, false, false, true, Some(local))
+}
+pub(crate) fn phone_with_egress(async_enabled: bool, egress: bool) -> (PeerIo, Shared) {
+    make_peer(8000, async_enabled || egress, egress, false, false, true)
+}
 pub(crate) fn peer_without_text(rate_hz: u32) -> (PeerIo, Shared) {
     make_peer(rate_hz, false, false, false, false, false)
 }
@@ -1419,10 +1432,30 @@ fn make_peer(
     forward_text: bool,
     phone: bool,
 ) -> (PeerIo, Shared) {
+    make_peer_with_local(
+        rate_hz,
+        async_enabled,
+        egress,
+        source,
+        forward_text,
+        phone,
+        None,
+    )
+}
+fn make_peer_with_local(
+    rate_hz: u32,
+    async_enabled: bool,
+    egress: bool,
+    source: bool,
+    forward_text: bool,
+    phone: bool,
+    local: Option<&str>,
+) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
+        local: local.map(Box::from),
         capabilities: if phone {
-            32
+            32 | u32::from(async_enabled) | (u32::from(egress) << 1)
         } else if source {
             23
         } else {
@@ -1470,11 +1503,15 @@ unsafe extern "C" fn peer_info(
     output: *mut abi::rptadv_peer_info_v1,
 ) -> i32 {
     unsafe { crate::fixture::peer_info(context, peer, output) };
-    let capabilities = unsafe { state(peer.cast_mut()) }
-        .lock()
-        .unwrap()
-        .capabilities;
+    let state = unsafe { state(peer.cast_mut()) }.lock().unwrap();
+    let capabilities = state.capabilities;
     unsafe {
+        if let Some(local) = &state.local {
+            (*output).local = abi::rptadv_peer_bytes_v1 {
+                data: local.as_ptr(),
+                length: local.len(),
+            };
+        }
         (*output).capabilities = capabilities;
         if capabilities & 32 != 0 {
             (*output).protocol = 3;
@@ -2657,10 +2694,10 @@ fn async_peer_step_is_serial_and_detaches_before_handle_drop() {
 
 #[test]
 fn retained_step_rejects_missing_context_and_unregistered_epoch() {
-    assert_eq!(unsafe { retained_step(ptr::null_mut()) }, -1);
+    assert_eq!(unsafe { retained_step::<PeerSession>(ptr::null_mut()) }, -1);
     let (mut session, control, _state, _) = make_async_session("1000");
     assert_eq!(
-        unsafe { retained_step(ptr::from_mut(&mut session).cast()) },
+        unsafe { retained_step::<PeerSession>(ptr::from_mut(&mut session).cast()) },
         -1
     );
     assert!(control.snapshot().unwrap().ended);
@@ -2673,7 +2710,7 @@ fn egress_retained_step_reports_io_failure_and_ends_the_session() {
     state.lock().unwrap().fail_read = true;
     state.lock().unwrap().input.push_back(Input::RadioKey);
     assert_eq!(
-        unsafe { retained_step(ptr::from_mut(&mut session).cast()) },
+        unsafe { retained_step::<PeerSession>(ptr::from_mut(&mut session).cast()) },
         -1
     );
     assert!(control.snapshot().unwrap().ended);
@@ -2835,13 +2872,13 @@ fn egress_admission_failure_keeps_existing_peers() {
 #[test]
 fn egress_sync_allocation_failure_ends_only_the_new_admission() {
     // Measure the standard Vec growth allocation without depending on its
-    // implementation's minimum capacity. Box pointers have usize's layout.
-    let mut probe = Vec::<usize>::new();
+    // implementation's minimum capacity. A boxed serial trait object has two words.
+    let mut probe = Vec::<(usize, usize)>::new();
     probe.try_reserve(1).unwrap();
     let capacity = probe.capacity();
-    probe.resize(capacity, 0);
+    probe.resize(capacity, (0, 0));
     probe.try_reserve(1).unwrap();
-    let failure_bytes = probe.capacity() * std::mem::size_of::<Box<PeerSession>>();
+    let failure_bytes = probe.capacity() * std::mem::size_of::<Box<dyn SerialSession>>();
     let (first, first_control, first_state, _first_output) = make_session("1000");
     let pause = Arc::new(std::sync::Barrier::new(2));
     {
@@ -2899,6 +2936,35 @@ fn missing_sync_queue_and_spawn_failure_return_unconsumed_sessions() {
     drop(session);
     assert_eq!(state.lock().unwrap().drops, 1);
     worker.stop();
+}
+
+#[test]
+fn full_sync_admission_queue_returns_the_last_owner_without_disturbing_existing_sessions() {
+    let (first, first_control, state, _output) = make_session("1000");
+    let pause = Arc::new(std::sync::Barrier::new(2));
+    state.lock().unwrap().pause = Some(Arc::clone(&pause));
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    worker.attach(first).ok().unwrap();
+    pause.wait();
+    let mut admitted = Vec::new();
+    for _ in 0..PENDING_ATTACH_CAPACITY {
+        let (session, control, state, output) = make_session("1000");
+        worker.attach(session).ok().unwrap();
+        admitted.push((control, state, output));
+    }
+    let (session, _control, rejected, _output) = make_session("1000");
+    let returned = worker.attach(session).err().unwrap();
+    assert_eq!(rejected.lock().unwrap().drops, 0);
+    assert!(!first_control.ended());
+    drop(returned);
+    assert_eq!(rejected.lock().unwrap().drops, 1);
+    pause.wait();
+    worker.stop();
+    assert!(
+        admitted
+            .iter()
+            .all(|(_, state, _)| state.lock().unwrap().drops == 1)
+    );
 }
 
 #[test]

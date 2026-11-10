@@ -66,6 +66,141 @@ fn records() -> Vec<PhoneMailbox> {
     .value
 }
 
+#[test]
+fn login_collection_bounds_digits_and_time_without_replaying_credentials() {
+    for (input, expected_mailbox, expected_pin) in [
+        ("100#1234#".to_owned(), "100", "1234"),
+        ("#".to_owned(), "", ""),
+        ("*41000#".to_owned(), "", ""),
+        (format!("{}#", "1".repeat(33)), "", ""),
+        (format!("100#{}#", "1".repeat(33)), "", ""),
+        ("100#A#".to_owned(), "", ""),
+        (
+            format!("{}#{}#", "1".repeat(32), "2".repeat(32)),
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+        ),
+    ] {
+        let mut collector = LoginCollector::default();
+        let result = input
+            .chars()
+            .filter_map(|digit| collector.digit(digit, 1))
+            .last()
+            .unwrap();
+        let LoginInput::Credentials { mailbox, pin } = result else {
+            panic!("completed credentials")
+        };
+        assert_eq!(
+            (mailbox.as_str(), pin.as_str()),
+            (expected_mailbox, expected_pin)
+        );
+        assert!(collector.mailbox.is_empty() && collector.pin.is_empty());
+        assert!(!collector.pin_phase && !collector.invalid && collector.last_ms.is_none());
+    }
+    let mut collector = LoginCollector::default();
+    assert!(collector.tick(u64::MAX).is_none());
+    collector.digit('1', 1);
+    assert!(collector.tick(3000).is_none());
+    assert!(matches!(collector.tick(3001), Some(LoginInput::Retry)));
+    assert!(collector.mailbox.is_empty());
+    collector.digit('1', 10);
+    assert!(
+        collector.tick(0).is_none(),
+        "clock rollback cannot finish credentials"
+    );
+}
+
+#[test]
+fn private_input_helpers_preserve_bounds_and_retire_authenticated_ended_owners() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    assert!(calls.event().is_none());
+    assert!(calls.actions(&source, &reply, '*', 0).is_err());
+    calls.cancel_grammar(&source, &reply);
+    calls.transfer_replies();
+    assert!(calls.grammar_timeouts(3000).is_empty());
+    assert!(
+        calls
+            .login_digit(&source, &reply, '1', 0)
+            .unwrap()
+            .is_none()
+    );
+    assert!(calls.login_timeouts(2999).is_empty());
+    assert_eq!(
+        calls.login_timeouts(3000),
+        [(source.clone(), reply.clone())]
+    );
+    calls.login_digit(&source, &reply, '1', 0).unwrap();
+    assert!(matches!(
+        calls.login_digit(&source, &reply, '2', 3000).unwrap(),
+        Some(LoginInput::Retry)
+    ));
+    calls
+        .authenticate(&source, &reply, &records(), "100", "1234", 3000)
+        .unwrap();
+    assert!(calls.grammar_timeouts(6000).is_empty());
+    assert!(calls.login_timeouts(6000).is_empty());
+    reply.retire();
+    calls.cancel_grammar(&source, &reply);
+    assert_eq!(calls.expire_authentication(6000), [reply.clone()]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn pending_private_handoff_keeps_the_control_queue_when_the_owner_is_full() {
+    let (mut calls, mut session, control, _state, source, reply) = private_session(false, false);
+    calls.calls[0].owner = Some(control);
+    for _ in 0..16 {
+        calls.queue_reply(&source, &reply, media()).unwrap();
+    }
+    calls.transfer_replies();
+    assert!(calls.calls[0].replies.is_empty());
+    calls.queue_reply(&source, &reply, media()).unwrap();
+    calls.transfer_replies();
+    assert_eq!(calls.calls[0].replies.len(), 1);
+    use crate::link::session::SerialSession;
+    session.step(0).unwrap();
+    calls.transfer_replies();
+    assert!(calls.calls[0].replies.is_empty());
+}
+
+pub(crate) fn private_session(
+    async_enabled: bool,
+    prepared: bool,
+) -> (
+    PhoneCalls,
+    crate::link::private_phone::PrivatePhoneSession,
+    crate::link::private_phone::PrivatePhoneControl,
+    std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+    PhoneSource,
+    PeerReply,
+) {
+    let (io, state) = crate::link::session::tests::phone_with_egress(async_enabled, prepared);
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let source = calls.admit(io, 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let io = calls.calls[0].io.take().unwrap();
+    let (session, control) =
+        crate::link::private_phone::PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    (calls, session, control, state, source, reply)
+}
+
+pub(crate) fn pending_digits(calls: &PhoneCalls, source: &PhoneSource) -> usize {
+    calls
+        .calls
+        .iter()
+        .find(|call| &call.source == source)
+        .unwrap()
+        .owner
+        .as_ref()
+        .unwrap()
+        .pending_digits()
+}
+
 fn peer(second: bool) -> PeerIo {
     unsafe extern "C" fn info(
         context: *mut c_void,

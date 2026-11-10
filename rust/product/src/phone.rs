@@ -1,9 +1,14 @@
 //! Serialized private call ownership; no radio binding, topology, or ASL session.
+use crate::link::{
+    private_phone::{PrivatePhoneControl, PrivatePhoneSession},
+    session::PeerIoWorker,
+};
 use crate::{Error, services::PeerIo};
 use rpt_advanced_core::{
     audio::{PcmStreamReader, Playback, PlaybackOutcome},
     config::PhoneMailbox,
     link::{PeerReply, PeerSignals, PhoneCallId, PhoneSource},
+    phone_dtmf::{PhoneDtmfAction, PhoneDtmfGrammar},
 };
 use std::{
     collections::VecDeque,
@@ -28,6 +33,9 @@ pub struct PrivatePhoneReply {
     playback: Playback,
 }
 impl PrivatePhoneReply {
+    pub(crate) fn targets(&self, reply: &PeerReply) -> bool {
+        self.reply == *reply && self.current()
+    }
     /// Exact account, call, generation, and actual ingress retained at preparation.
     pub fn source(&self) -> &PhoneSource {
         &self.source
@@ -60,13 +68,83 @@ impl PrivatePhoneReply {
 }
 
 struct Call {
-    _io: PeerIo,
+    io: Option<PeerIo>,
+    local: String,
+    owner: Option<PrivatePhoneControl>,
+    login: LoginCollector,
+    grammar: Option<PhoneDtmfGrammar>,
     source: PhoneSource,
     signals: PeerSignals,
     mailbox: Option<PhoneMailbox>,
     attempts: u8,
     login_deadline_ms: u64,
     replies: VecDeque<PrivatePhoneReply>,
+}
+
+#[derive(Default)]
+// Mailbox and PIN each end with '#'; no login symbol reaches the command grammar.
+struct LoginCollector {
+    mailbox: String,
+    pin: String,
+    pin_phase: bool,
+    invalid: bool,
+    last_ms: Option<u64>,
+}
+/// Local-only result; credential buffers never implement Debug or enter node parsers.
+pub(crate) enum LoginInput {
+    Credentials { mailbox: String, pin: String },
+    Retry,
+}
+impl LoginCollector {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+    fn tick(&mut self, now_ms: u64) -> Option<LoginInput> {
+        if self
+            .last_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) >= 3000)
+        {
+            self.clear();
+            return Some(LoginInput::Retry);
+        }
+        None
+    }
+    fn digit(&mut self, digit: char, now_ms: u64) -> Option<LoginInput> {
+        self.last_ms = Some(now_ms);
+        if digit == '#' {
+            if !self.pin_phase && !self.invalid && !self.mailbox.is_empty() {
+                self.pin_phase = true;
+                return None;
+            }
+            let credentials = LoginInput::Credentials {
+                mailbox: if self.invalid {
+                    String::new()
+                } else {
+                    std::mem::take(&mut self.mailbox)
+                },
+                pin: if self.invalid {
+                    String::new()
+                } else {
+                    std::mem::take(&mut self.pin)
+                },
+            };
+            self.clear();
+            return Some(credentials);
+        }
+        let target = if self.pin_phase {
+            &mut self.pin
+        } else {
+            &mut self.mailbox
+        };
+        if digit.is_ascii_digit() && target.len() < 32 && !self.invalid {
+            target.push(digit);
+        } else {
+            self.invalid = true;
+            self.mailbox.clear();
+            self.pin.clear();
+        }
+        None
+    }
 }
 
 /// Credential-free result of one exact call's login attempt.
@@ -134,7 +212,11 @@ impl PhoneCalls {
             .try_reserve_exact(self.maximum_replies)
             .map_err(|_| Error::Allocation)?;
         self.calls.push(Call {
-            _io: io,
+            local: io.local().to_owned(),
+            io: Some(io),
+            owner: None,
+            login: LoginCollector::default(),
+            grammar: None,
             source: source.clone(),
             signals: PeerSignals::for_phone(source.clone()),
             mailbox: None,
@@ -165,7 +247,112 @@ impl PhoneCalls {
             .find(|call| {
                 &call.source == source && call.signals.reply_target() == *reply && !reply.ended()
             })
-            .map(|call| call._io.local())
+            .map(|call| call.local.as_str())
+    }
+
+    /// Transfer the unique provider handle to the existing serial I/O owner.
+    pub(crate) fn start(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        grammar: PhoneDtmfGrammar,
+        worker: &mut PeerIoWorker,
+    ) -> Result<(), Error> {
+        let call = self.current(source, reply)?;
+        let io = call.io.take().ok_or(Error::Admission)?;
+        let (session, control) = PrivatePhoneSession::prepare(io, reply.clone())?;
+        worker.attach_private(session).map_err(|_| Error::Thread)?;
+        call.owner = Some(control);
+        call.grammar = Some(grammar);
+        Ok(())
+    }
+    /// One copied digit still belongs to the original call and ingress token.
+    pub(crate) fn event(&mut self) -> Option<(PhoneSource, PeerReply, char, u64)> {
+        self.calls.iter_mut().find_map(|call| {
+            let (digit, now_ms) = call.owner.as_mut()?.digit()?;
+            Some((
+                call.source.clone(),
+                call.signals.reply_target(),
+                digit,
+                now_ms,
+            ))
+        })
+    }
+    pub(crate) fn login_digit(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        digit: char,
+        now_ms: u64,
+    ) -> Result<Option<LoginInput>, Error> {
+        let call = self.current(source, reply)?;
+        let expired = call.login.tick(now_ms);
+        Ok(call.login.digit(digit, now_ms).or(expired))
+    }
+    /// Login timeout clears its partial credentials privately, never replaying them.
+    pub(crate) fn login_timeouts(&mut self, now_ms: u64) -> Vec<(PhoneSource, PeerReply)> {
+        self.calls
+            .iter_mut()
+            .filter_map(|call| {
+                if call.mailbox.is_none() && call.login.tick(now_ms).is_some() {
+                    Some((call.source.clone(), call.signals.reply_target()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    pub(crate) fn actions(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        digit: char,
+        now_ms: u64,
+    ) -> Result<Vec<PhoneDtmfAction>, Error> {
+        let call = self.current(source, reply)?;
+        Ok(call
+            .grammar
+            .as_mut()
+            .ok_or(Error::Admission)?
+            .digit(digit, now_ms))
+    }
+    pub(crate) fn cancel_grammar(&mut self, source: &PhoneSource, reply: &PeerReply) {
+        if let Ok(call) = self.current(source, reply) {
+            if let Some(grammar) = &mut call.grammar {
+                grammar.cancel();
+            }
+        }
+    }
+    pub(crate) fn grammar_timeouts(
+        &mut self,
+        now_ms: u64,
+    ) -> Vec<(PhoneSource, PeerReply, PhoneDtmfAction)> {
+        let mut actions = Vec::new();
+        for call in &mut self.calls {
+            if call.mailbox.is_some() {
+                if let Some(grammar) = &mut call.grammar {
+                    actions.extend(
+                        grammar.tick(now_ms).into_iter().map(|action| {
+                            (call.source.clone(), call.signals.reply_target(), action)
+                        }),
+                    );
+                }
+            }
+        }
+        actions
+    }
+    /// Hand off prepared streams only while both sides retain the exact live source.
+    pub(crate) fn transfer_replies(&mut self) {
+        for call in &mut self.calls {
+            if let Some(owner) = &mut call.owner {
+                while let Some(reply) = call.replies.pop_front() {
+                    if let Err(reply) = owner.send(reply) {
+                        call.replies.push_front(reply);
+                        break;
+                    }
+                }
+            }
+        }
     }
     fn current(&mut self, source: &PhoneSource, reply: &PeerReply) -> Result<&mut Call, Error> {
         self.calls
@@ -212,6 +399,7 @@ impl PhoneCalls {
         if !call.signals.authenticate_phone() {
             return Err(Error::Admission);
         }
+        call.login.clear();
         call.mailbox = Some(record.clone());
         Ok(PhoneLogin::Authenticated)
     }
@@ -230,7 +418,7 @@ impl PhoneCalls {
     pub fn expire_authentication(&mut self, now_ms: u64) -> Vec<PeerReply> {
         let mut retired = Vec::new();
         self.calls.retain(|call| {
-            if call.mailbox.is_none() && (now_ms >= call.login_deadline_ms || call.signals.ended())
+            if call.signals.ended() || (call.mailbox.is_none() && now_ms >= call.login_deadline_ms)
             {
                 call.signals.end();
                 retired.push(call.signals.reply_target());
@@ -293,4 +481,4 @@ impl PhoneCalls {
 
 #[cfg(test)]
 #[path = "phone_tests.rs"]
-mod tests;
+pub(crate) mod tests;

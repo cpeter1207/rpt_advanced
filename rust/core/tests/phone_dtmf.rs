@@ -27,6 +27,81 @@ fn telephone(text: &str) -> Vec<Action> {
 }
 
 #[test]
+fn phone_only_default_target_uses_the_real_bound_node_and_keeps_explicit_routes() {
+    for target in ["local-repeater", "1000"] {
+        let mut grammar = PhoneDtmfGrammar::new(
+            &DtmfCommandMap::standard(),
+            PhoneDtmfOptions {
+                default_command_target: Some(target.into()),
+                ..PhoneDtmfOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            input(&mut grammar, "*4#", 0),
+            [Action::SelectTarget(target.into())]
+        );
+        assert_eq!(grammar.selected_target(), Some(target));
+        assert_eq!(
+            input(&mut grammar, "*70**#", 10),
+            "*70#"
+                .chars()
+                .map(|digit| Action::NodeDigit {
+                    target: target.into(),
+                    digit
+                })
+                .collect::<Vec<_>>()
+        );
+        input(&mut grammar, "#", 20);
+        assert_eq!(
+            input(&mut grammar, "*42000#", 30),
+            [Action::SelectTarget("2000".into())]
+        );
+        input(&mut grammar, "#", 40);
+        assert_eq!(input(&mut grammar, "*3#", 50), [Action::Attach(None)]);
+    }
+    assert_eq!(
+        input(&mut grammar(), "*4#", 0),
+        [Action::CollectionDiscarded]
+    );
+    for target in ["", "bad name", "a[b", &"a".repeat(64)] {
+        assert!(
+            PhoneDtmfGrammar::new(
+                &DtmfCommandMap::standard(),
+                PhoneDtmfOptions {
+                    default_command_target: Some(target.into()),
+                    ..PhoneDtmfOptions::default()
+                }
+            )
+            .is_err()
+        );
+    }
+    let mut mappings = DtmfCommandMap::standard().mappings().to_vec();
+    mappings
+        .iter_mut()
+        .find(|mapping| mapping.action == LinkAction::Command)
+        .unwrap()
+        .digits
+        .clear();
+    let map = DtmfCommandMap::new(mappings).unwrap();
+    let mut disabled = PhoneDtmfGrammar::new(
+        &map,
+        PhoneDtmfOptions {
+            default_command_target: Some("local-repeater".into()),
+            ..PhoneDtmfOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !input(&mut disabled, "*4#", 0)
+            .iter()
+            .any(|action| matches!(action, Action::SelectTarget(_)))
+    );
+    input(&mut disabled, "*", 100);
+    assert_eq!(disabled.finish(), [Action::CollectionDiscarded]);
+}
+
+#[test]
 fn ordinary_digits_and_nonrouting_star_menus_remain_telephone_digits() {
     assert_eq!(
         input(&mut grammar(), "12#ABCD*70#*91*90", 0),
@@ -135,6 +210,7 @@ fn mapping_and_manual_remapping_use_the_effective_namespace() {
             manual_admission: true,
             manual_key: "92".into(),
             manual_unkey: "93".into(),
+            ..PhoneDtmfOptions::default()
         },
     )
     .unwrap();

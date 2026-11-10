@@ -4,7 +4,7 @@ mod egress_load;
 #[path = "native_maintenance_host_tests.rs"]
 mod native_maintenance;
 #[path = "host_phone_tests.rs"]
-mod phone;
+pub(crate) mod phone;
 #[path = "host_remote_tests.rs"]
 mod remote;
 #[path = "site_host_tests.rs"]
@@ -1242,6 +1242,48 @@ fn render_queued_telemetry(host: &mut Host, owners: &mut AudioOwners) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
     false
+}
+
+/// Observe actual shared receive/transmit owners across 20.48 seconds of PCM.
+/// The fixture's sample clock advances normally; only its wall-clock sleeps are shortened.
+pub(crate) fn probe_public_phone_media(host: &mut Host, local: &str) -> bool {
+    let lease = Arc::clone(
+        &host
+            .leases
+            .iter()
+            .find(|(name, _)| name == local)
+            .unwrap()
+            .1,
+    );
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    let mut heard = false;
+    for block in 0..1024_u64 {
+        let mut audio = [0.0; 960];
+        owners
+            .0
+            .acquire()
+            .unwrap()
+            .state()
+            .process(false, &mut audio, block * 20);
+        let mut generation = owners.1.acquire().unwrap();
+        let transmit = generation.state();
+        let keyed = transmit
+            .adapter
+            .process(
+                &mut transmit.controller,
+                false,
+                &mut audio,
+                rpt_advanced_core::link::SourcePosition::default(),
+            )
+            .unwrap();
+        drop(generation);
+        heard |= keyed || audio.iter().any(|sample| *sample != 0.0);
+        host.pump(clock()).unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    lease.lock().unwrap().owners = Some(owners);
+    heard
 }
 
 #[test]

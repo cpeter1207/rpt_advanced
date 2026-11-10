@@ -15,8 +15,8 @@ use crate::{
 use rpt_advanced_core::{
     audio::LinkAudioConsumer,
     link::{
-        ClassifiedText, HumanMessage, Peer, Protocol, ProtocolId, TextAudience, TextOrigin,
-        classify_asl,
+        ClassifiedText, HumanMessage, Peer, PeerReply, Protocol, ProtocolId, TextAudience,
+        TextOrigin, classify_asl,
     },
 };
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -318,11 +318,25 @@ enum PendingInput {
 /// Pending operations are bounded independently of established peer count.
 const PENDING_ATTACH_CAPACITY: usize = 1024;
 
+/// Internal serial I/O contract shared by radio peers and private phone calls.
+/// Registration, fallback polling and quiescent destruction keep their existing owner.
+pub(crate) trait SerialSession: Send {
+    fn io(&self) -> &PeerIo;
+    fn step(&mut self, now_ms: u64) -> Result<(), Error>;
+    fn stop(&self);
+    fn fail(&self, cause: &str, error: Error);
+    fn stop_flag(&self) -> Arc<AtomicBool>;
+    fn reply(&self) -> PeerReply;
+    fn wake(&self) -> PeerWake;
+    fn epoch(&self) -> Option<Instant>;
+    fn set_epoch(&mut self, epoch: Instant);
+}
+
 /// Bounded peer ownership: one round-robin thread for synchronous hosts, with
 /// individually retained callbacks for hosts that provide async peer steps.
 pub struct PeerIoWorker {
-    pending: Producer<Box<PeerSession>>,
-    incoming: Option<Consumer<Box<PeerSession>>>,
+    pending: Producer<Box<dyn SerialSession>>,
+    incoming: Option<Consumer<Box<dyn SerialSession>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     async_peers: Vec<AsyncPeer>,
@@ -334,8 +348,9 @@ struct AsyncPeer {
     services: HostServices,
     registration: NonNull<c_void>,
     stop: Arc<AtomicBool>,
-    observer: InboundObserver,
-    session: NonNull<PeerSession>,
+    reply: PeerReply,
+    session: NonNull<c_void>,
+    destroy: unsafe fn(*mut c_void),
     wake: PeerWake,
 }
 // SAFETY: the stable heap allocation moves only as a raw owner token. The host
@@ -345,7 +360,7 @@ impl AsyncPeer {
     fn signal_stop(&self) {
         self.wake.close();
         self.stop.store(true, Ordering::Release);
-        self.observer.signals().end();
+        self.reply.retire();
         self.services.peer_step_stop(self.registration);
     }
     fn detach(self) {
@@ -355,14 +370,17 @@ impl AsyncPeer {
         }
         self.services.peer_step_detach(self.registration);
         // SAFETY: detach guarantees no callback still borrows this peer.
-        drop(unsafe { Box::from_raw(self.session.as_ptr()) });
+        unsafe { (self.destroy)(self.session.as_ptr()) };
     }
 }
-unsafe extern "C" fn retained_step(context: *mut c_void) -> i32 {
-    let Some(session) = (unsafe { context.cast::<PeerSession>().as_mut() }) else {
+unsafe fn destroy_session<S>(context: *mut c_void) {
+    drop(unsafe { Box::from_raw(context.cast::<S>()) });
+}
+unsafe extern "C" fn retained_step<S: SerialSession>(context: *mut c_void) -> i32 {
+    let Some(session) = (unsafe { context.cast::<S>().as_mut() }) else {
         return -1;
     };
-    let Some(epoch) = session.async_epoch else {
+    let Some(epoch) = session.epoch() else {
         session.fail("owner without a registered epoch", Error::Thread);
         return -1;
     };
@@ -379,7 +397,8 @@ unsafe extern "C" fn retained_step(context: *mut c_void) -> i32 {
 impl PeerIoWorker {
     /// Prepare the owner; a poll thread starts only for a synchronous host.
     pub fn start(epoch: Instant) -> std::io::Result<Self> {
-        let (pending, incoming) = RingBuffer::<Box<PeerSession>>::new(PENDING_ATTACH_CAPACITY);
+        let (pending, incoming) =
+            RingBuffer::<Box<dyn SerialSession>>::new(PENDING_ATTACH_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         Ok(Self {
             pending,
@@ -395,7 +414,7 @@ impl PeerIoWorker {
 
     fn spawn_thread(
         &mut self,
-        mut incoming: Consumer<Box<PeerSession>>,
+        mut incoming: Consumer<Box<dyn SerialSession>>,
     ) -> std::io::Result<JoinHandle<()>> {
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_spawn) {
@@ -406,7 +425,7 @@ impl PeerIoWorker {
         thread::Builder::new()
             .name("rpt-peer-io".into())
             .spawn(move || {
-                let mut sessions: Vec<Box<PeerSession>> = Vec::new();
+                let mut sessions: Vec<Box<dyn SerialSession>> = Vec::new();
                 loop {
                     while let Ok(session) = incoming.pop() {
                         if sessions.try_reserve(1).is_ok() {
@@ -442,24 +461,36 @@ impl PeerIoWorker {
 
     /// Transfer a prepared peer without blocking or growing the bounded queue.
     pub fn attach(&mut self, session: PeerSession) -> Result<(), Box<PeerSession>> {
+        self.attach_serial(session)
+    }
+
+    /// Use the same sole I/O owner for a command-only call, without radio preparation.
+    pub(crate) fn attach_private(
+        &mut self,
+        session: super::private_phone::PrivatePhoneSession,
+    ) -> Result<(), Box<super::private_phone::PrivatePhoneSession>> {
+        self.attach_serial(session)
+    }
+
+    fn attach_serial<S: SerialSession + 'static>(&mut self, session: S) -> Result<(), Box<S>> {
         self.reap();
         let mut session = Box::new(session);
         if self.stop.load(Ordering::Acquire) {
             return Err(session);
         }
-        if let Some((services, peer)) = session.io.async_owner() {
+        if let Some((services, peer)) = session.io().async_owner() {
             if self.async_peers.try_reserve(1).is_err() {
                 return Err(session);
             }
-            let stop = Arc::clone(&session.stop);
-            let observer = session.inbound.observer();
-            let wake = session.wake.clone();
-            session.async_epoch = Some(self.epoch);
+            let stop = session.stop_flag();
+            let reply = session.reply();
+            let wake = session.wake();
+            session.set_epoch(self.epoch);
             // The host may invoke the callback before attach returns. Keep the
             // peer allocation raw and stable until detach has quiesced it.
             let context = Box::into_raw(session);
             let registration = match unsafe {
-                services.peer_step_attach(peer, Some(retained_step), context.cast())
+                services.peer_step_attach(peer, Some(retained_step::<S>), context.cast())
             } {
                 Ok(registration) => registration,
                 Err(_) => return Err(unsafe { Box::from_raw(context) }),
@@ -469,8 +500,9 @@ impl PeerIoWorker {
                 services,
                 registration,
                 stop,
-                observer,
-                session: NonNull::new(context).unwrap(),
+                reply,
+                session: NonNull::new(context.cast()).unwrap(),
+                destroy: destroy_session::<S>,
                 wake,
             });
             return Ok(());
@@ -491,9 +523,15 @@ impl PeerIoWorker {
         let Some(thread) = self.thread.as_ref().filter(|thread| !thread.is_finished()) else {
             return Err(session);
         };
+        if self.pending.slots() == 0 {
+            return Err(session);
+        }
+        // This sole control producer reserved a free slot; the consumer can only free more.
+        let owner: Box<dyn SerialSession> = session;
         self.pending
-            .push(session)
-            .map_err(|rtrb::PushError::Full(session)| session)?;
+            .write_chunk_uninit(1)
+            .expect("reserved owner slot")
+            .fill_from_iter([owner]);
         thread.thread().unpark();
         Ok(())
     }
@@ -1133,7 +1171,7 @@ impl PeerSession {
 }
 
 /// Off-audio metadata only; identities are validated and error names are typed.
-fn log_error(message: &str) {
+pub(super) fn log_error(message: &str) {
     #[cfg(test)]
     crate::fixture::error_log(3, message);
     let message = CString::new(message).expect("peer failure text contains no NUL");
@@ -1147,6 +1185,36 @@ fn log_error(message: &str) {
 impl Drop for PeerSession {
     fn drop(&mut self) {
         self.fail("owner release without a stop request", Error::Thread);
+    }
+}
+
+impl SerialSession for PeerSession {
+    fn io(&self) -> &PeerIo {
+        &self.io
+    }
+    fn step(&mut self, now_ms: u64) -> Result<(), Error> {
+        Self::step(self, now_ms)
+    }
+    fn stop(&self) {
+        Self::stop(self);
+    }
+    fn fail(&self, cause: &str, error: Error) {
+        Self::fail(self, cause, error);
+    }
+    fn stop_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop)
+    }
+    fn reply(&self) -> PeerReply {
+        self.inbound.signals().reply_target()
+    }
+    fn wake(&self) -> PeerWake {
+        self.wake.clone()
+    }
+    fn epoch(&self) -> Option<Instant> {
+        self.async_epoch
+    }
+    fn set_epoch(&mut self, epoch: Instant) {
+        self.async_epoch = Some(epoch);
     }
 }
 

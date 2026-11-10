@@ -6,6 +6,8 @@ use std::{fmt, mem};
 /// Prepared phone-only grammar choices, independent of call authentication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhoneDtmfOptions {
+    /// Existing configured local NodeId for phone-only `*4#`; None keeps pure syntax unchanged.
+    pub default_command_target: Option<String>,
     /// A separate telephone egress exists; false never echoes reverse-call digits.
     pub telephone_egress: bool,
     /// Manual admission is configured; false reports manual actions unavailable.
@@ -19,6 +21,7 @@ pub struct PhoneDtmfOptions {
 impl Default for PhoneDtmfOptions {
     fn default() -> Self {
         Self {
+            default_command_target: None,
             telephone_egress: false,
             manual_admission: false,
             manual_key: "91".into(),
@@ -38,7 +41,7 @@ pub enum PhoneDtmfAction {
     SelectTarget(String),
     /// One symbol for the selected target's unchanged parser and authorization.
     NodeDigit {
-        /// Selected decimal node; selection is not permission.
+        /// Selected decimal or configured bound local node; selection is not permission.
         target: String,
         /// Raw destination input; never log or regenerate credential symbols.
         digit: char,
@@ -106,6 +109,13 @@ impl fmt::Debug for PhoneDtmfGrammar {
 impl PhoneDtmfGrammar {
     /// Prepare routing and manual prefixes against the effective command namespace.
     pub fn new(map: &DtmfCommandMap, options: PhoneDtmfOptions) -> Result<Self, CommandMapError> {
+        if options
+            .default_command_target
+            .as_ref()
+            .is_some_and(|target| crate::config::NodeId::new(target).is_err())
+        {
+            return Err(CommandMapError::InvalidPrefix);
+        }
         for prefix in [&options.manual_key, &options.manual_unkey] {
             if prefix.is_empty()
                 || prefix.len() > 63
@@ -203,6 +213,17 @@ impl PhoneDtmfGrammar {
                         && mapping.digits == text
                 }) {
                     output.push(PhoneDtmfAction::Attach(None));
+                } else if let Some(target) =
+                    self.options.default_command_target.as_ref().filter(|_| {
+                        self.map.mappings().iter().any(|mapping| {
+                            mapping.action == LinkAction::Command
+                                && !mapping.digits.is_empty()
+                                && mapping.digits == text
+                        })
+                    })
+                {
+                    self.target = Some(target.clone());
+                    output.push(PhoneDtmfAction::SelectTarget(target.clone()));
                 } else if let Some(command) = self
                     .map
                     .parse(&text)

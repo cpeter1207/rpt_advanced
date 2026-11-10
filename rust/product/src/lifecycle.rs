@@ -20,7 +20,7 @@ use rpt_advanced_core::{
     command::LinkAction,
     runtime::{
         RuntimeDispatch,
-        dtmf::DigitOperation,
+        dtmf::{DigitOperation, DigitOutcome},
         links::{ConnectAttempt, LinkEffect, RetryWork},
     },
 };
@@ -98,6 +98,12 @@ struct DialJob {
     report: bool,
 }
 impl Dial {
+    fn private_reply(&self) -> Option<&rpt_advanced_core::link::PeerReply> {
+        match self {
+            Self::Connect(work) => work.private_reply(),
+            Self::Retry(work) => work.private_reply(),
+        }
+    }
     fn remote(&self) -> &str {
         match self {
             Self::Connect(work) => work.remote(),
@@ -149,14 +155,34 @@ impl Engine {
         local: &str,
         outcome: rpt_advanced_core::runtime::dtmf::DigitOutcome,
     ) -> Result<LinkEffect, RuntimeError> {
-        use rpt_advanced_core::runtime::dtmf::DigitOutcome;
         match outcome {
             DigitOutcome::MacroStopped { reply } => {
+                if let Some(reply) = reply
+                    .as_ref()
+                    .filter(|reply| reply.phone_source().is_some())
+                {
+                    let reply = reply.clone();
+                    self.run(move |host| host.private_phone_result(&reply, false))?;
+                    return Ok(LinkEffect::None);
+                }
                 let local = local.to_owned();
                 self.run(move |host| host.runtime.queue_macro_stopped(&local, reply))?;
                 Ok(LinkEffect::None)
             }
-            DigitOutcome::Operation(operation) => self.operation(local, operation),
+            DigitOutcome::Operation(operation) => {
+                let private = operation
+                    .reply
+                    .as_ref()
+                    .filter(|reply| reply.phone_source().is_some())
+                    .cloned();
+                let result = self.operation(local, operation);
+                if let (Err(_), Some(reply)) = (&result, private) {
+                    let _ = self.run(move |host| host.private_phone_result(&reply, false));
+                    Ok(LinkEffect::None)
+                } else {
+                    result
+                }
+            }
             DigitOutcome::RemoteCandidate(operation) => {
                 self.operation(local, operation).or(Ok(LinkEffect::None))
             }
@@ -183,6 +209,15 @@ impl Engine {
         let reply = operation.reply.clone();
         match self.operation(&local, operation) {
             Ok(effect) => self.effect(local, effect, revision),
+            Err(error)
+                if reply
+                    .as_ref()
+                    .is_some_and(|reply| reply.phone_source().is_some()) =>
+            {
+                let reply = reply.expect("matched private command source");
+                let _ = self.run(move |host| host.private_phone_result(&reply, false));
+                Err(error)
+            }
             Err(RuntimeError::Link(rpt_advanced_core::link::AdmissionError::Loop))
                 if dtmf_source =>
             {
@@ -254,6 +289,8 @@ impl Engine {
     ) -> Result<(), RuntimeError> {
         let name = local.clone();
         let remote = attempt.remote().to_owned();
+        let private_reply = attempt.private_reply().cloned();
+        let private_attach = private_reply.clone();
         let destination_remote = remote.clone();
         let destination = if self.current(revision) && attempt.current(self.elapsed_ms()) {
             self.run(move |host| host.lookup(&name, &destination_remote, None))
@@ -271,7 +308,7 @@ impl Engine {
                     .ok()
             });
         let engine = Arc::clone(self);
-        self.run_inner(true, move |host| {
+        let result = self.run_inner(true, move |host| {
             let clock = engine.clock();
             let mode = attempt.mode();
             let current = engine.current(revision);
@@ -295,13 +332,12 @@ impl Engine {
                     .map_err(RuntimeError::Link)?,
             };
             if attached {
-                let result = host.attach_peer(
-                    &local,
-                    &remote,
-                    mode,
-                    io.ok_or(RuntimeError::Rejected)?,
-                    clock,
-                );
+                let io = io.ok_or(RuntimeError::Rejected)?;
+                let result = if let Some(reply) = &private_attach {
+                    host.attach_peer_private(&local, &remote, mode, io, clock, reply)
+                } else {
+                    host.attach_peer(&local, &remote, mode, io, clock)
+                };
                 if result.is_err() {
                     host.reject_peer(&local, &remote, clock.now_ms);
                 }
@@ -309,7 +345,14 @@ impl Engine {
             } else {
                 Err(RuntimeError::Rejected)
             }
-        })
+        });
+        if let Some(reply) = private_reply {
+            let completed = result.is_ok();
+            let _ = self.run_inner(true, move |host| {
+                host.private_phone_result(&reply, completed)
+            });
+        }
+        result
     }
     fn background(
         self: &Arc<Self>,
@@ -518,10 +561,21 @@ impl Engine {
             self.background(local, effect, revision, false)?;
         }
         for (local, operation) in operations {
+            // A private caller's rejected operation/preparation is call-local;
+            // it is not loss of every node's RF/peer input collection.
+            let private_source = match &operation {
+                DigitOutcome::Operation(operation) | DigitOutcome::RemoteCandidate(operation) => {
+                    operation.reply.as_ref()
+                }
+                DigitOutcome::MacroStopped { reply } => reply.as_ref(),
+                _ => None,
+            }
+            .is_some_and(|reply| reply.phone_source().is_some());
             if self
                 .digit_effect(&local, operation)
                 .and_then(|effect| self.background(local, effect, revision, true))
                 .is_err()
+                && !private_source
             {
                 self.lost_digits.store(true, Ordering::Release);
             }

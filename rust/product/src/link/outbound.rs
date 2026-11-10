@@ -146,6 +146,12 @@ impl Outbound {
     pub(super) fn bind_clock(&mut self, clock: Arc<SourceClock>) {
         self.clock = Some(clock);
     }
+    /// Private prompt playback admits at most one native block behind retained conversion.
+    pub(super) fn ready_for_input(&mut self) -> bool {
+        self.pending.is_none()
+            && self.pcm_position == self.pcm_used
+            && self.queue.peek_span().is_none()
+    }
     pub(super) fn redirect(&mut self, queue: LinkAudioConsumer) -> Result<(), Error> {
         self.retired_rejections = self
             .retired_rejections
@@ -510,6 +516,38 @@ mod tests {
     use super::*;
     use crate::link::session::tests::peer_with_egress;
     use rpt_advanced_core::audio::LinkAudioQueue;
+
+    #[test]
+    fn one_block_readiness_preserves_future_pcm_and_retained_codec_input() {
+        let (mut io, state) = peer_with_egress(8000, true, true);
+        state.lock().unwrap().encode_unit = Some(160);
+        let (mut input, output) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(8000, output).unwrap();
+        assert!(outbound.ready_for_input());
+        let span = |source_start, born_ns| AudioSpan {
+            source_start,
+            born_ns: Some(born_ns),
+            ..AudioSpan::default()
+        };
+        assert_eq!(input.write(span(0, 20_000_000), &[0.25; BLOCK]), 0);
+        assert!(!outbound.ready_for_input());
+        outbound.step(&mut io, 0).unwrap();
+        assert!(
+            !outbound.ready_for_input(),
+            "a future block remains in its bounded queue"
+        );
+        outbound.step(&mut io, 20).unwrap();
+        assert!(outbound.ready_for_input());
+        assert_eq!(input.write(span(960, 40_000_000), &[0.5; BLOCK]), 0);
+        outbound.step(&mut io, 40).unwrap();
+        assert!(
+            !outbound.ready_for_input(),
+            "one codec packet consumed only the leading converted samples"
+        );
+        outbound.step(&mut io, 41).unwrap();
+        assert!(outbound.ready_for_input());
+        assert_eq!(input.dropped_samples(), 0);
+    }
 
     #[test]
     fn finite_drain_can_need_more_than_one_bounded_converter_turn() {

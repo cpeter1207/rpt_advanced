@@ -513,7 +513,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
         effects
     }
     fn track_detach(&mut self, local: &str, effect: &LinkEffect) {
-        if let LinkEffect::Detach(peers) = effect {
+        if let LinkEffect::Detach(peers) | LinkEffect::PrivateDetach { remotes: peers, .. } = effect
+        {
             for remote in peers {
                 let key = (local.to_owned(), remote.clone());
                 if !self.detaching.contains(&key) {
