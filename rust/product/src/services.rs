@@ -1837,4 +1837,4 @@ mod tests;
 
 #[cfg(test)]
 #[path = "services_history_tests.rs"]
-mod history_tests;
+pub(crate) mod history_tests;

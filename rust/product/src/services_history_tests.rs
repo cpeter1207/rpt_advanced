@@ -5,7 +5,7 @@ use rpt_advanced_core::link::{
 };
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
-struct State {
+pub(crate) struct State {
     prepared: u64,
     delay: AtomicU64,
     accepted: AtomicU64,
@@ -132,7 +132,8 @@ impl rpt_advanced_core::link::PeerInput for Source {
         })
     }
 }
-fn fixture(prepared: u64, delay: u64, phone: bool) -> (Box<State>, ProcessedPeer<Source>) {
+/// Qualified serial processor fixture shared with the actual prepared phone path.
+pub(crate) fn processor_fixture(prepared: u64, delay: u64) -> (Box<State>, PcmProcessor) {
     let mut state = Box::new(State {
         prepared,
         delay: AtomicU64::new(delay),
@@ -154,6 +155,10 @@ fn fixture(prepared: u64, delay: u64, phone: bool) -> (Box<State>, ProcessedPeer
             programme_buffering: Some(query),
         },
     };
+    (state, processor)
+}
+fn fixture(prepared: u64, delay: u64, phone: bool) -> (Box<State>, ProcessedPeer<Source>) {
+    let (state, processor) = processor_fixture(prepared, delay);
     (
         state,
         ProcessedPeer::new(Source::new(phone), Some(processor)),

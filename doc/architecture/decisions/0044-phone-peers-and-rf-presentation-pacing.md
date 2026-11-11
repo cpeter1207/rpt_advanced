@@ -488,3 +488,13 @@ its successor when retirement cancels that pending span. It returns cancellation
 and leaves the successor queued. Serialized egress then reevaluates source due
 time before admitting the successor, so an ordinary future span behind retired
 private media is neither sent early nor lost.
+
+## Prepared phone processor identity join — 2026-11-11
+
+The inner timed ring consumer forwards its exact borrowed private-call token
+before the existing ProcessedPeer graph prepares conservative receipt history.
+Outer mixer identity alone cannot qualify that preparation. Real 8/48 kHz phone
+input therefore uses the same bounded history owner and original receipt bounds
+as the qualified graph contract; exact post-DSP provenance remains unknown.
+Retiring the media generation still revokes its output without ending private
+call control. This joins a prepared path, not production attachment readiness.

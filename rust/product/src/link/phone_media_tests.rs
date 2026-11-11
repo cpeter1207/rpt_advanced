@@ -353,3 +353,51 @@ fn prepared_phone_media_publishes_typed_mixer_and_revokes_live_destination_contr
         "retired source cannot leak into another live call"
     );
 }
+
+#[test]
+fn prepared_phone_media_qualifies_original_age_through_the_actual_processor() {
+    // Measure a native two-variant representation before choosing the mixed owner.
+    eprintln!(
+        "input_owner_bytes ordinary={} phone={} two_variant={}",
+        std::mem::size_of::<ProcessedPeer<InboundConsumer>>(),
+        std::mem::size_of::<PhoneMediaInput>(),
+        std::mem::size_of::<Result<ProcessedPeer<InboundConsumer>, PhoneMediaInput>>(),
+    );
+    for rate in [8000, 48000] {
+        let (_state, graph) = crate::services::history_tests::processor_fixture(1, 1);
+        let call = reply();
+        let (mut ingress, mut input, shared) = prepare(call.clone(), rate, Some(graph)).unwrap();
+        assert_eq!(input.phone_reply(), Some(&call));
+        assert!(
+            input.source_timing_available(),
+            "the graph needs the inner exact call token at preparation"
+        );
+        ingress.adopt(0, reference());
+        let count = rate as usize / 50;
+        let samples = vec![0.25; count];
+        for index in 0..10 {
+            assert_eq!(
+                ingress.audio(index * count as u64, &samples, Some(birth(10))),
+                Ok(count)
+            );
+        }
+        let qualified = (0..4800)
+            .filter_map(|_| input.render_timed_sample())
+            .find(|sample| sample.age_bound.is_some())
+            .expect("real prepared phone history must qualify the original receipt");
+        assert_eq!(
+            qualified.provenance, None,
+            "a conservative DSP bound is not exact provenance"
+        );
+        assert_eq!(
+            qualified.age_bound,
+            Some(SourceTimeBound {
+                host_clock_epoch: 7,
+                not_after_ns: 10,
+            })
+        );
+        shared.retire();
+        assert!(!call.ended());
+        assert_eq!(input.render_timed_sample(), None);
+    }
+}

@@ -206,6 +206,11 @@ struct TimedInput {
     shared: Arc<Shared>,
 }
 impl PeerInput for TimedInput {
+    fn phone_reply(&self) -> Option<&PeerReply> {
+        // Graph history is prepared around this inner owner, before the outer
+        // media consumer exists. Preserve the same authenticated call token.
+        Some(&self.shared.reply)
+    }
     fn source_rate(&self) -> u32 {
         self.reader.source_rate()
     }
