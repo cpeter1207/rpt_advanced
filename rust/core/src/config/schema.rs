@@ -81,7 +81,7 @@ impl KnownScope {
                 Self::Site { kind, named: false }
             }
             ScopeKind::SiteSet(kind) => Self::Site { kind, named: true },
-            ScopeKind::Unknown => return None,
+            ScopeKind::Unknown | ScopeKind::PhoneAccount => return None,
         })
     }
 }
@@ -98,7 +98,8 @@ impl Schema {
             let repeated = document.sections()[..index].contains(section);
             if (!matches!(parsed.kind, ScopeKind::ProcessingNode)
                 && parsed.node.is_some_and(|node| node.len() > 63))
-                || parsed.label.is_some_and(|label| label.len() > 63)
+                || (parsed.kind != ScopeKind::PhoneAccount
+                    && parsed.label.is_some_and(|label| label.len() > 63))
             {
                 return Err(ConfigError::structure(
                     section,
@@ -120,6 +121,11 @@ impl Schema {
                 ));
             }
             if repeated {
+                continue;
+            }
+            // Account resolution owns its safe defaults and redacted diagnostics.
+            if parsed.kind == ScopeKind::PhoneAccount {
+                warnings.extend(super::phone_accounts::resolve_section(document, section).warnings);
                 continue;
             }
             let Some(known) = KnownScope::from_kind(parsed.kind) else {

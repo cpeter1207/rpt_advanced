@@ -64,6 +64,7 @@ fn main() {
             env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned())
         ))
         .allowlist_type("rptadv_.*")
+        .allowlist_var("RPTADV_PHONE_ACCOUNT_.*")
         .allowlist_var("RPTADV_SITE_.*")
         .allowlist_var("URP_NATIVE_.*")
         .allowlist_var("URP_AST_.*")

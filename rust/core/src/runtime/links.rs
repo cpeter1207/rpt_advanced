@@ -33,6 +33,10 @@ pub struct RetryWork {
     work: GenerationWork,
 }
 impl RetryWork {
+    /// Exact private caller of an unfinished initial attempt; established recovery has none.
+    pub fn private_reply(&self) -> Option<&PeerReply> {
+        pending_phone_reply(self.pending_source.as_ref())
+    }
     /// Destination for external directory lookup and dialing.
     pub fn remote(&self) -> &str {
         self.attempt.name()
@@ -51,6 +55,10 @@ impl RetryWork {
     }
 }
 impl ConnectAttempt {
+    /// Retain the actual private caller through external dialing and completion delivery.
+    pub fn private_reply(&self) -> Option<&PeerReply> {
+        pending_phone_reply(self.pending_source.as_ref())
+    }
     /// Exact destination requested by current policy.
     pub fn remote(&self) -> &str {
         &self.remote
@@ -82,12 +90,26 @@ fn pending_source_current(source: Option<&DigitOperation>, now_ms: Option<u64>) 
     })
 }
 
+fn pending_phone_reply(source: Option<&DigitOperation>) -> Option<&PeerReply> {
+    source?
+        .reply
+        .as_ref()
+        .filter(|reply| reply.phone_source().is_some())
+}
+
 /// Adapter-facing consequence of one serialized existing link command.
 pub enum LinkEffect {
     /// Dial outside the serialized owner, then return the token before attaching resources.
     Connect(ConnectAttempt),
     /// Unpublished identities whose external channels/readers must be stopped and drained.
     Detach(Vec<String>),
+    /// Phone-issued detach keeps its solicited completion outside public link announcements.
+    PrivateDetach {
+        /// Existing node peers selected by the authorized command.
+        remotes: Vec<String>,
+        /// Exact authenticated caller, independent of node attachment or numeric aliases.
+        reply: PeerReply,
+    },
     /// Advisory keyed-source messages, queued on the destination channel owner.
     Text(Vec<(String, String)>),
     /// Addressed command envelopes; delivery failures are not advisory.
@@ -620,6 +642,15 @@ impl NodeLinkControl {
         reply.retire();
         self.peer_commands.retain(|(_, source, _)| source != reply);
     }
+    /// Leave one caller's addressed mode without completing its partial command.
+    /// Preserve that source's grant and every unrelated source's collector/macro.
+    pub fn clear_source_input(&mut self, reply: &PeerReply) {
+        for (_, source, commands) in &mut self.peer_commands {
+            if source == reply {
+                commands.feed(DigitEvent::Lost);
+            }
+        }
+    }
     fn source_digit(
         &mut self,
         origin: &str,
@@ -756,6 +787,11 @@ impl NodeLinkControl {
         } else {
             operation.command.node.clone()
         };
+        let private_reply = operation
+            .reply
+            .as_ref()
+            .filter(|reply| reply.phone_source().is_some())
+            .cloned();
         let effect = match operation.command.action {
             LinkAction::RemoteBase => {
                 operation.remote.ok_or(AdmissionError::Invalid)?;
@@ -986,7 +1022,12 @@ impl NodeLinkControl {
                 return Err(AdmissionError::Denied);
             }
         };
-        Ok(effect)
+        Ok(match (effect, private_reply) {
+            (LinkEffect::Detach(remotes), Some(reply)) => {
+                LinkEffect::PrivateDetach { remotes, reply }
+            }
+            (effect, _) => effect,
+        })
     }
     /// Abandon an externally invalidated dial without adding retry intent or changing topology.
     /// Only its still-matching schedule reservation is released for a later current attempt.

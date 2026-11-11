@@ -115,9 +115,22 @@ pub struct SourceCoordinate {
     pub negative: bool,
 }
 
+/// Conservative original receipt bound, distinct from an exact source coordinate.
+/// The mapped source region was received no earlier than this value.
+/// This is not an exact DSP latency/contribution contract; never renew it on retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceTimeBound {
+    /// Nonzero identity of the original controller I/O clock lifecycle.
+    pub host_clock_epoch: u64,
+    /// A time no later than the earliest original receipt in the mapped source region.
+    pub not_after_ns: u64,
+}
+
 /// Provenance of one actual emitted sample, independent of PCM amplitude.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SampleProvenance {
+    /// Conservative original receipt bound; absent when a path cannot qualify age.
+    pub age_bound: Option<SourceTimeBound>,
     /// None for unmapped startup, untagged input or unlocated shortfall.
     pub position: Option<SourceCoordinate>,
     /// Existing real-PCM classification, including PLC recovery blends.

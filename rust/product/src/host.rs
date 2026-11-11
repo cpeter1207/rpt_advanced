@@ -42,6 +42,8 @@ use std::{
 
 #[path = "host_phone_auth.rs"]
 mod phone_auth;
+#[path = "host_phone_worker.rs"]
+mod phone_worker;
 #[path = "host_remote.rs"]
 mod remote;
 
@@ -207,6 +209,8 @@ struct PeerOwner {
     remote: String,
     mode: Mode,
     group: Option<GroupMemberSelection>,
+    // Successful publication permits later ordinary lifecycle notices, even when
+    // its initial solicited phone notice used a private sink.
     announced: bool,
     control: PeerControl,
 }
@@ -760,6 +764,11 @@ impl Host {
                 self.retire_phone(&source);
                 return Err(error);
             }
+            let started = self.start_private_phone(&source, &reply);
+            if let Err(error) = started {
+                self.retire_phone(&source);
+                return Err(error);
+            }
             return Ok(());
         }
         let remote = io
@@ -782,8 +791,32 @@ impl Host {
         local: &str,
         remote: &str,
         mode: Mode,
+        io: PeerIo,
+        clock: RuntimeClock,
+    ) -> Result<(), RuntimeError> {
+        self.attach_peer_notifying(local, remote, mode, io, clock, true)
+    }
+    /// A caller-requested node link uses ordinary media without public command announcements.
+    pub(crate) fn attach_peer_private(
+        &mut self,
+        local: &str,
+        remote: &str,
+        mode: Mode,
+        io: PeerIo,
+        clock: RuntimeClock,
+        reply: &PeerReply,
+    ) -> Result<(), RuntimeError> {
+        self.current_private_phone(local, reply)?;
+        self.attach_peer_notifying(local, remote, mode, io, clock, false)
+    }
+    fn attach_peer_notifying(
+        &mut self,
+        local: &str,
+        remote: &str,
+        mode: Mode,
         mut io: PeerIo,
         clock: RuntimeClock,
+        announce: bool,
     ) -> Result<(), RuntimeError> {
         // Telephone media needs explicit authenticated *3 policy and per-node rings.
         // Pending private calls must never enter this numeric-node/ASL path.
@@ -854,12 +887,14 @@ impl Host {
             .find(|peer| peer.local == local && peer.remote == remote)
         {
             peer.announced = true;
-            let _ = if peer.control.text_origin().protocol == ProtocolId::EchoLink as u32 {
-                self.runtime
-                    .queue_echo_link_event(local, remote, peer.control.callsign(), true)
-            } else {
-                self.runtime.queue_link_event(local, remote, true)
-            };
+            if announce {
+                let _ = if peer.control.text_origin().protocol == ProtocolId::EchoLink as u32 {
+                    self.runtime
+                        .queue_echo_link_event(local, remote, peer.control.callsign(), true)
+                } else {
+                    self.runtime.queue_link_event(local, remote, true)
+                };
+            }
         }
         Ok(())
     }
@@ -898,6 +933,9 @@ impl Host {
         Err(RuntimeError::Busy)
     }
     fn detach(&mut self, local: &str, remote: &str, now_ms: u64) {
+        self.detach_notifying(local, remote, now_ms, true);
+    }
+    fn detach_notifying(&mut self, local: &str, remote: &str, now_ms: u64, announce: bool) {
         let announced = if let Some(index) = self
             .peers
             .iter()
@@ -905,7 +943,7 @@ impl Host {
         {
             let peer = self.peers.remove(index);
             self.text.cancel(&peer.control.text_origin());
-            let announced = peer.announced.then(|| {
+            let announced = (announce && peer.announced).then(|| {
                 (
                     peer.control.text_origin().protocol,
                     peer.control.callsign().to_owned(),
@@ -1164,10 +1202,25 @@ impl Host {
         };
         if private_reply.is_some_and(|reply| reply.phone_source().is_some()) {
             // Additional private report families need their own prepared stream route.
+            let reply = private_reply.expect("matched private reply");
+            let source = reply.phone_source().expect("matched phone source");
+            self.current_private_phone(local, reply)?;
+            self.prepare_login_prompt(
+                source,
+                reply,
+                rpt_advanced_core::messages::PhoneAuthenticationPrompt::Unavailable,
+            )?;
             return Err(RuntimeError::Rejected);
         }
         match effect {
             LinkEffect::Connect(_) => Err(RuntimeError::Rejected),
+            LinkEffect::PrivateDetach { remotes, reply } => {
+                self.current_private_phone(local, &reply)?;
+                for remote in remotes {
+                    self.detach_notifying(local, &remote, clock.now_ms, false);
+                }
+                self.private_phone_result(&reply, true)
+            }
             LinkEffect::Detach(remotes) => {
                 for remote in remotes {
                     self.detach(local, &remote, clock.now_ms);
@@ -1361,6 +1414,7 @@ impl Host {
         for reply in self.phone_calls.expire_authentication(clock.now_ms) {
             self.retire_phone_source(&reply);
         }
+        self.pump_private_phones(clock);
         if let Err(error) = self.advance_reload(clock) {
             self.reload_failure = Some(error);
             self.reload_text = None;
@@ -1717,4 +1771,4 @@ impl Drop for Host {
 
 #[cfg(test)]
 #[path = "host_tests.rs"]
-mod tests;
+pub(crate) mod tests;

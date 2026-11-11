@@ -13,7 +13,7 @@ pub struct EgressError;
 /// One channel owner's persistent converter and bounded workspaces.
 pub struct Egress {
     api: ffi::rptadv_samplerate_adapter_descriptor,
-    converter: NonNull<ffi::rptadv_samplerate_converter>,
+    converter: Option<NonNull<ffi::rptadv_samplerate_converter>>,
     rate: u32,
     maximum: usize,
     pending: Vec<f32>,
@@ -74,6 +74,26 @@ impl Egress {
             {
                 return Err(EgressError);
             }
+            // Native-rate egress is an exact copy, not asynchronous clock
+            // recovery. Validate the provider contract, but prepare no unused
+            // converter/filter history or pending-input workspace for that path.
+            let mut value = Self {
+                api,
+                converter: None,
+                rate,
+                maximum,
+                pending: Vec::new(),
+                used: 0,
+                output: vec![0.0; maximum],
+                delay: 0,
+                skip: 0,
+                input_frames: 0,
+                output_frames: 0,
+                finishing: false,
+            };
+            if rate == 48000 {
+                return Ok(value);
+            }
             let mut converter = ptr::null_mut();
             if api.create.unwrap()(
                 48000,
@@ -88,24 +108,12 @@ impl Egress {
                 }
                 return Err(EgressError);
             }
-            let mut value = Self {
-                api,
-                converter: NonNull::new(converter).ok_or(EgressError)?,
-                rate,
-                maximum,
-                pending: vec![0.0; maximum * 2],
-                used: 0,
-                output: vec![0.0; maximum * 2 + 64],
-                delay: 0,
-                skip: 0,
-                input_frames: 0,
-                output_frames: 0,
-                finishing: false,
-            };
+            let converter = NonNull::new(converter).ok_or(EgressError)?;
+            value.converter = Some(converter);
+            value.pending.resize(maximum * 2, 0.0);
+            value.output.resize(maximum * 2 + 64, 0.0);
             let mut delay = 0;
-            if rate != 48000
-                && api.converter_output_delay.unwrap()(value.converter.as_ptr(), &mut delay) != 0
-            {
+            if api.converter_output_delay.unwrap()(converter.as_ptr(), &mut delay) != 0 {
                 return Err(EgressError);
             }
             value.delay = delay as usize;
@@ -122,7 +130,9 @@ impl Egress {
         if self.finishing && !input.is_empty() {
             self.reset()?;
         }
-        if input.len() > self.maximum || self.used + input.len() > self.pending.len() {
+        if input.len() > self.maximum
+            || (self.converter.is_some() && self.used + input.len() > self.pending.len())
+        {
             return Err(EgressError);
         }
         self.input_frames = self
@@ -143,7 +153,7 @@ impl Egress {
         // SAFETY: disjoint fixed buffers and unique converter; lengths fit u32.
         let result = unsafe {
             self.api.process.unwrap()(
-                self.converter.as_ptr(),
+                self.converter.map_or(ptr::null_mut(), NonNull::as_ptr),
                 self.pending.as_ptr(),
                 self.used as u32,
                 self.output.as_mut_ptr(),
@@ -194,17 +204,22 @@ impl Egress {
         self.output_frames = 0;
         self.skip = self.delay;
         self.finishing = false;
-        // SAFETY: this owner exclusively holds the validated converter.
-        (unsafe { self.api.reset.unwrap()(self.converter.as_ptr()) } == 0)
-            .then_some(())
-            .ok_or(EgressError)
+        if let Some(converter) = self.converter {
+            // SAFETY: this owner exclusively holds the validated converter.
+            if unsafe { self.api.reset.unwrap()(converter.as_ptr()) } != 0 {
+                return Err(EgressError);
+            }
+        }
+        Ok(())
     }
 }
 impl Drop for Egress {
     fn drop(&mut self) {
-        // SAFETY: exclusive ownership, no operation remains in flight.
-        unsafe {
-            self.api.destroy.unwrap()(self.converter.as_ptr());
+        if let Some(converter) = self.converter {
+            // SAFETY: exclusive ownership, no operation remains in flight.
+            unsafe {
+                self.api.destroy.unwrap()(converter.as_ptr());
+            }
         }
     }
 }

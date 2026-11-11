@@ -23,8 +23,10 @@ impl std::fmt::Debug for ConfigEntry {
             .field("key", &self.key)
             .field(
                 "value",
-                &if self.section.starts_with("mailbox ") {
-                    "<redacted mailbox value>"
+                &if self.section.starts_with("mailbox ")
+                    || self.section.starts_with("phone_account ")
+                {
+                    "<redacted private value>"
                 } else {
                     &self.value
                 },

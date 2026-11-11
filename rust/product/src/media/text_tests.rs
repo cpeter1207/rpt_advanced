@@ -12,6 +12,7 @@ use std::{
 
 #[derive(Default)]
 pub(crate) struct SpeechFixture {
+    pub(crate) frames: Option<usize>,
     release: AtomicBool,
     pub(crate) opened: Mutex<Vec<String>>,
     active: AtomicUsize,
@@ -83,8 +84,10 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
             0
         } else if body.starts_with("large") {
             if stream.read < 20 { capacity } else { 0 }
+        } else if stream.read == 0 {
+            stream.state.frames.unwrap_or(1).min(capacity)
         } else {
-            usize::from(stream.read == 0)
+            0
         };
         unsafe {
             *count = frames;

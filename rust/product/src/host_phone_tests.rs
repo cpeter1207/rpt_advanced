@@ -14,6 +14,509 @@ fn mailbox_host() -> Host {
     .unwrap()
 }
 
+thread_local! {
+    static BEFORE_EVENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(crate) fn before_event() {
+    let callback = BEFORE_EVENT.with_borrow_mut(Option::take);
+    if let Some(callback) = callback {
+        callback();
+    }
+}
+
+fn driven_mailbox_host() -> (Host, Arc<crate::media::text::tests::SpeechFixture>) {
+    let speech = Arc::new(crate::media::text::tests::SpeechFixture::default());
+    let configuration = document(
+        "usb",
+        &format!(
+            "[speech]\nvoice=voice.onnx\nlevel_db=-6\n{}",
+            include_str!("tests/fixtures/phone_mailbox.conf")
+        ),
+    );
+    let host = Host::start(
+        configuration,
+        crate::media::text::tests::preparer(Arc::clone(&speech)),
+        services(),
+        Instant::now(),
+        RuntimeClock {
+            now_ms: 0,
+            ..clock()
+        },
+    )
+    .unwrap();
+    (host, speech)
+}
+fn private_clock(host: &Host) -> RuntimeClock {
+    RuntimeClock {
+        now_ms: host.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        ..clock()
+    }
+}
+fn await_digits(host: &Host, source: &PhoneSource, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while crate::phone::tests::pending_digits(&host.phone_calls, source) < count {
+        assert!(
+            Instant::now() < deadline,
+            "actual private input receipt missing"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn retirement_after_a_digit_is_copied_cannot_authenticate_or_dispatch_it() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut host, _speech) = driven_mailbox_host();
+    let (phone, state) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", private_clock(&host))
+        .unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(crate::link::session::tests::Input::Digit(b'1'));
+    await_digits(&host, &source, 1);
+    let owner_reply = reply.clone();
+    let (retire, request) = std::sync::mpsc::sync_channel(1);
+    let (completed, receipt) = std::sync::mpsc::sync_channel(1);
+    let owner = std::thread::spawn(move || {
+        request.recv().unwrap();
+        owner_reply.retire();
+        completed.send(()).unwrap();
+    });
+    BEFORE_EVENT.with_borrow_mut(|callback| {
+        *callback = Some(Box::new(move || {
+            retire.send(()).unwrap();
+            receipt.recv_timeout(Duration::from_secs(2)).unwrap();
+        }))
+    });
+    host.pump(private_clock(&host)).unwrap();
+    owner.join().unwrap();
+    assert!(host.phone_source(call).is_none() && reply.ended());
+    assert!(host.operations.is_empty() && host.peers.is_empty());
+    assert!(state.lock().unwrap().audio.is_empty());
+    assert!(host.stop(20));
+}
+
+#[test]
+fn private_event_and_timeout_reply_pressure_retire_only_the_original_call() {
+    use rpt_advanced_core::audio::{PcmRead, PcmStreamReader};
+    struct Empty;
+    impl PcmStreamReader for Empty {
+        fn render(&mut self, _: &mut [f32]) -> PcmRead {
+            PcmRead::Finished
+        }
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for kind in ["event", "login-timeout", "grammar-timeout"] {
+        for full in [false, true] {
+            if kind == "event" && !full {
+                continue;
+            }
+            let (mut host, _speech) = driven_mailbox_host();
+            let (phone, state) = crate::link::session::tests::phone_peer();
+            let call = phone.identity().call_id().unwrap();
+            host.incoming_peer(phone, "203.0.113.9", private_clock(&host))
+                .unwrap();
+            let source = host.phone_source(call).unwrap().clone();
+            let reply = host.phone_reply(&source).unwrap();
+            if kind != "login-timeout" {
+                host.authenticate_phone(&source, &reply, "100", "1234", private_clock(&host))
+                    .unwrap();
+            }
+            while host.take_phone_reply(&source, &reply).unwrap().is_some() {}
+            if full {
+                for _ in 0..16 {
+                    host.queue_phone_reply(&source, &reply, Box::new(Empty))
+                        .unwrap();
+                }
+            }
+            let mut tick = private_clock(&host);
+            match kind {
+                "event" => {
+                    state
+                        .lock()
+                        .unwrap()
+                        .input
+                        .extend("*3#".bytes().map(crate::link::session::tests::Input::Digit));
+                    await_digits(&host, &source, 3);
+                }
+                "login-timeout" => {
+                    host.phone_calls
+                        .login_digit(&source, &reply, '1', 0)
+                        .unwrap();
+                    tick.now_ms = 3000;
+                }
+                "grammar-timeout" => {
+                    for digit in "*3".chars() {
+                        host.phone_calls.actions(&source, &reply, digit, 0).unwrap();
+                    }
+                    tick.now_ms = 3000;
+                }
+                _ => unreachable!(),
+            }
+            host.pump(tick).unwrap();
+            assert_eq!(host.phone_source(call).is_none(), full, "{kind}");
+            assert_eq!(reply.ended(), full, "{kind}");
+            assert!(host.operations.is_empty() && host.peers.is_empty());
+            assert!(state.lock().unwrap().bound_radio.is_none());
+            assert!(host.stop(3020));
+        }
+    }
+}
+
+#[test]
+fn real_three_second_login_pause_resets_privately_before_the_next_digit() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut host, speech) = driven_mailbox_host();
+    let (phone, state) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", private_clock(&host))
+        .unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(crate::link::session::tests::Input::Digit(b'1'));
+    await_digits(&host, &source, 1);
+    host.pump(private_clock(&host)).unwrap();
+    std::thread::sleep(Duration::from_millis(3010));
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(crate::link::session::tests::Input::Digit(b'2'));
+    await_digits(&host, &source, 1);
+    host.pump(private_clock(&host)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !speech
+        .opened
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|text| text == "Login unsuccessful. Try again")
+    {
+        host.pump(private_clock(&host)).unwrap();
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert!(!reply.phone_authenticated() && !reply.ended());
+    assert!(host.operations.is_empty() && host.peers.is_empty());
+    assert!(state.lock().unwrap().digits.is_empty());
+    assert!(host.stop(4000));
+}
+
+fn await_private_drop(
+    state: &std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while state.lock().unwrap().drops == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "private I/O owner did not release its retired handle"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(state.lock().unwrap().drops, 1);
+}
+
+#[test]
+fn decoded_private_call_digits_authenticate_on_the_serialized_host_without_rf() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = mailbox_host();
+    let (phone, state) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    state.lock().unwrap().input.extend(
+        "100#1234#"
+            .bytes()
+            .map(crate::link::session::tests::Input::Digit),
+    );
+    pump_until(&mut host, |_| reply.phone_authenticated());
+    assert_eq!(
+        host.phone_mailbox(&source, &reply).unwrap().callsign,
+        "KG0BP"
+    );
+    assert!(host.peers.is_empty());
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    assert!(state.lock().unwrap().texts.is_empty());
+    assert!(state.lock().unwrap().digits.is_empty());
+    assert!(host.stop(20));
+}
+
+#[test]
+fn actual_private_digits_select_the_bound_numeric_or_named_local_with_star_four_pound() {
+    for local in ["1000", "local-repeater"] {
+        let _serial = crate::fixture::LIFECYCLE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let configuration = ConfigDocument::parse(&format!(
+            "[{local}]\nradio_channel=usb\nduplex=full\n{}",
+            include_str!("tests/fixtures/phone_mailbox.conf")
+        ))
+        .unwrap();
+        let mut host =
+            Host::start(configuration, media(), services(), Instant::now(), clock()).unwrap();
+        let (phone, state) = crate::link::session::tests::phone_peer_named(local);
+        let call = phone.identity().call_id().unwrap();
+        host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+        let source = host.phone_source(call).unwrap().clone();
+        let reply = host.phone_reply(&source).unwrap();
+        state.lock().unwrap().input.extend(
+            "100#1234#*4#*70"
+                .bytes()
+                .map(crate::link::session::tests::Input::Digit),
+        );
+        pump_until(&mut host, |host| !host.operations.is_empty());
+        let [(target, DigitOutcome::Operation(operation))] = host.operations.as_slice() else {
+            panic!("one private status operation")
+        };
+        assert_eq!(target, local);
+        assert_eq!(operation.reply, Some(reply.clone()));
+        let operation = operation.clone();
+        host.operations.clear();
+        let effect = host
+            .runtime
+            .command(local, operation, clock(), false)
+            .unwrap();
+        host.immediate(local, effect, clock()).unwrap();
+        assert!(reply.phone_authenticated());
+        assert!(host.peers.is_empty());
+        assert!(state.lock().unwrap().bound_radio.is_none());
+        assert!(host.stop(20));
+    }
+}
+
+#[test]
+fn private_owner_preparation_failure_reclaims_only_the_new_call() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = Host::start(
+        document("usb", "link_command_status=91\n"),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let (phone, state) = crate::link::session::tests::phone_peer();
+    assert_eq!(
+        host.incoming_peer(phone, "203.0.113.9", clock()),
+        Err(RuntimeError::Preparation)
+    );
+    assert!(host.phone_calls.is_empty() && host.peers.is_empty());
+    assert_eq!(state.lock().unwrap().drops, 1);
+    assert!(host.stop(20));
+}
+
+#[test]
+fn private_completion_rejects_foreign_or_unauthenticated_tokens_and_closes_only_its_full_sink() {
+    use rpt_advanced_core::{
+        audio::{PcmRead, PcmStreamReader},
+        link::PeerSignals,
+        phone_dtmf::PhoneDtmfAction,
+    };
+    struct Empty;
+    impl PcmStreamReader for Empty {
+        fn render(&mut self, _: &mut [f32]) -> PcmRead {
+            PcmRead::Finished
+        }
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut host, _voice) = driven_mailbox_host();
+    let (phone, state) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", private_clock(&host))
+        .unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    assert!(host.current_private_phone("1000", &reply).is_err());
+    assert!(host.private_phone_result(&reply, true).is_err());
+    assert!(
+        host.private_phone_result(&PeerSignals::new().reply_target(), false)
+            .is_err()
+    );
+    assert!(host.phone_source(call).is_some());
+    host.authenticate_phone(&source, &reply, "100", "1234", private_clock(&host))
+        .unwrap();
+    assert!(host.current_private_phone("9999", &reply).is_err());
+    let foreign = PeerSignals::for_phone(source.clone());
+    assert!(foreign.authenticate_phone());
+    assert!(
+        host.private_phone_result(&foreign.reply_target(), false)
+            .is_err()
+    );
+    assert!(
+        reply.phone_authenticated(),
+        "foreign failure cannot retire the actual same-ID call"
+    );
+    while host.take_phone_reply(&source, &reply).unwrap().is_some() {}
+    host.private_phone_actions(
+        &source,
+        &reply,
+        vec![PhoneDtmfAction::NodeDigit {
+            target: "9999".into(),
+            digit: '*',
+        }],
+        private_clock(&host),
+    )
+    .unwrap();
+    assert!(host.take_phone_reply(&source, &reply).unwrap().is_some());
+    for _ in 0..16 {
+        host.queue_phone_reply(&source, &reply, Box::new(Empty))
+            .unwrap();
+    }
+    assert!(host.private_phone_result(&reply, false).is_err());
+    assert!(reply.ended() && host.phone_source(call).is_none());
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    assert!(host.stop(20));
+}
+
+#[test]
+fn private_grammar_dispatches_only_the_bound_node_and_reports_unavailable_media() {
+    use rpt_advanced_core::phone_dtmf::PhoneDtmfAction as Action;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = mailbox_host();
+    let (phone, state) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    host.authenticate_phone(&source, &reply, "100", "1234", clock())
+        .unwrap();
+    while host.take_phone_reply(&source, &reply).unwrap().is_some() {}
+    for digit in "*41000#*70".chars() {
+        let actions = host.phone_calls.actions(&source, &reply, digit, 0).unwrap();
+        host.private_phone_actions(&source, &reply, actions, clock())
+            .unwrap();
+    }
+    let [(local, DigitOutcome::Operation(operation))] = host.operations.as_slice() else {
+        panic!("one source-tagged current-local command")
+    };
+    assert_eq!(local, "1000");
+    assert_eq!(operation.reply, Some(reply.clone()));
+    assert_eq!(
+        operation.origin.as_deref(),
+        Some(source.call_id().to_string().as_str())
+    );
+    let operation = operation.clone();
+    host.operations.clear();
+    let effect = host
+        .runtime
+        .command("1000", operation, clock(), false)
+        .unwrap();
+    host.immediate("1000", effect, clock()).unwrap();
+    assert!(host.take_phone_reply(&source, &reply).unwrap().is_some());
+    for action in [Action::ExitCommandMode, Action::Attach(None)] {
+        let unavailable = !matches!(action, Action::ExitCommandMode);
+        host.private_phone_actions(&source, &reply, vec![action], clock())
+            .unwrap();
+        assert_eq!(
+            host.take_phone_reply(&source, &reply).unwrap().is_some(),
+            unavailable
+        );
+    }
+    assert!(host.operations.is_empty() && host.peers.is_empty());
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    {
+        let state = state.lock().unwrap();
+        assert!(state.texts.is_empty() && state.digits.is_empty());
+    }
+    host.retire_phone(&source);
+    assert!(
+        host.private_phone_actions(&source, &reply, vec![Action::Attach(None)], clock())
+            .is_err()
+    );
+    assert!(host.stop(20));
+
+    // Each independently prepared call keeps this test inside the real producer's
+    // four-job bound; cancellation is asynchronous and must not be bypassed.
+    for route in ["*49999#", "*41000#*91", "*41000#*42000**#"] {
+        let mut host = mailbox_host();
+        let (phone, state) = crate::link::session::tests::phone_peer();
+        let call = phone.identity().call_id().unwrap();
+        host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+        let source = host.phone_source(call).unwrap().clone();
+        let reply = host.phone_reply(&source).unwrap();
+        host.authenticate_phone(&source, &reply, "100", "1234", clock())
+            .unwrap();
+        while host.take_phone_reply(&source, &reply).unwrap().is_some() {}
+        for digit in route.chars() {
+            let actions = host.phone_calls.actions(&source, &reply, digit, 0).unwrap();
+            host.private_phone_actions(&source, &reply, actions, clock())
+                .unwrap();
+        }
+        assert!(host.take_phone_reply(&source, &reply).unwrap().is_some());
+        if route == "*49999#" {
+            assert!(
+                host.phone_calls
+                    .actions(&source, &reply, '5', 0)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(host.operations.is_empty() && host.peers.is_empty());
+        assert!(state.lock().unwrap().bound_radio.is_none());
+        assert!(host.stop(20));
+    }
+}
+
+#[test]
+fn private_worker_login_failure_and_provider_hangup_revoke_only_that_call() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = mailbox_host();
+    for input in ["100#9999#100#9999#100#9999#", "*41000#*70#*41000#"] {
+        let (phone, state) = crate::link::session::tests::phone_peer();
+        let call = phone.identity().call_id().unwrap();
+        host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+        let source = host.phone_source(call).unwrap().clone();
+        let reply = host.phone_reply(&source).unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .extend(input.bytes().map(crate::link::session::tests::Input::Digit));
+        pump_until(&mut host, |host| host.phone_source(call).is_none());
+        assert!(reply.ended() && !reply.phone_authenticated());
+        await_private_drop(&state);
+        assert!(host.operations.is_empty());
+    }
+    let (phone, state) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    host.authenticate_phone(&source, &reply, "100", "1234", clock())
+        .unwrap();
+    state.lock().unwrap().fail_ready = true;
+    pump_until(&mut host, |host| host.phone_source(call).is_none());
+    assert!(reply.ended());
+    await_private_drop(&state);
+    assert!(host.stop(20));
+}
+
 #[test]
 fn provider_admission_prepares_an_unauthenticated_private_login_prompt() {
     let _serial = crate::fixture::LIFECYCLE
@@ -125,6 +628,7 @@ fn exhausted_or_abandoned_login_retires_the_actual_provider_call() {
         );
     }
     assert!(reply.ended() && host.phone_source(call).is_none());
+    await_private_drop(&state);
     assert_eq!(state.lock().unwrap().drops, 1);
     let (phone, fresh_state) = crate::link::session::tests::phone_peer();
     host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
@@ -135,6 +639,7 @@ fn exhausted_or_abandoned_login_retires_the_actual_provider_call() {
     expired.now_ms = 60_010;
     host.pump(expired).unwrap();
     assert!(new_reply.ended() && host.phone_source(call).is_none());
+    await_private_drop(&fresh_state);
     assert_eq!(fresh_state.lock().unwrap().drops, 1);
     assert!(host.stop(60_020));
 }
@@ -216,6 +721,7 @@ fn failed_private_success_prompt_retires_login_authority_and_transport() {
     );
     assert!(reply.ended() && host.phone_source(call).is_none());
     assert!(host.phone_mailbox(&source, &reply).is_none());
+    await_private_drop(&state);
     assert_eq!(state.lock().unwrap().drops, 1);
     assert!(host.stop(20));
 }
@@ -411,6 +917,7 @@ fn pending_phone_has_no_handshake_topology_or_radio_attachment_and_queues_only_p
     assert!(!prepared.current());
     assert!(host.phone_source(call).is_none());
     assert!(!host.retire_phone(&source));
+    await_private_drop(&state);
     let state = state.lock().unwrap();
     assert!(
         state.texts.is_empty(),
@@ -526,6 +1033,7 @@ fn removed_node_reload_retires_its_pending_private_call_before_reclaiming_the_no
     assert!(host.runtime.node("1000").is_none());
     assert!(reply.ended());
     assert!(host.phone_source(call).is_none());
+    await_private_drop(&state);
     assert_eq!(state.lock().unwrap().drops, 1);
     assert!(state.lock().unwrap().bound_radio.is_none());
     pump_until(&mut host, |host| host.runtime.status(20).is_empty());

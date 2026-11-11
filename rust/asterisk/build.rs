@@ -39,6 +39,8 @@ fn main() {
         .allowlist_var("URP_AST_(REMOTE_.*|OPTION_REMOTE_CONTROL)")
         .allowlist_var("URP_AST_(SITE_.*|OPTION_SITE_IO)")
         .allowlist_type("UrpAstDirectCallbacks")
+        .allowlist_type("UrpAstFeedbackBinding")
+        .allowlist_var("URP_AST_(OPTION_RADIO_FEEDBACK|FEEDBACK_OPTION_ABI_VERSION)")
         .allowlist_type("UrpAstChannelCommand")
         .allowlist_var("URP_AST_(OPTION_RECEIVE_POLICY|COMMAND_GET_RECEIVE_POLICY)")
         .allowlist_type("urp_ast_link_attach")

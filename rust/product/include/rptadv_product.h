@@ -67,7 +67,7 @@ struct UrpAstSiteSnapshot;
 
 /** Borrowed immutable bytes. Null is valid only with zero length. */
 struct rptadv_peer_bytes_v1 {
-    const uint8_t *data; /**< Retained by its peer until destruction. */
+    const uint8_t *data; /**< Lifetime is specified by the enclosing contract. */
     size_t length;       /**< Exact byte count, excluding a terminator. */
 };
 
@@ -115,6 +115,26 @@ typedef uint32_t (*rptadv_peer_source_gap_v1)(void *context, uint64_t source_sta
 /** Borrowed human text, separate from protocol control and claimed sender authority. */
 typedef void (*rptadv_peer_source_text_v1)(void *context, struct rptadv_peer_bytes_v1 sender,
                                            struct rptadv_peer_bytes_v1 body);
+/** Original packet receipt in the supplied host clock. Retain unchanged through
+ * rejected offers, partial credit, conversion and retries; never stamp at playout. */
+struct rptadv_source_birth_v1 {
+    uint32_t struct_size;      /**< At least this complete revision. */
+    uint32_t abi_version;      /**< Exactly 1. */
+    uint64_t host_clock_epoch; /**< Exact nonzero sink clock identity. */
+    uint64_t born_ns;          /**< No later than sink reference_now_ns. */
+};
+/** Timed source PCM. A null birth is explicitly unqualified. */
+typedef size_t (*rptadv_peer_source_audio_timed_v1)(void *context, uint64_t source_start,
+                                                    const float *pcm, size_t count,
+                                                    uint32_t concealed,
+                                                    const struct rptadv_source_birth_v1 *birth);
+/** Request actual media retirement. Zero completes, one means retry pending,
+ * negative is terminal. Retain the reset and offer no new PCM until complete. */
+typedef int32_t (*rptadv_peer_source_discontinuity_v1)(void *context);
+/** One private telephone digit. Exactly one of 0123456789ABCD*# is valid.
+ * Zero accepts it once, one retains it for retry before later source events,
+ * and negative is terminal. Provider retries preserve the same symbol. */
+typedef int32_t (*rptadv_peer_source_digit_v1)(void *context, uint32_t symbol);
 /** Synchronous source sink; callbacks cannot reenter the same peer. */
 struct rptadv_peer_source_sink_v1 {
     uint32_t struct_size;              /**< Complete readable size. */
@@ -122,7 +142,19 @@ struct rptadv_peer_source_sink_v1 {
     void *context;                     /**< Borrowed during one source-read call. */
     rptadv_peer_source_audio_v1 audio; /**< Accept a leading PCM prefix. */
     rptadv_peer_source_gap_v1 gap;     /**< Accept a leading missing-sample prefix. */
+    /** Optional tail; require struct_size through the field being accessed. */
+    uint64_t host_clock_epoch; /**< Stable controller I/O lifecycle, zero unqualified. */
+    uint64_t reference_now_ns; /**< Captured before entering the provider. */
+    rptadv_peer_source_audio_timed_v1 audio_timed;            /**< Retains original age. */
+    rptadv_peer_source_discontinuity_v1 source_discontinuity; /**< Actual reset receipt. */
+    /** Optional private-phone-only tail. Check struct_size through this field
+     * and a nonnull callback before use. Source-capable phones use this one
+     * ordered stream, never a second legacy peer_read for digits. */
+    rptadv_peer_source_digit_v1 digit;
 };
+/** Complete original sink prefix, supported by legacy unqualified providers. */
+#define RPTADV_PEER_SOURCE_SINK_PREFIX_SIZE                                                        \
+    offsetof(struct rptadv_peer_source_sink_v1, host_clock_epoch)
 /** Copied bounded source turn, not raw packet or heartbeat receive state. */
 struct rptadv_peer_source_result_v1 {
     uint32_t struct_size;    /**< Complete caller-provided size. */
@@ -243,6 +275,25 @@ typedef int32_t (*rptadv_peer_step_v1)(void *step_context);
 typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t length);
 struct UrpNativeStationConfig;
 struct rptadv_echolink_account_config_v1;
+/** Native IAX2 provider account, distinct from an AllStarLink peer. */
+#define RPTADV_PHONE_ACCOUNT_IAX 1U
+/** Native SIP provider account. */
+#define RPTADV_PHONE_ACCOUNT_SIP 2U
+/** Public provider settings borrowed only during the configuration visitor.
+ * No secret contents are exposed. The enclosing node owns the local binding.
+ * Disabled complete accounts are reported but must not open transports. */
+struct rptadv_phone_account_configuration_v1 {
+    uint32_t struct_size;                     /**< Complete readable record size. */
+    struct rptadv_peer_bytes_v1 id;           /**< Account label, not a mailbox identity. */
+    uint32_t protocol;                        /**< Exactly RPTADV_PHONE_ACCOUNT_IAX or SIP. */
+    uint32_t enabled;                         /**< Exactly zero or one. */
+    struct rptadv_peer_bytes_v1 server;       /**< Host/IP and numeric port. */
+    struct rptadv_peer_bytes_v1 username;     /**< Provider authentication username. */
+    struct rptadv_peer_bytes_v1 secrets_file; /**< Host-relative or absolute path only. */
+    uint32_t register_account;                /**< Exactly zero or one; request registration. */
+    uint16_t registration_interval_s;         /**< Refresh interval, 1 through 65535 seconds. */
+    uint32_t authentication_timeout_ms;       /**< Absolute timeout, 1 through 120000 ms. */
+};
 /** Resolved host requirements, borrowed only during the configuration visitor. */
 struct rptadv_node_host_configuration {
     uint32_t struct_size;           /**< Complete readable record size. */
@@ -262,6 +313,9 @@ struct rptadv_node_host_configuration {
     const uint8_t
         *echolink_secrets_file; /**< Configured host-relative path, or empty for default. */
     size_t echolink_secrets_file_length; /**< Path byte count; not NUL terminated. */
+    /** Complete public phone records; array and spans live only during this visit. */
+    const struct rptadv_phone_account_configuration_v1 *phone_accounts;
+    size_t phone_account_count; /**< Number of records; zero permits a null pointer. */
 };
 /** Copy one node's requirements; return nonzero to abort inspection. */
 typedef int (*rptadv_configuration_sink)(void *context,
@@ -537,6 +591,10 @@ struct rptadv_host_services_v10 {
     /** Observe activation without I/O: zero is ready, one is opening, negative
      * is the first failure. Remote compositions require this complete tail. */
     int (*radio_ready)(void *context, void *radio);
+    /** Optional stopped-only feedback binding before radio_activate. The host copies
+     * the sized port and retains its serial TX callback/context through radio
+     * destruction. Absent capability is distinct from successful binding. */
+    int (*radio_feedback_bind)(void *context, void *radio, const struct UrpRadioFeedbackPort *port);
 };
 
 /** Exact revision of a typed site control request. */

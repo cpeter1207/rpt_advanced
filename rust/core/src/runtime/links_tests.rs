@@ -36,6 +36,117 @@ fn links() -> NodeLinkControl {
 }
 
 #[test]
+fn clearing_phone_mode_preserves_unrelated_and_same_call_replacement_collectors() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    let mut links = links();
+    let signals: Vec<_> = (1..=3)
+        .map(|ingress| {
+            PeerSignals::for_phone(
+                PhoneSource::new(
+                    PhoneAccountId::new("provider").unwrap(),
+                    1,
+                    "aabbccddeeff00112233445566778899".parse().unwrap(),
+                    2,
+                    ingress,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    for signal in &signals {
+        assert!(signal.authenticate_phone());
+        let reply = signal.reply_target();
+        for digit in "*7".chars() {
+            assert!(
+                links
+                    .phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone())
+                    .is_none()
+            );
+        }
+    }
+    links.clear_source_input(&signals[0].reply_target());
+    for (index, signal) in signals.iter().enumerate() {
+        let reply = signal.reply_target();
+        let outcomes: Vec<_> = "0#"
+            .chars()
+            .filter_map(|digit| {
+                links.phone_digit(reply.phone_source().unwrap(), digit, 2, reply.clone())
+            })
+            .collect();
+        assert_eq!(outcomes.len(), usize::from(index != 0));
+        assert!(reply.phone_authenticated() && !reply.ended());
+    }
+    links.clear_source_input(&PeerSignals::new().reply_target());
+}
+
+#[test]
+fn clearing_one_phone_macro_cancels_only_its_delayed_steps_and_retains_unlock() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let mut links = links();
+    links.configure_admin(&digest, &digest, 60_000);
+    let limits = crate::dtmf_macro::DtmfMacroLimits::default();
+    let definition = crate::config::ResolvedDtmfMacroSettings {
+        name: "status".into(),
+        trigger: "*95".into(),
+        protected: false,
+        commands: "*70#,*73#".into(),
+    };
+    let compiled = crate::dtmf_macro::compile(
+        &definition,
+        limits,
+        &DtmfCommandMap::standard(),
+        "524950",
+        &[],
+    )
+    .unwrap();
+    links.configure_macros(vec![compiled], limits).unwrap();
+    let signals: Vec<_> = (1..=2)
+        .map(|ingress| {
+            PeerSignals::for_phone(
+                PhoneSource::new(
+                    PhoneAccountId::new("provider").unwrap(),
+                    1,
+                    "aabbccddeeff00112233445566778899".parse().unwrap(),
+                    2,
+                    ingress,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    for signal in &signals {
+        assert!(signal.authenticate_phone());
+        let reply = signal.reply_target();
+        for digit in "*8001234#*95".chars() {
+            links.phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone());
+        }
+    }
+    assert_eq!(links.advance_macros(1).len(), 2);
+    let first = signals[0].reply_target();
+    links.clear_source_input(&first);
+    let remaining = links.advance_macros(2001);
+    assert!(
+        matches!(remaining.as_slice(), [DigitOutcome::Operation(operation)] if operation.reply == Some(signals[1].reply_target()))
+    );
+    let operation = "*804"
+        .chars()
+        .filter_map(|digit| {
+            links.phone_digit(first.phone_source().unwrap(), digit, 2002, first.clone())
+        })
+        .next()
+        .unwrap();
+    assert!(
+        matches!(operation, DigitOutcome::Operation(_)),
+        "mode exit retains this exact source's unlock grant"
+    );
+}
+
+#[test]
 fn phone_pending_connect_and_initial_retry_end_with_the_actual_call() {
     use crate::link::{PhoneAccountId, PhoneSource};
     for permanent in [false, true] {
@@ -79,6 +190,7 @@ fn phone_pending_connect_and_initial_retry_end_with_the_actual_call() {
             panic!("expected a pending private call command")
         };
         assert!(attempt.current_at(2));
+        assert_eq!(attempt.private_reply(), Some(&reply));
         if permanent {
             assert_eq!(
                 links.finish_connect_at(attempt, false, 3, None, |_| None),
@@ -88,6 +200,7 @@ fn phone_pending_connect_and_initial_retry_end_with_the_actual_call() {
                 .take_retry(10_000, host.control().work().unwrap())
                 .unwrap();
             assert!(retry.current_at(10_000));
+            assert_eq!(retry.private_reply(), Some(&reply));
             links.retire_source(&reply);
             assert!(!retry.current_at(10_001));
             assert_eq!(

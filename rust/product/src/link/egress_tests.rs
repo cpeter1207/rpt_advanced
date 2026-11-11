@@ -246,3 +246,25 @@ fn failed_creation_releases_a_converter_returned_alongside_an_error() {
         assert!(Egress::from_descriptor(8000, 16, Box::leak(Box::new(api))).is_err());
     }
 }
+
+#[test]
+fn native_rate_prepares_only_output_storage_without_a_samplerate_context() {
+    // SAFETY: this copied descriptor outlives the owner; failed_create proves
+    // the native copy path never constructs or warms a conversion context.
+    unsafe {
+        let mut api = *ffi::rptadv_samplerate_adapter_descriptor();
+        api.create = Some(failed_create);
+        let mut converter = Egress::from_descriptor(48000, 4096, &api).unwrap();
+        assert!(converter.pending.is_empty());
+        assert_eq!(converter.output.len(), 4096);
+        assert_eq!(converter.process(&[0.25, -0.25]).unwrap(), &[0.25, -0.25]);
+        assert!(converter.process(&[0.0; 4097]).is_err());
+        assert_eq!(converter.finish().unwrap(), (&[][..], true));
+        converter.reset().unwrap();
+        assert_eq!(converter.process(&[0.5]).unwrap(), &[0.5]);
+        assert_eq!(converter.finish().unwrap(), (&[][..], true));
+        assert_eq!(converter.process(&[-0.5]).unwrap(), &[-0.5]);
+        api.process = None;
+        assert!(Egress::from_descriptor(48000, 4096, &api).is_err());
+    }
+}

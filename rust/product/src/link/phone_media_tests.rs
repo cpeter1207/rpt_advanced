@@ -1,0 +1,257 @@
+use super::*;
+use crate::{abi, services::HostServices};
+use rpt_advanced_core::link::{PhoneAccountId, PhoneCallId};
+use std::{
+    ffi::{c_char, c_void},
+    ptr,
+};
+
+fn reply() -> PeerReply {
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        7,
+        PhoneCallId::new([1; 16]).unwrap(),
+        9,
+        13,
+    )
+    .unwrap();
+    let signals = PeerSignals::for_phone(source);
+    assert!(signals.authenticate_phone());
+    signals.reply_target()
+}
+
+fn reference() -> SourceTimeReference {
+    SourceTimeReference {
+        host_clock_epoch: 7,
+        now_ns: 10,
+    }
+}
+fn birth(time: u64) -> SourceBirth {
+    SourceBirth {
+        host_clock_epoch: 7,
+        born_ns: time,
+    }
+}
+fn position(shared: &Shared, frame: u64, fraction: u32) -> SourceCoordinate {
+    SourceCoordinate {
+        generation: shared.generation,
+        frame,
+        fraction_billionths: fraction,
+        negative: false,
+    }
+}
+
+#[test]
+fn prepared_phone_media_bounds_are_earliest_partition_times_and_never_cross_live_slots() {
+    let (_ingress, _input, shared) = prepare(reply(), 8000, None).unwrap();
+    assert!(shared.record(0, 160, birth(30)));
+    assert!(shared.record(1, 2, birth(20)));
+    assert!(shared.record(2, 3, birth(40)));
+    assert_eq!(
+        shared
+            .locate(position(&shared, 159, 0))
+            .unwrap()
+            .not_after_ns,
+        20
+    );
+    assert!(shared.locate(position(&shared, 159, 1)).is_none());
+    assert!(shared.record(160, 320, birth(10)));
+    assert_eq!(
+        shared
+            .locate(position(&shared, 159, 1))
+            .unwrap()
+            .not_after_ns,
+        10
+    );
+    for index in 2..64 {
+        assert!(shared.record(index * 160, (index + 1) * 160, birth(50)));
+    }
+    assert!(!shared.record(64 * 160, 65 * 160, birth(60)));
+    assert_eq!(shared.bound(0).unwrap().not_after_ns, 20);
+    shared.locate(position(&shared, 320, 0)).unwrap();
+    assert!(shared.record(64 * 160, 65 * 160, birth(60)));
+    assert!(
+        shared.bound(0).is_none(),
+        "reused slots cannot relabel old source"
+    );
+    assert_eq!(shared.bound(64 * 160).unwrap().not_after_ns, 60);
+    let mut foreign = position(&shared, 320, 0);
+    foreign.generation += 1;
+    assert!(shared.locate(foreign).is_none());
+    foreign.generation -= 1;
+    foreign.negative = true;
+    assert!(shared.locate(foreign).is_none());
+    shared.slot(2).revision.fetch_add(1, Ordering::SeqCst);
+    assert!(
+        shared.bound(320).is_none(),
+        "in-progress writes remain unknown"
+    );
+}
+
+#[test]
+fn prepared_phone_media_sidecar_refuses_before_pcm_and_credit_is_actual_ring_acceptance() {
+    let (mut ingress, input, shared) = prepare(reply(), 8000, None).unwrap();
+    ingress.adopt(0, reference());
+    assert!(shared.record(0, 160, birth(10)));
+    assert_eq!(
+        ingress.audio(64 * 160, &[0.25; 160], Some(birth(10))),
+        Ok(0)
+    );
+    assert_eq!(input.available(), 0);
+    assert_eq!(ingress.audio(0, &[0.25; 1600], Some(birth(10))), Ok(160));
+    assert_eq!(input.available(), 160);
+    assert_eq!(ingress.cursor, Some(160));
+    assert_eq!(
+        ingress.audio(170, &[0.25; 160], Some(birth(10))),
+        Err(Error::InvalidFrame)
+    );
+    assert_eq!(input.available(), 160);
+}
+
+#[test]
+fn prepared_phone_media_adoption_cannot_resurrect_retired_or_untimed_generations() {
+    for mode in 0..4 {
+        let current = reply();
+        let (mut ingress, mut input, shared) = prepare(current.clone(), 8000, None).unwrap();
+        assert_eq!(ingress.audio(0, &[0.5; 160], Some(birth(10))), Ok(160));
+        assert_eq!(input.available(), 0, "pre-adoption data is never admitted");
+        match mode {
+            0 => shared.retire(),
+            1 => current.retire(),
+            2 => {
+                ingress.adopt(0, SourceTimeReference::default());
+            }
+            _ => {
+                drop(input);
+                ingress.adopt(0, reference());
+                assert!(!shared.active());
+                continue;
+            }
+        }
+        ingress.adopt(0, reference());
+        assert!(!input.active());
+        assert_eq!(ingress.audio(160, &[0.5; 160], Some(birth(10))), Ok(160));
+        assert_eq!(input.render_timed_sample(), None);
+        assert_eq!(input.render_sample(), None);
+        let mut output = [1.0; 4];
+        assert_eq!(input.render(&mut output), None);
+        assert_eq!(output, [0.0; 4]);
+        input.silence(&mut output);
+        assert_eq!(output, [0.0; 4]);
+    }
+}
+
+#[test]
+fn prepared_phone_media_rejects_old_source_prefixes_unknown_age_and_wrong_epoch() {
+    let (mut ingress, input, _) = prepare(reply(), 8000, None).unwrap();
+    ingress.adopt(80, reference());
+    assert_eq!(ingress.audio(0, &[0.25; 160], Some(birth(10))), Ok(80));
+    assert_eq!(input.available(), 0);
+    assert_eq!(ingress.audio(80, &[0.25; 160], Some(birth(10))), Ok(160));
+    assert_eq!(input.available(), 160);
+    assert_eq!(ingress.audio(240, &[], Some(birth(10))), Ok(0));
+    assert_eq!(ingress.gap(240, 80), Ok(80));
+    assert!(!input.active());
+    assert_eq!(input.available(), 0);
+    assert!(!input.shared.reply.ended());
+    for time in [
+        None,
+        Some(birth(9)),
+        Some(SourceBirth {
+            host_clock_epoch: 8,
+            born_ns: 10,
+        }),
+    ] {
+        let (mut ingress, input, _) = prepare(reply(), 8000, None).unwrap();
+        ingress.adopt(0, reference());
+        assert_eq!(ingress.audio(0, &[0.25; 160], time), Ok(160));
+        assert_eq!(input.available(), 0);
+        assert!(!input.active());
+        assert!(!input.shared.reply.ended());
+    }
+}
+
+struct ProcessorState {
+    target: Option<Arc<Shared>>,
+    retire: bool,
+    destroyed: bool,
+}
+unsafe extern "C" fn process(context: *mut c_void, samples: *mut f32, count: usize) -> i32 {
+    let state = unsafe { &mut *context.cast::<ProcessorState>() };
+    unsafe { std::slice::from_raw_parts_mut(samples, count) }.fill(0.75);
+    if state.retire {
+        state.target.as_ref().unwrap().retire();
+    }
+    0
+}
+unsafe extern "C" fn destroy(context: *mut c_void) {
+    unsafe { &mut *context.cast::<ProcessorState>() }.destroyed = true;
+}
+unsafe extern "C" fn processor(
+    context: *mut c_void,
+    _: *const c_char,
+    _: usize,
+    _: *const c_char,
+    _: usize,
+    _: usize,
+    output: *mut abi::rptadv_pcm_processor_v1,
+) -> i32 {
+    let output = unsafe { &mut *output };
+    output.context = context;
+    output.process = Some(process);
+    output.destroy = Some(destroy);
+    0
+}
+
+#[test]
+fn prepared_phone_media_keeps_opaque_dsp_unknown_and_rechecks_retirement_after_processing() {
+    for mode in 0..3 {
+        let mut state = Box::new(ProcessorState {
+            target: None,
+            retire: false,
+            destroyed: false,
+        });
+        let mut table = unsafe { crate::fixture::host_descriptor().read() };
+        table.context = ptr::from_mut(state.as_mut()).cast();
+        table.peer_processing_prepare = Some(processor);
+        let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+        let graph = services.prepare_peer_processing("", "1000", 960).unwrap();
+        let (mut ingress, mut input, shared) = prepare(reply(), 8000, graph).unwrap();
+        state.target = Some(shared);
+        ingress.adopt(0, reference());
+        for index in 0..10 {
+            assert_eq!(
+                ingress.audio(index * 160, &[0.25; 160], Some(birth(10))),
+                Ok(160)
+            );
+        }
+        assert!(!input.source_timing_available());
+        let sample = input.render_timed_sample().unwrap();
+        assert_eq!(sample.sample, 0.75);
+        assert!(
+            sample.provenance.is_none(),
+            "opaque graph cannot relabel retained PCM"
+        );
+        state.retire = true;
+        match mode {
+            0 => assert!(input.render_timed_sample().is_none()),
+            1 => {
+                for _ in 0..9600 {
+                    assert!(input.render_sample().is_none());
+                    if !input.active() {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                let mut output = [1.0; 960];
+                assert!(input.render(&mut output).is_none());
+                assert_eq!(output, [0.0; 960]);
+            }
+        }
+        assert!(!input.active());
+        assert!(!input.shared.reply.ended());
+        drop(input);
+        assert!(state.destroyed);
+    }
+}

@@ -383,6 +383,8 @@ fn server_handle(
         local_nodes: nodes.as_ptr(),
         local_nodes_length: nodes.len(),
         catalog,
+        accounts: std::ptr::null(),
+        account_count: 0,
     };
     let mut handle = std::ptr::null_mut();
     if unsafe { api.bind.unwrap()(&options, &mut handle) } != 0 {
@@ -753,9 +755,14 @@ pub(crate) mod tests {
         0
     }
     unsafe extern "C" fn successful_server_bind(
-        _: *const ServerOptions,
+        options: *const ServerOptions,
         output: *mut *mut c_void,
     ) -> i32 {
+        // SAFETY: server_handle lends its complete options for this call.
+        let options = unsafe { &*options };
+        assert_eq!(options.struct_size as usize, size_of::<ServerOptions>());
+        assert!(options.accounts.is_null());
+        assert_eq!(options.account_count, 0);
         unsafe { output.write(std::ptr::dangling_mut::<c_void>()) };
         0
     }
@@ -794,6 +801,10 @@ pub(crate) mod tests {
             reset_encoder: Some(hangup),
             send_prepared_audio: Some(send_prepared),
             elapsed_ms: Some(elapsed),
+            dial_account: None,
+            poll_timed: None,
+            send_prepared_audio_timed: None,
+            retire_egress: None,
         }
     }
 
@@ -937,6 +948,10 @@ pub(crate) mod tests {
             poll: Some(server_poll),
             set_local_nodes: Some(server_set_nodes),
             destroy: Some(server_destroy),
+            configure_accounts: None,
+            register_account: None,
+            poll_accounts: None,
+            dial_provider_account: None,
         }
     }
 

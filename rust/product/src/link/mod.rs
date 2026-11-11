@@ -3,6 +3,7 @@
 pub(crate) mod dispatcher;
 pub mod egress;
 mod outbound;
+pub(crate) mod private_phone;
 mod regeneration;
 pub mod ring;
 pub mod session;

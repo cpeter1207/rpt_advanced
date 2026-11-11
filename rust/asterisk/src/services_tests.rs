@@ -14,6 +14,73 @@ const SITE_OPTION_FAILED: u8 = 49;
 const REMOTE_PENDING: u8 = 50;
 const REMOTE_ACK_MISSING: u8 = 51;
 const REMOTE_FAILED: u8 = 52;
+const FEEDBACK_ACK_MISSING: u8 = 81;
+const FEEDBACK_ACK_WRONG: u8 = 82;
+const FEEDBACK_OPTION_FAILED: u8 = 83;
+
+#[test]
+fn feedback_port_requires_stopped_radio_and_acknowledged_channel_binding() {
+    unsafe extern "C" fn publish(_: *mut c_void, _: *const ffi::UrpRadioFeedback) {}
+    reset();
+    let null = ptr::null_mut();
+    let mut context = 7_u64;
+    let port = ffi::UrpRadioFeedbackPort {
+        struct_size: size_of::<ffi::UrpRadioFeedbackPort>() as u32,
+        abi_version: 1,
+        context: ptr::from_mut(&mut context).cast(),
+        publish: Some(publish),
+    };
+    unsafe {
+        assert_eq!(radio_feedback_bind(null, null, &port), -1);
+        let mut empty = null;
+        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut empty), 0);
+        drop((*empty.cast::<ReservedRadio>()).radio.take());
+        assert_eq!(radio_feedback_bind(null, empty, &port), -1);
+        radio_destroy(null, empty);
+        for (failure, expected) in [
+            (FEEDBACK_ACK_MISSING, -1),
+            (FEEDBACK_ACK_WRONG, -1),
+            (FEEDBACK_OPTION_FAILED, -1),
+            (0, 0),
+        ] {
+            let mut radio = null;
+            assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+            assert_eq!(radio_feedback_bind(null, radio, ptr::null()), -1);
+            let short = [8_u32, 1];
+            assert_eq!(radio_feedback_bind(null, radio, short.as_ptr().cast()), -1);
+            let wrong_version = ffi::UrpRadioFeedbackPort {
+                abi_version: 2,
+                ..port
+            };
+            assert_eq!(radio_feedback_bind(null, radio, &wrong_version), -1);
+            assert_eq!(radio_feedback_bind(null, radio, &port), 0);
+            assert_eq!(
+                (*radio.cast::<ReservedRadio>()).feedback.unwrap().context,
+                port.context
+            );
+            let unbind = ffi::UrpRadioFeedbackPort {
+                publish: None,
+                ..port
+            };
+            assert_eq!(radio_feedback_bind(null, radio, &unbind), 0);
+            assert!((*radio.cast::<ReservedRadio>()).feedback.is_none());
+            assert_eq!(radio_feedback_bind(null, radio, &port), 0);
+            host(|state| state.failure = failure);
+            assert_eq!(
+                radio_activate(null, radio, Some(receive), null, Some(transmit), null),
+                expected
+            );
+            assert_eq!(radio_feedback_bind(null, radio, &unbind), -1);
+            assert_eq!(
+                radio_activate(null, radio, Some(receive), null, Some(transmit), null),
+                -1
+            );
+            radio_destroy(null, radio);
+            host(|state| state.failure = 0);
+            host(|state| state.clean());
+        }
+    }
+}
 
 #[test]
 fn remote_host_bridge_preserves_pending_owner_and_requires_acknowledgment() {
@@ -300,6 +367,25 @@ unsafe extern "C" fn ast_channel_setoption(
     block: i32,
 ) -> i32 {
     assert_eq!(block, 0);
+    if option == ffi::URP_AST_OPTION_RADIO_FEEDBACK as i32 {
+        assert_eq!(length as usize, size_of::<ffi::UrpAstFeedbackBinding>());
+        let binding = unsafe { &mut *data.cast::<ffi::UrpAstFeedbackBinding>() };
+        assert_eq!(binding.abi_version, 1);
+        assert_eq!(binding.reserved, 0);
+        assert_eq!(binding.accepted_abi_version, 0);
+        assert!(binding.port.publish.is_some());
+        let failure = host(|state| state.failure);
+        binding.accepted_abi_version = match failure {
+            FEEDBACK_ACK_MISSING => 0,
+            FEEDBACK_ACK_WRONG => 2,
+            _ => 1,
+        };
+        return if failure == FEEDBACK_OPTION_FAILED {
+            -9
+        } else {
+            0
+        };
+    }
     if option == ffi::URP_AST_OPTION_RECEIVE_POLICY as i32 {
         assert_eq!(length as usize, size_of::<ffi::UrpAstChannelCommand>());
         // SAFETY: the typed bridge retains one complete writable command.

@@ -33,6 +33,16 @@ does not repeat the full gate.
 
 Local recovery commits may follow affected targeted checks, but must not be
 represented as fully verified until the pull-request gate passes.
+Commit small, coherent changes regularly after their targeted checks so useful
+work is not left only in a working tree. The existing pre-push and pull-request
+quality gates still apply.
+
+Fetch `main` and rebase the active feature branch onto it frequently, including
+between implementation phases and before opening a pull request, to keep
+divergence manageable. Protect uncommitted work first. Coordinate rewrites of
+published or shared history, never bypass branch protections, and recheck affected
+behavior after a rebase.
+
 Treat compiler warnings as errors and fail applicable formatting, Ruff,
 ShellCheck, Cppcheck, Clang-Tidy, Doxygen, tests, installation checks, and 100%
 line and branch coverage of production code on Debian 13 amd64. Remove
@@ -86,6 +96,19 @@ manifest digest, and use that freshly pulled image for the run. When a quality
 base image changes, rebuild and verify every derived quality image before its
 consumer gate uses it. Hosted jobs must likewise consume a freshly published,
 verified native multi-architecture manifest rather than a known stale image.
+
+Satisfy every functional, safety, and quality requirement while keeping peak
+and retained memory usage to a minimum. Avoid unnecessary allocations,
+oversized workspaces, duplicate buffers, and warmed contexts that the selected
+path never uses. Measure realistic workloads; do not drop requirements or
+weaken tests to claim a memory improvement.
+
+Minimize parallelism while satisfying every requirement, including performance.
+Support large numbers of connected peers on one or more CPU cores, and scale
+with available CPU, memory, and network resources. Prefer bounded shared workers
+and measured concurrency over unnecessary per-peer threads or tasks. Keep
+constrained test serialization separate from production scheduling and capacity;
+do not impose the test runner's single-core limit on the production design.
 
 Prefer simple, linear control flow and minimize branches, especially in error
 handling. Share validation and error paths when their observable behavior is

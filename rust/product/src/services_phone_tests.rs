@@ -1,7 +1,7 @@
 //! Sized metadata admits phones only with a complete explicit private-call contract.
 use super::*;
 
-unsafe extern "C" fn info(
+pub(super) unsafe extern "C" fn info(
     mode: *mut c_void,
     peer: *const c_void,
     output: *mut abi::rptadv_peer_info_v1,
