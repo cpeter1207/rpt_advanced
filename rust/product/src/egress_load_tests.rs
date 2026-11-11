@@ -241,6 +241,8 @@ fn known_age_histograms_have_exact_percentiles() {
 #[test]
 #[ignore = "loopback load experiment: run tests/peer_egress_load.py"]
 fn egress_full_path_load() {
+    let resources = crate::resource_tests::Recorder::new("loopback-egress");
+    resources.record("baseline", 0);
     let peers: usize = std::env::var("RPTADV_LOAD_PEERS")
         .unwrap_or("1000".into())
         .parse()
@@ -452,6 +454,7 @@ fn egress_full_path_load() {
         .each_ref()
         .map(|value| value.load(Ordering::Relaxed));
     let udp = udp_errors();
+    resources.record("measured", host.peers.len());
     let result = serde_json::json!({
         "peers_requested": peers, "peers_alive": host.peers.len(), "peer_owner_tasks": host.peers.len(),
         "peers_at_measurement_start": baseline.len(),
@@ -495,4 +498,11 @@ fn egress_full_path_load() {
         assert!(paused_media > 0, "control pause stopped real audio");
     }
     assert!(host.stop(load_clock(epoch).now_ms));
+    resources.record("sessions-stopped", 0);
+    drop(host);
+    drop(simulator);
+    drop(table);
+    drop(owner);
+    drop(providers);
+    resources.record("fixtures-dropped", 0);
 }

@@ -2880,6 +2880,8 @@ fn finished_synchronous_owner_rejects_a_new_session_without_consuming_it() {
 
 #[test]
 fn egress_admission_above_1024() {
+    let resources = crate::resource_tests::Recorder::new("admission-2000");
+    resources.record("baseline", 0);
     let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
     let mut owners = Vec::new();
     for number in 0..2000 {
@@ -2890,6 +2892,7 @@ fn egress_admission_above_1024() {
     }
     assert!(worker.thread.is_none());
     assert_eq!(worker.async_peers.len(), 2000);
+    resources.record("admitted", 2000);
     owners[1000].0.stop();
     worker.reap();
     assert_eq!(worker.async_peers.len(), 1999);
@@ -2905,6 +2908,12 @@ fn egress_admission_above_1024() {
             .iter()
             .all(|(_, state, _)| state.lock().unwrap().drops == 1)
     );
+    resources.record("sessions-stopped", 0);
+    drop(owners);
+    drop(worker);
+    drop(state);
+    drop(_output);
+    resources.record("fixtures-dropped", 0);
 }
 
 #[test]
