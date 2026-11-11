@@ -1,5 +1,7 @@
 //! Retained provider catalog and generated ABI boundary to standalone IAX2.
 
+/// General provider account operations, separate from numeric ASL identities.
+pub mod accounts;
 pub(crate) mod executor;
 
 use crate::{abi, secrets::SecretsFile};
@@ -270,15 +272,7 @@ impl IaxServer {
         address: SocketAddr,
         local_nodes: &[String],
     ) -> Result<Self, IaxError> {
-        let library = client.0.library.as_ref().ok_or(IaxError::MissingSymbol)?;
-        let descriptor = unsafe {
-            let symbol: libloading::Symbol<unsafe extern "C" fn() -> *const ServerDescriptor> =
-                library
-                    .get(b"rptadv_iax2_server_descriptor_v2\0")
-                    .map_err(|_| IaxError::MissingSymbol)?;
-            symbol()
-        };
-        let api = checked_server_descriptor(descriptor)?;
+        let api = load_server_descriptor(client)?;
         let address = address.to_string();
         let nodes = local_nodes.join(",");
         let handle = server_handle(&api, client.0.catalog.as_ptr(), &address, &nodes)?;
@@ -337,6 +331,18 @@ impl Drop for IaxServer {
     fn drop(&mut self) {
         unsafe { self.api.destroy.unwrap()(self.handle.as_ptr()) };
     }
+}
+
+/// Borrow and validate the listener table while its retained client keeps code loaded.
+fn load_server_descriptor(client: &IaxClient) -> Result<ServerDescriptor, IaxError> {
+    let library = client.0.library.as_ref().ok_or(IaxError::MissingSymbol)?;
+    let descriptor = unsafe {
+        let symbol: libloading::Symbol<unsafe extern "C" fn() -> *const ServerDescriptor> = library
+            .get(b"rptadv_iax2_server_descriptor_v2\0")
+            .map_err(|_| IaxError::MissingSymbol)?;
+        symbol()
+    };
+    checked_server_descriptor(descriptor)
 }
 
 fn valid_server_descriptor(pointer: *const ServerDescriptor) -> bool {
@@ -783,7 +789,7 @@ pub(crate) mod tests {
     }
     unsafe extern "C" fn server_destroy(_: *mut c_void) {}
 
-    fn descriptor() -> ClientDescriptor {
+    pub(super) fn descriptor() -> ClientDescriptor {
         ClientDescriptor {
             struct_size: size_of::<ClientDescriptor>() as u32,
             abi_version: ABI_VERSION,
@@ -817,7 +823,7 @@ pub(crate) mod tests {
         0
     }
     unsafe extern "C" fn test_close_catalog(_: *mut c_void) {}
-    fn fixture_client(api: ClientDescriptor) -> IaxClient {
+    pub(super) fn fixture_client(api: ClientDescriptor) -> IaxClient {
         IaxClient(Arc::new(IaxOwner {
             library: None,
             api,
@@ -939,7 +945,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn server_descriptor() -> ServerDescriptor {
+    pub(super) fn server_descriptor() -> ServerDescriptor {
         ServerDescriptor {
             struct_size: size_of::<ServerDescriptor>() as u32,
             abi_version: ABI_VERSION,

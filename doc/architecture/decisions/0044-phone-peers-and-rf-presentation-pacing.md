@@ -378,3 +378,21 @@ and development package hashes were verified before isolated consumer tests.
 The unchanged 2000-peer/48 kHz admission workload remains required; no fixture
 rate, peer count or queue capacity is reduced. The constrained runner allocator
 settings remain test-only and do not change production process defaults.
+## Native IAX account boundary, 2026-11-11
+
+Standalone now wraps the released alpha11 listener account operations separately
+from numeric ASL dialing. A provider-only listener has no invented numeric node
+alias. Account labels, configured local binding, transport login, literal secret,
+presentation caller fields and destination remain distinct. Successful
+registration copies the actual granted interval and endpoints; successful calls
+retain their exact account/call generations and one owned provider handle.
+Malformed successful receipts retire that unique handle rather than leaking it.
+
+These wrappers add no registration scheduler, listener poller, worker, mailbox
+grant or RF attachment. The mixed admission operation consumes one stream and
+preserves the existing numeric policy callbacks. Product activation, same-process
+reload and timed private-media composition remain pending. Alpha11's immediate
+single-listener account replacement cannot implement a multi-listener/product
+reload transaction: failures after an earlier replacement cannot restore retired
+call generations. Activation must use a prepared, reserved provider transaction
+and the product's genuine commit boundary, not sequential mutation with rollback.
