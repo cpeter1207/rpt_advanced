@@ -274,9 +274,11 @@ fn revocable_queue_requires_prepared_domain_and_qualified_revision() {
     assert_eq!(writer.dropped_samples(), 3);
 }
 
+/// Number of copies to allow before invoking one deterministic test callback.
+type CopyHook = std::cell::RefCell<Option<(usize, Box<dyn FnOnce()>)>>;
+
 thread_local! {
-    static AFTER_COPY: std::cell::RefCell<Option<(usize, Box<dyn FnOnce()>)>> =
-        const { std::cell::RefCell::new(None) };
+    static AFTER_COPY: CopyHook = const { std::cell::RefCell::new(None) };
 }
 pub(super) fn after_copy() {
     let hook = AFTER_COPY.with(|slot| {

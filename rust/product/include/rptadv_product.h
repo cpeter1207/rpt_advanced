@@ -371,8 +371,10 @@ struct rptadv_radio_control_v1 {
  * The original control prefix and host table are unchanged; trailing unknown
  * bytes are not read or modified. Partial extensions are rejected. */
 struct rptadv_radio_programme_control_v1 {
-    struct rptadv_radio_control_v1 control; /**< Unchanged request prefix. */
-    struct UrpAstProgrammeRetirement retirement; /**< Exact released SDK envelope. */
+    /** Unchanged request prefix. */
+    struct rptadv_radio_control_v1 control;
+    /** Exact released SDK envelope. */
+    struct UrpAstProgrammeRetirement retirement;
 };
 
 /** Borrowed UTF-8 result emitted synchronously by a remote operation ticket. */
