@@ -205,6 +205,9 @@ impl<P> ProcessedPeer<P> {
 impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     for ProcessedPeer<P>
 {
+    fn phone_reply(&self) -> Option<&rpt_advanced_core::link::PeerReply> {
+        self.input.phone_reply()
+    }
     fn source_rate(&self) -> u32 {
         self.input.source_rate()
     }
@@ -534,6 +537,7 @@ impl HostServices {
             context: ptr::null_mut(),
             process: None,
             destroy: None,
+            programme_buffering: None,
         };
         let code = unsafe {
             prepare(
@@ -549,8 +553,13 @@ impl HostServices {
         match code {
             1 => Ok(None),
             0 => {
+                let prefix = offset_of!(abi::rptadv_pcm_processor_v1, programme_buffering);
+                let readable = api.struct_size as usize;
+                if readable == prefix {
+                    api.programme_buffering = None;
+                }
                 let processor = PcmProcessor { api, maximum };
-                (processor.api.struct_size as usize >= size_of::<abi::rptadv_pcm_processor_v1>()
+                ((readable == prefix || readable >= size_of::<abi::rptadv_pcm_processor_v1>())
                     && processor.api.abi_version == 1
                     && !processor.api.context.is_null()
                     && processor.api.process.is_some()

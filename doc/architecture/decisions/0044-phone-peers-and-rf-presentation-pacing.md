@@ -316,3 +316,26 @@ may retain an age bound without claiming an exact source coordinate or real/PLC
 classification. The current opaque processor clears both independently. The
 input trait can also expose a borrowed exact private-call reply token for typed
 mixer admission; ordinary inputs expose no such token.
+
+
+### Native peer programme-bound capability
+
+The controller processor record keeps its original ABI1 ownership prefix and
+adds an optional sized programme-buffering query. The native adapter forwards it
+to the released SDK query on the same uniquely owned graph and serial audio
+owner. Prefix-only callers remain valid, partial callback tails are rejected,
+and unknown extension bytes are untouched. There is no second graph, observer
+thread, hardware operation or timestamp derived from SDK frame counters.
+
+The callback exposes actual prepared and last-live-block history bounds and
+validity flags. Setup warmup is included in SDK counters; consumers must compare
+actual deltas and retain original source receipt bounds independently. An absent
+or rejected query remains unknown. The existing borrowed private-call identity
+is forwarded through processing unchanged.
+
+This capability alone does not implement RF scheduling or history retirement.
+Asterisk's existing upstream channel audiohook still owns its graph: its
+LINK_ATTACH envelope does not expose that owner's timed receipt/history query
+or graph-retirement transaction. A second product graph would duplicate DSP and
+is not a workaround. Both-host qualification requires a genuine channel-owner
+SDK extension and release; current Asterisk processing stays unqualified.

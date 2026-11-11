@@ -101,6 +101,7 @@ fn output() -> abi::rptadv_pcm_processor_v1 {
         context: ptr::null_mut(),
         process: None,
         destroy: None,
+        programme_buffering: None,
     }
 }
 
@@ -492,4 +493,75 @@ fn shared_sdk_peer_observer_reaches_control_after_the_graph_is_destroyed() {
     assert_eq!(registry.text("524950"), measured);
     drop(observer);
     assert_eq!(registry.text("524950"), "link_processors_retained=0\n");
+}
+
+#[test]
+fn prepared_processor_exposes_released_programme_bound_on_its_serial_owner() {
+    unsafe extern "C" fn buffering(
+        context: *mut c_void,
+        output: *mut abi::UrpProgrammeBuffering,
+    ) -> i32 {
+        assert!(!context.is_null());
+        let output = unsafe { &mut *output };
+        assert_eq!(output.struct_size, 64);
+        assert_eq!(output.abi_version, 1);
+        assert_eq!(output.reserved, 0);
+        output.flags = 2;
+        output.prepared_max_delay_frames = 480;
+        -9
+    }
+    let mut api = fixture();
+    api.struct_size = size_of::<abi::UrpAstDescriptor>() as u32;
+    api.link_programme_buffering = Some(buffering);
+    let mut output = output();
+    assert_eq!(prepared(&api, &mut output), Ok(true));
+    let operation = output.programme_buffering;
+    let context = output.context;
+    let destroy = output.destroy.unwrap();
+    let mut bound: abi::UrpProgrammeBuffering = unsafe { std::mem::zeroed() };
+    bound.struct_size = size_of_val(&bound) as u32;
+    bound.abi_version = 1;
+    let status = operation.map(|query| unsafe { query(context, &mut bound) });
+    assert_eq!(
+        unsafe { operation.unwrap()(ptr::null_mut(), &mut bound) },
+        -1
+    );
+    assert_eq!(unsafe { operation.unwrap()(context, ptr::null_mut()) }, -1);
+    unsafe { destroy(context) };
+    assert_eq!(
+        status,
+        Some(-9),
+        "the serial query must preserve provider status"
+    );
+    assert_eq!(bound.prepared_max_delay_frames, 480);
+    assert_eq!(DESTROYS.get(), 1);
+}
+
+#[test]
+fn programme_query_requires_complete_advertised_sdk_tail() {
+    unsafe extern "C" fn unreachable(_: *mut c_void, _: *mut abi::UrpProgrammeBuffering) -> i32 {
+        panic!("unadvertised query must never run");
+    }
+    for declared in [
+        0,
+        std::mem::offset_of!(abi::UrpAstDescriptor, link_programme_buffering),
+        std::mem::offset_of!(abi::UrpAstDescriptor, link_programme_buffering)
+            + size_of::<Option<Buffering>>()
+            - 1,
+    ] {
+        let mut api = fixture();
+        api.struct_size = declared as u32;
+        api.link_programme_buffering = Some(unreachable);
+        let mut output = output();
+        assert_eq!(prepared(&api, &mut output), Ok(true));
+        assert!(output.programme_buffering.is_none());
+        unsafe { output.destroy.unwrap()(output.context) };
+        assert_eq!(DESTROYS.get(), 1);
+    }
+    let mut api = fixture();
+    api.struct_size = size_of::<abi::UrpAstDescriptor>() as u32;
+    let mut output = output();
+    assert_eq!(prepared(&api, &mut output), Ok(true));
+    assert!(output.programme_buffering.is_none());
+    unsafe { output.destroy.unwrap()(output.context) };
 }

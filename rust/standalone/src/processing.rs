@@ -1,7 +1,11 @@
 //! Native peer processing owned by the dynamically loaded radio product.
 
 use crate::abi;
-use std::{ffi::c_void, mem::size_of, ptr::NonNull};
+use std::{
+    ffi::c_void,
+    mem::{offset_of, size_of},
+    ptr::NonNull,
+};
 
 #[path = "processing_observations.rs"]
 mod observations;
@@ -9,11 +13,13 @@ pub(crate) use observations::Observations;
 
 type Process = unsafe extern "C" fn(*mut c_void, u32, u32, *mut f32, u32) -> i32;
 type Destroy = unsafe extern "C" fn(*mut c_void);
+type Buffering = unsafe extern "C" fn(*mut c_void, *mut abi::UrpProgrammeBuffering) -> i32;
 
 struct Processor {
     handle: NonNull<c_void>,
     process: Process,
     destroy: Destroy,
+    buffering: Option<Buffering>,
     maximum: u32,
     _observation: Option<std::sync::Arc<observations::Observation>>,
 }
@@ -41,6 +47,7 @@ pub(crate) fn prepare(
         context: std::ptr::null_mut(),
         process: None,
         destroy: None,
+        programme_buffering: None,
     };
     let (Some(create), Some(process), Some(destroy)) = (
         api.native_link_prepare,
@@ -74,10 +81,16 @@ pub(crate) fn prepare(
             ))
         };
     };
+    let buffering = (api.struct_size as usize
+        >= offset_of!(abi::UrpAstDescriptor, link_programme_buffering)
+            + size_of::<Option<Buffering>>())
+    .then_some(api.link_programme_buffering)
+    .flatten();
     let processor = Box::new(Processor {
         handle,
         process,
         destroy,
+        buffering,
         maximum,
         _observation: None,
     });
@@ -91,6 +104,7 @@ pub(crate) fn prepare(
     output.context = Box::into_raw(processor).cast();
     output.process = Some(process_pcm);
     output.destroy = Some(destroy_processor);
+    output.programme_buffering = buffering.map(|_| programme_buffering as Buffering);
     Ok(true)
 }
 
@@ -117,6 +131,25 @@ unsafe extern "C" fn process_pcm(context: *mut c_void, samples: *mut f32, count:
             count as u32,
         )
     }
+}
+
+unsafe extern "C" fn programme_buffering(
+    context: *mut c_void,
+    output: *mut abi::UrpProgrammeBuffering,
+) -> i32 {
+    // SAFETY: the transferred unique owner serializes this query with process_pcm.
+    let Some(processor) = (unsafe { context.cast::<Processor>().as_mut() }) else {
+        return -1;
+    };
+    if output.is_null() {
+        return -1;
+    }
+    let Some(query) = processor.buffering else {
+        return -1;
+    };
+    // SAFETY: the caller supplies the SDK sized output record and retains its
+    // storage for this synchronous query. The real graph and library remain live.
+    unsafe { query(processor.handle.as_ptr(), output) }
 }
 
 unsafe extern "C" fn destroy_processor(context: *mut c_void) {

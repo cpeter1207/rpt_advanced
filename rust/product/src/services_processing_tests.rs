@@ -77,6 +77,10 @@ unsafe extern "C" fn prepare(
         5 => output.process = None,
         6 => output.context = ptr::null_mut(),
         9 => output.destroy = None,
+        11 => {
+            output.struct_size =
+                offset_of!(abi::rptadv_pcm_processor_v1, programme_buffering) as u32
+        }
         _ => {}
     }
     0
@@ -355,4 +359,19 @@ fn peer_processor_mutes_final_output_using_current_dtmf_state() {
         assert_eq!(input.render_sample(), Some(expected));
     }
     assert_eq!(state.processed.load(Ordering::Relaxed), 4);
+}
+
+#[test]
+fn legacy_processor_ownership_prefix_remains_supported() {
+    let (state, services) = fixture(11);
+    let mut processor = services
+        .prepare_peer_processing(CONFIGURATION, "1000", 4)
+        .unwrap()
+        .unwrap();
+    assert!(processor.api.programme_buffering.is_none());
+    let mut sample = [0.5];
+    assert!(processor.process(&mut sample));
+    assert_eq!(sample, [0.25]);
+    drop(processor);
+    assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
 }

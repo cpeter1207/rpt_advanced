@@ -338,6 +338,12 @@ struct rptadv_pcm_processor_v1 {
     void *context;        /**< Unique non-null processor owner. */
     int (*process)(void *context, float *samples, size_t count); /**< Native 48 kHz PCM. */
     void (*destroy)(void *context); /**< Release the prepared processor once. */
+    /** Optional sized tail. Query the same serial processor owner, never concurrently
+     * with process. This reports the real SDK programme-history bound, not source
+     * position or receipt time. Allocation/lock/I/O-free. A null/absent callback,
+     * rejected query or missing SDK validity flags leaves history unknown.
+     * Legacy prefix-only records remain valid; a partial callback is rejected. */
+    int (*programme_buffering)(void *context, struct UrpProgrammeBuffering *output);
 };
 
 /** Authorized physical-radio operation, executed only on serialized control.

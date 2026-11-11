@@ -267,17 +267,23 @@ unsafe extern "C" fn peer_processing_prepare(
     output: *mut abi::rptadv_pcm_processor_v1,
 ) -> i32 {
     boundary(-1, || {
-        let (Some(context), Some(configuration), Some(local), Some(output)) = (
+        let (Some(context), Some(configuration), Some(local)) = (
             unsafe { context.cast::<StandaloneHostContext>().as_ref() },
             unsafe { input(configuration, configuration_length) },
             unsafe { input(local, local_length) },
-            unsafe { output.as_mut() },
         ) else {
             return -1;
         };
-        if output.struct_size < size_of::<abi::rptadv_pcm_processor_v1>() as u32
-            || output.abi_version != 1
-        {
+        if output.is_null() {
+            return -1;
+        }
+        // SAFETY: the caller supplies the two-field header. Read it before borrowing
+        // a full record: older callers have only the unchanged ownership prefix.
+        let capacity = unsafe { std::ptr::addr_of!((*output).struct_size).read() } as usize;
+        let version = unsafe { std::ptr::addr_of!((*output).abi_version).read() };
+        let prefix = std::mem::offset_of!(abi::rptadv_pcm_processor_v1, programme_buffering);
+        let complete = size_of::<abi::rptadv_pcm_processor_v1>();
+        if version != 1 || capacity < prefix || (capacity > prefix && capacity < complete) {
             return -1;
         }
         if configuration.is_empty() {
@@ -289,6 +295,9 @@ unsafe extern "C" fn peer_processing_prepare(
         let Ok(descriptors) = providers.radio_runtime_descriptors() else {
             return -1;
         };
+        // Preparation writes local full-size storage; copying the selected prefix
+        // below cannot overwrite a legacy caller or an unknown extension tail.
+        let mut prepared: abi::rptadv_pcm_processor_v1 = unsafe { std::mem::zeroed() };
         match crate::processing::prepare(
             descriptors.product,
             std::ptr::from_ref(descriptors.ffmpeg).cast(),
@@ -296,9 +305,21 @@ unsafe extern "C" fn peer_processing_prepare(
             local,
             maximum_frames,
             Some(&context.radio.observations),
-            output,
+            &mut prepared,
         ) {
-            Ok(true) => 0,
+            Ok(true) => {
+                let written = capacity.min(complete);
+                prepared.struct_size = written as u32;
+                // SAFETY: validation proved this writable caller prefix is complete.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        std::ptr::from_ref(&prepared).cast::<u8>(),
+                        output.cast::<u8>(),
+                        written,
+                    );
+                }
+                0
+            }
             Ok(false) => 1,
             Err(error) => {
                 eprintln!("node {local} link processing preparation failed: {error}");
@@ -1594,6 +1615,7 @@ mod tests {
             context: ptr::null_mut(),
             process: None,
             destroy: None,
+            programme_buffering: None,
         };
         let invoke = |text: &str, maximum, output: &mut abi::rptadv_pcm_processor_v1| {
             // SAFETY: all borrowed request spans and output storage remain live through this call.
@@ -1659,9 +1681,74 @@ mod tests {
         owner.context.radio.providers = Some(Box::leak(Box::new(
             crate::providers::ProviderSet::load().unwrap(),
         )));
+        // A pre-tail caller must retain its guard and receive the same unique owner.
+        #[repr(C)]
+        struct Legacy {
+            size: u32,
+            version: u32,
+            context: *mut c_void,
+            process: Option<unsafe extern "C" fn(*mut c_void, *mut f32, usize) -> i32>,
+            destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+            guard: u64,
+        }
+        let prefix = std::mem::offset_of!(abi::rptadv_pcm_processor_v1, programme_buffering);
+        let mut legacy = Legacy {
+            size: prefix as u32,
+            version: 1,
+            context: ptr::null_mut(),
+            process: None,
+            destroy: None,
+            guard: 0x1020304050607080,
+        };
+        assert_eq!(
+            unsafe {
+                super::peer_processing_prepare(
+                    context,
+                    c"[1000]\n".as_ptr(),
+                    7,
+                    c"1000".as_ptr(),
+                    4,
+                    4,
+                    ptr::from_mut(&mut legacy).cast(),
+                )
+            },
+            0
+        );
+        assert_eq!(legacy.size as usize, prefix);
+        assert_eq!(legacy.guard, 0x1020304050607080);
+        unsafe { legacy.destroy.unwrap()(legacy.context) };
+        for capacity in prefix + 1..size_of::<abi::rptadv_pcm_processor_v1>() {
+            let mut partial = record();
+            partial.struct_size = capacity as u32;
+            assert_eq!(invoke(configuration, 4, &mut partial), -1);
+        }
+        #[repr(C)]
+        struct Extended {
+            record: abi::rptadv_pcm_processor_v1,
+            guard: u64,
+        }
+        let mut extended = Extended {
+            record: record(),
+            guard: 99,
+        };
+        extended.record.struct_size = size_of::<Extended>() as u32;
+        assert_eq!(invoke("[1000]\n", 4, &mut extended.record), 0);
+        assert_eq!(extended.guard, 99);
+        assert_eq!(
+            extended.record.struct_size as usize,
+            size_of::<abi::rptadv_pcm_processor_v1>()
+        );
+        unsafe { extended.record.destroy.unwrap()(extended.record.context) };
         let mut identity = record();
         assert_eq!(invoke("[1000]\n", 4, &mut identity), 0);
         assert!(!identity.context.is_null());
+        let mut before: abi::UrpProgrammeBuffering = unsafe { std::mem::zeroed() };
+        before.struct_size = size_of_val(&before) as u32;
+        before.abi_version = 1;
+        assert_eq!(
+            unsafe { identity.programme_buffering.unwrap()(identity.context, &mut before) },
+            0
+        );
         let expected = [0.25_f32, -0.5, 0.125, -0.25];
         let mut samples = expected;
         assert_eq!(
@@ -1672,6 +1759,21 @@ mod tests {
             0
         );
         assert_eq!(samples, expected);
+        let mut buffering: abi::UrpProgrammeBuffering = unsafe { std::mem::zeroed() };
+        buffering.struct_size = size_of_val(&buffering) as u32;
+        buffering.abi_version = 1;
+        assert_eq!(
+            unsafe { identity.programme_buffering.unwrap()(identity.context, &mut buffering) },
+            0
+        );
+        assert_eq!(
+            buffering.flags & 15,
+            15,
+            "released identity graph has live qualified history"
+        );
+        assert_eq!(buffering.current_max_delay_frames, 0);
+        assert_eq!(buffering.accepted_frames, before.accepted_frames + 4);
+        assert_eq!(buffering.delivered_frames, before.delivered_frames + 4);
         let observed = owner.context.radio.observations.text("1000");
         assert!(
             observed.contains("link_processors_retained=1"),
