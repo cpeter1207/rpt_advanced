@@ -81,11 +81,14 @@ pub(crate) fn prepare(
             ))
         };
     };
-    let buffering = (api.struct_size as usize
+    let buffering = if api.struct_size as usize
         >= offset_of!(abi::UrpAstDescriptor, link_programme_buffering)
-            + size_of::<Option<Buffering>>())
-    .then_some(api.link_programme_buffering)
-    .flatten();
+            + size_of::<Option<Buffering>>()
+    {
+        api.link_programme_buffering
+    } else {
+        None
+    };
     let processor = Box::new(Processor {
         handle,
         process,
