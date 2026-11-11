@@ -255,3 +255,101 @@ fn prepared_phone_media_keeps_opaque_dsp_unknown_and_rechecks_retirement_after_p
         assert!(state.destroyed);
     }
 }
+
+#[test]
+fn prepared_phone_media_retirement_ends_ring_generation_but_not_private_call() {
+    for retire in 0..3 {
+        let current = reply();
+        let (mut ingress, input, shared) = prepare(current.clone(), 8000, None).unwrap();
+        ingress.adopt(0, reference());
+        let generation = input.signals().reply_target();
+        assert!(!generation.ended());
+        match retire {
+            0 => shared.retire(),
+            1 => drop(input),
+            _ => ingress.retire(),
+        }
+        assert!(generation.ended());
+        assert!(!current.ended());
+    }
+}
+
+#[test]
+fn prepared_phone_media_publishes_typed_mixer_and_revokes_live_destination_contribution() {
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode, SourcePosition},
+    };
+    let mut peers = Vec::new();
+    let mut outputs = Vec::new();
+    let mut generations = Vec::new();
+    for index in 0..2 {
+        let source = PhoneSource::new(
+            PhoneAccountId::new("provider").unwrap(),
+            7,
+            PhoneCallId::new([index + 1; 16]).unwrap(),
+            9,
+            u64::from(index) + 13,
+        )
+        .unwrap();
+        let signals = PeerSignals::for_phone(source.clone());
+        assert!(signals.authenticate_phone());
+        let call = signals.reply_target();
+        let (mut ingress, input, shared) = prepare(call.clone(), 8000, None).unwrap();
+        ingress.adopt(0, reference());
+        for index in 0..12 {
+            assert_eq!(
+                ingress.audio(index * 160, &[0.25; 160], Some(birth(10))),
+                Ok(160)
+            );
+        }
+        let (writer, reader) = LinkAudioQueue::new(1920, 480).unwrap().into_endpoints();
+        peers.push(
+            AudioPeer::for_phone(&source, &call, Mode::TRANSCEIVE, input, writer, 480).unwrap(),
+        );
+        outputs.push(reader);
+        generations.push((ingress, shared, call));
+    }
+    let (mut mixer, mut dispatcher) = LinkAudio::new(peers, 480).unwrap();
+    let status = mixer.status();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    mixer
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0; 480],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    assert_eq!(status.last_keyed(), None);
+    assert_eq!(dispatcher.dispatch(1), 1);
+    let mut pcm = [0.0; 480];
+    assert_eq!(outputs[1].read(&mut pcm), 0);
+    assert!(pcm.iter().any(|sample| *sample != 0.0));
+    mixer
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0; 480],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    generations[0].1.retire();
+    assert!(
+        !generations[0].2.ended(),
+        "media retirement keeps private control alive"
+    );
+    assert_eq!(dispatcher.dispatch(1), 1);
+    assert_eq!(outputs[1].read(&mut pcm), 480);
+    assert_eq!(
+        pcm, [0.0; 480],
+        "retired source cannot leak into another live call"
+    );
+}

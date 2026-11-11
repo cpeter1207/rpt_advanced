@@ -39,6 +39,13 @@ pub enum PeerAddress {
     PhoneCall(super::PhoneCallId),
 }
 impl PeerIdentity {
+    /// Retain a validated opaque private-call token without a public alias.
+    pub fn for_phone(call: super::PhoneCallId) -> Self {
+        Self {
+            protocol: ProtocolId::Phone,
+            address: PeerAddress::PhoneCall(call),
+        }
+    }
     /// Parse a real protocol identity, never a prefixed operator dial alias.
     pub fn parse(protocol: ProtocolId, node: &str) -> Result<Self, IdentityError> {
         if protocol != ProtocolId::Phone && !super::decimal_identity(node) {

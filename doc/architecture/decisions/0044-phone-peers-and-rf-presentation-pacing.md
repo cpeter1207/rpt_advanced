@@ -396,3 +396,33 @@ single-listener account replacement cannot implement a multi-listener/product
 reload transaction: failures after an earlier replacement cannot restore retired
 call generations. Activation must use a prepared, reserved provider transaction
 and the product's genuine commit boundary, not sequential mutation with rollback.
+
+## Typed mixer publication and queued-block retirement — 2026-11-11
+
+The existing mixer accepts a typed public identity, or a private phone slot
+checked against the full account/call generation, actual ingress and exact
+authenticated reply token carried by its phone-policy input. A private slot
+never acquires a decimal alias, public last-keyed name or ordinary telemetry
+destination. Ordinary AllStar/EchoLink aliases and routing remain unchanged.
+
+The existing node-lifetime media worker owns one small retirement domain reused
+by successive mixer preparations. Exact ring-generation and call fences register
+with that domain on control, deduplicated by node ownership; repeated refreshes
+do not add history. Configured node ownership bounds registrations, and committed
+reload retires calls before replacing their node ownership. Registration uses an
+atomic release sequence with retirement so neither ordering can miss notification.
+Hardware processing and dispatch read only prepared fences and atomic revisions.
+
+Each queued composite block records which prepared sources actually contributed
+to its peer mix. The dispatcher validates those source fences once, then checks
+one node revision per destination. A later revision change cancels the remainder
+of that block and returns from the bounded pass instead of repeatedly rescanning
+all contributors. Revision saturation fails closed and never wraps. Unrelated
+nodes have independent domains. Revoking a prepared phone receive generation ends
+its ring fence while leaving the logical private call available for control.
+
+This proves typed core publication and revocation of queued composite blocks,
+including actual phone-policy ring consumers. It does not prove cancellation of
+already accepted provider packets, phone-tainted parrot history, final-TX DSP or
+RF presentation. Production attachment remains unavailable until those retained
+owners and the remaining admission requirements are joined safely.

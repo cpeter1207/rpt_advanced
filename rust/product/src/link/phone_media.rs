@@ -1,7 +1,7 @@
 //! One prepared phone receive generation, using the common ring and shared graph.
 use crate::{
     Error,
-    link::ring::{InboundConsumer, InboundPolicy, InboundProducer, InboundRing},
+    link::ring::{InboundConsumer, InboundObserver, InboundPolicy, InboundProducer, InboundRing},
     services::{PcmProcessor, ProcessedPeer, SourceBirth, SourceTimeReference},
 };
 use rpt_advanced_core::link::{
@@ -30,6 +30,7 @@ struct Bucket {
 /// Exact call and one independently revocable media generation; no node identity.
 pub(super) struct Shared {
     reply: PeerReply,
+    observer: InboundObserver,
     phase: AtomicU8,
     generation: u64,
     width: u64,
@@ -45,6 +46,7 @@ impl Shared {
     }
     pub(super) fn retire(&self) {
         self.phase.store(RETIRED, Ordering::Release);
+        self.observer.signals().end();
     }
     fn slot(&self, index: u64) -> &Bucket {
         &self.buckets[(index % BUCKETS as u64) as usize]
@@ -143,7 +145,6 @@ impl Ingress {
     }
     pub(super) fn retire(&self) {
         self.shared.retire();
-        self.writer.signals().end();
     }
     pub(super) fn audio(
         &mut self,
@@ -353,6 +354,7 @@ pub(super) fn prepare(
     }
     let shared = Arc::new(Shared {
         reply,
+        observer: writer.observer(),
         phase: AtomicU8::new(PREPARED),
         generation,
         width: u64::from(rate) / 50,

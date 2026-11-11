@@ -27,16 +27,11 @@ fn audio_peer_preparation_checks_identity_rate_and_callback_capacity() {
             None
         }
     }
-    for (name, rate, maximum) in [
-        ("bad", 48000, 1),
-        ("2000", 48000, 0),
-        ("2000", 0, 1),
-        ("2000", 48001, 1),
-    ] {
+    for (name, rate, maximum) in [("2000", 48000, 0), ("2000", 0, 1), ("2000", 48001, 1)] {
         let (outbound, _) = LinkAudioQueue::new(1, 64).unwrap().into_endpoints();
         assert!(
             AudioPeer::new(
-                name,
+                rpt_advanced_core::link::PeerIdentity::from_operator(name).unwrap(),
                 Mode::TRANSCEIVE,
                 Empty {
                     rate,
@@ -52,7 +47,7 @@ fn audio_peer_preparation_checks_identity_rate_and_callback_capacity() {
     assert!(LinkAudio::<Empty>::new(vec![], 0).is_err());
     let (outbound, _) = LinkAudioQueue::new(1, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new(
-        "2000",
+        rpt_advanced_core::link::PeerIdentity::from_operator("2000").unwrap(),
         Mode::TRANSCEIVE,
         Empty {
             rate: 48000,
@@ -298,7 +293,7 @@ fn external_radio_key_keys_a_link_without_replaying_stale_pcm() {
     signals.publish_pcm();
     let (producer, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new(
-        "200",
+        rpt_advanced_core::link::PeerIdentity::from_operator("200").unwrap(),
         Mode::TRANSCEIVE,
         Input {
             signals: std::sync::Arc::clone(&signals),
@@ -514,7 +509,15 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
     };
     first.signals.publish_pcm();
     let first_signal = first.signals.clone();
-    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, first, producer, 960, 100).unwrap();
+    let peer = AudioPeer::new(
+        rpt_advanced_core::link::PeerIdentity::from_operator("200").unwrap(),
+        Mode::TRANSCEIVE,
+        first,
+        producer,
+        960,
+        100,
+    )
+    .unwrap();
     let (local_producer, mut local_consumer) =
         LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     let local = Input {
@@ -523,8 +526,15 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
     };
     local.signals.publish_pcm();
     let local_signal = local.signals.clone();
-    let local_peer =
-        AudioPeer::new("400", Mode::LOCAL_MONITOR, local, local_producer, 960, 0).unwrap();
+    let local_peer = AudioPeer::new(
+        rpt_advanced_core::link::PeerIdentity::from_operator("400").unwrap(),
+        Mode::LOCAL_MONITOR,
+        local,
+        local_producer,
+        960,
+        0,
+    )
+    .unwrap();
     let (mut links, mut dispatcher) = LinkAudio::new(vec![peer, local_peer], 960).unwrap();
     let status = links.status();
     assert_eq!(status.last_keyed(), None);
@@ -637,8 +647,15 @@ fn generated_status_obeys_exact_audience_and_per_peer_telemetry_gate() {
         signals.set_telemetry_allowed(allowed);
         let reply = signals.reply_target();
         let (producer, mut consumer) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
-        let peer =
-            AudioPeer::new("200", Mode::TRANSCEIVE, Quiet(signals), producer, 960, 100).unwrap();
+        let peer = AudioPeer::new(
+            rpt_advanced_core::link::PeerIdentity::from_operator("200").unwrap(),
+            Mode::TRANSCEIVE,
+            Quiet(signals),
+            producer,
+            960,
+            100,
+        )
+        .unwrap();
         let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
         let (mut controller, mut control) = NodeController::new(
             ControllerSettings {

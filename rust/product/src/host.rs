@@ -300,7 +300,8 @@ fn prepared(
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
         let prepared_peer = AudioPeer::new(
-            &peer.remote,
+            rpt_advanced_core::link::PeerIdentity::from_operator(&peer.remote)
+                .map_err(|_| RuntimeError::Preparation)?,
             peer.mode,
             input,
             output,
@@ -324,7 +325,8 @@ fn prepared(
         ));
     }
     let (mut audio, dispatcher) =
-        LinkAudio::new(audio, MAXIMUM_FRAMES).map_err(|_| RuntimeError::Preparation)?;
+        LinkAudio::new_in_domain(audio, MAXIMUM_FRAMES, worker.retirement_domain())
+            .map_err(|_| RuntimeError::Preparation)?;
     audio = audio.with_text(Box::new(TextMix(text_readers)));
     let regeneration = if settings.dtmf_regeneration.enabled {
         let (writer, reader) = InboundRing::open(48000, InboundPolicy::Media)
