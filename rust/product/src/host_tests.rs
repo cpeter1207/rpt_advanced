@@ -2786,7 +2786,9 @@ fn peer_ending_before_refresh_is_reaped_without_a_connected_announcement() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut host = host();
-    let (io, state) = peer(48000);
+    // Establish "ended before refresh" explicitly: queued synchronous attach may
+    // return before its first poll, so an immediate failure there is a race.
+    let (io, state) = crate::link::session::tests::peer_with_initial_inline_step(48000);
     state.lock().unwrap().fail_ready = true;
     assert_eq!(
         host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock()),

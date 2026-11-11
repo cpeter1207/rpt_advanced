@@ -40,6 +40,7 @@ pub(crate) struct State {
     pub(crate) async_detaches: usize,
     pub(crate) fail_async_attach: bool,
     no_async_thread: bool,
+    initial_inline_step: bool,
     pub(crate) continuous_async: bool,
     pub(crate) observe_calls: usize,
     pub(crate) echo_observation: Option<abi::rptadv_peer_observation_v1>,
@@ -1317,6 +1318,12 @@ unsafe extern "C" fn async_attach(
         return -1;
     }
     state.lock().unwrap().async_attaches += 1;
+    // The host contract permits an initial serialized step before attach returns.
+    // Use it to establish lifecycle ordering without a scheduler-dependent sleep.
+    let initial_inline_step = state.lock().unwrap().initial_inline_step;
+    if initial_inline_step {
+        unsafe { step.unwrap()(step_context) };
+    }
     let address = step_context as usize;
     let worker_state = state.clone();
     let thread = (!state.lock().unwrap().no_async_thread).then(|| {
@@ -1406,6 +1413,17 @@ unsafe extern "C" fn observe_peer(
 pub(crate) fn peer(rate_hz: u32) -> (PeerIo, Shared) {
     peer_with_async(rate_hz, false)
 }
+/// A deterministic initial callback with no background fixture thread.
+pub(crate) fn peer_with_initial_inline_step(rate_hz: u32) -> (PeerIo, Shared) {
+    let (peer, state) = peer_with_async(rate_hz, true);
+    {
+        let mut options = state.lock().unwrap();
+        options.no_async_thread = true;
+        options.initial_inline_step = true;
+    }
+    (peer, state)
+}
+
 pub(crate) fn peer_with_async(rate_hz: u32, async_enabled: bool) -> (PeerIo, Shared) {
     peer_with_egress(rate_hz, async_enabled, false)
 }
