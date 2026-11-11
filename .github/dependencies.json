@@ -50,7 +50,7 @@
   },
   {
     "repository": "rate_adjusting_pcm_ring",
-    "sha": "c8f32d5eb98f20f1be67230a43a76966ef8aa930",
+    "sha": "360e7312a4a367418ddac04bd81b8996d8a0ae80",
     "packages": ["librate-adjusting-pcm-ring3", "librate-adjusting-pcm-ring3-dev"]
   },
   {

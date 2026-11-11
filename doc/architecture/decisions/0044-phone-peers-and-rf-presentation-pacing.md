@@ -367,3 +367,14 @@ The single serial processor owner performs queries and bounded metadata updates
 without new threads, heap allocation, clocks, locks or hardware operations on
 audio. Revocation still fences the exact phone media generation; graph owners
 are reclaimed off audio after quiescence, never reset speculatively in a callback.
+
+## Released bounded ring cohort — 2026-11-11
+
+The controller selects released ring `v3.0.0-alpha6` at
+`360e7312a4a367418ddac04bd81b8996d8a0ae80` and requires Debian
+`3.0.0~alpha6` or newer. This retains ring ABI 3 and its SONAME while reducing
+prepared converter workspaces and tagged-sample storage. Official amd64 runtime
+and development package hashes were verified before isolated consumer tests.
+The unchanged 2000-peer/48 kHz admission workload remains required; no fixture
+rate, peer count or queue capacity is reduced. The constrained runner allocator
+settings remain test-only and do not change production process defaults.
