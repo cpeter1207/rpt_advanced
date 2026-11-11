@@ -426,3 +426,32 @@ including actual phone-policy ring consumers. It does not prove cancellation of
 already accepted provider packets, phone-tainted parrot history, final-TX DSP or
 RF presentation. Production attachment remains unavailable until those retained
 owners and the remaining admission requirements are joined safely.
+
+## Final-TX programme retirement bridge
+
+The existing serialized radio-control operation gains opcode 8 with a sized
+request wrapping its unchanged prefix and the released SDK retirement envelope.
+Both hosts validate the complete extension before borrowing it. The native host
+retains the optional callback only within its advertised extent and uses the
+existing radio handle. Asterisk dispatches through the existing owned channel
+and requires an explicit SDK acknowledgment with unchanged generation and
+request identity. Unsupported capabilities fail closed. No host-table layout,
+SONAME, second graph, hardware owner or audio-thread control call is introduced.
+
+Dispatch acknowledgment preserves the SDK's success, pending or error result;
+it is not completed audio retirement. The existing TX feedback consumer now
+copies a complete optional programme tail and reports its completed-render
+retirement ID and separately qualified prepared/current bounds. A partial or
+malformed tail remains unavailable without discarding valid physical-prefix
+facts. Existing frame-count, physical-generation and monotonic-publication
+checks apply to the whole observation. Missing bound flags never become a known
+delay, and an impossible current bound is withheld. These fields do not supply
+source birth, DAC presentation time or physical PTT-off acknowledgment.
+
+This checkpoint exposes and tests actual dispatch and feedback paths, not an
+activated RF policy. A retired source may already be retained in final-TX DSP
+before the next control pump. Zero controller input or requested unkey cannot
+prove that old programme is suppressed. Activation additionally requires an
+immediate generation-aware permit at the existing post-DSP programme boundary,
+before signaling, plus the matching completed-render retirement acknowledgment.
+That capability and the RF FIFO/arbiter consumer remain prerequisites.

@@ -43,6 +43,7 @@ fn main() {
         .allowlist_var("URP_AST_(OPTION_RADIO_FEEDBACK|FEEDBACK_OPTION_ABI_VERSION)")
         .allowlist_type("UrpAstChannelCommand")
         .allowlist_var("URP_AST_(OPTION_RECEIVE_POLICY|COMMAND_GET_RECEIVE_POLICY)")
+        .allowlist_var("URP_AST_(OPTION_PROGRAMME_RETIRE|PROGRAMME_RETIRE_OPTION_ABI_VERSION)")
         .allowlist_type("urp_ast_link_attach")
         .allowlist_var("URP_AST_(OPTION_DIRECT_CALLBACKS|DIRECT_CALLBACKS_ABI_VERSION|OPTION_LINK_ATTACH|LINK_ATTACH_ABI_VERSION)")
         .allowlist_function("ast_(request_and_dial|channel_state)")

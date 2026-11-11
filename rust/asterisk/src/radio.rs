@@ -52,6 +52,36 @@ impl Radio {
             status
         }
     }
+    /// Dispatch retirement through the same channel owner without waiting for
+    /// audio adoption. An acknowledged pending result is not completed retirement.
+    pub(crate) fn retire_programme(&mut self, request: &mut ffi::UrpAstProgrammeRetirement) -> i32 {
+        let identity = (request.expected_radio_generation, request.request_id);
+        request.accepted_abi_version = 0;
+        request.result = -7;
+        // SAFETY: this unique channel and complete writable envelope outlive setoption.
+        let status = unsafe {
+            ffi::ast_channel_setoption(
+                self.connection.channel.pointer.as_ptr(),
+                ffi::URP_AST_OPTION_PROGRAMME_RETIRE as i32,
+                std::ptr::from_mut(request).cast(),
+                std::mem::size_of_val(request) as i32,
+                0,
+            )
+        };
+        if status != 0 {
+            return status;
+        }
+        if request.struct_size as usize != std::mem::size_of_val(request)
+            || request.abi_version != ffi::URP_AST_PROGRAMME_RETIRE_OPTION_ABI_VERSION
+            || request.accepted_abi_version != ffi::URP_AST_PROGRAMME_RETIRE_OPTION_ABI_VERSION
+            || (request.expected_radio_generation, request.request_id) != identity
+        {
+            request.accepted_abi_version = 0;
+            request.result = -7;
+            return -7;
+        }
+        0
+    }
     /// Query resolved receive policy before call(), rejecting unknown-option success.
     pub(crate) fn receive_policy(&mut self, command: &mut ffi::UrpAstChannelCommand) -> i32 {
         command.value = -1;

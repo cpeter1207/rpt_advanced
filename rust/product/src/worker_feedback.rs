@@ -1,10 +1,43 @@
-//! Sized physical feedback consumed once by the existing serial TX owner.
+//! Sized physical and programme feedback consumed once by the serial TX owner.
 //! These observations never prove receiver settling, DAC time or a usable RF window.
 use crate::abi;
-use std::mem::{offset_of, size_of};
+use std::mem::{offset_of, size_of, size_of_val};
 
 const PHYSICAL_BYTES: usize =
     offset_of!(abi::UrpRadioFeedback, transmitter_state) + size_of::<i32>();
+
+const PROGRAMME_BYTES: usize =
+    offset_of!(abi::UrpRadioFeedback, programme_retirement_id) + size_of::<u64>();
+
+/// Actual completed-render identity and separately qualified SDK delay bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProgrammeFeedback {
+    retirement: u64,
+    prepared: Option<u64>,
+    current: Option<u64>,
+}
+
+impl ProgrammeFeedback {
+    fn read(value: &abi::UrpRadioFeedback) -> Option<Self> {
+        let bound = &value.programme_buffering;
+        if (value.struct_size as usize) < PROGRAMME_BYTES
+            || bound.struct_size as usize != size_of_val(bound)
+            || bound.abi_version != abi::URP_PROGRAMME_BUFFERING_ABI_VERSION
+        {
+            return None;
+        }
+        let prepared = (bound.flags & abi::URP_PROGRAMME_PREPARED_BOUND_VALID != 0)
+            .then_some(bound.prepared_max_delay_frames);
+        let current = (bound.flags & abi::URP_PROGRAMME_CURRENT_BOUND_VALID != 0
+            && prepared.is_some_and(|maximum| bound.current_max_delay_frames <= maximum))
+        .then_some(bound.current_max_delay_frames);
+        Some(Self {
+            retirement: value.programme_retirement_id,
+            prepared,
+            current,
+        })
+    }
+}
 
 /// Qualified facts from one physical lifecycle and the immediately following callback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +52,7 @@ pub(super) struct PhysicalFeedback {
     observed: Option<bool>,
     acquisition_age: Option<u64>,
     state: Option<i32>,
+    programme: Option<ProgrammeFeedback>,
 }
 
 fn boolean(value: u32) -> Option<bool> {
@@ -26,8 +60,8 @@ fn boolean(value: u32) -> Option<bool> {
 }
 
 impl PhysicalFeedback {
-    /// Copy only the published physical prefix. The SDK lends readable size bytes,
-    /// not necessarily the complete newer record with its optional programme tail.
+    /// Copy the physical prefix and only a complete advertised programme tail.
+    /// The SDK lends size bytes, not necessarily the newest complete record.
     unsafe fn read(pointer: *const abi::UrpRadioFeedback) -> Option<Self> {
         if pointer.is_null() {
             return None;
@@ -39,13 +73,18 @@ impl PhysicalFeedback {
         }
         // The C record contains only integer scalar fields and nested scalar records.
         let mut value: abi::UrpRadioFeedback = unsafe { std::mem::zeroed() };
-        // SAFETY: size was checked before borrowing any later field. Copying the
-        // finite prefix neither reads nor requires an optional SDK programme tail.
+        let bytes = if declared >= PROGRAMME_BYTES {
+            PROGRAMME_BYTES
+        } else {
+            PHYSICAL_BYTES
+        };
+        // SAFETY: size was checked before copying any later field. No reference
+        // to the complete external record is formed, including for partial tails.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 pointer.cast::<u8>(),
                 std::ptr::from_mut(&mut value).cast(),
-                PHYSICAL_BYTES,
+                bytes,
             );
         }
         if value.abi_version != abi::URP_RADIO_FEEDBACK_ABI_VERSION
@@ -79,6 +118,7 @@ impl PhysicalFeedback {
                 .flatten()
         };
         Some(Self {
+            programme: ProgrammeFeedback::read(&value),
             generation: value.generation_id,
             sample: value.sample_index,
             frames: value.frame_count,
@@ -150,8 +190,23 @@ pub(super) fn status(value: Option<PhysicalFeedback>) -> String {
     let Some(value) = value else {
         return "  radio-feedback: unavailable".into();
     };
+    let programme = value.programme.map_or_else(
+        || "unavailable".to_owned(),
+        |value| {
+            format!(
+                "retirement={} prepared={} current={}",
+                value.retirement,
+                value
+                    .prepared
+                    .map_or_else(|| "unknown".into(), |v| v.to_string()),
+                value
+                    .current
+                    .map_or_else(|| "unknown".into(), |v| v.to_string())
+            )
+        },
+    );
     format!(
-        "  radio-feedback: generation={} sample={} duplex={} requested={} rendered={} serviced={} observed={} acquisition-age={}frames state={}",
+        "  radio-feedback: generation={} sample={} duplex={} requested={} rendered={} serviced={} observed={} acquisition-age={}frames state={}\n  tx-programme: {}",
         value.generation,
         value.sample,
         state(value.duplex, "half", "full"),
@@ -165,5 +220,6 @@ pub(super) fn status(value: Option<PhysicalFeedback>) -> String {
         value
             .state
             .map_or_else(|| "unknown".into(), |state| state.to_string()),
+        programme,
     )
 }

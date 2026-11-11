@@ -367,6 +367,25 @@ unsafe extern "C" fn ast_channel_setoption(
     block: i32,
 ) -> i32 {
     assert_eq!(block, 0);
+    if option == 0x52505052 {
+        assert_eq!(length as usize, size_of::<ProgrammeRetirement>());
+        let request = unsafe { &mut *data.cast::<ProgrammeRetirement>() };
+        assert_eq!((request.generation, request.request), (7, 11));
+        assert_eq!(request.accepted, 0);
+        request.accepted = 1;
+        request.result = PROGRAMME_RESULT.get();
+        PROGRAMME_CALLS.set(PROGRAMME_CALLS.get() + 1);
+        match PROGRAMME_FAULT.get() {
+            1 => return -9,
+            2 => request.accepted = 0,
+            3 => request.size -= 1,
+            4 => request.version = 2,
+            5 => request.generation += 1,
+            6 => request.request += 1,
+            _ => {}
+        }
+        return 0;
+    }
     if option == ffi::URP_AST_OPTION_RADIO_FEEDBACK as i32 {
         assert_eq!(length as usize, size_of::<ffi::UrpAstFeedbackBinding>());
         let binding = unsafe { &mut *data.cast::<ffi::UrpAstFeedbackBinding>() };
@@ -954,4 +973,138 @@ fn receive_policy_bridge_works_before_call_and_requires_a_valid_query_reply() {
         }
         host(|state| state.clean());
     }
+}
+
+// Independent C layout fixture for the released RPPR envelope and sized prefix.
+#[repr(C)]
+struct ProgrammeRetirement {
+    size: u32,
+    version: u32,
+    generation: u64,
+    request: u64,
+    accepted: u32,
+    result: i32,
+}
+#[repr(C)]
+struct ProgrammeRequest {
+    control: ffi::rptadv_radio_control_v1,
+    retirement: ProgrammeRetirement,
+}
+thread_local! {
+    static PROGRAMME_RESULT: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static PROGRAMME_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PROGRAMME_FAULT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[test]
+fn programme_retirement_uses_existing_channel_owner_and_preserves_actual_sdk_result() {
+    reset();
+    let null = ptr::null_mut();
+    let mut radio = null;
+    unsafe {
+        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+    }
+    PROGRAMME_FAULT.set(0);
+    for result in [0, 1, -9] {
+        PROGRAMME_RESULT.set(result);
+        PROGRAMME_CALLS.set(0);
+        let mut request: ProgrammeRequest = unsafe { std::mem::zeroed() };
+        request.control.struct_size = size_of_val(&request) as u32;
+        request.control.abi_version = 1;
+        request.control.operation = 8;
+        request.retirement = ProgrammeRetirement {
+            size: 32,
+            version: 1,
+            generation: 7,
+            request: 11,
+            accepted: 0,
+            result: -7,
+        };
+        assert_eq!(
+            unsafe { radio_control(null, radio, &mut request.control, None, null) },
+            0
+        );
+        assert_eq!(request.retirement.accepted, 1);
+        assert_eq!(
+            request.retirement.result, result,
+            "dispatch acceptance is not audio completion"
+        );
+        assert_eq!(PROGRAMME_CALLS.get(), 1);
+        assert_eq!(host(|state| state.channels), 1);
+    }
+    unsafe {
+        radio_destroy(null, radio);
+    }
+    host(|state| state.clean());
+}
+
+#[test]
+fn programme_retirement_rejects_malformed_or_unacknowledged_channel_requests() {
+    reset();
+    let null = ptr::null_mut();
+    let mut radio = null;
+    unsafe {
+        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+    }
+    for defect in 0..6 {
+        let mut request: ProgrammeRequest = unsafe { std::mem::zeroed() };
+        request.control.struct_size = size_of_val(&request) as u32;
+        request.control.abi_version = 1;
+        request.control.operation = 8;
+        request.retirement = ProgrammeRetirement {
+            size: 32,
+            version: 1,
+            generation: 7,
+            request: 11,
+            accepted: 0,
+            result: -7,
+        };
+        match defect {
+            0 => request.control.struct_size -= 1,
+            1 => request.control.abi_version = 2,
+            2 => request.retirement.size -= 1,
+            3 => request.retirement.version = 2,
+            4 => request.retirement.generation = 0,
+            _ => request.retirement.request = 0,
+        }
+        PROGRAMME_CALLS.set(0);
+        assert_eq!(
+            unsafe { radio_control(null, radio, &mut request.control, None, null) },
+            -1
+        );
+        assert_eq!(PROGRAMME_CALLS.get(), 0);
+    }
+    // This really is only a prefix allocation: operation 8 must not borrow its tail.
+    let mut prefix: ffi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+    prefix.struct_size = size_of_val(&prefix) as u32;
+    prefix.abi_version = 1;
+    prefix.operation = 8;
+    assert_eq!(
+        unsafe { radio_control(null, radio, &mut prefix, None, null) },
+        -1
+    );
+    for fault in 1..7 {
+        let mut request: ProgrammeRequest = unsafe { std::mem::zeroed() };
+        request.control.struct_size = size_of_val(&request) as u32;
+        request.control.abi_version = 1;
+        request.control.operation = 8;
+        request.retirement = ProgrammeRetirement {
+            size: 32,
+            version: 1,
+            generation: 7,
+            request: 11,
+            accepted: 0,
+            result: -7,
+        };
+        PROGRAMME_FAULT.set(fault);
+        assert_eq!(
+            unsafe { radio_control(null, radio, &mut request.control, None, null) },
+            if fault == 1 { -9 } else { -7 }
+        );
+    }
+    PROGRAMME_FAULT.set(0);
+    unsafe {
+        radio_destroy(null, radio);
+    }
+    host(|state| state.clean());
 }

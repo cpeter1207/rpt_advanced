@@ -266,11 +266,36 @@ pub unsafe extern "C" fn radio_control(
     {
         return -1;
     }
+    let pointer = request;
     // SAFETY: this boundary borrows the caller's live handle and complete request.
     let (handle, request) = unsafe { (radio.cast::<RadioHandle>().as_mut(), request.as_mut()) };
     let (Some(handle), Some(request)) = (handle, request) else {
         return -1;
     };
+    if request.operation == 8 {
+        if (header[0] as usize)
+            < std::mem::size_of::<crate::abi::rptadv_radio_programme_control_v1>()
+        {
+            return -1;
+        }
+        // SAFETY: the complete writable extension was validated before borrowing it.
+        let retirement = unsafe {
+            &mut (*pointer.cast::<crate::abi::rptadv_radio_programme_control_v1>()).retirement
+        };
+        retirement.accepted_abi_version = 0;
+        retirement.result = -7;
+        if retirement.struct_size as usize != std::mem::size_of_val(retirement)
+            || retirement.abi_version != crate::abi::URP_AST_PROGRAMME_RETIRE_OPTION_ABI_VERSION
+            || retirement.expected_radio_generation == 0
+            || retirement.request_id == 0
+        {
+            return -1;
+        }
+        return handle
+            .active
+            .as_mut()
+            .map_or(-7, |active| active.retire_programme(retirement));
+    }
     if request.operation == 7 {
         let command = &mut request.command;
         if command.struct_size as usize != std::mem::size_of_val(command)
@@ -1917,3 +1942,7 @@ mod receive_policy_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "radio_programme_tests.rs"]
+mod programme_tests;

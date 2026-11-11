@@ -206,15 +206,38 @@ unsafe extern "C" fn radio_control(
         }
         // SAFETY: this control ABI supplies a readable size/version prefix.
         let header = unsafe { request.cast::<[u32; 2]>().read_unaligned() };
-        if header[0] as usize != size_of::<ffi::rptadv_radio_control_v1>() || header[1] != 1 {
+        if (header[0] as usize) < size_of::<ffi::rptadv_radio_control_v1>() || header[1] != 1 {
             return -1;
         }
+        let pointer = request;
         let (reserved,request)=
             // SAFETY: the caller retains the complete writable request and unique radio.
             unsafe {(radio.cast::<ReservedRadio>().as_mut(),request.as_mut())};
         let (Some(reserved), Some(request)) = (reserved, request) else {
             return -1;
         };
+        if request.operation == 8 {
+            if (header[0] as usize) < size_of::<ffi::rptadv_radio_programme_control_v1>() {
+                return -1;
+            }
+            // SAFETY: the complete writable extension was validated before borrowing it.
+            let retirement = unsafe {
+                &mut (*pointer.cast::<ffi::rptadv_radio_programme_control_v1>()).retirement
+            };
+            retirement.accepted_abi_version = 0;
+            retirement.result = -7;
+            if retirement.struct_size as usize != size_of_val(retirement)
+                || retirement.abi_version != ffi::URP_AST_PROGRAMME_RETIRE_OPTION_ABI_VERSION
+                || retirement.expected_radio_generation == 0
+                || retirement.request_id == 0
+            {
+                return -1;
+            }
+            return reserved
+                .radio
+                .as_mut()
+                .map_or(-7, |radio| radio.retire_programme(retirement));
+        }
         if request.operation != 7 {
             return -7;
         }

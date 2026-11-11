@@ -395,6 +395,24 @@ impl ActiveRadio {
         Ok(())
     }
 
+    /// Dispatch one final-programme retirement on the existing native owner.
+    /// Completion still requires its matching completed-render feedback, not this result.
+    pub(crate) fn retire_programme(&mut self, request: &mut abi::UrpAstProgrammeRetirement) -> i32 {
+        let (Some(handle), Some(retire)) = (self.handle, self.api.native_programme_retire) else {
+            return -7;
+        };
+        // SAFETY: this is the retained native operation on its serialized control owner.
+        request.result = unsafe {
+            retire(
+                handle.as_ptr(),
+                request.expected_radio_generation,
+                request.request_id,
+            )
+        };
+        request.accepted_abi_version = abi::URP_AST_PROGRAMME_RETIRE_OPTION_ABI_VERSION;
+        0
+    }
+
     /// Borrow the existing native owner for one typed command or session intent.
     /// Mutable command results and provider error codes cross this boundary intact.
     pub(crate) fn maintenance(
@@ -494,7 +512,8 @@ fn retain_operations(api: &abi::UrpAstDescriptor) -> abi::UrpAstDescriptor {
         remote_source,
         remote_take,
         remote_destroy,
-        native_activation_status
+        native_activation_status,
+        native_programme_retire
     );
     retained
 }
@@ -839,6 +858,24 @@ pub(crate) mod tests {
     unsafe extern "C" fn ticket_destroy(ticket: *mut c_void) {
         assert_eq!(ticket, NonNull::<u32>::dangling().as_ptr().cast());
         CALLS.with(|calls| calls.borrow_mut().push("ticket_destroy"));
+    }
+
+    #[test]
+    fn programme_retirement_retains_only_a_complete_released_callback() {
+        unsafe extern "C" fn retire(_: *mut c_void, _: u64, _: u64) -> i32 {
+            0
+        }
+        let mut api = remote_fixture_api();
+        api.native_programme_retire = Some(retire);
+        let end = std::mem::offset_of!(abi::UrpAstDescriptor, native_programme_retire)
+            + std::mem::size_of_val(&api.native_programme_retire);
+        for (size, supported) in [(end - 1, false), (end, true)] {
+            api.struct_size = size as u32;
+            assert_eq!(
+                retain_operations(&api).native_programme_retire.is_some(),
+                supported
+            );
+        }
     }
 
     pub(crate) fn remote_fixture_api() -> abi::UrpAstDescriptor {

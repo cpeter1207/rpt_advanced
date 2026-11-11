@@ -348,17 +348,31 @@ struct rptadv_pcm_processor_v1 {
 
 /** Authorized physical-radio operation, executed only on serialized control.
  * STATUS=1, COMMAND=2, TRANSMIT=3, CLEAR_MANUAL=4,
- * PROCESSING_STATUS=5, ACTIVE_CONFIGURATION=6, RECEIVE_POLICY=7.
+ * PROCESSING_STATUS=5, ACTIVE_CONFIGURATION=6, RECEIVE_POLICY=7, PROGRAMME_RETIRE=8.
  * RECEIVE_POLICY works before activation and uses GET_RECEIVE_POLICY in the
  * nested command: value is effective VAD mode, flags is minimum native preroll.
- * COMMAND also uses the nested command. Text uses the synchronous sink. */
+ * COMMAND also uses the nested command. Text uses the synchronous sink.
+ * PROGRAMME_RETIRE requires the complete extended request below. */
 struct rptadv_radio_control_v1 {
-    uint32_t struct_size;                /**< Exact complete size. */
+    uint32_t struct_size;                /**< Complete readable/writable request extent. */
     uint32_t abi_version;                /**< One. */
     uint32_t operation;                  /**< One operation listed above. */
     struct UrpAstChannelCommand command; /**< In/out shared maintenance command. */
     uint32_t keyed;                      /**< Temporary manual transmit request, zero or one. */
     uint32_t forced_ctcss_tenths_hz;     /**< Optional manual transmit tone. */
+};
+
+/** Final-TX programme-history retirement on the existing physical owner.
+ * Pass control to radio_control with operation 8 and this complete struct_size.
+ * The host preserves the released SDK generation/request and result. Zero outer
+ * status and accepted ABI 1 mean dispatch, not completed rendering: only matching
+ * physical-generation feedback with the requested programme_retirement_id proves
+ * audio-owner adoption. Unsupported hosts fail closed. No audio-thread calls.
+ * The original control prefix and host table are unchanged; trailing unknown
+ * bytes are not read or modified. Partial extensions are rejected. */
+struct rptadv_radio_programme_control_v1 {
+    struct rptadv_radio_control_v1 control; /**< Unchanged request prefix. */
+    struct UrpAstProgrammeRetirement retirement; /**< Exact released SDK envelope. */
 };
 
 /** Borrowed UTF-8 result emitted synchronously by a remote operation ticket. */

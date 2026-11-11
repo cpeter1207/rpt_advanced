@@ -320,3 +320,67 @@ fn physical_prefix_never_requires_or_borrows_programme_tail() {
     unsafe { port.publish.unwrap()(std::ptr::null_mut(), std::ptr::null()) };
     drop(worker.stop());
 }
+
+#[test]
+fn programme_feedback_preserves_actual_retirement_and_live_bound_on_the_tx_owner() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut worker, port) = feedback_worker();
+    let mut value = physical_feedback(8);
+    value.programme_retirement_id = 11;
+    value.programme_buffering.struct_size = size_of_val(&value.programme_buffering) as u32;
+    value.programme_buffering.abi_version = 1;
+    value.programme_buffering.flags = 15;
+    value.programme_buffering.prepared_max_delay_frames = 480;
+    value.programme_buffering.current_max_delay_frames = 120;
+    value.programme_buffering.accepted_frames = 64;
+    value.programme_buffering.delivered_frames = 64;
+    let status = feedback_status(&mut worker, port, Some(&value));
+    assert!(
+        status.contains("tx-programme: retirement=11 prepared=480 current=120"),
+        "{status}"
+    );
+    // Complete physical feedback cannot manufacture an absent programme tail.
+    value.sample_index = 16;
+    value.acquired_sample_index = 16;
+    value.struct_size = std::mem::offset_of!(abi::UrpRadioFeedback, programme_buffering) as u32;
+    let status = feedback_status(&mut worker, port, Some(&value));
+    assert!(status.contains("observed=off"), "{status}");
+    assert!(status.contains("tx-programme: unavailable"), "{status}");
+    drop(worker.stop());
+}
+
+#[test]
+fn programme_feedback_keeps_retirement_separate_from_unknown_or_invalid_bounds() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut worker, port) = feedback_worker();
+    for defect in 0..6 {
+        let mut value = physical_feedback(8 * (defect + 1));
+        value.programme_retirement_id = 11;
+        value.programme_buffering.struct_size = size_of_val(&value.programme_buffering) as u32;
+        value.programme_buffering.abi_version = 1;
+        value.programme_buffering.flags = 15;
+        value.programme_buffering.prepared_max_delay_frames = 480;
+        value.programme_buffering.current_max_delay_frames = 120;
+        match defect {
+            0 => value.programme_buffering.flags = 0,
+            1 => value.programme_buffering.flags &= !4,
+            2 => value.programme_buffering.current_max_delay_frames = 481,
+            3 => value.programme_buffering.struct_size -= 1,
+            4 => value.programme_buffering.abi_version = 2,
+            _ => value.struct_size -= 1,
+        }
+        let status = feedback_status(&mut worker, port, Some(&value));
+        let expected = match defect {
+            0 => "tx-programme: retirement=11 prepared=unknown current=unknown",
+            1 | 2 => "tx-programme: retirement=11 prepared=480 current=unknown",
+            _ => "tx-programme: unavailable",
+        };
+        assert!(status.contains(expected), "{defect}: {status}");
+        assert!(status.contains("observed=off"), "{status}");
+    }
+    drop(worker.stop());
+}
