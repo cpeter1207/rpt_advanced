@@ -481,3 +481,10 @@ This closes publication after completed retirement, but does not revoke PCM
 already accepted into downstream conversion, codec, provider or RF history.
 Those owners still require their own fences before production phone attachment
 can become available.
+
+
+A read of an already peeked or partly consumed span never silently substitutes
+its successor when retirement cancels that pending span. It returns cancellation
+and leaves the successor queued. Serialized egress then reevaluates source due
+time before admitting the successor, so an ordinary future span behind retired
+private media is neither sent early nor lost.

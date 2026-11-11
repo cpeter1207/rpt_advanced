@@ -368,3 +368,39 @@ fn revocable_queue_zero_frames_are_never_published_or_returned_as_events() {
         assert!(reader.peek_span().is_none());
     }
 }
+
+#[test]
+fn revocable_queue_cancelled_peek_never_substitutes_the_following_span() {
+    for prefix in [0, 1] {
+        let (mut writer, mut reader, domain, source) = revocable_queue(16, 4);
+        let first = super::AudioSpan {
+            born_ns: Some(0),
+            ..super::AudioSpan::default()
+        };
+        let future = super::AudioSpan {
+            source_start: 2,
+            born_ns: Some(20_000_000),
+            ..first
+        };
+        assert_eq!(
+            writer.write_revocable(first, &[0.25; 2], domain.revision()),
+            0
+        );
+        assert_eq!(writer.write(future, &[0.5; 2]), 0);
+        if prefix != 0 {
+            assert_eq!(reader.read_span(&mut [0.0]).unwrap().frames, prefix);
+        }
+        let pending = reader.peek_span().unwrap();
+        assert_eq!(pending.span.source_start, prefix as u64);
+        assert_eq!(pending.frames, 2 - prefix);
+        source.retire();
+        let mut output = [9.0; 2];
+        assert!(
+            reader.read_span(&mut output).is_none(),
+            "a peek is not permission to consume a different source span"
+        );
+        assert_eq!(reader.peek_span().unwrap().span, future);
+        assert_eq!(reader.read_span(&mut output).unwrap().span, future);
+        assert_eq!(output, [0.5; 2]);
+    }
+}

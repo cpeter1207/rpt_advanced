@@ -534,29 +534,54 @@ mod tests {
 
     #[test]
     fn revocable_egress_peek_cancellation_never_prepares_or_sends_a_packet() {
-        let (mut io, state) = peer_with_egress(8000, true, true);
-        let domain = rpt_advanced_core::link::RetirementDomain::default();
-        let source = rpt_advanced_core::link::PeerSignals::new().reply_target();
-        source.bind_retirement_domain(&domain);
-        let (mut writer, reader) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
-        assert!(writer.bind_retirement_domain(&domain));
-        let span = AudioSpan {
-            born_ns: Some(0),
-            ..AudioSpan::default()
-        };
-        assert_eq!(
-            writer.write_revocable(span, &[0.25; BLOCK], domain.revision()),
-            0
-        );
-        let mut outbound = Outbound::new(8000, reader).unwrap();
-        BEFORE_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(move || source.retire())));
-        assert_eq!(outbound.step(&mut io, 0).unwrap(), Some(0));
-        assert!(outbound.pending.is_none());
-        assert!(outbound.conversion.is_none());
-        assert!(outbound.queue.peek_span().is_none());
-        let state = state.lock().unwrap();
-        assert!(state.prepared.is_empty());
-        assert!(state.writes.is_empty());
+        for future in [false, true] {
+            let (mut io, state) = peer_with_egress(8000, true, true);
+            let domain = rpt_advanced_core::link::RetirementDomain::default();
+            let source = rpt_advanced_core::link::PeerSignals::new().reply_target();
+            source.bind_retirement_domain(&domain);
+            let (mut writer, reader) = LinkAudioQueue::new(BLOCK * 2, 2).unwrap().into_endpoints();
+            assert!(writer.bind_retirement_domain(&domain));
+            let span = AudioSpan {
+                born_ns: Some(0),
+                ..AudioSpan::default()
+            };
+            assert_eq!(
+                writer.write_revocable(span, &[0.25; BLOCK], domain.revision()),
+                0
+            );
+            let next = AudioSpan {
+                source_start: BLOCK as u64,
+                born_ns: Some(20_000_000),
+                ..span
+            };
+            if future {
+                assert_eq!(writer.write(next, &[0.5; BLOCK]), 0);
+            }
+            let mut outbound = Outbound::new(8000, reader).unwrap();
+            BEFORE_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(move || source.retire())));
+            let wake = outbound.step(&mut io, 0).unwrap();
+            {
+                let state = state.lock().unwrap();
+                assert!(
+                    state.prepared.is_empty(),
+                    "cancelled peek must not substitute future PCM"
+                );
+                assert!(state.writes.is_empty());
+            }
+            assert_eq!(wake, Some(0));
+            assert!(outbound.pending.is_none());
+            assert!(outbound.conversion.is_none());
+            if future {
+                assert_eq!(outbound.queue.peek_span().unwrap().span, next);
+                assert_eq!(outbound.step(&mut io, 0).unwrap(), Some(20_000_000));
+                assert!(state.lock().unwrap().prepared.is_empty());
+                assert_eq!(outbound.queue.peek_span().unwrap().span, next);
+                outbound.step(&mut io, 20).unwrap();
+                assert!(!state.lock().unwrap().prepared.is_empty());
+            } else {
+                assert!(outbound.queue.peek_span().is_none());
+            }
+        }
     }
 
     #[test]

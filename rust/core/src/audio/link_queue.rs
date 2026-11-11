@@ -239,6 +239,9 @@ impl LinkAudioConsumer {
     }
     /// Copy only a currently valid span. Retirement can cancel a preceding peek
     /// or this copy; a cancelled copy zeros its touched prefix and returns None.
+    /// An existing peeked or partly read span is never replaced by its successor
+    /// in the same call. On cancellation, callers must reevaluate the next span's
+    /// admission conditions (such as its due time) before another read.
     /// PCM returned successfully has crossed the consumer-admission boundary;
     /// retained conversion/provider history requires its own retirement fence.
     pub fn read_span(&mut self, output: &mut [f32]) -> Option<ReadSpan> {
@@ -249,7 +252,19 @@ impl LinkAudioConsumer {
         if output.is_empty() {
             return None;
         }
-        let queued = self.peek_current()?;
+        let queued = if let Some(read) = self.pending {
+            let queued = QueuedSpan {
+                read,
+                revision: self.statistics.pending_revision.load(Ordering::Relaxed),
+            };
+            if !self.current(queued.revision) {
+                self.discard_pending();
+                return None;
+            }
+            queued
+        } else {
+            self.peek_current()?
+        };
         let pending = self.pending.as_mut().expect("current span");
         let count = pending.frames.min(output.len());
         self.consumer
