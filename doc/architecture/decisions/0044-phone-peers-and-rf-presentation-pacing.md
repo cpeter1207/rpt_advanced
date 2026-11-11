@@ -309,3 +309,10 @@ outer socket does not bound the per-transaction queues. Production SIP activatio
 therefore requires a qualified bounded admission/control contract; timer,
 cancellation and teardown must progress even under packet saturation. No
 rsipstack dependency is enabled by this media-only checkpoint.
+
+Conservative receipt bounds are carried on the timed output sample separately
+from exact source provenance. An explicitly qualified processor-history contract
+may retain an age bound without claiming an exact source coordinate or real/PLC
+classification. The current opaque processor clears both independently. The
+input trait can also expose a borrowed exact private-call reply token for typed
+mixer admission; ordinary inputs expose no such token.

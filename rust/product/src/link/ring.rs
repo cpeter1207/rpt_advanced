@@ -476,7 +476,6 @@ impl InboundConsumer {
             return Err(RingError);
         }
         let mut provenance = SampleProvenance {
-            age_bound: None,
             position: (timing.flags & ffi::RPCR3_TIMED_POSITION_VALID != 0).then_some(
                 SourceCoordinate {
                     generation: timing.generation,
@@ -497,6 +496,7 @@ impl InboundConsumer {
         }
         Ok(TimedPeerSample {
             sample,
+            age_bound: None,
             provenance: Some(provenance),
         })
     }

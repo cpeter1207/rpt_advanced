@@ -222,9 +222,9 @@ impl PeerInput for TimedInput {
     }
     fn render_timed_sample(&mut self) -> Option<TimedPeerSample> {
         let mut sample = self.reader.render_timed_sample().ok()?;
-        if let Some(provenance) = sample.provenance.as_mut() {
+        if let Some(provenance) = sample.provenance.as_ref() {
             if provenance.real && !provenance.plc && !provenance.gap && !provenance.zero_extension {
-                provenance.age_bound = provenance
+                sample.age_bound = provenance
                     .position
                     .and_then(|position| self.shared.locate(position));
             }
@@ -273,6 +273,9 @@ impl PhoneMediaInput {
     }
 }
 impl PeerInput for PhoneMediaInput {
+    fn phone_reply(&self) -> Option<&PeerReply> {
+        Some(&self.shared.reply)
+    }
     fn source_rate(&self) -> u32 {
         self.input.source_rate()
     }

@@ -568,6 +568,7 @@ fn prepared_phone_media_uses_the_shared_ring_with_original_age_and_exact_retirem
         "no implicit replacement"
     );
     assert_eq!(input.source(), reply.phone_source().unwrap());
+    assert_eq!(input.phone_reply(), Some(&reply));
     assert_eq!(input.available(), 0, "preparation alone cannot admit media");
     session.step(0).unwrap();
     let (epoch, birth) = state.lock().unwrap().source_reference.unwrap();
@@ -595,7 +596,7 @@ fn prepared_phone_media_uses_the_shared_ring_with_original_age_and_exact_retirem
                 && !value.zero_extension
                 && value.position.is_some_and(|position| !position.negative)
         }) {
-            let bound = sample.provenance.unwrap().age_bound.unwrap();
+            let bound = sample.age_bound.unwrap();
             assert_eq!(bound.host_clock_epoch, epoch);
             assert_eq!(bound.not_after_ns, birth);
             seen |= sample.sample.abs() > 0.1;

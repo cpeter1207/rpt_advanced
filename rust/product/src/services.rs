@@ -223,6 +223,7 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
             // The existing graph contract does not locate retained output on
             // its input timeline. Preserve PCM without inventing provenance.
             sample.provenance = None;
+            sample.age_bound = None;
         }
         if self.input.signals().dtmf_muted() {
             sample.sample = 0.0;

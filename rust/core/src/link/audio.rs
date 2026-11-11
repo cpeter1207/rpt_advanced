@@ -129,8 +129,6 @@ pub struct SourceTimeBound {
 /// Provenance of one actual emitted sample, independent of PCM amplitude.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SampleProvenance {
-    /// Conservative original receipt bound; absent when a path cannot qualify age.
-    pub age_bound: Option<SourceTimeBound>,
     /// None for unmapped startup, untagged input or unlocated shortfall.
     pub position: Option<SourceCoordinate>,
     /// Existing real-PCM classification, including PLC recovery blends.
@@ -150,12 +148,20 @@ pub struct SampleProvenance {
 pub struct TimedPeerSample {
     /// Actual rendered PCM, including silence and concealment.
     pub sample: f32,
+    /// Conservative receipt bound, independent of exact output provenance.
+    /// Opaque processing without a qualified history contract clears this field.
+    pub age_bound: Option<SourceTimeBound>,
     /// None when an intervening processor cannot prove its output provenance.
     pub provenance: Option<SampleProvenance>,
 }
 
 /// Unique adapter-owned consumer of one released inbound ring.
 pub trait PeerInput: Send {
+    /// Exact private-call token, never a numeric node identity or mailbox grant.
+    /// Public inputs return None; wrappers forward the original token unchanged.
+    fn phone_reply(&self) -> Option<&super::PeerReply> {
+        None
+    }
     /// Decoded source sample rate.
     fn source_rate(&self) -> u32;
     /// Immutable priming policy prepared with this unique source consumer.
