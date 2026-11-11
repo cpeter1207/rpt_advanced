@@ -212,10 +212,14 @@ impl Outbound {
         } else if self.queue.peek_span().is_some_and(|next| {
             next.span.born_ns.is_none_or(|born| born <= now) || !self.current(next.span.stream)
         }) {
-            let read = self
-                .queue
-                .read_span(&mut self.native)
-                .expect("peeked source span");
+            #[cfg(test)]
+            tests::before_read();
+            let Some(read) = self.queue.read_span(&mut self.native) else {
+                // A marked span can retire between peek and actual admission.
+                // Cancel retained conversion rather than treating it as fresh PCM.
+                self.discard()?;
+                return Ok(Some(now));
+            };
             if read
                 .span
                 .born_ns
@@ -516,6 +520,66 @@ mod tests {
     use super::*;
     use crate::link::session::tests::peer_with_egress;
     use rpt_advanced_core::audio::LinkAudioQueue;
+
+    thread_local! {
+        static BEFORE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn before_read() {
+        let hook = BEFORE_READ.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[test]
+    fn revocable_egress_peek_cancellation_never_prepares_or_sends_a_packet() {
+        let (mut io, state) = peer_with_egress(8000, true, true);
+        let domain = rpt_advanced_core::link::RetirementDomain::default();
+        let source = rpt_advanced_core::link::PeerSignals::new().reply_target();
+        source.bind_retirement_domain(&domain);
+        let (mut writer, reader) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
+        assert!(writer.bind_retirement_domain(&domain));
+        let span = AudioSpan {
+            born_ns: Some(0),
+            ..AudioSpan::default()
+        };
+        assert_eq!(
+            writer.write_revocable(span, &[0.25; BLOCK], domain.revision()),
+            0
+        );
+        let mut outbound = Outbound::new(8000, reader).unwrap();
+        BEFORE_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(move || source.retire())));
+        assert_eq!(outbound.step(&mut io, 0).unwrap(), Some(0));
+        assert!(outbound.pending.is_none());
+        assert!(outbound.conversion.is_none());
+        assert!(outbound.queue.peek_span().is_none());
+        let state = state.lock().unwrap();
+        assert!(state.prepared.is_empty());
+        assert!(state.writes.is_empty());
+    }
+
+    #[test]
+    fn revocable_queue_publication_read_and_retirement_allocate_nothing() {
+        let domain = rpt_advanced_core::link::RetirementDomain::default();
+        let source = rpt_advanced_core::link::PeerSignals::new().reply_target();
+        source.bind_retirement_domain(&domain);
+        let (mut writer, mut reader) = LinkAudioQueue::new(16, 4).unwrap().into_endpoints();
+        assert!(writer.bind_retirement_domain(&domain));
+        let (_, allocations) = crate::fixture::allocations(|| {
+            let span = AudioSpan::default();
+            assert_eq!(
+                writer.write_revocable(span, &[0.25; 8], domain.revision()),
+                0
+            );
+            assert_eq!(reader.read_span(&mut [0.0; 3]).unwrap().frames, 3);
+            source.retire();
+            assert!(reader.peek_span().is_none());
+            assert_eq!(writer.write(span, &[0.5; 8]), 0);
+            assert_eq!(reader.read(&mut [0.0; 8]), 0);
+        });
+        assert_eq!(allocations, 0);
+    }
 
     #[test]
     fn one_block_readiness_preserves_future_pcm_and_retained_codec_input() {

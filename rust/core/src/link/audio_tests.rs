@@ -986,10 +986,20 @@ mod phone;
 thread_local! {
     static BEFORE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    static AFTER_VALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 pub(super) fn before_publish() {
     BEFORE_PUBLISH.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+pub(super) fn after_validation() {
+    AFTER_VALIDATION.with(|slot| {
         if let Some(hook) = slot.borrow_mut().take() {
             hook();
         }

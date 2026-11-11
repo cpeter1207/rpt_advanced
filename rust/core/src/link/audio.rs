@@ -390,6 +390,7 @@ pub struct LinkDispatcher {
     fences: Vec<(PeerReply, Option<PeerReply>)>,
     retirement: RetirementDomain,
     checked_revision: Option<u64>,
+    private_contributor: bool,
     scratch: Vec<f32>,
     current: Option<ProgramBlock>,
     next_destination: usize,
@@ -427,17 +428,20 @@ impl LinkDispatcher {
                 self.current = self.incoming.pop().ok();
                 self.next_destination = 0;
                 self.checked_revision = None;
+                self.private_contributor = false;
             }
             let Some(block) = &self.current else {
                 break;
             };
             let revision = self.retirement.revision();
+            let mut private_contributor = self.private_contributor;
             let contributors_live = match self.checked_revision {
                 Some(checked) => revision == Some(checked),
                 None => {
                     revision.is_some()
                         && block.routing.iter().zip(&self.fences).all(
                             |(route, (generation, phone))| {
+                                private_contributor |= route.contributes && phone.is_some();
                                 !route.contributes
                                     || (!generation.ended()
                                         && phone
@@ -448,6 +452,7 @@ impl LinkDispatcher {
                         && self.retirement.revision() == revision
                 }
             };
+            self.private_contributor = private_contributor;
             if !contributors_live {
                 // One O(peers) validation per block, then O(1) checks. Churn
                 // cancels the rest without rescanning or draining unbounded work.
@@ -493,11 +498,19 @@ impl LinkDispatcher {
                 break;
             }
             self.activity_edges[index] = destination.activity_edge;
-            if eligible
-                && self.outbound[index].write(destination.span, &self.scratch[..block.frames])
-                    < block.frames
-            {
-                notify = true;
+            #[cfg(test)]
+            tests::after_validation();
+            if eligible {
+                let rejected = if self.private_contributor || phone.is_some() {
+                    self.outbound[index].write_revocable(
+                        destination.span,
+                        &self.scratch[..block.frames],
+                        revision,
+                    )
+                } else {
+                    self.outbound[index].write(destination.span, &self.scratch[..block.frames])
+                };
+                notify |= rejected < block.frames;
             }
             if notify {
                 on_written(index);
@@ -573,7 +586,10 @@ impl<P: PeerInput> LinkAudio<P> {
         let mut outbound = Vec::new();
         for peer in &mut peers {
             // Control-only construction consumes each freshly prepared peer exactly once.
-            let producer = peer.outbound.take().expect("prepared outbound owner");
+            let mut producer = peer.outbound.take().expect("prepared outbound owner");
+            if !producer.bind_retirement_domain(&retirement) {
+                return Err(AdmissionError::Invalid);
+            }
             outbound.push(producer);
         }
         let samples = maximum
@@ -599,6 +615,7 @@ impl<P: PeerInput> LinkAudio<P> {
             fences,
             retirement,
             checked_revision: None,
+            private_contributor: false,
             scratch: vec![0.0; maximum],
             current: None,
             next_destination: 0,

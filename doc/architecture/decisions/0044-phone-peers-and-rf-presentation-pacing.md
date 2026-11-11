@@ -455,3 +455,29 @@ prove that old programme is suppressed. Activation additionally requires an
 immediate generation-aware permit at the existing post-DSP programme boundary,
 before signaling, plus the matching completed-render retirement acknowledgment.
 That capability and the RF FIFO/arbiter consumer remain prerequisites.
+## Revision-qualified outbound spans — 2026-11-11
+
+A dispatcher-side revision check cannot make a later queue write atomic with
+retirement. Each inseparable phone-tainted composite and each private-phone
+destination therefore carries the captured node revision in the existing
+queue's private descriptor. The shared queue allocation binds its node domain
+once on control. The descriptor adds one u64, with no new PCM storage, public
+AudioSpan change or per-publication reference-count operation. Ordinary-only
+spans remain unmarked and retain their existing FIFO behavior.
+
+The sole consumer discards stale marked descriptors and their corresponding
+PCM without copying, bounded by its entry snapshot of queued descriptors.
+Partial spans retain the same revision in a scalar inside the existing shared
+allocation. Only the sole consumer reads or changes this pending scalar; it is
+cleared when a span completes or is discarded. The consumer retains its original
+112-byte representation on 64-bit targets; private descriptors grow from 56 to
+64 bytes. No observer or producer changes the pending state. A read rechecks after
+copying and clears a cancelled prefix; an unclocked read containing an obsolete marked
+prefix is conservatively silenced as a whole. A preceding peek is advisory,
+so serialized egress treats a cancelled read as retirement rather than panic.
+
+Successful consumer admission is a distinct boundary from queued storage.
+This closes publication after completed retirement, but does not revoke PCM
+already accepted into downstream conversion, codec, provider or RF history.
+Those owners still require their own fences before production phone attachment
+can become available.

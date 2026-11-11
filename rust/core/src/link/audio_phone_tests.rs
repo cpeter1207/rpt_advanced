@@ -245,7 +245,7 @@ fn typed_public_mixer_preserves_protocol_qualified_public_names() {
 
 #[test]
 fn typed_phone_mixer_revokes_contributions_and_bounds_later_retirement_churn() {
-    for retire_at in 0..3 {
+    for retire_at in 0..4 {
         let mut peers = Vec::new();
         let mut readers = Vec::new();
         let mut calls = Vec::new();
@@ -303,7 +303,12 @@ fn typed_phone_mixer_revokes_contributions_and_bounds_later_retirement_churn() {
             calls[0].retire();
         } else {
             let retiring = calls[1].clone();
-            super::BEFORE_PUBLISH.with(|slot| {
+            let hook = if retire_at == 2 {
+                &super::BEFORE_PUBLISH
+            } else {
+                &super::AFTER_VALIDATION
+            };
+            hook.with(|slot| {
                 *slot.borrow_mut() = Some(Box::new(move || retiring.retire()));
             });
         }
@@ -317,7 +322,7 @@ fn typed_phone_mixer_revokes_contributions_and_bounds_later_retirement_churn() {
             );
         }
         let mut received = [0.0; 4];
-        let destination = usize::from(retire_at != 2);
+        let destination = usize::from(retire_at < 2);
         assert_eq!(
             readers[destination].read(&mut received),
             4,
