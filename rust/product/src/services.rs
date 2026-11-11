@@ -166,7 +166,24 @@ pub struct PcmProcessor {
 // transmit worker, and destruction waits for that generation's quiescence.
 unsafe impl Send for PcmProcessor {}
 
+#[path = "services_history.rs"]
+mod history;
+
 impl PcmProcessor {
+    fn buffering(&mut self) -> Option<abi::UrpProgrammeBuffering> {
+        let query = self.api.programme_buffering?;
+        // This scalar record borrows the same serial graph owner as process.
+        let mut state: abi::UrpProgrammeBuffering = unsafe { std::mem::zeroed() };
+        state.struct_size = size_of_val(&state) as u32;
+        state.abi_version = 1;
+        let status = unsafe { query(self.api.context, &mut state) };
+        (status == 0
+            && state.struct_size as usize >= size_of_val(&state)
+            && state.abi_version == 1
+            && state.reserved == 0)
+            .then_some(state)
+    }
+
     fn process(&mut self, samples: &mut [f32]) -> bool {
         if samples.len() > self.maximum {
             return false;
@@ -195,11 +212,31 @@ impl Drop for PcmProcessor {
 pub struct ProcessedPeer<P> {
     input: P,
     processor: Option<PcmProcessor>,
+    history: Option<Box<history::History>>,
 }
-impl<P> ProcessedPeer<P> {
-    /// Retain preallocated processing alongside this unique ring consumer.
-    pub fn new(input: P, processor: Option<PcmProcessor>) -> Self {
-        Self { input, processor }
+impl<P: rpt_advanced_core::link::PeerInput> ProcessedPeer<P> {
+    /// Prepare optional compact receipt metadata before publishing this unique consumer.
+    pub fn new(input: P, mut processor: Option<PcmProcessor>) -> Self {
+        let history = if input.source_timing_available()
+            && input
+                .phone_reply()
+                .is_some_and(|reply| reply.phone_source().is_some())
+        {
+            processor.as_mut().and_then(history::History::prepare)
+        } else {
+            None
+        };
+        Self {
+            input,
+            processor,
+            history,
+        }
+    }
+
+    fn forget_history(&mut self) {
+        if let Some(history) = self.history.as_mut() {
+            history.invalidate();
+        }
     }
 }
 impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
@@ -215,18 +252,26 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         self.input.receive_policy()
     }
     fn source_timing_available(&self) -> bool {
-        self.processor.is_none() && self.input.source_timing_available()
+        (self.processor.is_none() || self.history.is_some()) && self.input.source_timing_available()
     }
     fn render_timed_sample(&mut self) -> Option<rpt_advanced_core::link::TimedPeerSample> {
-        let mut sample = self.input.render_timed_sample()?;
+        let Some(mut sample) = self.input.render_timed_sample() else {
+            self.forget_history();
+            return None;
+        };
         if let Some(processor) = self.processor.as_mut() {
+            let original = sample;
             if !processor.process(std::slice::from_mut(&mut sample.sample)) {
+                self.forget_history();
                 return None;
             }
-            // The existing graph contract does not locate retained output on
-            // its input timeline. Preserve PCM without inventing provenance.
+            // A qualified graph bound can retain an older original receipt bound,
+            // but does not recover an exact coordinate or real/PLC classification.
             sample.provenance = None;
-            sample.age_bound = None;
+            sample.age_bound = self
+                .history
+                .as_mut()
+                .and_then(|history| history.output(original, processor.buffering()));
         }
         if self.input.signals().dtmf_muted() {
             sample.sample = 0.0;
@@ -246,6 +291,7 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         self.input.finite_playout()
     }
     fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+        self.forget_history();
         match self.input.render(output) {
             Some(real)
                 if self
@@ -265,6 +311,7 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         }
     }
     fn silence(&mut self, scratch: &mut [f32]) {
+        self.forget_history();
         scratch.fill(0.0);
         if let Some(processor) = self.processor.as_mut() {
             let _ = processor.process(scratch);
@@ -272,6 +319,7 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         scratch.fill(0.0);
     }
     fn render_sample(&mut self) -> Option<f32> {
+        self.forget_history();
         let mut sample = self.input.render_sample()?;
         if self
             .processor
@@ -1786,3 +1834,7 @@ impl Drop for PeerIo {
 #[cfg(test)]
 #[path = "services_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "services_history_tests.rs"]
+mod history_tests;

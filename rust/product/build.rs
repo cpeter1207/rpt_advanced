@@ -40,6 +40,7 @@ fn main() {
         .allowlist_var("RPCR3_.*")
         .allowlist_var("URP_NATIVE_.*")
         .allowlist_var("URP_RADIO_FEEDBACK_.*")
+        .allowlist_var("URP_PROGRAMME_.*")
         .allowlist_var("URP_AST_.*")
         .allowlist_var("RPTADV_MEDIA_.*")
         .allowlist_var("RPTADV_PEER_EVENT_.*")

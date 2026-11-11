@@ -339,3 +339,31 @@ LINK_ATTACH envelope does not expose that owner's timed receipt/history query
 or graph-retirement transaction. A second product graph would duplicate DSP and
 is not a workaround. Both-host qualification requires a genuine channel-owner
 SDK extension and release; current Asterisk processing stays unqualified.
+
+
+### Native conservative original-age history
+
+A timed private-phone processor prepares compact metadata beside its existing
+graph, before audio publication. Ordinary peers allocate no history. At native
+48 kHz, twenty-millisecond buckets retain the earliest actual original receipt
+bound and source generation, never PCM or a time derived from output counters.
+The array covers at most 24,000 frames with at most 26 buckets. This is a local
+metadata horizon, not a claim that the complete ring, DSP, RF FIFO, converter,
+backend and physical path meets the end-to-end age cap. The real SDK prepared
+maximum remains unchanged even when it exceeds this horizon.
+
+Only a fresh, coherent, single-sample SDK observation with all required validity
+flags can qualify output age. The current delay must fit both the real prepared
+maximum and retained metadata. Exact post-DSP source provenance remains unknown.
+Unknown input, PLC, missing intervals, mixed source generations or clock epochs,
+adapter padding, failed/stale observations and pre-admission history cannot
+become fresh programme. Buckets can retain a slightly older bound or withhold
+qualification rather than underestimate age.
+
+Block rendering, idle processing and failures invalidate the metadata window.
+Resumption requires an actual SDK counter baseline and newly qualified source
+history. These counters establish continuity only and never reset source birth.
+The single serial processor owner performs queries and bounded metadata updates
+without new threads, heap allocation, clocks, locks or hardware operations on
+audio. Revocation still fences the exact phone media generation; graph owners
+are reclaimed off audio after quiescence, never reset speculatively in a callback.

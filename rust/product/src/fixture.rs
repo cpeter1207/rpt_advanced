@@ -14,6 +14,36 @@ use std::{
 };
 
 thread_local! { static FAIL_BYTES: Cell<usize> = const { Cell::new(0) }; }
+thread_local! { static ALLOCATION_COUNT: Cell<Option<usize>> = const { Cell::new(None) }; }
+
+/// Count allocations on this test thread only; nested measurements are rejected.
+pub(crate) fn allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ALLOCATION_COUNT.with(|count| count.set(None));
+        }
+    }
+    ALLOCATION_COUNT.with(|count| {
+        assert!(
+            count.get().is_none(),
+            "allocation measurement already active"
+        );
+        count.set(Some(0));
+    });
+    let _reset = Reset;
+    let result = operation();
+    (result, ALLOCATION_COUNT.with(|count| count.get().unwrap()))
+}
+
+fn count_allocation() {
+    let _ = ALLOCATION_COUNT.try_with(|count| {
+        if let Some(previous) = count.get() {
+            count.set(Some(previous + 1));
+        }
+    });
+}
+
 thread_local! {
     pub(crate) static ERROR_LOGS: std::cell::RefCell<Vec<(i32, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -42,6 +72,7 @@ fn reject(bytes: usize) -> bool {
 // for one selected allocation is explicitly permitted by GlobalAlloc.
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count_allocation();
         if reject(layout.size()) {
             ptr::null_mut()
         } else {
@@ -52,6 +83,7 @@ unsafe impl GlobalAlloc for Allocator {
         unsafe { System.dealloc(pointer, layout) };
     }
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, bytes: usize) -> *mut u8 {
+        count_allocation();
         if reject(bytes) {
             ptr::null_mut()
         } else {
