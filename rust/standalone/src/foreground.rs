@@ -29,6 +29,8 @@ pub enum ForegroundError {
     Registration(std::io::Error),
     /// The standalone IAX2 listener could not bind or operate.
     Iax(crate::iax::IaxError),
+    /// Product published but a listener operation failed; owners remain retained for shutdown.
+    CommittedIax(crate::iax::IaxError),
     /// The service-only local maintenance socket could not bind.
     LocalControl(std::io::Error),
     /// The host cannot provide Unix signal and privilege semantics.
@@ -46,6 +48,10 @@ impl std::fmt::Display for ForegroundError {
                 write!(formatter, "cannot start registration worker: {error}")
             }
             Self::Iax(error) => error.fmt(formatter),
+            Self::CommittedIax(error) => write!(
+                formatter,
+                "configuration published; listener update failed: {error}"
+            ),
             Self::LocalControl(error) => {
                 write!(formatter, "cannot start local radio control: {error}")
             }
@@ -109,8 +115,11 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
             if RELOAD.swap(false, Ordering::AcqRel) {
                 local_control.close(&mut control);
                 if let Err(error) = control.reload() {
-                    eprintln!("configuration reload rejected: {error}");
+                    eprintln!("configuration reload failed: {error}");
                 }
+            }
+            if control.runtime.reload_fatal() {
+                break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -122,12 +131,29 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
             client: &client,
             registration: &mut registration,
         });
-        runtime.stop().map_err(ForegroundError::Runtime)?;
+        let fatal = runtime.reload_failure();
+        if let Err(error) = runtime.stop() {
+            // A failed quiescence cannot release listener callbacks underneath the
+            // retained product/provider owners. Process shutdown remains fatal.
+            std::mem::forget(iax_listeners);
+            registration.stop();
+            return Err(ForegroundError::Runtime(error));
+        }
         iax_listeners.clear();
         registration.stop();
         eprintln!("rpt-advanced standalone runtime stopped");
-        Ok(())
+        shutdown_result(fatal, Ok(()))
     }
+}
+
+#[cfg(unix)]
+fn shutdown_result(
+    fatal: Option<crate::runtime::RuntimeError>,
+    stopped: Result<(), crate::runtime::RuntimeError>,
+) -> Result<(), ForegroundError> {
+    stopped
+        .and_then(|()| fatal.map_or(Ok(()), Err))
+        .map_err(ForegroundError::Runtime)
 }
 
 #[cfg(unix)]
@@ -148,20 +174,32 @@ impl ForegroundControl<'_> {
         validate_configuration(&updated)?;
         let radios = resolve_radios(&updated)?;
         let nodes = resolve_listener_nodes(&radios);
-        update_iax_listeners(self.listeners, nodes, self.client, |candidates| {
+        let result = update_iax_listeners(self.listeners, nodes, self.client, |candidates| {
             enable_iax_listeners(candidates, self.runtime)?;
             self.runtime
                 .reload_with_radios(&updated, radios)
                 .map_err(ForegroundError::Runtime)
-        })?;
+        });
+        if matches!(result, Err(ForegroundError::CommittedIax(_))) {
+            self.runtime.fence_reload();
+            return result;
+        }
+        if let Err(error) = &result {
+            if !matches!(error, ForegroundError::Runtime(error) if error.publication().published())
+            {
+                return result;
+            }
+        }
         match read_secrets(self.secrets_path)
             .and_then(|secrets| registration_targets(&updated, &secrets))
         {
             Ok(targets) => self.registration.replace(targets),
             Err(error) => eprintln!("registration configuration reload rejected: {error}"),
         }
-        eprintln!("rpt-advanced configuration reloaded");
-        Ok(())
+        if result.is_ok() {
+            eprintln!("rpt-advanced configuration reloaded");
+        }
+        result
     }
 }
 
@@ -224,17 +262,34 @@ fn update_iax_listeners(
             added.insert(*port, bind_iax_listener(client, *port, local_nodes)?);
         }
     }
-    reload_product(&mut added)?;
+    let result = reload_product(&mut added);
+    if let Err(error) = &result {
+        let publication = match error {
+            ForegroundError::Runtime(error) => error.publication(),
+            _ => rptadv_peer_support::reload::ReloadOutcome::Rejected,
+        };
+        if !publication.published() {
+            if matches!(
+                publication,
+                rptadv_peer_support::reload::ReloadOutcome::Fatal(_)
+            ) {
+                listeners.extend(added);
+            }
+            return result;
+        }
+    }
+    // Adopt candidate listeners on committed operational errors as well. A
+    // later numeric-binding failure cannot make publication disappear.
+    listeners.extend(added);
     for (port, local_nodes) in &nodes {
         if let Some(listener) = listeners.get_mut(port) {
             listener
                 .set_local_nodes(local_nodes)
-                .map_err(ForegroundError::Iax)?;
+                .map_err(ForegroundError::CommittedIax)?;
         }
     }
     listeners.retain(|port, _| nodes.contains_key(port));
-    listeners.extend(added);
-    Ok(())
+    result
 }
 
 /// Start prepared listeners before exposing their generation to control polling.
@@ -584,6 +639,24 @@ mod tests {
     }
 
     #[test]
+    fn fatal_reload_shutdown_preserves_failure_after_successful_cleanup() {
+        use crate::runtime::RuntimeError;
+        use rptadv_peer_support::reload::ReloadOutcome;
+        let fatal = RuntimeError::ReloadOutcome(ReloadOutcome::Fatal(73));
+        assert!(matches!(
+            super::shutdown_result(Some(fatal), Ok(())),
+            Err(ForegroundError::Runtime(RuntimeError::ReloadOutcome(
+                ReloadOutcome::Fatal(73)
+            )))
+        ));
+        assert!(super::shutdown_result(None, Ok(())).is_ok());
+        assert!(matches!(
+            super::shutdown_result(Some(fatal), Err(RuntimeError::Stop)),
+            Err(ForegroundError::Runtime(RuntimeError::Stop))
+        ));
+    }
+
+    #[test]
     fn listener_reload_keeps_current_set_when_product_reload_fails() {
         let current = super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
@@ -601,6 +674,28 @@ mod tests {
             ForegroundError::Runtime(crate::runtime::RuntimeError::Reload)
         ));
         assert_eq!(listeners.keys().copied().collect::<Vec<_>>(), [4569]);
+    }
+
+    #[test]
+    fn listener_reload_retains_candidate_owners_for_committed_error_and_fatal_shutdown() {
+        use rptadv_peer_support::reload::ReloadOutcome;
+        for outcome in [ReloadOutcome::CommittedWithError, ReloadOutcome::Fatal(73)] {
+            let current =
+                super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
+            let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
+            let nodes = std::collections::BTreeMap::from([(0, vec!["55553".to_owned()])]);
+            let result = super::update_iax_listeners(&mut listeners, nodes, &test_client(), |_| {
+                Err(ForegroundError::Runtime(
+                    crate::runtime::RuntimeError::ReloadOutcome(outcome),
+                ))
+            });
+            assert!(result.is_err());
+            assert!(
+                listeners.contains_key(&0),
+                "candidate callbacks must remain owned"
+            );
+            assert_eq!(listeners.contains_key(&4569), !outcome.published());
+        }
     }
 
     #[test]
@@ -628,7 +723,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ForegroundError::Iax(crate::iax::IaxError::Operation)
+            ForegroundError::CommittedIax(crate::iax::IaxError::Operation)
         ));
         assert_eq!(listeners.keys().copied().collect::<Vec<_>>(), [4569]);
     }
@@ -678,8 +773,8 @@ mod tests {
 
         let descriptor = Box::leak(Box::new(crate::abi::rptadv_product_descriptor_v1 {
             struct_size: size_of::<crate::abi::rptadv_product_descriptor_v1>() as u32,
-            abi_version: 7,
-            capability: *b"rptadv.prod7\0\0\0\0",
+            abi_version: 8,
+            capability: *b"rptadv.prod8\0\0\0\0",
             start: Some(start),
             reload: Some(reload),
             stop: Some(stop),
@@ -1000,7 +1095,10 @@ mod tests {
         let result = super::run(Path::new(&configuration), secrets.as_deref());
         if std::env::var_os("RPT_ADVANCED_FOREGROUND_EXPECT_BIND_ERROR").is_some() {
             let error = result.unwrap_err();
-            assert!(matches!(error, ForegroundError::LocalControl(_)));
+            assert!(
+                matches!(error, ForegroundError::LocalControl(_)),
+                "{error:?}"
+            );
             eprintln!("{error}");
         } else {
             result.unwrap();
@@ -1229,7 +1327,10 @@ mod tests {
             unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGHUP) },
             0
         );
-        wait_for_log(&receiver, "configuration reload rejected");
+        wait_for_log(
+            &receiver,
+            "configuration reload failed: line 1: malformed section or option",
+        );
         let mut local =
             std::os::unix::net::UnixStream::connect(crate::local_control::SOCKET_PATH).unwrap();
         local
@@ -1259,7 +1360,7 @@ mod tests {
         );
         wait_for_log(
             &receiver,
-            "configuration reload rejected: cannot bind the IAX2 listener",
+            "configuration reload failed: cannot bind the IAX2 listener",
         );
         drop(occupied);
         fs::write(&path, "[general]\nnode_enabled=no\n[524950]\n").unwrap();

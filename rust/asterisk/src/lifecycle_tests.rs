@@ -189,8 +189,8 @@ unsafe extern "C" fn digit(
 
 static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<ffi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 7,
-    capability: *b"rptadv.prod7\0\0\0\0",
+    abi_version: 8,
+    capability: *b"rptadv.prod8\0\0\0\0",
     start: Some(start),
     reload: Some(reload),
     stop: Some(stop),
@@ -311,7 +311,10 @@ fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() 
 #[test]
 fn product_reload_waits_for_pending_completion() {
     let product = unsafe { Product::open(ptr::from_ref(&DESCRIPTOR)) }.unwrap();
-    assert!(product.reload("pending-candidate"));
+    assert_eq!(
+        product.reload("pending-candidate"),
+        rptadv_peer_support::reload::ReloadOutcome::Committed
+    );
     assert_eq!(
         RELOAD_DOCUMENTS.with_borrow(|documents| documents.last().cloned()),
         Some("pending-candidate".to_owned())
@@ -385,8 +388,7 @@ fn lifecycle_retains_live_product_on_failed_stop_and_rolls_back_registration() {
             &[
                 "[1000]\nnode_enabled=no\n",
                 "accepted-candidate",
-                "rejected-candidate",
-                "accepted-candidate"
+                "rejected-candidate"
             ]
         )
     });
@@ -450,8 +452,8 @@ fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
         std::fs::write(&path, "fixture-empty").unwrap();
         assert_eq!(
             super::reload(),
-            0,
-            "retirement failure does not undo the committed reload"
+            -1,
+            "report retirement failure without undoing the committed reload"
         );
         assert_eq!(unload(), -1);
         unsafe { fail(0) };
@@ -485,5 +487,54 @@ fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
         );
+    }
+}
+
+#[test]
+fn product_reload_preserves_immediate_and_deferred_terminal_disposition() {
+    use rptadv_peer_support::reload::ReloadOutcome;
+    thread_local! {
+        static TERMINAL: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+        static DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    unsafe extern "C" fn begin(_: *const std::ffi::c_char, _: usize) -> i32 {
+        INVOCATIONS.set(INVOCATIONS.get() + 1);
+        if DEFERRED.get() { 1 } else { TERMINAL.get() }
+    }
+    unsafe extern "C" fn poll() -> i32 {
+        TERMINAL.get()
+    }
+    for deferred in [false, true] {
+        for (status, outcome) in [
+            (0, ReloadOutcome::Committed),
+            (-1, ReloadOutcome::Rejected),
+            (-2, ReloadOutcome::CommittedWithError),
+            (-3, ReloadOutcome::Fatal(-3)),
+            (73, ReloadOutcome::Fatal(73)),
+        ] {
+            TERMINAL.set(status);
+            DEFERRED.set(deferred);
+            INVOCATIONS.set(0);
+            let mut descriptor = DESCRIPTOR;
+            descriptor.reload = Some(begin);
+            descriptor.reload_poll = Some(poll);
+            let product = unsafe { Product::open(Box::leak(Box::new(descriptor))) }.unwrap();
+            assert_eq!(product.reload("candidate"), outcome);
+            assert_eq!(INVOCATIONS.get(), 1);
+        }
+    }
+}
+
+#[test]
+fn product_mixed_reload_cohorts_are_rejected_before_use() {
+    for wrong_version in [true, false] {
+        let mut api = DESCRIPTOR;
+        if wrong_version {
+            api.abi_version = 7;
+        } else {
+            api.capability = *b"rptadv.prod7\0\0\0\0";
+        }
+        assert!(unsafe { Product::open(&api) }.is_none());
     }
 }

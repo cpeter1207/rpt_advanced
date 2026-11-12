@@ -365,3 +365,21 @@ cannot rebind released pins or revoke that completed handoff. Unchanged banks
 continue normal observations and service. Rejected core preparation aborts the
 sealed candidate and restores old demand using existing owners. This does not
 resolve outer post-publication notification, cleanup, or host outcome reporting.
+
+### Explicit publication outcome cohort
+
+Product ABI8 (`rptadv.prod8`, `librptadv_product.so.3`) distinguishes committed
+(0), pending (1), confirmed rejected (-1), committed with operational error (-2),
+and fatal/indeterminate (-3). Unknown statuses are fatal and retain the original
+status for diagnosis. Both hosts reject ABI7 before startup; there is no legacy
+fallback. A failed preparation does not require replaying the old document.
+
+Terminal publication survives ordinary control-pump completion and subsequent
+polling. Fatal device restoration, caught panic, or an unconfirmed control reply
+must not assert that the old runtime was coherently restored. Site cleanup,
+resumption, notification, account activation, and retirement failures remain
+observable independently of publication. Committed errors adopt candidate host
+configuration; fatal outcomes fence admission and retain owners through shutdown.
+The reserved IAX batch is still a separate integration step: both committed
+outcomes require commit, while fatal shutdown may abort only an uncommitted
+reservation without retiring old listener/account ownership or reopening service.

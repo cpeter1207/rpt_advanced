@@ -399,24 +399,34 @@ impl Host {
     }
     /// Confirm safe levels and release site pins before any radio reservation is destroyed.
     pub(crate) fn site_shutdown(&mut self, now_ms: u64) -> Result<bool, RuntimeError> {
-        if self.site_transition.is_none() {
-            self.site_acquisition.pause(true);
-            assert!(
-                self.site_radio
-                    .begin(RadioSite::default(), &Default::default())
-            );
-            self.site_transition = Some(Transition {
-                shutdown: true,
-                staged: false,
-                complete: false,
-            });
+        self.site_shutdown_inner(now_ms, false)
+    }
+    /// A fatal publication uncertainty can only supersede its candidate for shutdown.
+    pub(crate) fn site_fatal_shutdown(&mut self, now_ms: u64) -> Result<bool, RuntimeError> {
+        self.site_shutdown_inner(now_ms, true)
+    }
+    fn site_shutdown_inner(&mut self, now_ms: u64, fatal: bool) -> Result<bool, RuntimeError> {
+        if !fatal
+            && self
+                .site_transition
+                .as_ref()
+                .is_some_and(|change| !change.shutdown)
+        {
+            return Err(RuntimeError::Busy);
         }
         if !self
             .site_transition
             .as_ref()
             .is_some_and(|change| change.shutdown)
         {
-            return Err(RuntimeError::Busy);
+            self.site_retired
+                .extend(self.site_acquisition.begin_shutdown());
+            self.site_radio.begin_shutdown();
+            self.site_transition = Some(Transition {
+                shutdown: true,
+                staged: false,
+                complete: false,
+            });
         }
         if self
             .site_transition

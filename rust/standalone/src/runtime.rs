@@ -1,6 +1,7 @@
 //! Process-lifetime owner for the portable product.
 
 use crate::{abi, host_services::HostServicesOwner};
+use rptadv_peer_support::reload::ReloadOutcome;
 use std::{
     ffi::c_char,
     mem::size_of,
@@ -17,12 +18,16 @@ pub enum RuntimeError {
     Provider(crate::providers::ProviderError),
     /// EchoLink account preparation or notification drainage failed.
     Echo(rptadv_peer_support::echolink::host::Error),
-    /// A staged account/product update failed, possibly with a separate rollback failure.
+    /// Account preparation was rejected before candidate publication.
     EchoUpdate(rptadv_peer_support::echolink::host::UpdateError),
     /// Product start rejected the selected providers or configuration.
     Start,
     /// Product could not prepare the replacement configuration.
     Reload,
+    /// Product publication failed operationally or is indeterminate; raw status is retained.
+    ReloadOutcome(ReloadOutcome),
+    /// Product published, but account follow-up failed with retained callback ownership.
+    EchoCommitted(rptadv_peer_support::echolink::host::UpdateOutcome),
     /// Product could not quiesce all runtime owners.
     Stop,
 }
@@ -33,6 +38,12 @@ impl std::fmt::Display for RuntimeError {
             Self::InvalidDescriptor => "product lifecycle descriptor is incomplete",
             Self::Start => "standalone product startup failed",
             Self::Reload => "standalone configuration reload failed",
+            Self::ReloadOutcome(outcome) => {
+                return write!(formatter, "reload outcome: {outcome:?}");
+            }
+            Self::EchoCommitted(outcome) => {
+                return write!(formatter, "committed EchoLink update: {outcome:?}");
+            }
             Self::Stop => "standalone product shutdown failed",
             Self::Provider(error) => return error.fmt(formatter),
             Self::Echo(error) => {
@@ -46,6 +57,16 @@ impl std::fmt::Display for RuntimeError {
 }
 
 impl std::error::Error for RuntimeError {}
+impl RuntimeError {
+    /// Publication classification for outer radio/listener ownership decisions.
+    pub(crate) fn publication(self) -> ReloadOutcome {
+        match self {
+            Self::ReloadOutcome(outcome) => outcome,
+            Self::EchoCommitted(outcome) => outcome.product,
+            _ => ReloadOutcome::Rejected,
+        }
+    }
+}
 
 /// Running product and host context. Product stop precedes host/provider release.
 pub struct ProductRuntime {
@@ -57,6 +78,7 @@ pub struct ProductRuntime {
     composition: Option<crate::providers::ProductRuntimeDescriptors>,
     configuration: Mutex<String>,
     configuration_path: Option<PathBuf>,
+    reload_fault: std::sync::atomic::AtomicI32,
 }
 
 impl ProductRuntime {
@@ -74,6 +96,22 @@ impl ProductRuntime {
         self.configuration
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Fence a published configuration whose outer listener follow-up failed.
+    pub(crate) fn fence_reload(&self) {
+        self.reload_fault
+            .store(-3, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Fatal reloads close foreground admission until orderly shutdown.
+    pub(crate) fn reload_fatal(&self) -> bool {
+        self.reload_fault.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+
+    pub(crate) fn reload_failure(&self) -> Option<RuntimeError> {
+        let status = self.reload_fault.load(std::sync::atomic::Ordering::Acquire);
+        (status != 0).then_some(RuntimeError::ReloadOutcome(ReloadOutcome::Fatal(status)))
     }
 
     /// Fixed service configuration path; a maintenance caller cannot replace it.
@@ -113,8 +151,8 @@ impl ProductRuntime {
             return Err(RuntimeError::InvalidDescriptor);
         };
         if product.struct_size < size_of::<abi::rptadv_product_descriptor_v1>() as u32
-            || product.abi_version != 7
-            || product.capability != *b"rptadv.prod7\0\0\0\0"
+            || product.abi_version != 8
+            || product.capability != *b"rptadv.prod8\0\0\0\0"
         {
             return Err(RuntimeError::InvalidDescriptor);
         }
@@ -141,6 +179,7 @@ impl ProductRuntime {
             composition: None,
             configuration: Mutex::new(configuration.to_owned()),
             configuration_path: None,
+            reload_fault: std::sync::atomic::AtomicI32::new(0),
         })
     }
 
@@ -188,16 +227,14 @@ impl ProductRuntime {
 
     /// Replace configuration without stopping the process; failed preparation keeps old state.
     pub fn reload(&self, configuration: &str) -> Result<(), RuntimeError> {
+        let fault = self.reload_fault.load(std::sync::atomic::Ordering::Acquire);
+        if fault != 0 {
+            return Err(RuntimeError::ReloadOutcome(ReloadOutcome::Fatal(fault)));
+        }
         let mut active = self.active_configuration();
         let host = self.host.as_ref().ok_or(RuntimeError::InvalidDescriptor)?;
         let apply = || self.reload_product(configuration);
-        let restore = || {
-            // A product failure may follow publication. Reopen only the old
-            // hardware snapshot while restoring the last successful document.
-            host.discard_staged_radios();
-            self.reload_product(&active)
-        };
-        if let Some(providers) = &self.providers {
+        let outcome = if let Some(providers) = &self.providers {
             providers
                 .validate_runtime()
                 .map_err(RuntimeError::Provider)?;
@@ -210,33 +247,48 @@ impl ProductRuntime {
                 .as_deref()
                 .ok_or(RuntimeError::InvalidDescriptor)?;
             let outcome = with_echo_preparation(path, descriptors, |preparation| {
-                unsafe {
-                    host.reload_echo(self.product, configuration, preparation, apply, restore)
-                }
-                .map_err(RuntimeError::EchoUpdate)
+                unsafe { host.reload_echo(self.product, configuration, preparation, apply) }
+                    .map_err(RuntimeError::EchoUpdate)
             })?;
-            if let Some(error) = outcome.retirement {
-                eprintln!("rpt-advanced: EchoLink retired account remains retained: {error:?}");
+            if outcome.product.published() {
+                *active = configuration.to_owned();
             }
-        } else if !apply() {
-            if !restore() {
-                eprintln!("rpt-advanced: configuration rollback failed");
+            if let ReloadOutcome::Fatal(status) = outcome.product {
+                self.reload_fault
+                    .store(status, std::sync::atomic::Ordering::Release);
             }
-            return Err(RuntimeError::Reload);
+            if outcome.failure.is_some() || outcome.retirement.is_some() {
+                return Err(RuntimeError::EchoCommitted(outcome));
+            }
+            outcome.product
+        } else {
+            apply()
+        };
+        if outcome.published() {
+            *active = configuration.to_owned();
         }
-        *active = configuration.to_owned();
-        Ok(())
+        match outcome {
+            ReloadOutcome::Committed => Ok(()),
+            ReloadOutcome::Rejected => Err(RuntimeError::Reload),
+            ReloadOutcome::Fatal(status) => {
+                self.reload_fault
+                    .store(status, std::sync::atomic::Ordering::Release);
+                Err(RuntimeError::ReloadOutcome(outcome))
+            }
+            ReloadOutcome::CommittedWithError => Err(RuntimeError::ReloadOutcome(outcome)),
+        }
     }
-    fn reload_product(&self, configuration: &str) -> bool {
-        // These calls run on the host's reload caller, never its audio/control executor.
+    fn reload_product(&self, configuration: &str) -> ReloadOutcome {
+        // The caller retains staged owners throughout every deferred poll.
         let mut status =
             unsafe { (self.reload)(configuration.as_ptr().cast(), configuration.len()) };
-        while status == 1 {
+        loop {
+            if let Some(outcome) = ReloadOutcome::from_status(status) {
+                return outcome;
+            }
             std::thread::sleep(std::time::Duration::from_millis(1));
-            // Admission required the completed lifecycle tail before startup.
             status = unsafe { self.product.reload_poll.unwrap()() };
         }
-        status == 0
     }
 
     /// Reload product and host radio settings as one control-plane transaction.
@@ -255,7 +307,13 @@ impl ProductRuntime {
                 Ok(())
             }
             Err(error) => {
-                host.discard_staged_radios();
+                match error.publication() {
+                    ReloadOutcome::Committed | ReloadOutcome::CommittedWithError => {
+                        host.commit_radios()
+                    }
+                    ReloadOutcome::Rejected => host.discard_staged_radios(),
+                    ReloadOutcome::Fatal(_) => {}
+                }
                 Err(error)
             }
         }
@@ -553,8 +611,8 @@ mod tests {
     ) -> &'static abi::rptadv_product_descriptor_v1 {
         Box::leak(Box::new(abi::rptadv_product_descriptor_v1 {
             struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-            abi_version: 7,
-            capability: *b"rptadv.prod7\0\0\0\0",
+            abi_version: 8,
+            capability: *b"rptadv.prod8\0\0\0\0",
             start: Some(start),
             reload: Some(reload),
             stop: Some(stop),
@@ -860,12 +918,14 @@ mod tests {
     }
 
     #[test]
-    fn reload_restores_the_last_successful_configuration_after_partial_publication() {
-        static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-        unsafe extern "C" fn publish_then_reject(
-            configuration: *const c_char,
-            length: usize,
-        ) -> i32 {
+    fn reload_terminal_disposition_never_replays_the_previous_document() {
+        use std::cell::{Cell, RefCell};
+        thread_local! {
+            static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+            static STATUS: Cell<i32> = const { Cell::new(0) };
+            static DEFERRED: Cell<bool> = const { Cell::new(false) };
+        }
+        unsafe extern "C" fn reload(configuration: *const c_char, length: usize) -> i32 {
             let text = unsafe {
                 std::str::from_utf8(std::slice::from_raw_parts(
                     configuration.cast::<u8>(),
@@ -873,33 +933,53 @@ mod tests {
                 ))
             }
             .unwrap();
-            SEEN.lock().unwrap().push(text.to_owned());
-            -i32::from(text == "candidate-rejected")
+            SEEN.with_borrow_mut(|seen| seen.push(text.to_owned()));
+            if DEFERRED.get() { 1 } else { STATUS.get() }
         }
-        SEEN.lock().unwrap().clear();
-        let mut process = unsafe {
-            ProductRuntime::start(
-                descriptor_with_reload(
+        unsafe extern "C" fn poll() -> i32 {
+            STATUS.get()
+        }
+        for deferred in [false, true] {
+            for status in [0, -1, -2, -3, 73] {
+                SEEN.with_borrow_mut(Vec::clear);
+                STATUS.set(status);
+                DEFERRED.set(deferred);
+                let mut api = *descriptor_with_reload(
                     start_without_counts,
-                    publish_then_reject,
+                    reload,
                     stop_without_counts,
                     None,
-                ),
-                host(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                "original",
-            )
+                );
+                api.reload_poll = Some(poll);
+                let mut process = unsafe {
+                    ProductRuntime::start(
+                        Box::leak(Box::new(api)),
+                        host(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        "original",
+                    )
+                }
+                .unwrap();
+                let result = process.reload("candidate");
+                assert_eq!(result.is_ok(), status == 0);
+                assert_eq!(SEEN.with_borrow(Clone::clone), ["candidate"]);
+                assert_eq!(
+                    process.configuration_text(),
+                    if matches!(status, 0 | -2) {
+                        "candidate"
+                    } else {
+                        "original"
+                    }
+                );
+                if matches!(status, -3 | 73) {
+                    assert!(process.reload("must-not-run").is_err());
+                    assert_eq!(SEEN.with_borrow(Clone::clone), ["candidate"]);
+                }
+                process.stop().unwrap();
+            }
         }
-        .unwrap();
-        process.reload("last-successful").unwrap();
-        assert!(process.reload("candidate-rejected").is_err());
-        assert_eq!(
-            *SEEN.lock().unwrap(),
-            ["last-successful", "candidate-rejected", "last-successful"]
-        );
-        process.stop().unwrap();
     }
 
     #[test]
@@ -964,7 +1044,7 @@ mod tests {
         let inspection = crate::providers::ProductInspection::open().unwrap();
         let mut product = *inspection.api();
         product.start = Some(fail_start);
-        tests::replace_descriptor(&mut providers, "librptadv_product.so.2", product);
+        tests::replace_descriptor(&mut providers, "librptadv_product.so.3", product);
         assert!(matches!(
             ProductRuntime::start_with_providers(
                 std::path::Path::new("rpt_advanced.conf"),
@@ -990,7 +1070,7 @@ mod tests {
         for (providers, expected) in [
             (
                 tests::empty_provider_set(),
-                ProviderError::MissingDescriptor("librptadv_product.so.2"),
+                ProviderError::MissingDescriptor("librptadv_product.so.3"),
             ),
             (
                 providers,
@@ -1215,9 +1295,8 @@ mod tests {
             (
                 RuntimeError::EchoUpdate(rptadv_peer_support::echolink::host::UpdateError {
                     cause: rptadv_peer_support::echolink::host::Error::Product,
-                    rollback: None,
                 }),
-                "EchoLink reload failed: UpdateError { cause: Product, rollback: None }",
+                "EchoLink reload failed: UpdateError { cause: Product }",
             ),
         ] {
             assert_eq!(error.to_string(), expected);
@@ -1490,5 +1569,27 @@ mod tests {
         .unwrap();
         drop(failed_without_providers);
         assert_eq!(FAILED_STOP_ATTEMPTS.load(Ordering::Relaxed), 3);
+    }
+    #[test]
+    fn product_mixed_reload_cohorts_are_rejected_before_start() {
+        for wrong_version in [true, false] {
+            let mut api = *descriptor(start_without_counts, stop_without_counts, None);
+            if wrong_version {
+                api.abi_version = 7;
+            } else {
+                api.capability = *b"rptadv.prod7\0\0\0\0";
+            }
+            let result = unsafe {
+                ProductRuntime::start(
+                    Box::leak(Box::new(api)),
+                    host(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    "[general]\n",
+                )
+            };
+            assert!(matches!(result, Err(RuntimeError::InvalidDescriptor)));
+        }
     }
 }

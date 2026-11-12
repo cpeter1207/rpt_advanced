@@ -33,12 +33,12 @@ impl Product {
         if pointer.is_null()
             || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
                 != size_of::<ffi::rptadv_product_descriptor_v1>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 7
+            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 8
         {
             return None;
         }
         let descriptor = unsafe { &*pointer };
-        (descriptor.capability == *b"rptadv.prod7\0\0\0\0"
+        (descriptor.capability == *b"rptadv.prod8\0\0\0\0"
             && descriptor.start.is_some()
             && descriptor.reload.is_some()
             && descriptor.reload_poll.is_some()
@@ -78,7 +78,7 @@ impl Product {
         }
     }
     /// Replace configuration without discarding a working generation on failure.
-    pub fn reload(&self, configuration: &str) -> bool {
+    pub fn reload(&self, configuration: &str) -> rptadv_peer_support::reload::ReloadOutcome {
         // The module reload caller waits; the taskprocessor continues servicing peers/radios.
         let mut status =
             unsafe { self.0.reload.unwrap()(configuration.as_ptr().cast(), configuration.len()) };
@@ -86,7 +86,7 @@ impl Product {
             std::thread::sleep(std::time::Duration::from_millis(1));
             status = unsafe { self.0.reload_poll.unwrap()() };
         }
-        status == 0
+        rptadv_peer_support::reload::ReloadOutcome::from_status(status).expect("terminal status")
     }
     /// Stop every product owner and drain accepted calls.
     pub fn stop(&self) -> bool {

@@ -87,7 +87,7 @@ not a requirement to reject a useful dependency. The
 records codec-client moves, packet-library fit tests and coordinated host/DTMF
 contracts. The EchoLink cutover introduced typed incoming requests and copied
 per-peer protocol/capability metadata through host-services ABI 9 and product
-ABI 7. The current VAD cohort uses host-services ABI 10 with product ABI 7
+ABI 7. The current cohort uses host-services ABI 10 with product ABI 8
 (ADR 0043). Both IAX hosts
 preserve their existing transport/media behavior and populate real local and
 remote identities. Product SONAME 2 rejects the older host/product pair.

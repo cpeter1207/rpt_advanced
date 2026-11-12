@@ -312,3 +312,79 @@ fn site_radio_sealed_release_survives_poll_fault_without_hiding_health() {
         }
     }
 }
+
+#[test]
+fn site_radio_fatal_shutdown_restarts_safe_phase_for_retained_output() {
+    let mut definitions = settings();
+    let mut retained = definitions["2000"].outputs[0].clone();
+    retained.name = "retained".into();
+    retained.active_high = true;
+    retained.endpoint.as_mut().unwrap().channel = "8".into();
+    definitions.get_mut("2000").unwrap().outputs.push(retained);
+    let mut site = RadioSite::prepare(&definitions).unwrap();
+    let mut owner = Owner::new();
+    owner.settle(&mut site, 0);
+    definitions.get_mut("2000").unwrap().outputs.remove(0);
+    assert!(site.begin(
+        RadioSite::prepare(&definitions).unwrap(),
+        &Default::default()
+    ));
+    owner.settle(&mut site, 10);
+    assert!(site.stage());
+    owner.poll(&mut site, 12);
+    assert_eq!(owner.state.claimed_mask, 0x80);
+    assert_ne!(owner.state.serviced_high_mask & 0x80, 0);
+    // The removal of A has been submitted, but B still needs a fresh safe
+    // acknowledgment before fatal shutdown may release it.
+    site.begin_shutdown();
+    owner.service();
+    owner.poll(&mut site, 13);
+    assert_eq!(
+        owner.state.claimed_mask, 0x80,
+        "retain B until its safe write is serviced"
+    );
+    assert_eq!(owner.state.submitted_high_mask & 0x80, 0);
+    assert_eq!(site.barrier(), None);
+    assert!(!site.stage());
+    owner.service();
+    owner.poll(&mut site, 14);
+    assert!(site.stage());
+    owner.settle(&mut site, 15);
+    assert!(site.commit());
+    assert_eq!(owner.state.claimed_mask, 0);
+}
+
+#[test]
+fn site_radio_fatal_shutdown_keeps_unsubmitted_full_release_obligation() {
+    assert_full_release_survives_fatal(false);
+}
+#[test]
+fn site_radio_fatal_shutdown_keeps_unacknowledged_full_release_obligation() {
+    assert_full_release_survives_fatal(true);
+}
+fn assert_full_release_survives_fatal(submitted: bool) {
+    let mut site = RadioSite::prepare(&settings()).unwrap();
+    let mut owner = Owner::new();
+    owner.settle(&mut site, 0);
+    assert!(site.begin(RadioSite::default(), &Default::default()));
+    owner.settle(&mut site, 10);
+    assert!(site.stage());
+    if submitted {
+        owner.poll(&mut site, 12);
+    }
+    site.begin_shutdown();
+    assert_eq!(
+        site.barrier(),
+        None,
+        "outstanding release must not disappear with removed output metadata"
+    );
+    owner.poll(&mut site, 13);
+    assert_eq!(site.barrier(), None);
+    owner.service();
+    owner.poll(&mut site, 14);
+    assert_eq!(owner.state.claimed_mask, 0);
+    assert_eq!(site.barrier(), Some(Ok(())));
+    assert!(site.stage());
+    owner.settle(&mut site, 15);
+    assert!(site.commit());
+}

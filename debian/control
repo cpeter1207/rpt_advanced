@@ -27,7 +27,7 @@ Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
  librate-adjusting-pcm-ring3 (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha3),
- librptadv-product2 (= ${binary:Version}),
+ librptadv-product3 (= ${binary:Version}),
  librptadvecholink1 (>= 0.1.0~alpha1),
  libusbradioplus-product1 (>= 0.1.0~alpha34-1),
  librptadv-file-adapter1 (= ${binary:Version}),
@@ -60,7 +60,7 @@ Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, ${asterisk:Depends},
  librate-adjusting-pcm-ring3 (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha3),
- librptadv-product2 (= ${binary:Version}),
+ librptadv-product3 (= ${binary:Version}),
  librptadvecholink1 (>= 0.1.0~alpha1),
  librptadv-file-adapter1 (= ${binary:Version}),
  librptadv-speech-adapter1 (= ${binary:Version}),
@@ -69,7 +69,7 @@ Description: optional Asterisk adapter for the RPT Advanced controller
  Deprecated Asterisk module adapter for RadioPlusAdvanced channels. It may be
  installed independently of the standalone controller package.
 
-Package: librptadv-product2
+Package: librptadv-product3
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
@@ -88,7 +88,7 @@ Description: portable controller product for rpt_advanced
 Package: librptadv-product-dev
 Architecture: amd64 arm64
 Multi-Arch: same
-Depends: ${misc:Depends}, librptadv-product2 (= ${binary:Version}), librptadv-codec-dev,
+Depends: ${misc:Depends}, librptadv-product3 (= ${binary:Version}), librptadv-codec-dev,
  libusbradioplus-product-dev (>= 0.1.0~alpha34-1)
 Description: development files for the rpt_advanced product
  Public C header and unversioned linker name for the versioned product.

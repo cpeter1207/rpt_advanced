@@ -22,9 +22,20 @@ struct UrpAstSiteRequest;
 struct UrpAstSiteSnapshot;
 
 /** Exact incompatible product ABI revision. */
-#define RPTADV_PRODUCT_ABI_VERSION 7U
+#define RPTADV_PRODUCT_ABI_VERSION 8U
 /** Product capability name stored in its fixed-width descriptor field. */
-#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod7"
+#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod8"
+/** Candidate published and all required follow-up operations succeeded. */
+#define RPTADV_RELOAD_COMMITTED 0
+/** Reload remains in progress; poll for its terminal disposition. */
+#define RPTADV_RELOAD_PENDING 1
+/** Candidate rejected before publication; the previous configuration remains live. */
+#define RPTADV_RELOAD_REJECTED (-1)
+/** Candidate published, but a required follow-up operation failed. */
+#define RPTADV_RELOAD_COMMITTED_ERROR (-2)
+/** Unrecoverable or uncertain state; keep admission closed until shutdown. */
+#define RPTADV_RELOAD_FATAL (-3)
+
 /** Exact incompatible host-services ABI revision. */
 #define RPTADV_HOST_ABI_VERSION 10U
 /** Host-services capability name stored in its fixed-width descriptor field. */
@@ -683,7 +694,9 @@ struct rptadv_product_descriptor_v1 {
                  size_t configuration_length);
     int (*reload)(const char *configuration,
                   size_t configuration_length); /**< Replace configuration: zero
-                    complete, one accepted/pending (call reload_poll), negative failed. */
+                    committed, one pending (call reload_poll), -1 rejected without publication,
+                    -2 committed with operational error, -3 fatal/indeterminate.
+                    Unknown statuses are fatal; never replay an old document. */
     int (*stop)(void);                          /**< Stop and quiesce every product owner. */
     /** Check current incoming policy before answering a channel. */
     int (*authorize_incoming)(const struct rptadv_incoming_peer_v1 *request, void *peer);
@@ -722,9 +735,10 @@ struct rptadv_product_descriptor_v1 {
     int (*radio_control)(const char *local, size_t local_length,
                          struct rptadv_radio_control_v1 *request, rptadv_text_sink_v1 sink,
                          void *sink_context);
-    /** Advance retained activation/rollback: zero completed, one pending,
-     * negative failed after safe rollback. Keep host candidate settings until
-     * completion. Each call is nonblocking with respect to physical rig I/O. */
+    /** Advance retained activation and return the same ABI8 reload statuses.
+     * Terminal status is retained across repeated polls. Keep candidate owners
+     * through pending/fatal outcomes; adopt them on either committed status.
+     * Each call is nonblocking with respect to physical rig I/O. */
     int (*reload_poll)(void);
 };
 

@@ -220,6 +220,7 @@ struct PeerOwner {
 pub struct Host {
     reload_text: Option<TextExecutor>,
     reload_failure: Option<RuntimeError>,
+    reload_basis: u64,
     activated_revision: u64,
     remote_pending: Vec<remote::Pending>,
     text: TextExecutor,
@@ -485,6 +486,7 @@ impl Host {
         let mut host = Self {
             reload_text: None,
             reload_failure: None,
+            reload_basis: 0,
             activated_revision: 0,
             remote_pending: Vec::new(),
             text,
@@ -591,6 +593,7 @@ impl Host {
             return Err(RuntimeError::Busy);
         }
         self.reload_failure = None;
+        self.reload_basis = self.runtime.revision();
         let mut text = TextExecutor::prepare(document.nodes().len().max(1), self.media.clone())
             .map_err(|_| RuntimeError::Preparation)?;
         // Keep the live pair until commit. Only one candidate pair may overlap it;
@@ -714,6 +717,21 @@ impl Host {
             return Err(error.clone());
         }
         Ok(!self.runtime.reload_pending())
+    }
+    /// Report publication independently of preparation or operational failure.
+    pub(crate) fn reload_status(&self, error: Option<&RuntimeError>) -> i32 {
+        let error = error.or(self.reload_failure.as_ref());
+        if matches!(error, Some(RuntimeError::Restore)) {
+            -3
+        } else if self.runtime.revision() != self.reload_basis {
+            if error.is_some() { -2 } else { 0 }
+        } else if error.is_some() {
+            -1
+        } else if self.runtime.reload_pending() {
+            1
+        } else {
+            0
+        }
     }
     /// Route reserved Echo aliases before ASL lookup; an address alone cannot admit an Echo QSO.
     pub fn lookup(

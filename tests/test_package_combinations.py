@@ -70,7 +70,7 @@ def test_either_host_installs_the_dynamically_loaded_echolink_runtime() -> None:
     stanzas = package_stanzas()
     for host in ("rpt-advanced", "app-rpt-advanced"):
         assert "librptadvecholink1 (>= 0.1.0~alpha1)" in depends(stanzas[host])
-    assert "librptadvecholink" not in depends(stanzas["librptadv-product2"])
+    assert "librptadvecholink" not in depends(stanzas["librptadv-product3"])
 
 
 def test_radio_product_dependency_does_not_require_the_asterisk_integration() -> None:
@@ -80,14 +80,14 @@ def test_radio_product_dependency_does_not_require_the_asterisk_integration() ->
     standalone = depends(stanzas["rpt-advanced"])
     assert "libusbradioplus-product1 (>= 0.1.0~alpha34-1)" in standalone
     assert "usbradioplus" not in standalone.replace("libusbradioplus-product1", "")
-    for package in ("app-rpt-advanced", "librptadv-product2"):
+    for package in ("app-rpt-advanced", "librptadv-product3"):
         assert "usbradioplus" not in depends(stanzas[package]).replace(
             "libusbradioplus-product1", ""
         )
         assert "librptadv-resolver-adapter1" not in depends(stanzas[package])
         assert "librptadv-jitter-adapter1" not in depends(stanzas[package])
     assert "libusbradioplus-product1 (>= 0.1.0~alpha34-1)" in depends(
-        stanzas["librptadv-product2"]
+        stanzas["librptadv-product3"]
     )
     assert "libusbradioplus-product-dev (>= 0.1.0~alpha34-1)" in depends(
         stanzas["librptadv-product-dev"]
@@ -151,7 +151,7 @@ def test_site_packages_are_optional_and_separately_installable() -> None:
         assert f"{runtime} (= ${{binary:version}})" in depends(
             stanzas[f"librptadv-{name}-adapter-dev"]
         )
-        for entry in ("rpt-advanced", "app-rpt-advanced", "librptadv-product2"):
+        for entry in ("rpt-advanced", "app-rpt-advanced", "librptadv-product3"):
             assert runtime not in depends(stanzas[entry])
         assert (ROOT / f"debian/{runtime}.install").read_text().splitlines() == [
             f"usr/lib/*/rpt_advanced/librptadv_{name}_adapter.so.1*"

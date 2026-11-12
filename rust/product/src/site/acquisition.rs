@@ -427,6 +427,23 @@ impl Acquisition {
         self.devices = retained;
         retired
     }
+    /// Discard dormant candidates for off-control disposal and keep old owners safe.
+    pub fn begin_shutdown(&mut self) -> Vec<DeviceWorker> {
+        self.commit = None;
+        let retired = self
+            .replacement
+            .take()
+            .map(|replacement| {
+                replacement
+                    .fresh
+                    .into_values()
+                    .map(|device| device.worker)
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.pause(true);
+        retired
+    }
     /// Cancel a candidate; return unused new owners for disposal outside control.
     pub fn abort(&mut self) -> Vec<DeviceWorker> {
         self.commit = None;

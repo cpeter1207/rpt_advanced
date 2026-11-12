@@ -28,7 +28,7 @@ JITTER = "librptadv_jitter_adapter.so.1"
 GPIOD = "librptadv_gpiod_adapter.so.1"
 HWMON = "librptadv_hwmon_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
-PRODUCT = "librptadv_product.so.2"
+PRODUCT = "librptadv_product.so.3"
 RING_MINIMUM_VERSION = "3.0.0~alpha6"
 SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha3"
 TONE_MINIMUM_VERSION = "0.1.0~alpha1"
@@ -376,7 +376,7 @@ def package(control: Path) -> None:
     }
     standalone = stanzas["rpt-advanced"].split("Description:", 1)[0]
     adapter = stanzas["app-rpt-advanced"].split("Description:", 1)[0]
-    product = stanzas["librptadv-product2"].split("Description:", 1)[0]
+    product = stanzas["librptadv-product3"].split("Description:", 1)[0]
     assert "${asterisk:Depends}" not in standalone, (
         "standalone package depends on Asterisk"
     )

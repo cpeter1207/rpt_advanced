@@ -6,7 +6,7 @@
 #include <stddef.h>
 #include <string.h>
 
-_Static_assert(RPTADV_PRODUCT_ABI_VERSION == 7, "update product ABI probe deliberately");
+_Static_assert(RPTADV_PRODUCT_ABI_VERSION == 8, "update product ABI probe deliberately");
 _Static_assert(RPTADV_HOST_ABI_VERSION == 10, "update host ABI probe deliberately");
 _Static_assert(RPTADV_PEER_PHONE == 3 && RPTADV_PEER_PRIVATE_CALL == 32,
                "phone identity requires an explicit private-call capability");

@@ -32,7 +32,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
         mpsc,
     },
     thread::JoinHandle,
@@ -46,6 +46,22 @@ type HostOperation = Box<dyn FnOnce(&mut Host) -> Result<ErasedResult, RuntimeEr
 static FAIL_DIAL_THREAD: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 pub(crate) static SKIP_TICKER_THREAD: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static TICKER_TURNS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static PANIC_CONTROL_AFTER: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static FATAL_BEFORE_FINISH_CLEAR: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+fn inject_control_panic() {
+    if PANIC_CONTROL_AFTER.fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+        left.checked_sub(1)
+    }) == Ok(1)
+    {
+        panic!("injected serialized operation panic");
+    }
+}
+
 #[cfg(test)]
 static FAIL_TICKER_THREAD: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
@@ -76,6 +92,7 @@ pub(crate) struct Engine {
     health: SchedulerHealth,
     accepting: AtomicBool,
     reloading: AtomicBool,
+    reload_status: AtomicI32,
     revision: AtomicU64,
     lost_digits: AtomicBool,
     event_busy: AtomicU64,
@@ -434,14 +451,17 @@ impl Engine {
         }
         result
     }
+    /// Fatal status remains authoritative even if a concurrent finish clears the
+    /// advisory pending flag. Only a new Engine lifecycle can clear that status.
+    pub(super) fn reload_fenced(&self) -> bool {
+        self.reloading.load(Ordering::Acquire) || self.reload_status.load(Ordering::Acquire) == -3
+    }
     fn enter(self: &Arc<Self>) -> Result<Call, RuntimeError> {
         self.enter_reload(false)
     }
     fn enter_reload(self: &Arc<Self>, reload: bool) -> Result<Call, RuntimeError> {
         let mut count = self.calls.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.accepting.load(Ordering::Acquire)
-            || !reload && self.reloading.load(Ordering::Acquire)
-        {
+        if !self.accepting.load(Ordering::Acquire) || !reload && self.reload_fenced() {
             return Err(RuntimeError::Rejected);
         }
         *count += 1;
@@ -474,15 +494,27 @@ impl Engine {
         let (send, receive) = mpsc::sync_channel(1);
         self.enqueue(move || {
             let result = if !engine.accepting.load(Ordering::Acquire)
+                || engine.reload_status.load(Ordering::Acquire) == -3
                 || (!reload && engine.reloading.load(Ordering::Acquire))
                 || engine.revision.load(Ordering::Acquire) != revision
             {
                 Err(RuntimeError::Rejected)
             } else {
                 let mut host = engine.host.lock().unwrap_or_else(|e| e.into_inner());
-                host.as_mut()
-                    .ok_or(RuntimeError::Rejected)
-                    .and_then(operation)
+                catch_unwind(AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    inject_control_panic();
+                    host.as_mut()
+                        .ok_or(RuntimeError::Rejected)
+                        .and_then(operation)
+                }))
+                .unwrap_or_else(|_| {
+                    // Latch before the executor can run its next queued task.
+                    // The panic hook retains the original diagnostic.
+                    engine.record_reload_status(-3);
+                    engine.reloading.store(true, Ordering::Release);
+                    Err(RuntimeError::Restore)
+                })
             };
             let _ = send.send(result);
         })
@@ -531,7 +563,7 @@ impl Engine {
     }
     pub(crate) fn current(&self, revision: u64) -> bool {
         self.accepting.load(Ordering::Acquire)
-            && !self.reloading.load(Ordering::Acquire)
+            && !self.reload_fenced()
             && self.revision.load(Ordering::Acquire) == revision
     }
     fn pump(self: &Arc<Self>, clock: RuntimeClock, schedule: bool) -> Result<(), RuntimeError> {
@@ -681,13 +713,15 @@ impl Engine {
                     if schedule {
                         last_second = Some(clock.wall_seconds);
                     }
-                    if !engine.reloading.load(Ordering::Acquire) {
+                    if !engine.reload_fenced() {
                         engine.pump_observed(clock, schedule);
-                    } else {
+                    } else if engine.reload_status.load(Ordering::Acquire) != -3 {
                         // Hardware readiness cannot suspend existing peers or other
                         // radios. Only configuration/scheduled-action publication waits.
                         let _ = engine.run_inner(true, move |host| host.pump(clock));
                     }
+                    #[cfg(test)]
+                    TICKER_TURNS.fetch_add(1, Ordering::AcqRel);
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
             })
@@ -938,6 +972,7 @@ unsafe extern "C" fn rptadv_product_start(
             health: SchedulerHealth::default(),
             accepting: AtomicBool::new(true),
             reloading: AtomicBool::new(false),
+            reload_status: AtomicI32::new(0),
             revision: AtomicU64::new(1),
             lost_digits: AtomicBool::new(false),
             event_busy: AtomicU64::new(0),
@@ -999,25 +1034,51 @@ unsafe extern "C" fn rptadv_product_reload(
     configuration: *const std::ffi::c_char,
     configuration_length: usize,
 ) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| -> Result<i32, RuntimeError> {
-        let document = document(unsafe { input(configuration, configuration_length) }?)?;
-        let (engine, _call) = selected()?;
-        engine.reload_configuration(document)?;
-        Ok(i32::from(engine.reloading.load(Ordering::Acquire)))
-    }))
-    .ok()
-    .and_then(Result::ok)
-    .unwrap_or(-1)
+    let Ok((engine, _call)) = selected() else {
+        return -3;
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let document =
+            match unsafe { input(configuration, configuration_length) }.and_then(document) {
+                Ok(document) => document,
+                Err(error) => {
+                    eprintln!("rpt-advanced: reload preparation rejected: {error:?}");
+                    engine.record_reload_status(-1);
+                    return -1;
+                }
+            };
+        let result = engine.reload_configuration(document);
+        if let Err(error) = result {
+            eprintln!("rpt-advanced: reload failed: {error:?}");
+        }
+        engine.reload_status.load(Ordering::Acquire)
+    })) {
+        Ok(status) => status,
+        Err(_) => {
+            engine.reloading.store(true, Ordering::Release);
+            engine.record_reload_status(-3);
+            -3
+        }
+    }
 }
-/// Poll the existing control owner; a pending call retains both generations.
+/// Poll the existing control owner and retain its terminal publication disposition.
 unsafe extern "C" fn rptadv_product_reload_poll() -> i32 {
-    catch_unwind(AssertUnwindSafe(|| {
-        let (engine, _call) = selected_reload(true)?;
-        engine.poll_reload_configuration()
-    }))
-    .ok()
-    .and_then(Result::ok)
-    .map_or(-1, |ready| i32::from(!ready))
+    let Ok((engine, _call)) = selected_reload(true) else {
+        return -3;
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.poll_reload_configuration())) {
+        Ok(result) => {
+            if let Err(error) = result {
+                eprintln!("rpt-advanced: reload follow-up failed: {error:?}");
+            }
+            engine.reload_status.load(Ordering::Acquire)
+        }
+        Err(_) => {
+            engine.reloading.store(true, Ordering::Release);
+            engine.record_reload_status(-3);
+            -3
+        }
+    }
 }
 /// Gate admission, stop/join owners, and drain accepted tasks before releasing registrations.
 extern "C" fn rptadv_product_stop() -> i32 {
@@ -1194,8 +1255,8 @@ unsafe extern "C" fn rptadv_product_digit(
 
 static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 7,
-    capability: *b"rptadv.prod7\0\0\0\0",
+    abi_version: 8,
+    capability: *b"rptadv.prod8\0\0\0\0",
     start: Some(rptadv_product_start),
     reload: Some(rptadv_product_reload),
     stop: Some(rptadv_product_stop),

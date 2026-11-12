@@ -1112,15 +1112,13 @@ impl HostServicesOwner {
         product: &ffi::rptadv_product_descriptor_v1,
         configuration: &str,
         preparation: Preparation<'_>,
-        apply: impl FnOnce() -> bool,
-        restore: impl FnOnce() -> bool,
+        apply: impl FnOnce() -> rptadv_peer_support::reload::ReloadOutcome,
     ) -> Result<UpdateOutcome, UpdateError> {
         let (accounts, outcome) = unsafe {
             preparation.reload(
                 self.context.echo_accounts(),
                 |visit| visit_accounts(product, configuration, visit),
                 apply,
-                restore,
             )
         }?;
         *self

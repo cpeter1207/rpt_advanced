@@ -2,4 +2,5 @@
 
 pub mod control;
 pub mod echolink;
+pub mod reload;
 pub mod secrets;

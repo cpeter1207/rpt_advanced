@@ -114,6 +114,11 @@ fn activation_reload_poll_stays_admitted_until_commit_or_safe_rollback() {
     );
     assert_eq!(unsafe { api.reload_poll.unwrap()() }, 1);
     ACTIVATION.store(0, Ordering::Release);
+    let engine = ENGINE.lock().unwrap().as_ref().unwrap().clone();
+    let clock = engine.clock();
+    engine
+        .run_inner(true, move |host| host.pump(clock))
+        .unwrap();
     assert_eq!(unsafe { api.reload_poll.unwrap()() }, 0);
     assert_eq!(unsafe { api.stop.unwrap()() }, 0);
     SKIP_TICKER_THREAD.store(true, Ordering::Release);

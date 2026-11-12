@@ -36,6 +36,8 @@ struct Bank {
     pending: Option<Pending>,
     fenced: u32,
     releasing: bool,
+    /// Already-safe pins whose release remains obligated during fatal shutdown.
+    retired_mask: u32,
     settled: bool,
     touched: bool,
     error: Option<ReadingQuality>,
@@ -68,6 +70,7 @@ struct Pending {
 impl Bank {
     fn target_mask(&self) -> u32 {
         self.mask()
+            & !self.retired_mask
             & if self.releasing {
                 !self.fenced
             } else {
@@ -259,6 +262,20 @@ impl RadioSite {
             sealed: false,
         });
         true
+    }
+    /// Supersede an indeterminate candidate without restoring live demand.
+    pub fn begin_shutdown(&mut self) {
+        self.replacement = None;
+        for bank in self.banks.values_mut() {
+            if bank.releasing {
+                // Keep their metadata and pending release obligation, but never
+                // reclaim already-safe pins during the remaining safe-write phase.
+                bank.retired_mask |= bank.fenced;
+                bank.releasing = false;
+            }
+            // Preserve accepted commands until their acknowledgment is observed.
+        }
+        assert!(self.begin(Self::default(), &BTreeSet::new()));
     }
     /// Inspect acknowledgments without waiting on the hardware owner.
     pub fn barrier(&self) -> Option<Result<(), ReadingQuality>> {

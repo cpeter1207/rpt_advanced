@@ -30,6 +30,7 @@ fn engine(
         health: SchedulerHealth::default(),
         accepting: AtomicBool::new(true),
         reloading: AtomicBool::new(false),
+        reload_status: AtomicI32::new(0),
         revision: AtomicU64::new(1),
         lost_digits: AtomicBool::new(false),
         event_busy: AtomicU64::new(0),
