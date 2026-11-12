@@ -43,6 +43,7 @@ struct Provider {
     service_events: VecDeque<Event>,
     media_epoch: u64,
     source_cursor: u64,
+    audio_birth_ns: Option<u64>,
     legacy_reads: usize,
     legacy_sends: usize,
     retirements: usize,
@@ -229,7 +230,7 @@ unsafe extern "C" fn timed_poll(
                 record.event_kind = 1;
                 record.event_length = 4;
                 record.flags = 1;
-                record.born_ns = 700;
+                record.born_ns = state.audio_birth_ns.unwrap_or(700);
                 state.source_cursor += 4;
                 state.events.pop_front();
             }
@@ -907,20 +908,29 @@ fn source_ordering_and_sink_contract_failures_retire_the_exact_call() {
             }
             _ => Event::Audio,
         };
-        PROVIDER.with_borrow_mut(|state| state.events = [event, Event::Digit(b'7')].into());
+        PROVIDER.with_borrow_mut(|state| {
+            state.events = [event, Event::Digit(b'7')].into();
+            state.audio_birth_ns = (defect == 6).then_some(10_500);
+        });
         let now = if defect == 6 {
-            // A refused audio suffix keeps its original birth. A regressed host
-            // reference clock cannot make it valid in the future.
-            read(&handle, Some(&mut sink), 11_000);
-            699
+            // Keep both references valid for the provider fixture so only the
+            // host rejects the retained suffix whose original birth is future.
+            assert_eq!(read(&handle, Some(&mut sink), 11_000).progress, 2);
+            10_499
         } else {
             11_000
         };
+        let services = PROVIDER.with_borrow(|state| state.services);
         let (status, output) = read_callbacks(&handle, 0, Some(&callbacks(&mut sink, now)));
         assert_eq!((status, output.state), (-1, 3), "source defect {defect}");
-        let polls = PROVIDER.with_borrow(|state| state.polls);
+        if defect == 6 {
+            PROVIDER.with_borrow(|state| assert_eq!(state.services, services + 1));
+            assert_eq!(sink.audio_offers.len(), 1);
+            assert_eq!(sink.audio_offers[0].3, 10_500);
+        }
+        let calls = PROVIDER.with_borrow(|state| (state.polls, state.services));
         assert_eq!(read(&handle, Some(&mut sink), 12_000).state, 3);
-        PROVIDER.with_borrow(|state| assert_eq!(state.polls, polls));
+        PROVIDER.with_borrow(|state| assert_eq!((state.polls, state.services), calls));
     }
 }
 

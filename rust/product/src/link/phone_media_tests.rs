@@ -102,6 +102,32 @@ fn prepared_phone_media_bounds_are_earliest_partition_times_and_never_cross_live
 }
 
 #[test]
+fn prepared_phone_media_interpolation_never_combines_clock_epochs() {
+    let (_ingress, _input, shared) = prepare(reply(), 8000, None).unwrap();
+    assert!(shared.record(0, 160, birth(20)));
+    assert!(shared.record(
+        160,
+        320,
+        SourceBirth {
+            host_clock_epoch: 8,
+            born_ns: 10,
+        },
+    ));
+    for (frame, fraction, expected) in [
+        (159, 0, Some((7, 20))),
+        (160, 0, Some((8, 10))),
+        (159, 1, None),
+    ] {
+        assert_eq!(
+            shared
+                .locate(position(&shared, frame, fraction))
+                .map(|bound| (bound.host_clock_epoch, bound.not_after_ns)),
+            expected,
+        );
+    }
+}
+
+#[test]
 fn prepared_phone_media_sidecar_refuses_before_pcm_and_credit_is_actual_ring_acceptance() {
     let (mut ingress, input, shared) = prepare(reply(), 8000, None).unwrap();
     adopt(&mut ingress, 0, reference());
