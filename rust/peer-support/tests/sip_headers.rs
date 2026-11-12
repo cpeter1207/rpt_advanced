@@ -207,3 +207,35 @@ fn malformed_list_syntax_is_rejected_without_splitting_opaque_fields() {
         );
     }
 }
+
+#[test]
+fn call_id_lists_do_not_apply_quoted_string_or_angle_grouping() {
+    let mut parser = Parser::default();
+    let message = parser
+        .parse(
+            b"SIP/2.0 200 OK\r\nIn-Reply-To: a\"(><@b,c@d\r\n\r\n",
+            Transport::Udp,
+        )
+        .unwrap();
+    let values: Vec<_> = message
+        .unique(b"in-reply-to")
+        .unwrap()
+        .unwrap()
+        .values(&mut [0; MAX_FIELD])
+        .map(|v| v.map(<[u8]>::to_vec))
+        .collect();
+    assert_eq!(values, [Ok(b"a\"(><@b".to_vec()), Ok(b"c@d".to_vec())]);
+}
+
+#[test]
+fn generic_parameter_hosts_and_quoted_utf8_are_validated_in_their_grammar() {
+    for value in [
+        b"<sip:a@b>;p=[bad]".as_slice(),
+        b"<sip:a@b>;p=foo:bar",
+        b"<sip:a@b>;p=::1",
+        b"\"\xff\"<sip:a@b>",
+    ] {
+        assert!(NameAddr::parse(value).is_err());
+    }
+    assert!(NameAddr::parse(b"<sip:a@b>;p=[2001:db8::1];q=\"utf8:\xc3\xa9\"").is_ok());
+}

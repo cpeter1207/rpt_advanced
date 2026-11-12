@@ -1050,8 +1050,12 @@ calls still require their own explicit admission/storage reservations.
 The selected limits are 32 KiB wire, 16 KiB start-line/headers, 16 KiB body,
 128 logical fields and 4 KiB unfolded field. The parser/framing index and caller
 unfolding scratch together target at most 8 KiB, excluding admitted wire bytes;
-allocation/layout tests must prove that target. These are implementation bounds,
-not universal SIP limits. RFC 3261 framing/grammar, RFC 5954 IPv6 and RFC 8217
+allocation/layout tests prove the explicit workspace target on native amd64:
+8-byte entries, 1096-byte parser, 1144-byte TCP decoder, 4096-byte scratch,
+48-byte message view and 96-byte URI view (5384 bytes together on the TCP path,
+excluding wire storage and compiler call-stack frames). Instrumented allocation
+checks observe zero allocations across valid and mutated wire inputs. These are
+implementation bounds, not universal SIP limits or a process-RSS measurement. RFC 3261 framing/grammar, RFC 5954 IPv6 and RFC 8217
 name-address rules apply; RFC 4475/5118 provide independent torture inputs.
 Valid SIPS syntax remains distinct from unsupported secure routing, which must
 fail closed. URI headers never supply arbitrary request headers or authority.

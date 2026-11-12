@@ -5,7 +5,9 @@
 //! wire buffer; retained transactions must acquire their own storage reservation.
 
 mod headers;
+mod uri;
 pub use headers::{Header, NameAddr, Values};
+pub use uri::{Host, RouteError, Scheme, SipUri};
 
 /// Maximum admitted wire-buffer size, independent of parser workspace.
 pub const MAX_MESSAGE: usize = 32_768;
@@ -44,6 +46,8 @@ pub enum ParseError {
     InvalidLength,
     /// Stream framing requires a Content-Length field.
     MissingLength,
+    /// URI belongs to a scheme other than SIP or SIPS.
+    UnsupportedScheme,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -488,3 +492,6 @@ impl<'a> TcpDecoder<'a> {
         self.parser.length = None;
     }
 }
+
+#[cfg(test)]
+mod tests;

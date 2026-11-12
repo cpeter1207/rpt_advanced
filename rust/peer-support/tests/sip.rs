@@ -210,3 +210,59 @@ fn exact_wire_header_and_unfolded_field_boundaries() {
     assert!(std::mem::size_of::<TcpDecoder>() + 4096 <= 8192);
     assert!(std::mem::size_of::<Parser>() + 4096 <= 8192);
 }
+
+#[test]
+fn framing_ignores_http_transfer_coding_and_never_decodes_chunked_bodies() {
+    let wire = b"SIP/2.0 200 OK\r\nTransfer-Encoding: chunked\r\nl:4\r\n\r\n0\r\n\r\n";
+    let mut parser = Parser::default();
+    let message = parser.parse(wire, Transport::Tcp).unwrap();
+    assert_eq!(message.body(), b"0\r\n\r");
+    assert_eq!(&wire[message.consumed()..], b"\n");
+    assert_eq!(
+        parser
+            .parse(
+                b"SIP/2.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                Transport::Tcp
+            )
+            .err(),
+        Some(ParseError::MissingLength)
+    );
+}
+
+#[test]
+fn folded_lengths_require_one_decimal_and_stream_errors_are_sticky() {
+    let mut parser = Parser::default();
+    assert_eq!(
+        parser
+            .parse(
+                b"SIP/2.0 200 OK\r\nl:\r\n 0004 \t\r\n\r\nbody",
+                Transport::Tcp
+            )
+            .unwrap()
+            .body(),
+        b"body"
+    );
+    for wire in [
+        b"SIP/2.0 200 OK\r\nl:4\r\n 0\r\n\r\n".as_slice(),
+        b"SIP/2.0 200 OK\r\nX:y\rX:z",
+        b"SIP/2.0 200 \0\r\n\r\n",
+        b"SIP/2.0 2x0 OK\r\n\r\n",
+        b" SIP/2.0\r\n\r\n",
+        b"INV/ITE sip:a@b SIP/2.0\r\n\r\n",
+        b"INVITE sip:a\tb SIP/2.0\r\n\r\n",
+        b"INVITE sip:a@b SIP/2.0 \r\n\r\n",
+        b"SIP/2.0 200 OK\r\n: value\r\n\r\n",
+    ] {
+        assert!(parser.parse(wire, Transport::Udp).is_err());
+    }
+    for bad in [b"\n".as_slice(), b"\rx", b"SIP/2.0 200 OK\r\n\r\n"] {
+        let mut storage = [0; MAX_MESSAGE];
+        let mut decoder = TcpDecoder::new(&mut storage);
+        let first = decoder.push(bad).unwrap_err();
+        assert_eq!(decoder.push(b"next"), Err(first));
+        assert!(decoder.message().is_none());
+    }
+    let mut storage = [0; MAX_MESSAGE];
+    let mut decoder = TcpDecoder::new(&mut storage);
+    assert_eq!(decoder.push(&[b'x'; 16_385]), Err(ParseError::Limit));
+}

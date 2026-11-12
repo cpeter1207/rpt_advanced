@@ -92,6 +92,7 @@ impl Header<'_> {
             remaining: self.unfold(scratch),
             list,
             comments,
+            words: self.is(b"In-Reply-To"),
         }
     }
 }
@@ -169,6 +170,7 @@ pub struct Values<'a> {
     remaining: &'a [u8],
     list: bool,
     comments: bool,
+    words: bool,
 }
 
 impl<'a> Iterator for Values<'a> {
@@ -183,7 +185,12 @@ impl<'a> Iterator for Values<'a> {
         if !self.list && !self.comments {
             return Some(Ok(input));
         }
-        match value_end(input, self.list, self.comments) {
+        let end = if self.words {
+            Ok(input.iter().position(|b| *b == b',').unwrap_or(input.len()))
+        } else {
+            value_end(input, self.list, self.comments)
+        };
+        match end {
             Ok(end) => {
                 let value = trim(&input[..end]);
                 if value.is_empty() {
@@ -329,7 +336,10 @@ fn quoted_end(value: &[u8]) -> Result<usize, ParseError> {
         } else {
             match byte {
                 b'\\' => escaped = true,
-                b'"' => return Ok(at + 1),
+                b'"' => {
+                    std::str::from_utf8(&value[..at + 1]).map_err(|_| ParseError::Syntax)?;
+                    return Ok(at + 1);
+                }
                 _ if byte < 0x20 && byte != b'\t' || byte == 0x7f => {
                     return Err(ParseError::Syntax);
                 }
@@ -363,6 +373,9 @@ fn validate_parameters(mut value: &[u8]) -> Result<(), ParseError> {
             };
             if count == 0 {
                 return Err(ParseError::Syntax);
+            }
+            if !value.starts_with(b"\"") && !value[..count].iter().copied().all(token) {
+                super::uri::host(&value[..count])?;
             }
             value = trim(&value[count..]);
         }
