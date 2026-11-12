@@ -4,6 +4,8 @@
 #[path = "host_services/echo_tests.rs"]
 pub(crate) mod echo_tests;
 
+mod iax_phone;
+
 use crate::{
     abi, directory,
     iax::{IaxClient, IaxError, IaxEvent, IaxPeer},
@@ -456,10 +458,22 @@ enum PeerRegistration {
     Iax(*mut c_void),
     Echo(Registration),
 }
-struct IaxHandle(IaxPeer, Vec<f32>, String, String);
+struct IaxHandle {
+    peer: IaxPeer,
+    samples: Vec<f32>,
+    local: String,
+    remote: String,
+    phone: Option<Box<iax_phone::Phone>>,
+}
 impl IaxHandle {
     fn new(peer: IaxPeer, local: &str, remote: &str) -> Self {
-        Self(peer, vec![0.0; 4096], local.into(), remote.into())
+        Self {
+            peer,
+            samples: vec![0.0; 4096],
+            local: local.into(),
+            remote: remote.into(),
+            phone: None,
+        }
     }
 }
 
@@ -501,15 +515,26 @@ unsafe extern "C" fn peer_info(
         }
         let (protocol, capabilities, account_generation, qso_generation, remote, local, callsign) =
             match peer {
-                HostPeer::Iax(peer) => (
-                    1,
-                    if context.ingress.is_some() { 15 } else { 12 },
-                    0,
-                    0,
-                    peer.3.as_str(),
-                    peer.2.as_str(),
-                    "",
-                ),
+                HostPeer::Iax(peer) => match &peer.phone {
+                    Some(phone) => (
+                        3,
+                        51,
+                        phone.receipt.account_generation,
+                        phone.receipt.call_generation,
+                        peer.remote.as_str(),
+                        peer.local.as_str(),
+                        "",
+                    ),
+                    None => (
+                        1,
+                        if context.ingress.is_some() { 15 } else { 12 },
+                        0,
+                        0,
+                        peer.remote.as_str(),
+                        peer.local.as_str(),
+                        "",
+                    ),
+                },
                 HostPeer::Echo(peer) => {
                     let identity = peer.identity();
                     (
@@ -542,7 +567,13 @@ unsafe extern "C" fn peer_info(
             remote: bytes(remote),
             callsign: bytes(callsign),
             local: bytes(local),
-            provider_account: bytes(""),
+            provider_account: bytes(match peer {
+                HostPeer::Iax(peer) => peer
+                    .phone
+                    .as_ref()
+                    .map_or("", |phone| phone.account.as_str()),
+                HostPeer::Echo(_) => "",
+            }),
         };
         unsafe {
             ptr::copy_nonoverlapping(
@@ -592,7 +623,13 @@ unsafe extern "C" fn peer_step_attach(
             let Some(peer) = (unsafe { iax_peer_ref(peer) }) else {
                 return -1;
             };
-            peer.0.raw_handle()
+            // This inactive slice qualifies only owned metadata/source callbacks.
+            // Ordinary jitter setup and alpha12 ACK polling do not establish the
+            // required phone profile. Do not attach until both are qualified.
+            if peer.phone.is_some() {
+                return -1;
+            }
+            peer.peer.raw_handle()
         };
         if unsafe {
             ingress
@@ -698,7 +735,7 @@ unsafe extern "C" fn peer_observe(
         let mut raw: abi::rptadv_iax2_peer_observation_v1 = unsafe { std::mem::zeroed() };
         raw.struct_size = size_of::<abi::rptadv_iax2_peer_observation_v1>() as u32;
         raw.abi_version = 1;
-        if unsafe { executor.observe(peer.0.raw_handle(), ptr::from_mut(&mut raw).cast()) } != 0
+        if unsafe { executor.observe(peer.peer.raw_handle(), ptr::from_mut(&mut raw).cast()) } != 0
             || raw.struct_size as usize != size_of::<abi::rptadv_iax2_peer_observation_v1>()
             || raw.abi_version != 1
         {
@@ -1025,7 +1062,7 @@ fn parse_destination(
 unsafe extern "C" fn peer_rate(_: *mut c_void, peer: *const c_void) -> u32 {
     match unsafe { peer.cast::<PeerHandle>().as_ref() } {
         Some(HostPeer::Echo(_)) => 8000,
-        Some(HostPeer::Iax(peer)) => peer.0.sample_rate_hz(),
+        Some(HostPeer::Iax(peer)) => peer.peer.sample_rate_hz(),
         None => 0,
     }
 }
@@ -1047,21 +1084,28 @@ unsafe extern "C" fn peer_read(
         let (Some(peer), Some(event)) = (unsafe { iax_peer_mut(peer) }, event) else {
             return -1;
         };
+        if peer.phone.is_some() {
+            return -1;
+        }
         // Full legal datagram text remains deliverable; local synthesis has its own limit.
         let mut text = [0_u8; 65507];
-        let mut input = peer.0.poll(&mut peer.1, &mut text);
+        let mut input = peer.peer.poll(&mut peer.samples, &mut text);
         if let Ok(IaxEvent::NeedCapacity(required)) = input {
-            if peer.1.try_reserve_exact(required - peer.1.len()).is_err() {
+            if peer
+                .samples
+                .try_reserve_exact(required - peer.samples.len())
+                .is_err()
+            {
                 return -1;
             }
-            peer.1.resize(required, 0.0);
+            peer.samples.resize(required, 0.0);
             // Native decode/PLC was retained, not consumed; retry once on this owner.
-            input = peer.0.poll(&mut peer.1, &mut text);
+            input = peer.peer.poll(&mut peer.samples, &mut text);
         }
         match input {
             Ok(IaxEvent::None) => 0,
             Ok(IaxEvent::Audio(length)) => unsafe {
-                event(event_context, 3, peer.1.as_ptr().cast(), length);
+                event(event_context, 3, peer.samples.as_ptr().cast(), length);
                 0
             },
             Ok(IaxEvent::Gap(length)) => unsafe {
@@ -1101,7 +1145,10 @@ unsafe extern "C" fn peer_send_text(
         }) else {
             return -1;
         };
-        if peer.0.send_text(text.as_bytes()).is_ok() {
+        if peer.phone.is_some() {
+            return -1;
+        }
+        if peer.peer.send_text(text.as_bytes()).is_ok() {
             0
         } else {
             -1
@@ -1111,7 +1158,7 @@ unsafe extern "C" fn peer_send_text(
 
 unsafe extern "C" fn peer_send_digit(_: *mut c_void, peer: *mut c_void, digit: u8) -> i32 {
     unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| {
-        if peer.0.send_digit(digit).is_ok() {
+        if peer.peer.send_digit(digit).is_ok() {
             0
         } else {
             -1
@@ -1163,12 +1210,12 @@ unsafe extern "C" fn peer_prepare_audio(
                 unsafe { peer.prepare_audio(pcm, output, flush, result.cast()) }
                     .map_or(-1, |()| unsafe { (*result).status as i32 })
             }
-            Some(HostPeer::Iax(_)) => {
-                unsafe { iax_peer_mut(peer) }
-                    .unwrap()
-                    .0
-                    .prepare_audio(pcm, output, flush, unsafe { &mut *result })
-            }
+            Some(HostPeer::Iax(_)) => unsafe { iax_peer_mut(peer) }.unwrap().peer.prepare_audio(
+                pcm,
+                output,
+                flush,
+                unsafe { &mut *result },
+            ),
             None => -1,
         }
     })
@@ -1178,7 +1225,7 @@ unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i3
         if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
             return unsafe { peer.reset_encoder() }.map_or(-1, |()| 0);
         }
-        unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| peer.0.reset_encoder())
+        unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| peer.peer.reset_encoder())
     })
 }
 unsafe extern "C" fn peer_send_prepared(
@@ -1202,9 +1249,10 @@ unsafe extern "C" fn peer_send_prepared(
             Some(HostPeer::Echo(peer)) => {
                 unsafe { peer.send_prepared(bytes, frames, timestamp) }.map_err(|_| ())
             }
+            Some(HostPeer::Iax(peer)) if peer.phone.is_some() => return -1,
             Some(HostPeer::Iax(_)) => unsafe { iax_peer_mut(peer) }
                 .unwrap()
-                .0
+                .peer
                 .send_prepared(bytes, frames, timestamp)
                 .map_err(|_| ()),
             None => return -1,
@@ -1222,7 +1270,7 @@ unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
             .elapsed_ms()
             .map_or(0, |value| value.min(u64::from(u32::MAX)) as u32);
     }
-    unsafe { iax_peer_ref(peer) }.map_or(0, |peer| peer.0.elapsed_ms())
+    unsafe { iax_peer_ref(peer) }.map_or(0, |peer| peer.peer.elapsed_ms())
 }
 unsafe extern "C" fn peer_step_wake(context: *mut c_void, registration: *mut c_void) {
     match unsafe { registration.cast::<PeerRegistration>().as_ref() } {
@@ -1248,7 +1296,7 @@ unsafe extern "C" fn peer_set_deadline(context: *mut c_void, peer: *mut c_void, 
         return -1;
     };
     context.ingress.as_ref().map_or(-1, |ingress| unsafe {
-        ingress.executor.set_deadline(peer.0.raw_handle(), after)
+        ingress.executor.set_deadline(peer.peer.raw_handle(), after)
     })
 }
 
@@ -1268,6 +1316,21 @@ unsafe extern "C" fn peer_read_source(
             || unsafe { ptr::addr_of!((*output).abi_version).read() } != 1
         {
             return -1;
+        }
+        if let Some(HostPeer::Iax(peer)) = unsafe { peer.cast::<PeerHandle>().as_mut() } {
+            let Some(phone) = &mut peer.phone else {
+                return -1;
+            };
+            return unsafe {
+                phone.read(
+                    &mut peer.peer,
+                    &mut peer.samples,
+                    completion,
+                    sink,
+                    &mut *output,
+                )
+            }
+            .map_or(-1, |()| 0);
         }
         let Some(HostPeer::Echo(peer)) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
             return -1;
@@ -3129,3 +3192,7 @@ mod tests {
         owner.destroy_peer(handle);
     }
 }
+
+#[cfg(test)]
+#[path = "host_services/iax_phone_tests.rs"]
+mod iax_phone_tests;

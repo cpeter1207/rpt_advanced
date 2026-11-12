@@ -825,3 +825,45 @@ adoption permit. Production attachment still needs the actual two-sided target
 grant, limits, isolation/bypass authority, lifecycle-spanning queued-candidate
 fence, typed publication and RF qualification. No production caller, automatic
 preparation, attachment success or RF route is enabled here.
+
+## Inactive owned private IAX source boundary — 2026-11-12
+
+The standalone host can consume an already uniquely owned ProviderCall and its
+copied receipt under the current account/listener admission fence. It checks
+the committed account generation, exact listener/provider endpoints, nonzero
+provider call generation, call numbers and the current 8 kHz G.711 profile.
+Failed identity allocation or validation destroys that owned peer exactly once.
+No raw incoming callback adoption, account activation, registration or dial
+execution is added.
+
+The standalone host artifact owns one checked call sequence, shared by every
+native private-call creator in that host. Replacing HostServicesOwner or a
+listener cannot reset it. The sequence never wraps; its canonical nonzero
+32-hex representation is an opaque identity, not an authentication secret.
+There is no allocator static in peer-support or a provider/product DSO.
+Asterisk native private-call construction is not yet implemented and must retain
+its host-owned sequence across reload while identities survive.
+
+Actual metadata/source callbacks distinguish Phone from numeric ASL without a
+caller-number alias. A private source retains one 160-frame PCM prefix or one
+control event, with exact accepted offset, provider media epoch and original
+host-clock birth. NativeEvents is the sole digit authority. Refusal retains
+that event before subsequent events. A reset acknowledges the provider target
+only after actual product retirement completes; a digit accompanying reset is
+retained until then. Null-sink queries consume nothing. A changed host clock
+fails closed rather than restamping a retained source.
+
+Alpha12 does not distinguish codec concealment from all other absent-birth PCM.
+Such PCM is discarded as an exact counted interval of unavailable usable source
+audio. The gap contract is unresolved source loss, not a claim about network
+packet loss. Ambiguous PCM reaches neither analysis nor RF and is never assigned
+a fabricated birth or concealment classification. Private legacy reads, ASL
+text and untimed prepared sends fail closed. Ordinary numeric peers are unchanged.
+
+Private executor attachment remains explicitly unavailable. The existing
+ordinary jitter setup does not qualify the phone profile, and alpha12 cannot
+guarantee protocol ACK/expiry progress while an application event is refused.
+Zero-capacity polling is not a service-only operation. A separate bounded
+provider progress prerequisite and timed egress/source authorization composition
+must be qualified before production admission. This slice changes no host ABI,
+SONAME, scheduler, thread count or live account behavior.

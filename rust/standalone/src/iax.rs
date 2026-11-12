@@ -6,6 +6,7 @@ pub mod accounts;
 pub mod configuration;
 pub(crate) mod executor;
 pub(crate) mod listeners;
+pub(crate) mod timed;
 
 use crate::{abi, secrets::SecretsFile};
 use std::{
@@ -659,6 +660,15 @@ pub(crate) mod tests {
         }
     }
 
+    /// External table fixture for actual host ownership/source callbacks.
+    pub(crate) fn host_fixture_peer(api: ClientDescriptor) -> IaxPeer {
+        IaxPeer {
+            _owner: fixture_client(api),
+            api,
+            handle: NonNull::dangling(),
+        }
+    }
+
     thread_local! {
         static EVENT: Cell<u32> = const { Cell::new(0) };
         static EVENT_LENGTH: Cell<usize> = const { Cell::new(1) };
@@ -792,7 +802,7 @@ pub(crate) mod tests {
     }
     unsafe extern "C" fn server_destroy(_: *mut c_void) {}
 
-    pub(super) fn descriptor() -> ClientDescriptor {
+    pub(crate) fn descriptor() -> ClientDescriptor {
         ClientDescriptor {
             struct_size: size_of::<ClientDescriptor>() as u32,
             abi_version: ABI_VERSION,
