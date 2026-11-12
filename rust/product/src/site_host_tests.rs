@@ -519,10 +519,22 @@ fn site_host_basis_fences_only_removed_disabled_or_replaced_radios() {
         assert_eq!(basis.replaced.contains("1000"), replaced);
         assert!(basis.known.is_empty());
     }
-    assert_eq!(host.commit_sites(), Ok(()));
+    Host::commit_sites(
+        &mut host.site_acquisition,
+        &mut host.site_radio,
+        &mut host.site_transition,
+        &mut host.site_retired,
+        &host.phone_calls,
+    );
     let _ = host.site_shutdown(2);
     host.advance_sites(clock());
-    assert_eq!(host.commit_sites(), Ok(()));
+    Host::commit_sites(
+        &mut host.site_acquisition,
+        &mut host.site_radio,
+        &mut host.site_transition,
+        &mut host.site_retired,
+        &host.phone_calls,
+    );
     for now in 3..12 {
         if host.stop(now) {
             break;

@@ -349,3 +349,19 @@ No second runtime or persistent worker pool is added.
 This phase does not complete the outer product/provider transaction. Site
 ownership commitment and post-publication operational error reporting still
 require explicit integration before phone-account activation.
+
+### Sealed site handoff
+
+The site barrier seals acknowledged acquisition preparation and radio pin release
+before core reload preparation. Acquisition commit storage is reserved at that
+barrier. Existing replacement state retains the seal until abort or the shared
+prepublication hook, after every device finalization succeeds. That hook retires
+phone calls first, then adopts site bindings, and only then permits node
+publication, without a fallible site readiness check.
+
+A sealed radio barrier records completed safe release, not continuing hardware
+health. Subsequent snapshots still report unavailable or stale hardware, but
+cannot rebind released pins or revoke that completed handoff. Unchanged banks
+continue normal observations and service. Rejected core preparation aborts the
+sealed candidate and restores old demand using existing owners. This does not
+resolve outer post-publication notification, cleanup, or host outcome reporting.

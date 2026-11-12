@@ -671,9 +671,16 @@ impl Host {
     }
     fn advance_reload(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
         let phone_calls = &mut self.phone_calls;
+        let acquisition = &mut self.site_acquisition;
+        let radio = &mut self.site_radio;
+        let transition = &mut self.site_transition;
+        let retired = &mut self.site_retired;
         let ready = self
             .runtime
-            .poll_reload_with_commit(clock, |runtime| Self::retire_phones(runtime, phone_calls))
+            .poll_reload_with_commit(clock, |runtime| {
+                Self::retire_phones(runtime, phone_calls);
+                Self::commit_sites(acquisition, radio, transition, retired, phone_calls);
+            })
             .inspect_err(|_| self.reload_text = None)?;
         if !ready {
             return Ok(());
@@ -687,7 +694,6 @@ impl Host {
             self.remote_pending.clear();
             self.text.stop();
             self.text = text;
-            self.commit_sites()?;
         }
         self.activated_revision = self.runtime.revision();
         self.activate_dispatchers(clock.now_ms);

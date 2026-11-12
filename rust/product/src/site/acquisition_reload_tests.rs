@@ -311,3 +311,57 @@ fn site_acquisition_aborted_metadata_change_retains_old_retirement_level() {
     close(&mut service, &mut host);
     assert_eq!(PROBE.lock().unwrap().written.last(), Some(&0.0));
 }
+
+#[test]
+fn site_acquisition_sealed_handoff_keeps_workers_paused_until_commit_or_abort() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    for commit in [false, true] {
+        *PROBE.lock().unwrap() = Probe::default();
+        let epoch = Instant::now();
+        let mut host = host("1000");
+        let mut service = Acquisition::prepare(&definitions(RELAY), backends(), epoch).unwrap();
+        service.output("1000", "relay", 1.0).unwrap();
+        until(|| {
+            service.poll(0, |_| host.control().work());
+            service
+                .output_status("1000", "relay")
+                .unwrap()
+                .submitted
+                .is_some()
+        });
+        assert!(!service.seal());
+        assert!(begin(&mut service, &BTreeMap::new(), epoch));
+        until(|| service.barrier().is_some());
+        assert!(!service.seal());
+        assert!(service.stage());
+        until(|| service.barrier().is_some());
+        assert!(service.seal());
+        assert!(!service.seal());
+        let written = PROBE.lock().unwrap().written.clone();
+        PROBE.lock().unwrap().failure = true;
+        for now in 1..10 {
+            service.poll(now, |_| host.control().work());
+            assert_eq!(service.barrier(), Some(Ok(())));
+            assert!(!service.resume());
+        }
+        assert_eq!(PROBE.lock().unwrap().written, written);
+        PROBE.lock().unwrap().failure = false;
+        if commit {
+            let retired = service.commit_prepared();
+            assert_eq!(retired.len(), 1);
+            for mut worker in retired {
+                assert!(worker.finish());
+            }
+            assert!(service.output_status("1000", "relay").is_none());
+        } else {
+            drop(service.abort());
+            until(|| service.resume());
+            until(|| {
+                service.poll(10, |_| host.control().work());
+                PROBE.lock().unwrap().written.last() == Some(&1.0)
+            });
+            assert_eq!(PROBE.lock().unwrap().opened.len(), 1);
+        }
+        close(&mut service, &mut host);
+    }
+}

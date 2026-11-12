@@ -34,6 +34,7 @@ pub struct Acquisition {
     devices: Vec<Device>,
     replacement: Option<Replacement>,
     auto_resume: bool,
+    commit: Option<(Vec<Device>, Vec<DeviceWorker>)>,
 }
 type DeviceKey = (SiteBackend, String);
 /// Inert candidate whose new worker allocation/failed cleanup occurs outside control.
@@ -375,19 +376,41 @@ impl Acquisition {
         replacement.prepared = true;
         true
     }
-    /// Publish bindings after successful runtime publication; return safely retired owners.
-    pub fn commit(&mut self) -> Result<Vec<DeviceWorker>, ReadingQuality> {
-        if self.barrier() != Some(Ok(()))
-            || !self
-                .replacement
-                .as_ref()
-                .is_some_and(|replacement| replacement.prepared)
-        {
-            return Err(ReadingQuality::Fault);
+    /// Seal acknowledged preparation and reserve all commit storage before publication.
+    pub fn seal(&mut self) -> bool {
+        if self.barrier() != Some(Ok(())) {
+            return false;
         }
-        let mut replacement = self.replacement.take().expect("validated replacement");
+        let Some(next) = self.replacement.as_mut() else {
+            return false;
+        };
+        if !next.prepared || self.commit.is_some() {
+            return false;
+        }
         let mut retained = Vec::new();
         let mut retired = Vec::new();
+        if retained
+            .try_reserve(self.devices.len() + next.fresh.len())
+            .is_err()
+            || retired.try_reserve(self.devices.len()).is_err()
+        {
+            return false;
+        }
+        self.commit = Some((retained, retired));
+        true
+    }
+    /// Test convenience for a single synchronous control turn.
+    #[cfg(test)]
+    pub fn commit(&mut self) -> Result<Vec<DeviceWorker>, ReadingQuality> {
+        if !self.seal() {
+            return Err(ReadingQuality::Fault);
+        }
+        Ok(self.commit_prepared())
+    }
+    /// Consume sealed bindings without allocation or another fallible readiness check.
+    pub fn commit_prepared(&mut self) -> Vec<DeviceWorker> {
+        let mut replacement = self.replacement.take().expect("sealed replacement");
+        let (mut retained, mut retired) = self.commit.take().expect("sealed storage");
         for mut device in self.devices.drain(..) {
             if let Some(mut bindings) = replacement.bindings.remove(&device.key) {
                 transfer(&device.bindings, &mut bindings);
@@ -402,10 +425,11 @@ impl Acquisition {
         }
         retained.extend(replacement.fresh.into_values());
         self.devices = retained;
-        Ok(retired)
+        retired
     }
     /// Cancel a candidate; return unused new owners for disposal outside control.
     pub fn abort(&mut self) -> Vec<DeviceWorker> {
+        self.commit = None;
         let retired = self
             .replacement
             .take()

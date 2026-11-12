@@ -275,3 +275,40 @@ fn site_radio_reassigned_node_or_pin_does_not_inherit_another_outputs_state() {
         );
     }
 }
+
+#[test]
+fn site_radio_sealed_release_survives_poll_fault_without_hiding_health() {
+    for commit in [false, true] {
+        let mut site = RadioSite::prepare(&settings()).unwrap();
+        let mut owner = Owner::new();
+        owner.settle(&mut site, 0);
+        assert!(!site.seal());
+        assert!(site.begin(RadioSite::default(), &Default::default()));
+        owner.settle(&mut site, 10);
+        assert!(!site.seal());
+        assert!(site.stage());
+        owner.settle(&mut site, 12);
+        assert_eq!(owner.state.claimed_mask, 0);
+        assert!(site.seal());
+        assert!(!site.seal());
+        site.poll(6000, |_, _, operation| {
+            assert!(matches!(operation, Operation::Snapshot));
+            Err(-7)
+        });
+        // A completed release is a fact, not a claim of current hardware health.
+        assert_eq!(site.barrier(), Some(Ok(())));
+        assert_eq!(
+            site.output_status("2000", "relay").unwrap().quality,
+            ReadingQuality::Unavailable
+        );
+        if commit {
+            site.commit_prepared();
+            assert!(site.output_status("2000", "relay").is_none());
+        } else {
+            site.abort();
+            owner.settle(&mut site, 6001);
+            assert_eq!(owner.state.claimed_mask, 0x40);
+            assert_eq!(site.output_status("2000", "relay").unwrap().requested, 1.0);
+        }
+    }
+}

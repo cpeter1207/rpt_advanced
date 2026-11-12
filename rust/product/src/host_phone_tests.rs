@@ -941,8 +941,30 @@ fn phone_reload_and_unload_retire_the_actual_call_generation() {
     host.incoming_peer(phone, "127.0.0.1", clock()).unwrap();
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
-    host.reload(document("usb", "ctcss_encode=no\n"), clock())
-        .unwrap();
+    let next = document("usb", "ctcss_encode=no\n");
+    let mut acquisition = Some(
+        crate::site::acquisition::Acquisition::prepare_reload(
+            &Default::default(),
+            Arc::new(crate::site::backends::SiteBackends::load(&next).unwrap()),
+            host.epoch,
+            host.site_acquisition.keys(),
+        )
+        .unwrap(),
+    );
+    let mut radio = Some(crate::site::radio::RadioSite::default());
+    host.begin_site_reload(
+        host.runtime.revision(),
+        &mut acquisition,
+        &mut radio,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(host.site_barrier(clock().now_ms), Ok(true));
+    // The ownership-boundary assertion must observe retirement, not just its
+    // eventual completion after new site bindings have been installed.
+    assert!(!host.phone_calls.is_empty());
+    host.reload(next, clock()).unwrap();
+    assert!(host.site_transition.is_none());
     pump_until(&mut host, |host| host.phone_source(call).is_none());
     assert!(reply.ended());
     let (phone, _) = crate::link::session::tests::phone_peer();

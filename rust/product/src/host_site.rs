@@ -318,6 +318,13 @@ impl Host {
     /// Advance safe/release acknowledgments, never wait on control.
     pub(crate) fn site_barrier(&mut self, now_ms: u64) -> Result<bool, RuntimeError> {
         self.poll_sites(now_ms);
+        if self
+            .site_transition
+            .as_ref()
+            .is_some_and(|change| change.complete)
+        {
+            return Ok(true);
+        }
         if !self.site_ready()? {
             return Ok(false);
         }
@@ -333,7 +340,20 @@ impl Host {
             transition.staged = true;
             self.poll_sites(now_ms);
         }
-        self.site_ready()
+        if !self.site_ready()? {
+            return Ok(false);
+        }
+        let transition = self.site_transition.as_mut().expect("active handoff");
+        if !transition.shutdown {
+            self.site_retired
+                .try_reserve(self.site_acquisition.keys().len())
+                .map_err(|_| RuntimeError::Preparation)?;
+            if !self.site_acquisition.seal() || !self.site_radio.seal() {
+                return Err(RuntimeError::Preparation);
+            }
+            transition.complete = true;
+        }
+        Ok(true)
     }
     fn site_ready(&mut self) -> Result<bool, RuntimeError> {
         let mut ready = true;
@@ -354,22 +374,24 @@ impl Host {
         }
         std::mem::take(&mut self.site_retired)
     }
-    /// Transfer prepared ownership at runtime publication, before any new-generation polling.
-    pub(super) fn commit_sites(&mut self) -> Result<(), RuntimeError> {
-        if self
-            .site_transition
-            .as_ref()
-            .is_some_and(|change| !change.shutdown)
-        {
-            self.site_retired.extend(
-                self.site_acquisition
-                    .commit()
-                    .map_err(|_| RuntimeError::Device)?,
+    /// Transfer sealed ownership in the infallible prepublication hook.
+    pub(super) fn commit_sites(
+        acquisition: &mut Acquisition,
+        radio: &mut RadioSite,
+        transition: &mut Option<Transition>,
+        retired: &mut Vec<crate::site::worker::DeviceWorker>,
+        phone_calls: &PhoneCalls,
+    ) {
+        if transition.as_ref().is_some_and(|change| !change.shutdown) {
+            assert!(
+                phone_calls.is_empty(),
+                "retire phone grants before site ownership"
             );
-            assert!(self.site_radio.commit());
-            self.site_transition = None;
+            assert!(transition.as_ref().is_some_and(|change| change.complete));
+            retired.extend(acquisition.commit_prepared());
+            radio.commit_prepared();
+            *transition = None;
         }
-        Ok(())
     }
     /// Resume only after the caller has retired removed device workers off control.
     pub(crate) fn resume_sites(&mut self) -> bool {
