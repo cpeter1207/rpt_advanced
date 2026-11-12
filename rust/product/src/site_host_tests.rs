@@ -383,6 +383,13 @@ fn site_host_reload_release_then_abort_restores_live_demand_without_reopening() 
         }
     }
     assert!(ready);
+    let writes = BANK.lock().unwrap().writes.clone();
+    assert_eq!(host.site_barrier(8), Ok(true));
+    assert_eq!(
+        BANK.lock().unwrap().writes,
+        writes,
+        "completed handoff is idempotent"
+    );
     assert_eq!(
         BANK.lock().unwrap().writes,
         [(0x40, 0x40), (0x40, 0), (0, 0)]

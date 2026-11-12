@@ -933,6 +933,36 @@ fn pending_phone_has_no_handshake_topology_or_radio_attachment_and_queues_only_p
         .is_err(),
         "unimplemented private message preparation must fail explicitly"
     );
+    struct EmptyReply;
+    impl rpt_advanced_core::audio::PcmStreamReader for EmptyReply {
+        fn render(&mut self, _: &mut [f32]) -> rpt_advanced_core::audio::PcmRead {
+            rpt_advanced_core::audio::PcmRead::Finished
+        }
+    }
+    // The first unavailable report is queued. Fill the actual bounded mailbox.
+    for _ in 1..16 {
+        host.queue_phone_reply(&source, &reply, Box::new(EmptyReply))
+            .unwrap();
+    }
+    assert_eq!(
+        host.immediate(
+            "1000",
+            LinkEffect::Message {
+                selector: "1".into(),
+                reply: Some(reply.clone())
+            },
+            clock()
+        ),
+        Err(RuntimeError::Rejected)
+    );
+    let mut retained = 0;
+    while host.take_phone_reply(&source, &reply).unwrap().is_some() {
+        retained += 1;
+    }
+    assert_eq!(
+        retained, 16,
+        "failed unavailable prompt must preserve queued replies"
+    );
     let (other, rejected) = crate::link::session::tests::phone_peer();
     assert!(
         host.attach_peer("1000", "2000", Mode::TRANSCEIVE, other, clock())

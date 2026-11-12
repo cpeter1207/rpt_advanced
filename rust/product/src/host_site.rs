@@ -348,9 +348,15 @@ impl Host {
             self.site_retired
                 .try_reserve(self.site_acquisition.keys().len())
                 .map_err(|_| RuntimeError::Preparation)?;
-            if !self.site_acquisition.seal() || !self.site_radio.seal() {
+            if !self.site_acquisition.seal() {
                 return Err(RuntimeError::Preparation);
             }
+            // This serialized turn staged and checked the radio barrier above;
+            // no callback can mutate its handoff between readiness and sealing.
+            assert!(
+                self.site_radio.seal(),
+                "ready staged radio handoff must seal"
+            );
             transition.complete = true;
         }
         Ok(true)

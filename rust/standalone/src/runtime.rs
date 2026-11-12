@@ -956,7 +956,7 @@ mod tests {
                     )
                 }
                 .unwrap();
-                let result = process.reload("candidate");
+                let result = process.reload_with_radios("candidate", Vec::new());
                 assert_eq!(result.is_ok(), status == 0);
                 assert_eq!(SEEN.with_borrow(Clone::clone), ["candidate"]);
                 assert_eq!(
