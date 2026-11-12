@@ -62,3 +62,28 @@ fn stopped_feedback_binding_preserves_the_borrowed_port_and_reports_capability()
         Err(Error::Operation)
     );
 }
+
+#[test]
+fn timed_egress_tail_preserves_physically_short_408_byte_host() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    let prefix = std::mem::offset_of!(abi::rptadv_host_services_v10, peer_send_prepared_timed);
+    assert_eq!(prefix, 408);
+    table.struct_size = prefix as u32;
+    let mut old = [0_u64; 51];
+    unsafe {
+        ptr::copy_nonoverlapping(
+            ptr::from_ref(&table).cast::<u8>(),
+            old.as_mut_ptr().cast(),
+            prefix,
+        );
+    }
+    let services = unsafe { HostServices::open(old.as_ptr().cast()) }.unwrap();
+    assert!(services.0.peer_send_prepared_timed.is_none());
+    for length in 409..416 {
+        table.struct_size = length;
+        assert!(matches!(
+            unsafe { HostServices::open(&table) },
+            Err(Error::Admission)
+        ));
+    }
+}

@@ -1,6 +1,6 @@
-//! Typed private-call ownership for the existing standalone host callbacks.
+//! Typed private-call source and timed egress on the existing serial host owner.
 //! Product admission borrows the actual handle before its one ownership transfer.
-//! No registrar, dial worker or additional scheduler is created.
+//! No registrar, dial worker, additional scheduler or mailbox/RF authority is created.
 use super::{HostServicesOwner, IaxHandle, PeerHandle};
 use crate::{
     abi,
@@ -33,6 +33,7 @@ pub(super) struct Phone {
     offset: usize,
     acknowledged: u64,
     host_epoch: Option<u64>,
+    egress_epoch: Option<u64>,
     closed: bool,
 }
 
@@ -133,6 +134,7 @@ impl HostServicesOwner {
             offset: 0,
             acknowledged: 0,
             host_epoch: None,
+            egress_epoch: None,
             closed: false,
         });
         Ok(Box::into_raw(Box::new(PeerHandle::Iax(IaxHandle {
@@ -147,6 +149,59 @@ impl HostServicesOwner {
 }
 
 impl Phone {
+    /// No new owner or media operation may revive a terminal private call.
+    pub(super) fn live(&self) -> bool {
+        !self.closed
+    }
+
+    /// PCM preparation requires a completed serial retirement, never a guessed token.
+    pub(super) fn encoding_ready(&self) -> bool {
+        self.live() && self.egress_epoch.is_some()
+    }
+
+    fn close(&mut self) {
+        self.closed = true;
+        self.pending = None;
+        self.egress_epoch = None;
+    }
+
+    /// Reuse the host encoder reset as the exact private local-retirement boundary.
+    pub(super) fn retire_egress(&mut self, peer: &mut IaxPeer) -> Result<(), IaxError> {
+        self.egress_epoch = None;
+        if self.closed {
+            return Err(IaxError::Operation);
+        }
+        match peer.retire_private_egress() {
+            Ok(epoch) => {
+                self.egress_epoch = Some(epoch);
+                Ok(())
+            }
+            Err(error) => {
+                self.close();
+                Err(error)
+            }
+        }
+    }
+
+    /// The product keeps packet age; this host alone retains the provider TX token.
+    pub(super) fn send_prepared(
+        &mut self,
+        peer: &mut IaxPeer,
+        bytes: &[u8],
+        frames: u32,
+        timestamp: u32,
+        deadline: u32,
+    ) -> Result<i32, IaxError> {
+        let Some(epoch) = self.egress_epoch.filter(|_| self.live()) else {
+            return Err(IaxError::Operation);
+        };
+        let result = peer.send_private_prepared(bytes, frames, timestamp, epoch, deadline);
+        if result.is_err() {
+            self.close();
+        }
+        result
+    }
+
     /// One source turn on the existing exclusive peer owner. A retained/refused
     /// item is offered before polling another source item. Released ABI2 service
     /// keeps ACK/retry progress bounded while leaving held PCM/digits untouched.
@@ -171,8 +226,7 @@ impl Phone {
         if result.is_err() {
             // Every terminal source failure retires this owner before a later
             // state query or provider access. Never revive a failed call.
-            self.closed = true;
-            self.pending = None;
+            self.close();
             output.state = 3;
         }
         result

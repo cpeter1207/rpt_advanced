@@ -285,7 +285,7 @@ fn phone_source_digit_credit_is_ordered_private_and_retained_between_polls() {
         );
         0
     }
-    let (prepared, _) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    let (prepared, _) = crate::link::session::tests::phone_source_peer();
     let mut services = host_services(|table| {
         *table = prepared.services.0;
         table.peer_info = Some(info);
@@ -381,7 +381,7 @@ fn phone_source_digit_rejects_invalid_symbols_and_invalid_acceptance() {
         );
         0
     }
-    let (prepared, _) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    let (prepared, _) = crate::link::session::tests::phone_source_peer();
     for mode in 0..=5 {
         let services = host_services(|table| {
             *table = prepared.services.0;

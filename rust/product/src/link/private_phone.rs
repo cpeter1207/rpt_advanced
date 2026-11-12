@@ -226,7 +226,11 @@ impl PrivatePhoneSession {
         let (output, input) = LinkAudioQueue::new(BLOCK, 1)
             .expect("fixed nonzero private block and span capacities")
             .into_endpoints();
-        let outbound = Outbound::new(rate, input)?;
+        let outbound = if io.source_media() {
+            Outbound::private(rate, input)?
+        } else {
+            Outbound::new(rate, input)?
+        };
         let (replies, incoming) = RingBuffer::new(16);
         let (digits, events) = RingBuffer::new(64);
         let wake = PeerWake::default();
@@ -311,6 +315,7 @@ impl PrivatePhoneSession {
         let mode = self.digit_mode;
         let scratch = &mut self.pcm;
         let mut failure = None;
+        let mut retire_egress = false;
         let result = self
             .io
             .read_source_at(self.source_completion, reference, |input| {
@@ -406,6 +411,7 @@ impl PrivatePhoneSession {
                             })
                     }
                     SourceInput::Discontinuity => {
+                        retire_egress = true;
                         if let Some(media) = media.take() {
                             media.retire();
                         }
@@ -438,6 +444,9 @@ impl PrivatePhoneSession {
                     }
                 }
             })?;
+        if retire_egress || result.finish_pending {
+            self.outbound.retire(&mut self.io)?;
+        }
         revision.0.get().ok_or(Error::Admission)?;
         if let Some(error) = failure {
             return Err(error);
@@ -566,7 +575,16 @@ impl PrivatePhoneSession {
                             source_start: self.source_position,
                             stream: source.ingress(),
                             // This is newly rendered private prompt PCM, never provider receive PCM.
-                            born_ns: Some(now_ms.saturating_mul(1_000_000)),
+                            born_ns: if self.io.source_media() {
+                                let reference =
+                                    self.source_clock.ok_or(Error::Admission)?.reference();
+                                if reference.host_clock_epoch == 0 {
+                                    return Err(Error::Admission);
+                                }
+                                Some(reference.now_ns)
+                            } else {
+                                Some(now_ms.saturating_mul(1_000_000))
+                            },
                         },
                         &self.pcm[..count],
                     );
@@ -646,6 +664,10 @@ impl SerialSession for PrivatePhoneSession {
         self.epoch = Some(epoch);
     }
     fn set_source_clock(&mut self, clock: SourceTimeClock) {
+        if self.outbound.bind_private_clock(clock).is_err() {
+            self.stop();
+            return;
+        }
         self.source_clock = Some(clock);
     }
 }

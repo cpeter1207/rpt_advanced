@@ -634,6 +634,15 @@ struct rptadv_host_services_v10 {
      * the sized port and retains its serial TX callback/context through radio
      * destruction. Absent capability is distinct from successful binding. */
     int (*radio_feedback_bind)(void *context, void *radio, const struct UrpRadioFeedbackPort *port);
+    /** Optional complete ABI-10 tail for private source-phone egress. Requires
+     * the complete prepared-media and asynchronous owner groups. The serial
+     * owner samples peer_elapsed_ms before its original host source clock and
+     * retains one checked, nonwrapping deadline across retries. Zero accepts,
+     * one is WouldBlock, two is Expired without acceptance; negative is terminal.
+     * Private reset_encoder retires provider egress before returning success.
+     * Phone G.711 packets contain exactly 160 bytes/frames; no empty unkey. */
+    int (*peer_send_prepared_timed)(void *context, void *peer, const uint8_t *bytes, size_t count,
+                                    uint32_t frames, uint32_t timestamp_ms, uint32_t deadline_ms);
 };
 
 /** Exact revision of a typed site control request. */

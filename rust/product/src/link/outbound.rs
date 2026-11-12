@@ -1,6 +1,9 @@
 //! Single-owner media conversion, source-clock timestamps, and bounded retry storage.
 use super::{egress::Egress, source_clock::SourceClock};
-use crate::{Error, services::PeerIo};
+use crate::{
+    Error,
+    services::{PeerIo, SourceTimeClock},
+};
 use rpt_advanced_core::audio::{AudioSpan, LinkAudioConsumer};
 use std::sync::{
     Arc,
@@ -63,6 +66,7 @@ struct Pending {
     source_frames: u32,
     timestamp: u32,
     end_timestamp: u32,
+    deadline: Option<u32>,
     expires: u64,
     stream: u64,
 }
@@ -111,6 +115,8 @@ pub(super) struct Outbound {
     conversion: Option<Conversion>,
     anchor: Option<Anchor>,
     clock: Option<Arc<SourceClock>>,
+    private: bool,
+    private_clock: Option<SourceTimeClock>,
     next_audio_ms: u64,
     unkey_ns: Option<u64>,
     idle_timestamp: u32,
@@ -137,11 +143,47 @@ impl Outbound {
             conversion: None,
             anchor: None,
             clock: None,
+            private: false,
+            private_clock: None,
             next_audio_ms: 0,
             unkey_ns: None,
             idle_timestamp: 0,
             sent: false,
         })
+    }
+    /// Source phones retain the original worker clock; no PCM/untimed fallback.
+    pub(super) fn private(rate: u32, queue: LinkAudioConsumer) -> Result<Self, Error> {
+        let mut outbound = Self::new(rate, queue)?;
+        outbound.private = true;
+        Ok(outbound)
+    }
+    pub(super) fn bind_private_clock(&mut self, clock: SourceTimeClock) -> Result<(), Error> {
+        let epoch = clock.reference().host_clock_epoch;
+        if epoch == 0
+            || self
+                .private_clock
+                .is_some_and(|old| old.reference().host_clock_epoch != epoch)
+        {
+            return Err(Error::Admission);
+        }
+        self.private_clock = Some(clock);
+        Ok(())
+    }
+    /// Drop staged media before serial retirement, including when no next PCM arrives.
+    pub(super) fn retire(&mut self, io: &mut PeerIo) -> Result<(), Error> {
+        while self.queue.read_span(&mut self.native).is_some() {}
+        self.discard_media(io)
+    }
+    fn discard_media(&mut self, io: &mut PeerIo) -> Result<(), Error> {
+        self.discard()?;
+        if self.private {
+            self.anchor = None;
+            self.unkey_ns = None;
+            self.sent = false;
+            io.reset_encoder()?;
+            self.reset_encoder = false;
+        }
+        Ok(())
     }
     pub(super) fn bind_clock(&mut self, clock: Arc<SourceClock>) {
         self.clock = Some(clock);
@@ -179,7 +221,22 @@ impl Outbound {
             self.pcm_step(io, now_ms)?;
             return Ok(Some(self.next_audio_ms.saturating_mul(1_000_000)));
         }
-        let now = now_ms.saturating_mul(1_000_000);
+        if self.private
+            && self.pending.is_none()
+            && self.conversion.is_none()
+            && self.queue.peek_span().is_none()
+        {
+            return Ok(None);
+        }
+        let now = if self.private {
+            let reference = self.private_clock.ok_or(Error::Admission)?.reference();
+            if reference.host_clock_epoch == 0 {
+                return Err(Error::Admission);
+            }
+            reference.now_ns
+        } else {
+            now_ms.saturating_mul(1_000_000)
+        };
         self.statistics.rejected.store(
             self.retired_rejections
                 .saturating_add(self.queue.dropped_samples()),
@@ -202,7 +259,7 @@ impl Outbound {
                     u64::from(pending.source_frames) * 48_000 / u64::from(self.rate),
                     Ordering::Relaxed,
                 );
-                self.discard()?;
+                self.discard_media(io)?;
             } else {
                 self.send(io, now)?;
             }
@@ -210,26 +267,26 @@ impl Outbound {
             self.prepare(io, now, false)?;
             self.send(io, now)?;
         } else if self.queue.peek_span().is_some_and(|next| {
-            next.span.born_ns.is_none_or(|born| born <= now) || !self.current(next.span.stream)
+            self.private
+                || next.span.born_ns.is_none_or(|born| born <= now)
+                || !self.current(next.span.stream)
         }) {
             #[cfg(test)]
             tests::before_read();
             let Some(read) = self.queue.read_span(&mut self.native) else {
                 // A marked span can retire between peek and actual admission.
                 // Cancel retained conversion rather than treating it as fresh PCM.
-                self.discard()?;
+                self.discard_media(io)?;
                 return Ok(Some(now));
             };
-            if read
-                .span
-                .born_ns
-                .is_none_or(|born| now >= born.saturating_add(AGE_NS))
-                || !self.current(read.span.stream)
+            if read.span.born_ns.is_none_or(|born| {
+                now >= born.saturating_add(AGE_NS) || (self.private && born > now)
+            }) || !self.current(read.span.stream)
             {
                 self.statistics
                     .expired
                     .fetch_add(read.frames as u64, Ordering::Relaxed);
-                self.discard()?;
+                self.discard_media(io)?;
             } else {
                 self.encode(io, read.span, read.frames, now)?;
                 self.send(io, now)?;
@@ -282,7 +339,11 @@ impl Outbound {
             // An idle marker is uncommitted media too: keep its source timestamp
             // while waiting for writable, but never retain it indefinitely.
             let expires = deadline.saturating_add(AGE_NS);
-            if self.sent && now < expires && !io.send_prepared(&[], 0, self.idle_timestamp)? {
+            if !self.private
+                && self.sent
+                && now < expires
+                && !io.send_prepared(&[], 0, self.idle_timestamp)?
+            {
                 return Ok(next.into_iter().chain(Some(expires)).min());
             }
             self.sent = false;
@@ -306,7 +367,7 @@ impl Outbound {
                 && now < previous.born_ns.saturating_add(AGE_NS)
         });
         if !continuous {
-            self.discard()?;
+            self.discard_media(io)?;
             self.conversion = Some(Conversion {
                 span,
                 next: span.source_start,
@@ -389,7 +450,7 @@ impl Outbound {
                     / u64::from(self.rate),
                 Ordering::Relaxed,
             );
-            return self.discard();
+            return self.discard_media(io);
         }
         let result = io.prepare_audio(
             &self.converter.retained_output(self.pcm_used)[self.pcm_position..],
@@ -449,12 +510,37 @@ impl Outbound {
         let end_timestamp = anchor.call_ms.wrapping_add(
             (end_origin as i128 - anchor.source_ns as i128).div_euclid(1_000_000) as u32,
         );
+        let deadline = if self.private {
+            // The native floor MUST precede the original host clock reference.
+            // Birth was stamped by this same retained worker clock at rendering.
+            let elapsed = io.elapsed_ms();
+            let reference = self.private_clock.ok_or(Error::Admission)?.reference();
+            let remaining = (reference.host_clock_epoch != 0)
+                .then(|| reference.now_ns.checked_sub(born))
+                .flatten()
+                .and_then(|age| AGE_NS.checked_sub(age))
+                .map(|remaining| (remaining / 1_000_000) as u32);
+            let Some(deadline) = remaining
+                .filter(|remaining| *remaining != 0)
+                .and_then(|remaining| elapsed.checked_add(remaining))
+            else {
+                self.statistics.expired.fetch_add(
+                    u64::from(result.source_frames) * 48_000 / u64::from(self.rate),
+                    Ordering::Relaxed,
+                );
+                return self.discard_media(io);
+            };
+            Some(deadline)
+        } else {
+            None
+        };
         self.pending = Some(Pending {
             bytes: result.encoded_bytes,
             frames: result.packet_frames,
             source_frames: result.source_frames,
             timestamp,
             end_timestamp,
+            deadline,
             expires,
             stream,
         });
@@ -462,11 +548,28 @@ impl Outbound {
     }
     fn send(&mut self, io: &mut PeerIo, now: u64) -> Result<(), Error> {
         if let Some(pending) = &self.pending {
-            if io.send_prepared(
-                &self.encoded[..pending.bytes],
-                pending.frames,
-                pending.timestamp,
-            )? {
+            let status = if let Some(deadline) = pending.deadline {
+                io.send_prepared_timed(
+                    &self.encoded[..pending.bytes],
+                    pending.frames,
+                    pending.timestamp,
+                    deadline,
+                )?
+            } else {
+                i32::from(!io.send_prepared(
+                    &self.encoded[..pending.bytes],
+                    pending.frames,
+                    pending.timestamp,
+                )?)
+            };
+            if status == 2 {
+                self.statistics.expired.fetch_add(
+                    u64::from(pending.source_frames) * 48_000 / u64::from(self.rate),
+                    Ordering::Relaxed,
+                );
+                return self.discard_media(io);
+            }
+            if status == 0 {
                 let age = now.saturating_sub(pending.expires.saturating_sub(AGE_NS));
                 self.statistics.ages[(age / 1_000_000).min(200) as usize]
                     .fetch_add(1, Ordering::Relaxed);

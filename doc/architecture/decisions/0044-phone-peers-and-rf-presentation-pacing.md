@@ -1167,3 +1167,45 @@ rejects, preventing double destruction. Request identity bytes remain valid thro
 consuming callbacks. Existing current-document product checks, mailbox/PIN login,
 private executor/media qualification and attachment guards remain authoritative.
 No new ABI, runtime, worker, radio binding or RF route is introduced.
+
+## Serial private IAX executor and timed egress, 2026-11-12
+
+The standalone typed private handle can now use the existing bounded serial
+executor. Construction requires the exact committed account/listener and call
+generations, released timed source polling, native timed send and native egress
+retirement. The provider still selects private 8 kHz jitter. No new scheduler,
+call owner, transport, RF attachment or mailbox/command authority is introduced.
+Legacy polling, untimed prepared sends and AllStar text remain refused.
+
+The prepared packet callback previously carried only a source timestamp: neither
+it nor the existing opaque encoder result can carry an immutable maximum age.
+One optional host-v10 tail therefore adds `peer_send_prepared_timed` at offset
+408 (complete size 416). The complete 408-byte prefix remains valid; partial
+409--415-byte tables are rejected before a bounded copy. The tail requires the
+complete prepared-media/async callback groups, and source-phone admission
+requires the tail. Both host constructors and validators are updated; Asterisk
+advertises no timed private send. This compatible sized extension changes no
+ABI version, SONAME or package identity; private IAX still requires alpha13.
+
+The existing original source clock stamps new private prompt PCM once. Before
+creating a pending packet, product samples provider elapsed time first, then
+the same original source clock, and floors the remaining 200 ms age allowance
+into a checked, nonwrapping deadline. Missing, changed or future clock ages fail
+closed. Congestion retains exact bytes, timestamp and deadline; provider expiry
+discards the packet and conversion/encoder history without counting acceptance.
+
+The existing encoder-reset callback is the serial native retirement boundary.
+Product drops staged media before reset; host alone stores the returned nonzero
+provider TX epoch. Pending or failed retirement closes that call, with no
+legacy fallback. Source discontinuity and finish retire immediately even when
+no new PCM follows. Cancellation ends the exact private session. Private sends
+are exactly 160 G.711 bytes/frames at 8 kHz; radio empty unkey markers are never
+sent to a telephone.
+
+Focused tests exercise the public host against the released provider: exact
+private jitter, one attached executor, stop/detach/destruction, ACK progress
+behind held digits, and timed G.711 reception. Product regressions cover the
+physically short prefix, capability groups, immutable retry/expiry and immediate
+reset failure. Actual-product mailbox login/status and manual telephone smoke
+remain separate integration milestones. RF timing, half-duplex receive,
+outgoing authority and live hardware acceptance are not established here.

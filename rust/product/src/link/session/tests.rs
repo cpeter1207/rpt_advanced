@@ -60,6 +60,9 @@ pub(crate) struct State {
     pub(crate) prepared: Vec<(Vec<u8>, u32)>,
     prepared_frames: Vec<u32>,
     pub(crate) prepared_result: i32,
+    pub(crate) timed_deadlines: Vec<u32>,
+    pub(crate) encoder_resets: usize,
+    pub(crate) encoder_reset_result: i32,
     call_elapsed: u32,
     pub(crate) deadlines: Vec<u64>,
     source_position: u64,
@@ -1529,6 +1532,9 @@ fn make_peer_with_local(
         table.peer_step_wake = Some(wake_only);
         table.peer_set_deadline = Some(deadline);
     }
+    if source && phone.is_some() {
+        table.peer_send_prepared_timed = Some(send_prepared_timed);
+    }
     if source {
         table.peer_read_source = Some(read_source);
     }
@@ -1797,10 +1803,11 @@ unsafe extern "C" fn prepare_audio(
 }
 unsafe extern "C" fn reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
+    state.encoder_resets += 1;
     state.encode_position = 0;
     state.encode_pending.clear();
     state.tail_remaining = state.encode_tail;
-    0
+    state.encoder_reset_result
 }
 unsafe extern "C" fn send_prepared(
     _: *mut c_void,
@@ -1817,6 +1824,22 @@ unsafe extern "C" fn send_prepared(
         timestamp,
     ));
     state.prepared_result
+}
+unsafe extern "C" fn send_prepared_timed(
+    context: *mut c_void,
+    peer: *mut c_void,
+    input: *const u8,
+    count: usize,
+    frames: u32,
+    timestamp: u32,
+    deadline: u32,
+) -> i32 {
+    unsafe { state(peer) }
+        .lock()
+        .unwrap()
+        .timed_deadlines
+        .push(deadline);
+    unsafe { send_prepared(context, peer, input, count, frames, timestamp) }
 }
 unsafe extern "C" fn elapsed(_: *mut c_void, peer: *mut c_void) -> u32 {
     unsafe { state(peer) }.lock().unwrap().call_elapsed
@@ -2050,6 +2073,7 @@ fn egress_host_contract_and_asterisk_pcm() {
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_service),
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_ready),
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_feedback_bind),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, peer_send_prepared_timed),
         std::mem::size_of_val(&table),
     ];
     for length in boundary..=std::mem::size_of_val(&table) {
@@ -3572,4 +3596,41 @@ fn public_source_retains_reset_without_acknowledging_media_retirement() {
     while let Some(event) = control.event() {
         assert!(!matches!(event, Event::Digit(_)));
     }
+}
+
+#[test]
+fn timed_callback_requires_complete_prepared_and_async_groups() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.peer_send_prepared_timed = Some(send_prepared_timed);
+    assert!(unsafe { HostServices::open(&table) }.is_err());
+}
+
+#[test]
+fn source_phone_admission_requires_timed_egress_capability() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.peer_info = Some(peer_info);
+    table.peer_step_attach = Some(async_attach);
+    table.peer_step_stop = Some(async_stop);
+    table.peer_step_detach = Some(async_detach);
+    table.peer_prepare_audio = Some(prepare_audio);
+    table.peer_reset_encoder = Some(reset_encoder);
+    table.peer_send_prepared = Some(send_prepared);
+    table.peer_elapsed_ms = Some(elapsed);
+    table.peer_step_wake = Some(wake_only);
+    table.peer_set_deadline = Some(deadline);
+    table.peer_read_source = Some(read_source);
+    let state = Arc::new(Mutex::new(State {
+        capabilities: 51,
+        ..State::default()
+    }));
+    let handle = Box::into_raw(Box::new(state)).cast();
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(matches!(
+        unsafe { services.inspect_peer(handle) },
+        Err(Error::Admission)
+    ));
+    table.peer_send_prepared_timed = Some(send_prepared_timed);
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(unsafe { services.inspect_peer(handle) }.is_ok());
+    drop(unsafe { Box::from_raw(handle.cast::<Shared>()) });
 }

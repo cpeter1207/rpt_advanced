@@ -1287,6 +1287,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v10 {
     radio_quiesce: Some(radio_quiesce),
     radio_ready: Some(radio_ready),
     radio_feedback_bind: Some(radio_feedback_bind),
+    peer_send_prepared_timed: None,
     radio_remote_submit: Some(radio_remote_submit),
 });
 

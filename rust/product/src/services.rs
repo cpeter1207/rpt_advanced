@@ -578,6 +578,7 @@ impl HostServices {
         let remote_tail = offset_of!(abi::rptadv_host_services_v10, radio_service);
         let ready_tail = offset_of!(abi::rptadv_host_services_v10, radio_ready);
         let feedback_tail = offset_of!(abi::rptadv_host_services_v10, radio_feedback_bind);
+        let timed_tail = offset_of!(abi::rptadv_host_services_v10, peer_send_prepared_timed);
         if size < table_size
             && ![
                 required,
@@ -587,6 +588,7 @@ impl HostServices {
                 remote_tail,
                 ready_tail,
                 feedback_tail,
+                timed_tail,
             ]
             .contains(&size)
         {
@@ -627,6 +629,7 @@ impl HostServices {
             || !matches!(async_count, 0 | 3)
             || !matches!(egress_count, 0 | 6)
             || (egress_count == 6 && async_count != 3)
+            || (api.peer_send_prepared_timed.is_some() && egress_count != 6)
             || (egress_count == 0 && api.peer_write.is_none())
             || (api.peer_read_source.is_some() && egress_count != 6)
         {
@@ -968,6 +971,9 @@ impl HostServices {
                 && (!matches!(protocol, ProtocolId::EchoLink | ProtocolId::Phone)
                     || self.0.peer_read_source.is_none()
                     || capabilities & 3 != 3))
+            || (protocol == ProtocolId::Phone
+                && capabilities & 16 != 0
+                && self.0.peer_send_prepared_timed.is_none())
             || (protocol == ProtocolId::EchoLink
                 && capabilities & 4 != 0
                 && self.0.peer_send_human_text.is_none())
@@ -1882,6 +1888,35 @@ impl PeerIo {
         } {
             0 => Ok(true),
             1 => Ok(false),
+            _ => Err(Error::Write),
+        }
+    }
+    /// Submit private media against its immutable checked provider-clock deadline.
+    /// Zero accepts, one retains the exact packet, two discards without acceptance.
+    pub(crate) fn send_prepared_timed(
+        &mut self,
+        bytes: &[u8],
+        frames: u32,
+        timestamp: u32,
+        deadline: u32,
+    ) -> Result<i32, Error> {
+        let send = self
+            .services
+            .0
+            .peer_send_prepared_timed
+            .ok_or(Error::Admission)?;
+        match unsafe {
+            send(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len(),
+                frames,
+                timestamp,
+                deadline,
+            )
+        } {
+            status @ 0..=2 => Ok(status),
             _ => Err(Error::Write),
         }
     }

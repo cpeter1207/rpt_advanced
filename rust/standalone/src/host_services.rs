@@ -131,6 +131,7 @@ impl HostServicesOwner {
             radio_remote_submit: Some(crate::radio_host::radio_remote_submit),
             radio_ready: Some(crate::radio_host::radio_ready),
             radio_feedback_bind: Some(crate::radio_host::radio_feedback_bind),
+            peer_send_prepared_timed: Some(peer_send_prepared_timed),
         });
         Ok(Self {
             context,
@@ -623,11 +624,9 @@ unsafe extern "C" fn peer_step_attach(
             let Some(peer) = (unsafe { iax_peer_ref(peer) }) else {
                 return -1;
             };
-            // This inactive slice qualifies only owned metadata/source callbacks.
-            // The released callback selects phone jitter by provider ownership.
-            // Timed private egress remains unqualified; do not attach a private
-            // call until the complete product/provider lifecycle is ready.
-            if peer.phone.is_some() {
+            // A typed private handle already required the complete released timed
+            // contract. The provider selects its phone jitter on this same owner.
+            if peer.phone.as_ref().is_some_and(|phone| !phone.live()) {
                 return -1;
             }
             peer.peer.raw_handle()
@@ -1211,12 +1210,18 @@ unsafe extern "C" fn peer_prepare_audio(
                 unsafe { peer.prepare_audio(pcm, output, flush, result.cast()) }
                     .map_or(-1, |()| unsafe { (*result).status as i32 })
             }
-            Some(HostPeer::Iax(_)) => unsafe { iax_peer_mut(peer) }.unwrap().peer.prepare_audio(
-                pcm,
-                output,
-                flush,
-                unsafe { &mut *result },
-            ),
+            Some(HostPeer::Iax(_)) => {
+                let peer = unsafe { iax_peer_mut(peer) }.unwrap();
+                if peer
+                    .phone
+                    .as_ref()
+                    .is_some_and(|phone| !phone.encoding_ready())
+                {
+                    return -1;
+                }
+                peer.peer
+                    .prepare_audio(pcm, output, flush, unsafe { &mut *result })
+            }
             None => -1,
         }
     })
@@ -1226,7 +1231,10 @@ unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i3
         if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
             return unsafe { peer.reset_encoder() }.map_or(-1, |()| 0);
         }
-        unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| peer.peer.reset_encoder())
+        unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| match &mut peer.phone {
+            Some(phone) => phone.retire_egress(&mut peer.peer).map_or(-1, |()| 0),
+            None => peer.peer.reset_encoder(),
+        })
     })
 }
 unsafe extern "C" fn peer_send_prepared(
@@ -1265,6 +1273,34 @@ unsafe extern "C" fn peer_send_prepared(
         }
     })
 }
+unsafe extern "C" fn peer_send_prepared_timed(
+    _: *mut c_void,
+    peer: *mut c_void,
+    bytes: *const u8,
+    count: usize,
+    frames: u32,
+    timestamp: u32,
+    deadline: u32,
+) -> i32 {
+    boundary(-1, || {
+        // This released private profile is exactly G.711 8 kHz / 20 ms. Empty
+        // radio end markers never become telephone protocol or PCM traffic.
+        if count != 160 || frames != 160 || bytes.is_null() {
+            return -1;
+        }
+        let Some(peer) = (unsafe { iax_peer_mut(peer) }) else {
+            return -1;
+        };
+        let Some(phone) = &mut peer.phone else {
+            return -1;
+        };
+        let bytes = unsafe { std::slice::from_raw_parts(bytes, count) };
+        phone
+            .send_prepared(&mut peer.peer, bytes, frames, timestamp, deadline)
+            .unwrap_or(-1)
+    })
+}
+
 unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
     if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
         return peer

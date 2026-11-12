@@ -36,7 +36,9 @@ _Static_assert(offsetof(struct rptadv_host_services_v10, radio_ready) == 392,
                "preserve the complete remote tail");
 _Static_assert(offsetof(struct rptadv_host_services_v10, radio_feedback_bind) == 400,
                "preserve the complete SDK33 host prefix");
-_Static_assert(sizeof(struct rptadv_host_services_v10) == 408,
+_Static_assert(offsetof(struct rptadv_host_services_v10, peer_send_prepared_timed) == 408,
+               "preserve the complete previous host prefix");
+_Static_assert(sizeof(struct rptadv_host_services_v10) == 416,
                "update the complete ABI-10 size deliberately");
 
 static int node(void *context, const struct rptadv_node_host_configuration *record) {

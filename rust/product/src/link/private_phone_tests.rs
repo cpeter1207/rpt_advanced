@@ -2118,3 +2118,143 @@ fn provider_ring_failures_preserve_private_media_boundaries() {
         }
     }
 }
+
+#[test]
+fn private_source_prompt_retains_deadline_and_retires_expired_packet() {
+    for result in [0, 1, 2] {
+        let (mut session, mut control, state, reply) = source_session_with_auth(true);
+        let origin = Instant::now();
+        session.set_epoch(origin);
+        session.set_source_clock(SourceTimeClock::new(origin).unwrap());
+        state.lock().unwrap().prepared_result = result;
+        control
+            .send(crate::phone::tests::private_prompt(
+                &reply,
+                Box::new(Speech::new(1920)),
+            ))
+            .ok()
+            .unwrap();
+        session.step(0).unwrap();
+        let first = state.lock().unwrap().timed_deadlines.clone();
+        assert_eq!(first.len(), 1, "source phones must use timed egress");
+        assert!(first[0] <= 200);
+        if result == 1 {
+            session.step(10).unwrap();
+            assert_eq!(state.lock().unwrap().timed_deadlines, [first[0], first[0]]);
+        }
+        let stats = session.outbound.statistics.snapshot();
+        assert_eq!(stats.accepted, u64::from(result == 0));
+        if result == 2 {
+            assert!(stats.expired_native_samples > 0);
+            assert!(state.lock().unwrap().encoder_resets >= 2);
+        }
+        reply.retire();
+        let before = state.lock().unwrap().timed_deadlines.len();
+        assert_eq!(session.step(20), Err(Error::Hangup));
+        assert_eq!(state.lock().unwrap().timed_deadlines.len(), before);
+    }
+}
+
+#[test]
+fn private_source_reset_retires_pending_prompt_without_next_pcm() {
+    for reset_result in [0, 1, -1] {
+        let (mut session, mut control, state, reply) = source_session_with_auth(true);
+        let origin = Instant::now();
+        session.set_epoch(origin);
+        session.set_source_clock(SourceTimeClock::new(origin).unwrap());
+        state.lock().unwrap().prepared_result = 1;
+        control
+            .send(crate::phone::tests::private_prompt(
+                &reply,
+                Box::new(Speech::new(960)),
+            ))
+            .ok()
+            .unwrap();
+        session.step(0).unwrap();
+        session.step(10).unwrap();
+        let (attempts, resets) = {
+            let state = state.lock().unwrap();
+            assert!(!state.timed_deadlines.is_empty());
+            (state.timed_deadlines.len(), state.encoder_resets)
+        };
+        {
+            let mut state = state.lock().unwrap();
+            state.source_reset = true;
+            state.encoder_reset_result = reset_result;
+        }
+        assert_eq!(
+            session.step(20),
+            if reset_result == 0 {
+                Ok(())
+            } else {
+                Err(Error::Translation)
+            }
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(state.timed_deadlines.len(), attempts);
+        assert!(state.encoder_resets > resets);
+        assert_eq!(reply.ended(), reset_result != 0);
+    }
+}
+
+#[test]
+fn private_160_frame_packet_retains_oldest_birth_and_deadline_across_turns() {
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    let origin = Instant::now();
+    let clock = SourceTimeClock::new(origin).unwrap();
+    session.set_epoch(origin);
+    session.set_source_clock(clock);
+    {
+        let mut state = state.lock().unwrap();
+        state.encode_unit = Some(160);
+        state.prepared_result = 1;
+    }
+    control
+        .send(crate::phone::tests::private_prompt(
+            &reply,
+            Box::new(Speech::new(1920)),
+        ))
+        .ok()
+        .unwrap();
+    session.step(0).unwrap();
+    let oldest_upper = clock.reference().now_ns;
+    assert_eq!(session.source_position, 960);
+    assert!(
+        state.lock().unwrap().prepared.is_empty(),
+        "FIR/encoder retains the incomplete packet"
+    );
+
+    // Actual owner-clock age, not a synthetic step tick: a packet completed by
+    // the next PCM block must still pay for the first block's retained samples.
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    let before_completion = clock.reference().now_ns;
+    session.step(20).unwrap();
+    let (packet, deadline) = {
+        let state = state.lock().unwrap();
+        assert_eq!(state.prepared.len(), 1);
+        assert_eq!(state.prepared[0].0.len(), 160);
+        assert_eq!(state.timed_deadlines.len(), 1);
+        (state.prepared[0].clone(), state.timed_deadlines[0])
+    };
+    let maximum_remaining = (200_000_000 - (before_completion - oldest_upper)) / 1_000_000;
+    assert!(
+        u64::from(deadline) <= maximum_remaining,
+        "completion must not renew the oldest birth"
+    );
+    assert_eq!(session.source_position, 1920);
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    session.step(21).unwrap();
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(state.prepared, [packet.clone(), packet.clone()]);
+        assert_eq!(state.timed_deadlines, [deadline, deadline]);
+    }
+    assert_eq!(session.outbound.statistics.snapshot().accepted, 0);
+    state.lock().unwrap().prepared_result = 0;
+    session.step(22).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.prepared, [packet.clone(), packet.clone(), packet]);
+    assert_eq!(state.timed_deadlines, [deadline, deadline, deadline]);
+    assert_eq!(session.outbound.statistics.snapshot().accepted, 1);
+}

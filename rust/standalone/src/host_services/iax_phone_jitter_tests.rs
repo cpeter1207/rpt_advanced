@@ -67,15 +67,28 @@ fn provider(account: &PreparedAccount) -> ProviderAccount<'_> {
     }
 }
 
-/// Exercise only the actual preparation wrapper. No peer executor is attached.
+/// Exercise the real public host attach/stop/detach path without any RF binding.
 fn qualify(
-    owner: &HostServicesOwner,
+    owner: &mut HostServicesOwner,
     account: &PreparedAccount,
     call: ProviderCall,
     local: SocketAddr,
     format: u64,
 ) {
     assert_eq!(call.receipt.format, format);
+    let ingress = owner.context.ingress.as_mut().unwrap();
+    let mut observed = *ingress.jitter;
+    JITTER.with_borrow_mut(|evidence| {
+        *evidence = JitterEvidence {
+            real: Some(observed),
+            fail_next: true,
+            configurations: Vec::with_capacity(2),
+            ..JitterEvidence::default()
+        };
+    });
+    observed.create = Some(create_jitter);
+    observed.destroy = Some(destroy_jitter);
+    ingress.jitter = Box::leak(Box::new(observed));
     let handle = Handle {
         owner,
         raw: owner.provider_peer_handle(call, account, local).unwrap(),
@@ -90,67 +103,40 @@ fn qualify(
     let stepped = AtomicU64::new(0);
     let mut registration = ptr::dangling_mut::<c_void>();
     let api = owner.descriptor();
-    let status = unsafe {
+    let attach = |registration: &mut *mut c_void| unsafe {
         api.peer_step_attach.unwrap()(
             api.context,
             handle.raw,
             Some(step),
             ptr::from_ref(&stepped).cast_mut().cast(),
-            &mut registration,
+            registration,
         )
     };
-    if !registration.is_null() {
-        // Even a regression must quiesce before borrowed fixture context drops.
-        unsafe {
-            api.peer_step_stop.unwrap()(api.context, registration);
-            api.peer_step_detach.unwrap()(api.context, registration);
-        }
-    }
-    assert_eq!(status, -1);
+    assert_eq!(attach(&mut registration), -1);
     assert!(registration.is_null());
     assert_eq!(stepped.load(Ordering::Relaxed), 0);
+    JITTER.with_borrow(|evidence| assert_eq!((evidence.created, evidence.destroyed), (0, 0)));
+    assert_eq!(metadata(&handle).qso_generation, identity.qso_generation);
+    assert_eq!(attach(&mut registration), 0);
+    assert!(!registration.is_null());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while stepped.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    // Quiesce even if the callback did not run, before its borrowed context drops.
+    unsafe {
+        api.peer_step_stop.unwrap()(api.context, registration);
+        api.peer_step_detach.unwrap()(api.context, registration);
+    }
+    assert_eq!(stepped.load(Ordering::Relaxed), 1);
+    // A detached peer cannot acquire a second executor or native jitter owner.
+    assert_eq!(attach(&mut registration), -1);
+    assert!(registration.is_null());
     let ingress = owner.context.ingress.as_ref().unwrap();
-    let mut observed = *ingress.jitter;
-    JITTER.with_borrow_mut(|evidence| {
-        *evidence = JitterEvidence {
-            real: Some(observed),
-            fail_next: true,
-            configurations: Vec::with_capacity(2),
-            ..JitterEvidence::default()
-        };
-    });
-    observed.create = Some(create_jitter);
-    observed.destroy = Some(destroy_jitter);
     let raw = unsafe { crate::host_services::iax_peer_ref(handle.raw) }
         .unwrap()
         .peer
         .raw_handle();
-    assert!(
-        unsafe {
-            ingress
-                .executor
-                .configure_jitter(raw, ptr::from_ref(&observed).cast())
-        }
-        .is_err()
-    );
-    JITTER.with_borrow(|evidence| assert_eq!((evidence.created, evidence.destroyed), (0, 0)));
-    // Failed preparation must leave this unique peer usable, with unchanged identity.
-    assert_eq!(metadata(&handle).qso_generation, identity.qso_generation);
-    unsafe {
-        ingress
-            .executor
-            .configure_jitter(raw, ptr::from_ref(&observed).cast())
-    }
-    .unwrap();
-    // A second owner is refused before another native jitter context is created.
-    assert!(
-        unsafe {
-            ingress
-                .executor
-                .configure_jitter(raw, ptr::from_ref(&observed).cast())
-        }
-        .is_err()
-    );
     let mut observation: abi::rptadv_iax2_peer_observation_v1 = unsafe { std::mem::zeroed() };
     observation.struct_size = size_of::<abi::rptadv_iax2_peer_observation_v1>() as u32;
     observation.abi_version = 1;
@@ -275,7 +261,7 @@ unsafe extern "C" fn accept(
 }
 
 #[test]
-fn real_provider_calls_prepare_phone_jitter_without_activating_private_executor() {
+fn real_provider_calls_attach_one_private_executor_with_phone_jitter() {
     for (profile, format) in [(1, 4), (2, 8)] {
         let left_reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
         let right_reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -284,7 +270,7 @@ fn real_provider_calls_prepare_phone_jitter_without_activating_private_executor(
         let client = tests::selected_client(Path::new("librptadviax2.so.2"), profile);
         let outgoing_client = client.clone();
         let right_account = account_at(left);
-        let host = owner();
+        let mut host = owner();
         drop(right_reservation);
         let mut listener =
             IaxServer::bind_with_accounts(&client, right, &[], &[provider(&right_account)])
@@ -303,7 +289,7 @@ fn real_provider_calls_prepare_phone_jitter_without_activating_private_executor(
         // advance concurrently. Production gains no per-call thread or scheduler.
         let dial = thread::spawn(move || {
             let account = account_at(right);
-            let host = owner();
+            let mut host = owner();
             let mut listener =
                 IaxServer::bind_with_accounts(&outgoing_client, left, &[], &[provider(&account)])
                     .unwrap();
@@ -319,7 +305,7 @@ fn real_provider_calls_prepare_phone_jitter_without_activating_private_executor(
                     timeout_ms: 3000,
                 })
                 .unwrap();
-            qualify(&host, &account, call, left, format);
+            qualify(&mut host, &account, call, left, format);
         });
         let deadline = Instant::now() + Duration::from_secs(5);
         while incoming.call.is_none() && !dial.is_finished() && Instant::now() < deadline {
@@ -339,7 +325,7 @@ fn real_provider_calls_prepare_phone_jitter_without_activating_private_executor(
         dial.join().unwrap();
         assert_eq!(incoming.authorized, 1);
         let call = incoming.call.take().expect("real incoming provider call");
-        qualify(&host, &right_account, call, right, format);
+        qualify(&mut host, &right_account, call, right, format);
     }
 }
 
@@ -377,7 +363,7 @@ fn real_provider_ack_progress_continues_behind_a_refused_private_digit() {
             IaxServer::bind_with_accounts(&outgoing_client, left, &[], &[provider(&account)])
                 .unwrap();
         host.enable_listener(&mut listener).unwrap();
-        let mut call = listener
+        let call = listener
             .dial_provider_account(&DialRequest {
                 account: &account.settings().id,
                 generation: account.generation(),
@@ -395,16 +381,54 @@ fn real_provider_ack_progress_continues_behind_a_refused_private_digit() {
                 .configure_jitter(call.peer.raw_handle(), ptr::from_ref(ingress.jitter).cast())
         }
         .unwrap();
-        call.peer.send_digit(b'5').unwrap();
+        let handle = Handle {
+            owner: &host,
+            raw: host.provider_peer_handle(call, &account, left).unwrap(),
+        };
+        let raw = unsafe { crate::host_services::iax_peer_ref(handle.raw) }
+            .unwrap()
+            .peer
+            .raw_handle();
+        let api = host.descriptor();
+        assert_eq!(
+            unsafe { api.peer_send_digit.unwrap()(api.context, handle.raw, b'5') },
+            0
+        );
         let started = Instant::now();
-        let mut acknowledged = 0;
+        let mut source_sink = Sink::default();
         let mut second = false;
         let mut completed = false;
         loop {
             match commands.try_recv() {
                 Ok(false) => break,
                 Ok(true) => {
-                    call.peer.send_digit(b'6').unwrap();
+                    assert_eq!(
+                        unsafe { api.peer_send_digit.unwrap()(api.context, handle.raw, b'6') },
+                        0
+                    );
+                    assert_eq!(
+                        unsafe { api.peer_reset_encoder.unwrap()(api.context, handle.raw) },
+                        0
+                    );
+                    // Newly generated fixture G.711: the native floor precedes its
+                    // generation, with no queued/converter history to restamp.
+                    let timestamp =
+                        unsafe { api.peer_elapsed_ms.unwrap()(api.context, handle.raw) };
+                    let payload = [0xfe; 160];
+                    assert_eq!(
+                        unsafe {
+                            api.peer_send_prepared_timed.unwrap()(
+                                api.context,
+                                handle.raw,
+                                payload.as_ptr(),
+                                payload.len(),
+                                160,
+                                timestamp,
+                                timestamp.checked_add(200).unwrap(),
+                            )
+                        },
+                        0
+                    );
                     second = true;
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
@@ -414,28 +438,20 @@ fn real_provider_ack_progress_continues_behind_a_refused_private_digit() {
                 started.elapsed() < Duration::from_secs(5),
                 "private ACK progress timed out"
             );
-            let event = call
-                .peer
-                .poll_source(
-                    &mut [0.0; 160],
-                    19,
-                    started.elapsed().as_nanos() as u64 + 1_000_000_000,
-                    acknowledged,
-                )
-                .unwrap();
-            if event.discontinuity {
-                acknowledged = event.media_epoch;
-            }
+            read(
+                &handle,
+                Some(&mut source_sink),
+                started.elapsed().as_nanos() as u64 + 1_000_000_000,
+            );
             let mut observation: abi::rptadv_iax2_peer_observation_v1 =
                 unsafe { std::mem::zeroed() };
             observation.struct_size = size_of::<abi::rptadv_iax2_peer_observation_v1>() as u32;
             observation.abi_version = 1;
             assert_eq!(
                 unsafe {
-                    ingress.executor.observe(
-                        call.peer.raw_handle(),
-                        ptr::from_mut(&mut observation).cast(),
-                    )
+                    ingress
+                        .executor
+                        .observe(raw, ptr::from_mut(&mut observation).cast())
                 },
                 0
             );
@@ -510,6 +526,10 @@ fn real_provider_ack_progress_continues_behind_a_refused_private_digit() {
             .iter()
             .all(|symbol| *symbol == u32::from(b'5'))
     );
+    assert!(
+        sink.audio_offers.is_empty(),
+        "private media cannot overtake the refused digit"
+    );
     sink.digit_offers.clear();
     sink.digit_status = Some(0);
     while sink.digit_offers.len() < 2 && started.elapsed() < Duration::from_secs(5) {
@@ -517,6 +537,18 @@ fn real_provider_ack_progress_continues_behind_a_refused_private_digit() {
         thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(sink.digit_offers, [u32::from(b'5'), u32::from(b'6')]);
+    while sink.audio_offers.is_empty() && started.elapsed() < Duration::from_secs(5) {
+        read(&handle, Some(&mut sink), now());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        sink.audio_offers.first().map(|offer| offer.1.len()),
+        Some(160)
+    );
+    assert!(
+        sink.audio_offers[0].3 <= now(),
+        "native receipt birth remains qualified"
+    );
     command.send(false).unwrap();
     dial.join().unwrap();
     drop(handle);

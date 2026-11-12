@@ -11,9 +11,10 @@ and the affected configuration and test documentation in the same change.
 pacing extension. Typed private call identities, sized metadata and bounded
 call-private reply ownership, mailbox verification and timed audio consumption
 form an unreleased foundation. Standalone numeric IAX accounts with registration
-disabled use prepared startup/reload listener profiles. Incoming IAX calls now
-join actual typed private handles and product authorization; complete private
-execution, phone media and RF pacing remain pending. The existing deployed ownership
+disabled use prepared startup/reload listener profiles. Incoming IAX calls join
+actual typed private handles and product authorization, then reuse the serial
+executor and released timed egress. Actual-product private call integration and
+RF pacing remain pending. The existing deployed ownership
 described below is unchanged. The experimental shared `rptadv-peer-support::sip`
 parser is a bounded borrowed-wire prerequisite only, reusable by both hosts; it
 does not activate signaling, move provider ownership or change the media path.

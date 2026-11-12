@@ -45,6 +45,11 @@ struct Provider {
     source_cursor: u64,
     legacy_reads: usize,
     legacy_sends: usize,
+    retirements: usize,
+    retirement_status: i32,
+    egress_epoch: u64,
+    timed_status: i32,
+    timed_sends: Vec<(Vec<u8>, u32, u32, u64, u32)>,
     destroyed: usize,
     acknowledgements: Vec<u64>,
 }
@@ -72,6 +77,43 @@ unsafe extern "C" fn legacy_poll(
 unsafe extern "C" fn legacy_send(_: *mut c_void, _: *const u8, _: usize, _: u32, _: u32) -> i32 {
     PROVIDER.with_borrow_mut(|state| state.legacy_sends += 1);
     0
+}
+unsafe extern "C" fn retire_egress(_: *mut c_void, epoch: *mut u64) -> i32 {
+    PROVIDER.with_borrow_mut(|state| {
+        state.retirements += 1;
+        unsafe { epoch.write(0) };
+        if state.retirement_status == 0 {
+            state.egress_epoch += 1;
+            unsafe { epoch.write(state.egress_epoch) };
+        }
+        state.retirement_status
+    })
+}
+unsafe extern "C" fn timed_send(
+    _: *mut c_void,
+    bytes: *const u8,
+    count: usize,
+    frames: u32,
+    timestamp: u32,
+    timing: *const abi::rptadv_iax2_timed_send_v1,
+) -> i32 {
+    let timing = unsafe { &*timing };
+    assert_eq!(
+        timing.struct_size as usize,
+        size_of::<abi::rptadv_iax2_timed_send_v1>()
+    );
+    assert_eq!((timing.abi_version, timing.reserved), (1, 0));
+    PROVIDER.with_borrow_mut(|state| {
+        assert_eq!(timing.egress_epoch, state.egress_epoch);
+        state.timed_sends.push((
+            unsafe { std::slice::from_raw_parts(bytes, count) }.to_vec(),
+            frames,
+            timestamp,
+            timing.egress_epoch,
+            timing.deadline_ms,
+        ));
+        state.timed_status
+    })
 }
 unsafe extern "C" fn timed_poll(
     _: *mut c_void,
@@ -231,6 +273,8 @@ fn call_with_timing(account: &PreparedAccount, local: SocketAddr, timed: bool) -
     api.poll = Some(legacy_poll);
     api.send_prepared_audio = Some(legacy_send);
     api.poll_timed = timed.then_some(timed_poll);
+    api.retire_egress = Some(retire_egress);
+    api.send_prepared_audio_timed = Some(timed_send);
     call_with_descriptor(account, local, api)
 }
 fn call_with_descriptor(
@@ -418,26 +462,8 @@ fn private_handles_never_enter_legacy_read_or_untimed_prepared_send() {
         unsafe { api.peer_send_text.unwrap()(api.context, handle.raw, c"T 1 524950".as_ptr(), 10) },
         -1
     );
-    unsafe extern "C" fn idle_step(_: *mut c_void) -> i32 {
-        0
-    }
-    let mut registration = ptr::dangling_mut::<c_void>();
-    assert_eq!(
-        unsafe {
-            api.peer_step_attach.unwrap()(
-                api.context,
-                handle.raw,
-                Some(idle_step),
-                ptr::null_mut(),
-                &mut registration,
-            )
-        },
-        -1
-    );
-    assert!(
-        registration.is_null(),
-        "inactive private call was attached to ordinary jitter"
-    );
+    // Executor lifecycle is tested with actual provider-owned handles below;
+    // this external-table fixture is not a native provider peer allocation.
     PROVIDER.with_borrow(|state| assert_eq!((state.legacy_reads, state.legacy_sends), (0, 0)));
 }
 
@@ -1175,4 +1201,129 @@ fn protocol_media_reset_keeps_a_refused_private_control_digit() {
         [u32::from(b'5'), u32::from(b'5'), u32::from(b'6')]
     );
     assert_eq!(sink.reset_offers, 3);
+}
+
+#[test]
+fn private_egress_reuses_serial_reset_and_retains_exact_timed_packet_on_congestion() {
+    let owner = owner();
+    let account = account();
+    let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+    let api = owner.descriptor();
+    let send = api
+        .peer_send_prepared_timed
+        .expect("private timed host capability");
+    assert_eq!(
+        unsafe { api.peer_reset_encoder.unwrap()(api.context, handle.raw) },
+        0
+    );
+    PROVIDER.with_borrow(|state| assert_eq!((state.retirements, state.egress_epoch), (1, 1)));
+    let bytes = [0xfe; 160];
+    for status in [1, 0, 2] {
+        PROVIDER.with_borrow_mut(|state| state.timed_status = status);
+        assert_eq!(
+            unsafe {
+                send(
+                    api.context,
+                    handle.raw,
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    160,
+                    42,
+                    199,
+                )
+            },
+            status
+        );
+    }
+    PROVIDER.with_borrow(|state| {
+        assert_eq!(state.legacy_sends, 0);
+        assert_eq!(
+            state.timed_sends,
+            vec![(bytes.to_vec(), 160, 42, 1, 199); 3]
+        );
+    });
+    assert_eq!(
+        unsafe { api.peer_reset_encoder.unwrap()(api.context, handle.raw) },
+        0
+    );
+    assert_eq!(
+        unsafe {
+            send(
+                api.context,
+                handle.raw,
+                bytes.as_ptr(),
+                bytes.len(),
+                160,
+                62,
+                219,
+            )
+        },
+        2
+    );
+    PROVIDER.with_borrow(|state| assert_eq!(state.timed_sends.last().unwrap().3, 2));
+    drop(handle);
+    PROVIDER.with_borrow(|state| assert_eq!(state.destroyed, 1));
+}
+
+#[test]
+fn pending_or_failed_private_retirement_ends_the_call_without_legacy_fallback() {
+    for status in [1, -1] {
+        let owner = owner();
+        let account = account();
+        let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+        let api = owner.descriptor();
+        PROVIDER.with_borrow_mut(|state| state.retirement_status = status);
+        assert_eq!(
+            unsafe { api.peer_reset_encoder.unwrap()(api.context, handle.raw) },
+            -1
+        );
+        assert_eq!(read(&handle, None, 10_000).state, 3);
+        assert_eq!(
+            unsafe { api.peer_reset_encoder.unwrap()(api.context, handle.raw) },
+            -1
+        );
+        let send = api
+            .peer_send_prepared_timed
+            .expect("private timed host capability");
+        assert_eq!(
+            unsafe {
+                send(
+                    api.context,
+                    handle.raw,
+                    [0xff; 160].as_ptr(),
+                    160,
+                    160,
+                    0,
+                    200,
+                )
+            },
+            -1
+        );
+        PROVIDER.with_borrow(|state| {
+            assert_eq!(state.retirements, 1);
+            assert!(state.timed_sends.is_empty());
+            assert_eq!(state.legacy_sends, 0);
+        });
+    }
+}
+
+#[test]
+fn missing_provider_timed_send_or_retirement_cannot_admit_a_private_handle() {
+    let owner = owner();
+    let account = account();
+    let local = "127.0.0.1:4569".parse().unwrap();
+    for missing in 0..2 {
+        let mut api = tests::descriptor();
+        api.destroy = Some(destroy);
+        api.poll_timed = Some(timed_poll);
+        api.retire_egress = (missing != 0).then_some(retire_egress);
+        api.send_prepared_audio_timed = (missing != 1).then_some(timed_send);
+        let outcome =
+            owner.provider_peer_handle(call_with_descriptor(&account, local, api), &account, local);
+        if let Ok(raw) = outcome {
+            owner.destroy_peer(raw);
+        }
+        assert_eq!(outcome, Err(IaxError::IncompatibleAdapter));
+    }
+    PROVIDER.with_borrow(|state| assert_eq!(state.destroyed, 2));
 }

@@ -26,8 +26,61 @@ impl IaxPeer {
     /// Verify the optional tail before transferring a private call to its host.
     pub(crate) fn supports_timed_source(&self) -> bool {
         // IaxClient validates the complete current descriptor before any peer
-        // can be constructed; only this optional callback can be unavailable.
+        // can be constructed; each required optional callback must be present.
         self.api.poll_timed.is_some()
+            && self.api.send_prepared_audio_timed.is_some()
+            && self.api.retire_egress.is_some()
+    }
+
+    /// Retire private encoder history and old TX eligibility on its sole owner.
+    /// A fresh private call never sends legacy full-frame PCM; pending retirement
+    /// therefore fails closed rather than restoring untimed media or its retries.
+    pub(crate) fn retire_private_egress(&mut self) -> Result<u64, IaxError> {
+        let retire = self
+            .api
+            .retire_egress
+            .ok_or(IaxError::IncompatibleAdapter)?;
+        let mut epoch = 0;
+        match unsafe { retire(self.handle.as_ptr(), &mut epoch) } {
+            0 if epoch != 0 => Ok(epoch),
+            _ => Err(IaxError::Operation),
+        }
+    }
+
+    /// Forward one immutable packet/deadline/token without re-encoding or restamping.
+    /// Status two is uncommitted expiry, distinct from acceptance and congestion.
+    pub(crate) fn send_private_prepared(
+        &mut self,
+        bytes: &[u8],
+        frames: u32,
+        timestamp: u32,
+        epoch: u64,
+        deadline_ms: u32,
+    ) -> Result<i32, IaxError> {
+        let send = self
+            .api
+            .send_prepared_audio_timed
+            .ok_or(IaxError::IncompatibleAdapter)?;
+        let timing = abi::rptadv_iax2_timed_send_v1 {
+            struct_size: size_of::<abi::rptadv_iax2_timed_send_v1>() as u32,
+            abi_version: 1,
+            egress_epoch: epoch,
+            deadline_ms,
+            reserved: 0,
+        };
+        match unsafe {
+            send(
+                self.handle.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len(),
+                frames,
+                timestamp,
+                &timing,
+            )
+        } {
+            status @ 0..=2 => Ok(status),
+            _ => Err(IaxError::Operation),
+        }
     }
 
     /// Read one event into a caller-sized PCM prefix, retaining provider suffixes.
