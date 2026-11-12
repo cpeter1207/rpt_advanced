@@ -52,6 +52,17 @@ fn account_failures_are_logged_off_callback_once_and_old_generations_are_ignored
         done.recv_timeout(Duration::from_secs(5)).unwrap();
     };
     drain();
+    let update = accounts.prepare_update().unwrap();
+    let outcome = update
+        .commit(|| {
+            // An unchanged enabled entry must still obey the owner-wide update gate.
+            unsafe { event(3, 4, 4) };
+            drain();
+            assert!(received.try_recv().is_err());
+            ReloadOutcome::Rejected
+        })
+        .unwrap_err();
+    assert_eq!(outcome.cause, Error::Product);
     for kind in [u32::MAX, 2] {
         unsafe { raw(kind) };
         drain();
