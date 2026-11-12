@@ -39,6 +39,8 @@ enum Event {
 struct Provider {
     events: VecDeque<Event>,
     polls: usize,
+    services: usize,
+    service_events: VecDeque<Event>,
     media_epoch: u64,
     source_cursor: u64,
     legacy_reads: usize,
@@ -80,12 +82,60 @@ unsafe extern "C" fn timed_poll(
     record: *mut abi::rptadv_iax2_timed_event_v1,
 ) -> i32 {
     let record = unsafe { &mut *record };
-    if record.struct_size as usize != size_of::<abi::rptadv_iax2_timed_event_v1>()
-        || record.abi_version != 1
+    let service = if record.abi_version == 2 {
+        if record.struct_size as usize != size_of::<abi::rptadv_iax2_timed_event_v2>() {
+            return -1;
+        }
+        let request =
+            unsafe { &*(ptr::from_ref(record).cast::<abi::rptadv_iax2_timed_event_v2>()) };
+        if request.reserved != 0 || request.request_flags > 1 {
+            return -1;
+        }
+        request.request_flags == 1
+    } else {
+        false
+    };
+    if !(record.struct_size as usize == size_of::<abi::rptadv_iax2_timed_event_v1>()
+        && record.abi_version == 1
+        || record.struct_size as usize == size_of::<abi::rptadv_iax2_timed_event_v2>()
+            && record.abi_version == 2)
         || record.host_clock_epoch != 9
         || record.reference_now_ns < 10_000
     {
         return -1;
+    }
+    if service {
+        assert!(pcm.is_null() && text.is_null());
+        assert_eq!((capacity, text_capacity), (0, 0));
+        return PROVIDER.with_borrow_mut(|state| {
+            state.services += 1;
+            record.event_kind = 0;
+            record.event_length = 0;
+            record.media_epoch = state.media_epoch.max(1);
+            record.source_start = state.source_cursor;
+            record.flags = if record.media_epoch != record.acknowledged_media_epoch {
+                2
+            } else {
+                0
+            };
+            record.event_kind = if record.flags == 2 { 8 } else { 0 };
+            record.born_ns = 0;
+            match state.service_events.pop_front() {
+                Some(Event::Reset(epoch)) => {
+                    state.media_epoch = epoch;
+                    state.source_cursor = 0;
+                    record.media_epoch = epoch;
+                    record.source_start = 0;
+                    record.event_kind = 8;
+                    record.flags = 2;
+                }
+                Some(Event::Failure) => return -1,
+                Some(Event::Malformed(mutate)) => mutate(record),
+                None => {}
+                _ => panic!("invalid service fixture event"),
+            }
+            0
+        });
     }
     PROVIDER.with_borrow_mut(|state| {
         state.polls += 1;
@@ -944,7 +994,7 @@ fn malformed_timed_provider_records_never_escape_the_abi_boundary() {
     let mut peer = call(&account, "127.0.0.1:4569".parse().unwrap()).peer;
     let faults: [Mutate; 13] = [
         |r| r.struct_size = 0,
-        |r| r.abi_version = 2,
+        |r| r.abi_version = 1,
         |r| r.host_clock_epoch += 1,
         |r| r.reference_now_ns += 1,
         |r| r.acknowledged_media_epoch += 1,
@@ -1032,4 +1082,94 @@ fn numeric_iax_handle_cannot_enter_the_private_source_callback() {
     .cast();
     let handle = Handle { owner: &owner, raw };
     assert_eq!(read_callbacks(&handle, 0, None).0, -1);
+}
+
+/// Backpressure must not stop the released provider's ACK/retry owner or overwrite PCM.
+#[test]
+fn held_private_audio_and_digits_keep_bounded_protocol_progress() {
+    let owner = owner();
+    let account = account();
+    let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+    PROVIDER.with_borrow_mut(|state| {
+        state.events = [Event::Reset(1), Event::Audio, Event::Digit(b'5')].into();
+    });
+    let mut sink = Sink {
+        audio_accept: Some(0),
+        digit_status: Some(1),
+        ..Sink::default()
+    };
+    read(&handle, Some(&mut sink), 10_000);
+    read(&handle, Some(&mut sink), 11_000);
+    for now in 12_000..12_004 {
+        assert_eq!(read(&handle, Some(&mut sink), now).progress, 2);
+    }
+    PROVIDER.with_borrow(|state| assert_eq!((state.polls, state.services), (2, 4)));
+    assert!(
+        sink.audio_offers
+            .iter()
+            .all(|offer| offer == &sink.audio_offers[0])
+    );
+    assert!(sink.digit_offers.is_empty());
+    sink.audio_accept = None;
+    read(&handle, Some(&mut sink), 13_000);
+    read(&handle, Some(&mut sink), 14_000);
+    read(&handle, Some(&mut sink), 15_000);
+    PROVIDER.with_borrow(|state| assert_eq!((state.polls, state.services), (3, 6)));
+    assert_eq!(sink.digit_offers, [b'5' as u32, b'5' as u32]);
+}
+
+#[test]
+fn protocol_retirement_replaces_held_pcm_before_any_more_source_credit() {
+    let owner = owner();
+    let account = account();
+    let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+    PROVIDER.with_borrow_mut(|state| state.events = [Event::Reset(1), Event::Audio].into());
+    let mut sink = Sink {
+        audio_accept: Some(0),
+        ..Sink::default()
+    };
+    read(&handle, Some(&mut sink), 10_000);
+    read(&handle, Some(&mut sink), 11_000);
+    PROVIDER.with_borrow_mut(|state| state.service_events = [Event::Reset(2)].into());
+    assert_eq!(read(&handle, Some(&mut sink), 12_000).progress, 1);
+    assert_eq!(sink.audio_offers.len(), 1);
+    assert_eq!(sink.reset_offers, 2);
+    PROVIDER.with_borrow_mut(|state| state.events = [Event::Audio].into());
+    read(&handle, Some(&mut sink), 13_000);
+    PROVIDER.with_borrow_mut(|state| state.service_events = [Event::Failure].into());
+    let callbacks = callbacks(&mut sink, 14_000);
+    assert_eq!(read_callbacks(&handle, 0, Some(&callbacks)).0, -1);
+    assert_eq!(read(&handle, None, 15_000).state, 3);
+    assert_eq!(sink.audio_offers.len(), 2);
+    drop(handle);
+    PROVIDER.with_borrow(|state| assert_eq!(state.destroyed, 1));
+}
+
+#[test]
+fn protocol_media_reset_keeps_a_refused_private_control_digit() {
+    let owner = owner();
+    let account = account();
+    let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+    PROVIDER.with_borrow_mut(|state| {
+        state.events = [Event::Reset(1), Event::Digit(b'5'), Event::Digit(b'6')].into()
+    });
+    let mut sink = Sink {
+        digit_status: Some(1),
+        ..Sink::default()
+    };
+    read(&handle, Some(&mut sink), 10_000);
+    read(&handle, Some(&mut sink), 11_000);
+    PROVIDER.with_borrow_mut(|state| state.service_events = [Event::Reset(2)].into());
+    sink.refuse_reset = true;
+    assert_eq!(read(&handle, Some(&mut sink), 12_000).progress, 2);
+    assert_eq!(sink.digit_offers, [u32::from(b'5')]);
+    sink.refuse_reset = false;
+    sink.digit_status = Some(0);
+    read(&handle, Some(&mut sink), 13_000);
+    read(&handle, Some(&mut sink), 14_000);
+    assert_eq!(
+        sink.digit_offers,
+        [u32::from(b'5'), u32::from(b'5'), u32::from(b'6')]
+    );
+    assert_eq!(sink.reset_offers, 3);
 }

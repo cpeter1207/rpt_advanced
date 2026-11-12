@@ -106,9 +106,9 @@ impl HostServicesOwner {
 
 impl Phone {
     /// One source turn on the existing exclusive peer owner. A retained/refused
-    /// item is offered before polling another item. Alpha12 does not provide
-    /// independent ACK progress in this state; production attachment stays inactive
-    /// until the separate bounded protocol-progress prerequisite is qualified.
+    /// item is offered before polling another source item. Released ABI2 service
+    /// keeps ACK/retry progress bounded while leaving held PCM/digits untouched.
+    /// Protocol retirement fences old PCM without discarding private control.
     pub(super) unsafe fn read(
         &mut self,
         peer: &mut IaxPeer,
@@ -170,23 +170,42 @@ impl Phone {
             return Err(IaxError::Operation);
         }
         self.host_epoch = Some(sink.host_clock_epoch);
-        if self.pending.is_none() {
-            let event = peer.poll_source(
+        let event = if self.pending.is_some() {
+            peer.service_source(
+                sink.host_clock_epoch,
+                sink.reference_now_ns,
+                self.acknowledged,
+            )?
+        } else {
+            peer.poll_source(
                 samples,
                 sink.host_clock_epoch,
                 sink.reference_now_ns,
                 self.acknowledged,
-            )?;
-            if (event.discontinuity && event.media_epoch <= self.acknowledged)
-                || (!event.discontinuity && event.media_epoch != self.acknowledged)
-            {
-                return Err(IaxError::Operation);
-            }
+            )?
+        };
+        if (event.discontinuity && event.media_epoch <= self.acknowledged)
+            || (!event.discontinuity && event.media_epoch != self.acknowledged)
+        {
+            return Err(IaxError::Operation);
+        }
+        if self.pending.is_none() {
             if matches!(event.kind, Kind::None) && !event.discontinuity {
                 return Ok(());
             }
             self.pending = Some(event);
             self.offset = 0;
+        } else if event.discontinuity {
+            // Media retirement may supersede refused PCM/gaps, never a private
+            // control symbol that the downstream owner has not accepted.
+            let pending = self.pending.as_mut().unwrap();
+            if matches!(pending.kind, Kind::Digit(_)) {
+                pending.media_epoch = event.media_epoch;
+                pending.discontinuity = true;
+            } else {
+                *pending = event;
+                self.offset = 0;
+            }
         }
         let event = self.pending.as_mut().unwrap();
         if event.discontinuity {

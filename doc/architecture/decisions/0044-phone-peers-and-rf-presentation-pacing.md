@@ -1117,3 +1117,29 @@ The immutable source manifest preserves codec-before-IAX ordering. The SDK
 remains a signed-APT dependency rather than an unsupported source-manifest
 entry. Raising these floors does not activate phone attachment or qualify RF
 timing; consumers must still negotiate their required capabilities.
+
+
+## Private IAX protocol progress consumer, 2026-11-12
+
+Standalone private source reads now use the released alpha13 sized ABI2 request
+through the existing `poll_timed` callback. When a PCM/gap suffix, telephone digit
+or retirement acknowledgment is refused, the same serial owner requests one
+bounded `SERVICE_ONLY` turn with no source buffers before retrying it. ACKs,
+protocol replies and retransmissions continue without consuming later source
+items or replacing the held PCM buffer. No second poller, queue or thread is added.
+
+A service-reported media retirement fences held PCM/gaps before further credit.
+An already refused private digit survives that retirement and remains behind its
+required downstream reset acknowledgment. Invalid or terminal provider responses
+latch the exact call closed; null state queries cannot revive or repoll it.
+Legacy source polling and untimed prepared sending remain forbidden for private
+handles. The standalone private async attachment guard remains in place pending
+qualified private timed egress and its complete product/provider lifecycle.
+
+Focused tests include real released-provider loopback signaling: while digit 5
+is refused by the public host callback, a later reliable digit 6 is acknowledged
+without being offered out of order. Accepted-prefix PCM/birth, media reset,
+control retention and terminal cleanup are checked separately. These tests do
+not establish working phone calls, provider admission, RF attachment, a physical
+radio timing profile or live hardware acceptance. The existing host ABI and
+SONAMEs are unchanged; alpha13 build/runtime floors are required.

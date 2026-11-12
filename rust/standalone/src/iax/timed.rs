@@ -1,7 +1,7 @@
 //! Released source-time polling; one mode and one serialized owner per private call.
 use super::{IaxError, IaxPeer};
 use crate::abi;
-use std::mem::size_of;
+use std::{mem::size_of, ptr};
 
 /// One bounded copied event. Birth remains tied to the supplied host clock.
 #[derive(Clone, Copy)]
@@ -39,36 +39,94 @@ impl IaxPeer {
         reference_now_ns: u64,
         acknowledged_media_epoch: u64,
     ) -> Result<Event, IaxError> {
-        let poll = self.api.poll_timed.ok_or(IaxError::IncompatibleAdapter)?;
         // Legal text is consumed without interpretation. This is transient stack
         // storage, not an additional retained buffer for every connected call.
         let mut text = [0u8; 65507];
-        let mut record = abi::rptadv_iax2_timed_event_v1 {
-            struct_size: size_of::<abi::rptadv_iax2_timed_event_v1>() as u32,
-            abi_version: 1,
-            host_clock_epoch: host_epoch,
+        self.source_record(
+            pcm,
+            &mut text,
+            host_epoch,
             reference_now_ns,
             acknowledged_media_epoch,
-            event_kind: 0,
-            flags: 0,
-            event_length: 0,
-            media_epoch: 0,
-            source_start: 0,
-            born_ns: 0,
+            false,
+        )
+    }
+
+    /// Service ACKs/retries with no source buffers or source cursor consumption.
+    /// The released provider bounds each turn to 64 datagrams and 64 held records.
+    pub(crate) fn service_source(
+        &mut self,
+        host_epoch: u64,
+        reference_now_ns: u64,
+        acknowledged_media_epoch: u64,
+    ) -> Result<Event, IaxError> {
+        self.source_record(
+            &mut [],
+            &mut [],
+            host_epoch,
+            reference_now_ns,
+            acknowledged_media_epoch,
+            true,
+        )
+    }
+
+    fn source_record(
+        &mut self,
+        pcm: &mut [f32],
+        text: &mut [u8],
+        host_epoch: u64,
+        reference_now_ns: u64,
+        acknowledged_media_epoch: u64,
+        service: bool,
+    ) -> Result<Event, IaxError> {
+        let poll = self.api.poll_timed.ok_or(IaxError::IncompatibleAdapter)?;
+        let request_flags = if service {
+            abi::RPTADV_IAX2_SERVICE_ONLY
+        } else {
+            0
+        };
+        let mut request = abi::rptadv_iax2_timed_event_v2 {
+            prefix: abi::rptadv_iax2_timed_event_v1 {
+                struct_size: size_of::<abi::rptadv_iax2_timed_event_v2>() as u32,
+                abi_version: 2,
+                host_clock_epoch: host_epoch,
+                reference_now_ns,
+                acknowledged_media_epoch,
+                event_kind: 0,
+                flags: 0,
+                event_length: 0,
+                media_epoch: 0,
+                source_start: 0,
+                born_ns: 0,
+            },
+            request_flags,
+            reserved: 0,
         };
         let status = unsafe {
             poll(
                 self.handle.as_ptr(),
-                pcm.as_mut_ptr(),
+                if pcm.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    pcm.as_mut_ptr()
+                },
                 pcm.len(),
-                text.as_mut_ptr(),
+                if text.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    text.as_mut_ptr()
+                },
                 text.len(),
-                &mut record,
+                &mut request.prefix,
             )
         };
+        let record = request.prefix;
         if status != 0
-            || record.struct_size as usize != size_of::<abi::rptadv_iax2_timed_event_v1>()
-            || record.abi_version != 1
+            || request.request_flags != request_flags
+            || request.reserved != 0
+            || record.struct_size as usize != size_of::<abi::rptadv_iax2_timed_event_v2>()
+            || record.abi_version != 2
+            || (service && !matches!(record.event_kind, 0 | 8))
             || record.host_clock_epoch != host_epoch
             || record.reference_now_ns != reference_now_ns
             || record.acknowledged_media_epoch != acknowledged_media_epoch

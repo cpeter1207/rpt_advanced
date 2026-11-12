@@ -625,8 +625,8 @@ unsafe extern "C" fn peer_step_attach(
             };
             // This inactive slice qualifies only owned metadata/source callbacks.
             // The released callback selects phone jitter by provider ownership.
-            // Bounded protocol progress and timed egress remain unqualified;
-            // do not attach a private call until those prerequisites are ready.
+            // Timed private egress remains unqualified; do not attach a private
+            // call until the complete product/provider lifecycle is ready.
             if peer.phone.is_some() {
                 return -1;
             }

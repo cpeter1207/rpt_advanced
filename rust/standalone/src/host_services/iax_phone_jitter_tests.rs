@@ -342,3 +342,182 @@ fn real_provider_calls_prepare_phone_jitter_without_activating_private_executor(
         qualify(&host, &right_account, call, right, format);
     }
 }
+
+/// Exercise the real DSO and UDP ACK window while the public host refuses digits.
+#[test]
+fn real_provider_ack_progress_continues_behind_a_refused_private_digit() {
+    use std::sync::mpsc;
+    let left_reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let right_reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let left = left_reservation.local_addr().unwrap();
+    let right = right_reservation.local_addr().unwrap();
+    let client = tests::selected_client(Path::new("librptadviax2.so.2"), 1);
+    let outgoing_client = client.clone();
+    let account = account_at(left);
+    let host = owner();
+    drop(right_reservation);
+    let mut listener =
+        IaxServer::bind_with_accounts(&client, right, &[], &[provider(&account)]).unwrap();
+    host.enable_listener(&mut listener).unwrap();
+    let mut incoming = Incoming {
+        client,
+        account: Arc::clone(&account),
+        local: right,
+        format: 4,
+        call: None,
+        authorized: 0,
+    };
+    let (command, commands) = mpsc::channel();
+    let (result, results) = mpsc::channel();
+    drop(left_reservation);
+    let dial = thread::spawn(move || {
+        let account = account_at(right);
+        let host = owner();
+        let mut listener =
+            IaxServer::bind_with_accounts(&outgoing_client, left, &[], &[provider(&account)])
+                .unwrap();
+        host.enable_listener(&mut listener).unwrap();
+        let mut call = listener
+            .dial_provider_account(&DialRequest {
+                account: &account.settings().id,
+                generation: account.generation(),
+                destination: "fixture",
+                caller_number: "",
+                caller_name: "",
+                context: "",
+                timeout_ms: 3000,
+            })
+            .unwrap();
+        let ingress = host.context.ingress.as_ref().unwrap();
+        unsafe {
+            ingress
+                .executor
+                .configure_jitter(call.peer.raw_handle(), ptr::from_ref(ingress.jitter).cast())
+        }
+        .unwrap();
+        call.peer.send_digit(b'5').unwrap();
+        let started = Instant::now();
+        let mut acknowledged = 0;
+        let mut second = false;
+        let mut completed = false;
+        loop {
+            match commands.try_recv() {
+                Ok(false) => break,
+                Ok(true) => {
+                    call.peer.send_digit(b'6').unwrap();
+                    second = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "private ACK progress timed out"
+            );
+            let event = call
+                .peer
+                .poll_source(
+                    &mut [0.0; 160],
+                    19,
+                    started.elapsed().as_nanos() as u64 + 1_000_000_000,
+                    acknowledged,
+                )
+                .unwrap();
+            if event.discontinuity {
+                acknowledged = event.media_epoch;
+            }
+            let mut observation: abi::rptadv_iax2_peer_observation_v1 =
+                unsafe { std::mem::zeroed() };
+            observation.struct_size = size_of::<abi::rptadv_iax2_peer_observation_v1>() as u32;
+            observation.abi_version = 1;
+            assert_eq!(
+                unsafe {
+                    ingress.executor.observe(
+                        call.peer.raw_handle(),
+                        ptr::from_mut(&mut observation).cast(),
+                    )
+                },
+                0
+            );
+            if second && !completed && observation.egress_reliable_pending == 0 {
+                result.send(()).unwrap();
+                completed = true;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+    let started = Instant::now();
+    while incoming.call.is_none() && started.elapsed() < Duration::from_secs(5) {
+        unsafe {
+            listener.poll_accounts(
+                0,
+                None,
+                None,
+                Some(authorize),
+                Some(accept),
+                ptr::from_mut(&mut incoming).cast(),
+            )
+        }
+        .unwrap();
+        thread::sleep(Duration::from_millis(1));
+    }
+    let call = incoming
+        .call
+        .take()
+        .expect("authenticated real provider call");
+    assert_eq!(incoming.authorized, 1);
+    let handle = Handle {
+        owner: &host,
+        raw: host.provider_peer_handle(call, &account, right).unwrap(),
+    };
+    let ingress = host.context.ingress.as_ref().unwrap();
+    let raw = unsafe { crate::host_services::iax_peer_ref(handle.raw) }
+        .unwrap()
+        .peer
+        .raw_handle();
+    unsafe {
+        ingress
+            .executor
+            .configure_jitter(raw, ptr::from_ref(ingress.jitter).cast())
+    }
+    .unwrap();
+    let mut sink = Sink {
+        digit_status: Some(1),
+        ..Sink::default()
+    };
+    let now = || started.elapsed().as_nanos() as u64 + 1_000_000_000;
+    while sink.digit_offers.is_empty() && started.elapsed() < Duration::from_secs(5) {
+        read(&handle, Some(&mut sink), now());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(sink.digit_offers, [u32::from(b'5')]);
+    command.send(true).unwrap();
+    let mut acked = false;
+    while started.elapsed() < Duration::from_secs(5) {
+        read(&handle, Some(&mut sink), now());
+        if results.try_recv().is_ok() {
+            acked = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        acked,
+        "refused first digit stalled the later reliable frame's ACK"
+    );
+    assert!(
+        sink.digit_offers
+            .iter()
+            .all(|symbol| *symbol == u32::from(b'5'))
+    );
+    sink.digit_offers.clear();
+    sink.digit_status = Some(0);
+    while sink.digit_offers.len() < 2 && started.elapsed() < Duration::from_secs(5) {
+        read(&handle, Some(&mut sink), now());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(sink.digit_offers, [u32::from(b'5'), u32::from(b'6')]);
+    command.send(false).unwrap();
+    dial.join().unwrap();
+    drop(handle);
+}
