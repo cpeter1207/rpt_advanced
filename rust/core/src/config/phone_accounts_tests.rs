@@ -69,6 +69,13 @@ fn phone_account_invalid_optional_values_use_safe_defaults() {
 
 #[test]
 fn phone_account_invalid_required_values_are_unavailable() {
+    let long_host = [
+        "x".repeat(63),
+        "x".repeat(63),
+        "x".repeat(63),
+        "x".repeat(62),
+    ]
+    .join(".");
     for (key, values) in [
         ("local_node", vec!["", "absent", "bad node"]),
         (
@@ -76,6 +83,12 @@ fn phone_account_invalid_required_values_are_unavailable() {
             vec![
                 "",
                 "pbx",
+                ":4569",
+                &format!("{long_host}:4569"),
+                "pbx..example:4569",
+                &format!("{}:4569", "x".repeat(64)),
+                "-pbx:4569",
+                "pbx-:4569",
                 "pbx:0",
                 "pbx:65536",
                 "pbx:service",
@@ -88,13 +101,30 @@ fn phone_account_invalid_required_values_are_unavailable() {
                 "999.1.2.3:4569",
             ],
         ),
-        ("username", vec!["", "bad user"]),
-        ("secrets_file", vec!["", "https://secret"]),
+        (
+            "username",
+            vec!["", "bad user", "bad\u{7}user", &"x".repeat(256)],
+        ),
+        (
+            "secrets_file",
+            vec!["", "https://secret", &"x".repeat(4097)],
+        ),
     ] {
         for value in values {
-            let resolved = resolve_phone_accounts(&account(&format!("{key}={value}")));
+            let document = account(&format!("{key}={value}"));
+            let resolved = resolve_phone_accounts(&document);
             assert!(resolved.value.is_empty(), "{key}={value}");
             assert!(!resolved.warnings.is_empty());
+            assert!(
+                resolved
+                    .warnings
+                    .iter()
+                    .all(|warning| warning.fallback == "account unavailable")
+            );
+            assert_eq!(
+                Schema::validate(&document).unwrap().warnings,
+                resolved.warnings
+            );
         }
     }
     for key in ["local_node", "server", "username", "secrets_file"] {
@@ -120,6 +150,7 @@ fn phone_account_addresses_and_lower_bounds() {
     assert_eq!(relative.value[0].secrets_file, "private/provider.secret");
     for server in [
         "127.0.0.1:1",
+        "127.0.0.1.:1",
         "[::1]:65535",
         "localhost:5060",
         "sip.example.:5060",
@@ -132,6 +163,35 @@ fn phone_account_addresses_and_lower_bounds() {
         assert_eq!(resolved.value[0].server, server);
         assert_eq!(resolved.value[0].registration_interval_s, 1);
         assert_eq!(resolved.value[0].authentication_timeout_ms, 1);
+    }
+}
+
+#[test]
+fn phone_account_maximum_field_lengths_are_accepted() {
+    let host = [
+        "x".repeat(63),
+        "x".repeat(63),
+        "x".repeat(63),
+        "x".repeat(61),
+    ]
+    .join(".");
+    for (key, value) in [
+        ("server", format!("{host}:4569")),
+        ("username", "x".repeat(255)),
+        ("secrets_file", "x".repeat(4096)),
+    ] {
+        let document = account(&format!("{key}={value}"));
+        let resolved = resolve_phone_accounts(&document);
+        assert!(resolved.warnings.is_empty(), "{key}");
+        assert_eq!(resolved.value.len(), 1, "{key}");
+        let settings = &resolved.value[0];
+        let actual = match key {
+            "server" => &settings.server,
+            "username" => &settings.username,
+            _ => &settings.secrets_file,
+        };
+        assert_eq!(actual, &value, "{key}");
+        assert!(Schema::validate(&document).unwrap().warnings.is_empty());
     }
 }
 
