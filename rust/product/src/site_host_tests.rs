@@ -313,6 +313,62 @@ fn site_host_shutdown_acknowledges_safe_release_before_destroying_radio() {
 }
 
 #[test]
+fn site_host_seal_reservation_failure_keeps_candidate_unpublished_and_retryable() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let revision = host.runtime.revision();
+    // This new input-only device remains paused: no device operation is submitted.
+    let candidate_document = document(
+        "usb",
+        "[sensor 1000 voltage]\nenabled=yes\nbackend=iio\ndevice=/absent\nchannel=in_voltage0\n",
+    );
+    let settings = [(
+        "1000".into(),
+        ResolvedSiteSettings::resolve(&candidate_document, &NodeId::new("1000").unwrap())
+            .unwrap()
+            .value,
+    )]
+    .into_iter()
+    .collect();
+    let mut acquisition = Some(
+        Acquisition::prepare_reload(
+            &settings,
+            Arc::new(crate::site::backends::SiteBackends::load(&candidate_document).unwrap()),
+            host.epoch,
+            host.site_acquisition.keys(),
+        )
+        .unwrap(),
+    );
+    let mut radio = Some(RadioSite::default());
+    host.begin_site_reload(revision, &mut acquisition, &mut radio, &Default::default())
+        .unwrap();
+    // Empty current banks allocate nothing while polling/staging. The first
+    // allocation is the fallible seal reservation for this one new device.
+    assert_eq!(
+        crate::fixture::fail_allocation_ordinal(1, || host.site_barrier(10)),
+        Err(RuntimeError::Preparation)
+    );
+    assert_eq!(host.runtime.revision(), revision);
+    assert!(host.site_acquisition.keys().is_empty());
+    assert!(!host.resume_sites());
+    assert_eq!(host.site_barrier(11), Ok(true));
+    assert_eq!(host.site_barrier(12), Ok(true));
+    let mut retired = host.abort_sites();
+    assert_eq!(retired.len(), 1);
+    retired[0].pause(true);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !retired[0].finish() {
+        assert!(Instant::now() < deadline, "candidate worker did not retire");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(host.resume_sites());
+    assert_eq!(host.runtime.revision(), revision);
+    assert!(host.stop(20));
+}
+
+#[test]
 fn site_host_reload_release_then_abort_restores_live_demand_without_reopening() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

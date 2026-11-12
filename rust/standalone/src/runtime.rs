@@ -1034,6 +1034,65 @@ mod tests {
     }
 
     #[test]
+    fn provider_reload_preserves_terminal_publication_and_fatal_fence() {
+        use crate::providers::{ProviderSet, tests};
+        use std::cell::Cell;
+        thread_local! {
+            static STATUS: Cell<i32> = const { Cell::new(0) };
+            static CALLS: Cell<u32> = const { Cell::new(0) };
+        }
+        unsafe extern "C" fn reload(_: *const c_char, _: usize) -> i32 {
+            CALLS.set(CALLS.get() + 1);
+            STATUS.get()
+        }
+        let active = "[general]\nnode_enabled=no\n";
+        let candidate = "[general]\nnode_enabled=no\nstatus_snapshot_interval_ms=100\n";
+        for (status, outcome, published, fatal) in [
+            (0, super::ReloadOutcome::Committed, true, false),
+            (-2, super::ReloadOutcome::CommittedWithError, true, false),
+            (-3, super::ReloadOutcome::Fatal(-3), false, true),
+            (73, super::ReloadOutcome::Fatal(73), false, true),
+        ] {
+            STATUS.set(status);
+            CALLS.set(0);
+            let mut providers = ProviderSet::load().unwrap();
+            let inspection = crate::providers::ProductInspection::open().unwrap();
+            let mut product = *inspection.api();
+            product.start = Some(start_without_counts);
+            product.reload = Some(reload);
+            product.stop = Some(stop_without_counts);
+            tests::replace_descriptor(&mut providers, "librptadv_product.so.3", product);
+            let mut process = ProductRuntime::start_with_providers(
+                std::path::Path::new("rpt_advanced.conf"),
+                active,
+                Vec::new(),
+                SecretsFile::parse("").unwrap(),
+                providers,
+            )
+            .unwrap();
+            let result = process.reload(candidate);
+            assert_eq!(
+                result,
+                if status == 0 {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::ReloadOutcome(outcome))
+                }
+            );
+            assert_eq!(
+                process.configuration_text(),
+                if published { candidate } else { active }
+            );
+            assert_eq!(process.reload_fatal(), fatal);
+            if fatal {
+                assert_eq!(process.reload("must not run"), result);
+                assert_eq!(CALLS.get(), 1);
+            }
+            process.stop().unwrap();
+        }
+    }
+
+    #[test]
     fn provider_composition_propagates_product_start_failure() {
         use crate::providers::{ProviderSet, tests};
         let mut providers = ProviderSet::load().unwrap();
@@ -1380,6 +1439,33 @@ mod tests {
             assert_eq!(process.configuration_text(), candidate);
             assert!(matches!(process.stop(), Err(RuntimeError::Echo(_))));
             unsafe { fail(0) };
+            process.stop().unwrap();
+
+            // The existing native fixture rejects activation of node 42.
+            // Start with no account, then publish its first enabled account.
+            let active = "[524950]\nnode_enabled=no\n";
+            let candidate = "[524950]\nnode_enabled=no\n[echolink 524950]\nenabled=yes\ncallsign=K1ABC-R\nnode_number=42\n";
+            let mut process = ProductRuntime::start_with_providers(
+                &directory.join("rpt_advanced.conf"),
+                active,
+                Vec::new(),
+                SecretsFile::parse("").unwrap(),
+                crate::providers::ProviderSet::load().unwrap(),
+            )
+            .unwrap();
+            let error = process.reload(candidate).unwrap_err();
+            assert_eq!(
+                error,
+                RuntimeError::EchoCommitted(rptadv_peer_support::echolink::host::UpdateOutcome {
+                    product: ReloadOutcome::Committed,
+                    failure: Some(rptadv_peer_support::echolink::host::Error::Status(
+                        rptadv_peer_support::echolink::abi::Status::Full,
+                    )),
+                    retirement: None,
+                })
+            );
+            assert_eq!(process.configuration_text(), candidate);
+            assert!(!process.reload_fatal());
             process.stop().unwrap();
             return;
         }

@@ -174,11 +174,7 @@ impl ForegroundControl<'_> {
             self.client,
             self.runtime,
             |runtime, listener| runtime.enable_listener(listener),
-            |runtime| {
-                runtime
-                    .reload_with_radios(&updated, radios)
-                    .map_err(ForegroundError::Runtime)
-            },
+            |runtime| runtime.reload_with_radios(&updated, radios),
         );
         if let Err(error) = &result {
             if !matches!(error, ForegroundError::Runtime(error) if error.publication().published())
@@ -255,7 +251,7 @@ fn update_iax_listeners<C>(
     client: &crate::iax::IaxClient,
     context: &mut C,
     enable_added: impl FnMut(&mut C, &mut crate::iax::IaxServer) -> Result<(), crate::iax::IaxError>,
-    reload_product: impl FnOnce(&mut C) -> Result<(), ForegroundError>,
+    reload_product: impl FnOnce(&mut C) -> Result<(), crate::runtime::RuntimeError>,
 ) -> Result<(), ForegroundError> {
     use rptadv_peer_support::reload::ReloadOutcome;
     let profiles = nodes
@@ -281,14 +277,13 @@ fn update_iax_listeners<C>(
             result = reload_product(context);
             match &result {
                 Ok(()) => ReloadOutcome::Committed,
-                Err(ForegroundError::Runtime(error)) => error.publication(),
-                Err(_) => ReloadOutcome::Rejected,
+                Err(error) => error.publication(),
             }
         },
     )
     .map_err(ForegroundError::Iax)?;
     // Keep the exact original product/host error, including its raw fatal status.
-    result
+    result.map_err(ForegroundError::Runtime)
 }
 
 /// Start prepared listeners before exposing their generation to control polling.
@@ -676,11 +671,7 @@ mod tests {
             &client,
             &mut (),
             |_, _| Ok(()),
-            |_| {
-                Err(ForegroundError::Runtime(
-                    crate::runtime::RuntimeError::Reload,
-                ))
-            },
+            |_| Err(crate::runtime::RuntimeError::Reload),
         )
         .unwrap_err();
 
@@ -705,11 +696,7 @@ mod tests {
                 &client,
                 &mut (),
                 |_, _| Ok(()),
-                |_| {
-                    Err(ForegroundError::Runtime(
-                        crate::runtime::RuntimeError::ReloadOutcome(outcome),
-                    ))
-                },
+                |_| Err(crate::runtime::RuntimeError::ReloadOutcome(outcome)),
             );
             assert!(result.is_err());
             assert!(
@@ -765,6 +752,119 @@ mod tests {
             ForegroundError::Iax(crate::iax::IaxError::InvalidParameters)
         ));
         assert_eq!(listeners.keys().copied().collect::<Vec<_>>(), [4569]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_reload_adopts_only_published_configuration_and_listener_cohorts() {
+        use crate::{abi, host_services::HostServicesOwner, runtime::ProductRuntime};
+        use rptadv_peer_support::reload::ReloadOutcome;
+        use std::{cell::Cell, ffi::c_char};
+        thread_local! {
+            static STATUS: Cell<i32> = const { Cell::new(0) };
+            static CALLS: Cell<u32> = const { Cell::new(0) };
+        }
+        unsafe extern "C" fn start(
+            _: *const abi::rptadv_host_services_v10,
+            _: *const abi::rptadv_control_descriptor_v1,
+            _: *const abi::rptadv_file_descriptor,
+            _: *const abi::rptadv_speech_descriptor,
+            _: *const c_char,
+            _: usize,
+        ) -> i32 {
+            0
+        }
+        unsafe extern "C" fn reload(_: *const c_char, _: usize) -> i32 {
+            CALLS.set(CALLS.get() + 1);
+            STATUS.get()
+        }
+        extern "C" fn stop() -> i32 {
+            0
+        }
+        let path =
+            std::env::temp_dir().join(format!("rpt-foreground-cohort-{}.conf", std::process::id()));
+        let secrets_path = path.with_extension("secrets");
+        fs::write(&secrets_path, "").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&secrets_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let active = "[general]\nnode_enabled=no\n";
+        let inspection = crate::providers::ProductInspection::open().unwrap();
+        let mut product = *inspection.api();
+        product.start = Some(start);
+        product.reload = Some(reload);
+        product.stop = Some(stop);
+        let product = Box::leak(Box::new(product));
+        let client = test_client();
+        for (status, outcome, published, fatal, retain_listener) in [
+            (0, ReloadOutcome::Committed, true, false, true),
+            (-1, ReloadOutcome::Rejected, false, false, false),
+            (-2, ReloadOutcome::CommittedWithError, true, false, true),
+            (-3, ReloadOutcome::Fatal(-3), false, true, true),
+            (73, ReloadOutcome::Fatal(73), false, true, true),
+        ] {
+            STATUS.set(status);
+            CALLS.set(0);
+            let reserved = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
+            let port = reserved.local_addr().unwrap().port();
+            let candidate = format!(
+                "[general]\nnode_enabled=yes\niax_local_port={port}\n[524950]\nradio_channel=fixture\n"
+            );
+            fs::write(&path, &candidate).unwrap();
+            let mut runtime = unsafe {
+                ProductRuntime::start(
+                    product,
+                    HostServicesOwner::new(
+                        Vec::new(),
+                        None,
+                        crate::secrets::SecretsFile::parse("").unwrap(),
+                    )
+                    .unwrap(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    active,
+                )
+            }
+            .unwrap();
+            let mut listeners = std::collections::BTreeMap::new();
+            let mut registration =
+                crate::registration::RegistrationWorker::start(Vec::new()).unwrap();
+            drop(reserved);
+            let result = super::ForegroundControl {
+                runtime: &mut runtime,
+                configuration: &path,
+                secrets_path: Some(&secrets_path),
+                listeners: &mut listeners,
+                client: &client,
+                registration: &mut registration,
+            }
+            .reload();
+            assert_eq!(CALLS.get(), 1);
+            assert_eq!(result.is_ok(), status == 0);
+            if let Err(ForegroundError::Runtime(error)) = result {
+                assert_eq!(
+                    error,
+                    if status == -1 {
+                        crate::runtime::RuntimeError::Reload
+                    } else {
+                        crate::runtime::RuntimeError::ReloadOutcome(outcome)
+                    }
+                );
+            } else {
+                assert!(result.is_ok(), "unexpected foreground error: {result:?}");
+            }
+            assert_eq!(
+                runtime.configuration_text(),
+                if published { &candidate } else { active }
+            );
+            assert_eq!(listeners.contains_key(&port), retain_listener);
+            assert_eq!(runtime.reload_fatal(), fatal);
+            runtime.stop().unwrap();
+            listeners.clear();
+            registration.stop();
+        }
+        fs::remove_file(path).unwrap();
+        fs::remove_file(secrets_path).unwrap();
     }
 
     #[cfg(unix)]

@@ -320,6 +320,48 @@ fn site_radio_sealed_release_survives_poll_fault_without_hiding_health() {
 }
 
 #[test]
+fn site_radio_sealed_partial_release_never_rebinds_after_owner_epoch_changes() {
+    let mut definitions = settings();
+    let mut retained = definitions["2000"].outputs[0].clone();
+    retained.name = "retained".into();
+    retained.active_high = true;
+    retained.endpoint.as_mut().unwrap().channel = "8".into();
+    definitions.get_mut("2000").unwrap().outputs.push(retained);
+    let mut site = RadioSite::prepare(&definitions).unwrap();
+    let mut owner = Owner::new();
+    owner.settle(&mut site, 0);
+    definitions.get_mut("2000").unwrap().outputs.remove(0);
+    assert!(site.begin(
+        RadioSite::prepare(&definitions).unwrap(),
+        &Default::default()
+    ));
+    owner.settle(&mut site, 10);
+    assert!(site.stage());
+    owner.settle(&mut site, 12);
+    assert_eq!(owner.state.claimed_mask, 0x80);
+    assert!(site.seal());
+
+    // A changed hardware epoch normally requests rebind of the retained pin.
+    // The completed release fence must suppress that operation until commit.
+    owner.state.generation += 13;
+    let commands = owner.levels.len();
+    owner.poll(&mut site, 14);
+    assert_eq!(owner.levels.len(), commands);
+    assert_eq!(owner.state.claimed_mask, 0x80);
+    assert_eq!(site.barrier(), Some(Ok(())));
+
+    site.commit_prepared();
+    owner.settle(&mut site, 15);
+    assert!(owner.levels.len() > commands);
+    assert_eq!(owner.state.claimed_mask, 0x80);
+    assert!(site.output_status("2000", "relay").is_none());
+    assert_eq!(
+        site.output_status("2000", "retained").unwrap().submitted,
+        Some((1.0, 16))
+    );
+}
+
+#[test]
 fn site_radio_fatal_shutdown_restarts_safe_phase_for_retained_output() {
     let mut definitions = settings();
     let mut retained = definitions["2000"].outputs[0].clone();
