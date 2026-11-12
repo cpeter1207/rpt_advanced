@@ -98,12 +98,6 @@ impl ProductRuntime {
             .unwrap_or_else(|error| error.into_inner())
     }
 
-    /// Fence a published configuration whose outer listener follow-up failed.
-    pub(crate) fn fence_reload(&self) {
-        self.reload_fault
-            .store(-3, std::sync::atomic::Ordering::Release);
-    }
-
     /// Fatal reloads close foreground admission until orderly shutdown.
     pub(crate) fn reload_fatal(&self) -> bool {
         self.reload_fault.load(std::sync::atomic::Ordering::Acquire) != 0

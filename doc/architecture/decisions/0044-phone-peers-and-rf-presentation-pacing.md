@@ -757,3 +757,32 @@ expiry notification. This does not cancel the outer phone grammar or change
 the existing loss scope. Ordinary reconciliation still checks both grammars
 and the exact source revision after processing any newer queued private input;
 loss notification itself neither clears suppression nor admits media.
+
+## Scoped IAX listener cohort composition — 2026-11-12
+
+The existing foreground listener map is the sole control owner. A scoped
+transaction maps prepared IAX accounts to the explicitly named enabled node's
+configured port, preserving numeric ASL bindings separately. New listeners bind
+complete candidate profiles and enable the existing shared receiver before
+product publication, but remain unpolled. The receiver only queues NEW traffic;
+it owns no account credentials or product admission callbacks and performs no
+registration, authentication or call setup by itself.
+
+All candidate map insertion and batch preparation precede product application.
+One borrowed alpha12 batch covers retained, added and removed ports; removed
+listeners receive empty replacement profiles. The same borrowed runtime context
+is lent sequentially to candidate enablement and product application. No map
+reference enters the latter callback, and no extra ownership object or unsafe
+alias is introduced.
+
+Both published terminal outcomes consume commit before obsolete listeners are
+removed. Rejection aborts and removes only additions. Fatal or unknown outcomes
+abort only uncommitted provider preparation, retain every old and new listener
+owner, and return to the existing fenced shutdown path. Original product errors
+remain distinct; no late sequential binding mutation or compensating product
+reload remains.
+
+Production foreground composition still supplies no provider accounts. Shared
+account preparation, registration/dial execution, typed private IAX metadata,
+timed source reads/egress and complete retirement remain required before actual
+phone admission. This cohort join adds no scheduler, worker or live account use.

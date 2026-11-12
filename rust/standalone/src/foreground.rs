@@ -29,8 +29,6 @@ pub enum ForegroundError {
     Registration(std::io::Error),
     /// The standalone IAX2 listener could not bind or operate.
     Iax(crate::iax::IaxError),
-    /// Product published but a listener operation failed; owners remain retained for shutdown.
-    CommittedIax(crate::iax::IaxError),
     /// The service-only local maintenance socket could not bind.
     LocalControl(std::io::Error),
     /// The host cannot provide Unix signal and privilege semantics.
@@ -48,10 +46,6 @@ impl std::fmt::Display for ForegroundError {
                 write!(formatter, "cannot start registration worker: {error}")
             }
             Self::Iax(error) => error.fmt(formatter),
-            Self::CommittedIax(error) => write!(
-                formatter,
-                "configuration published; listener update failed: {error}"
-            ),
             Self::LocalControl(error) => {
                 write!(formatter, "cannot start local radio control: {error}")
             }
@@ -173,17 +167,19 @@ impl ForegroundControl<'_> {
         let updated = read_configuration(self.configuration)?;
         validate_configuration(&updated)?;
         let radios = resolve_radios(&updated)?;
-        let nodes = resolve_listener_nodes(&radios);
-        let result = update_iax_listeners(self.listeners, nodes, self.client, |candidates| {
-            enable_iax_listeners(candidates, self.runtime)?;
-            self.runtime
-                .reload_with_radios(&updated, radios)
-                .map_err(ForegroundError::Runtime)
-        });
-        if matches!(result, Err(ForegroundError::CommittedIax(_))) {
-            self.runtime.fence_reload();
-            return result;
-        }
+        let nodes = resolve_listener_nodes(&radios)?;
+        let result = update_iax_listeners(
+            self.listeners,
+            nodes,
+            self.client,
+            self.runtime,
+            |runtime, listener| runtime.enable_listener(listener),
+            |runtime| {
+                runtime
+                    .reload_with_radios(&updated, radios)
+                    .map_err(ForegroundError::Runtime)
+            },
+        );
         if let Err(error) = &result {
             if !matches!(error, ForegroundError::Runtime(error) if error.publication().published())
             {
@@ -218,22 +214,27 @@ impl crate::local_control::Backend for ForegroundControl<'_> {
     }
 }
 
-fn resolve_listener_nodes(radios: &[crate::ResolvedRadioNode]) -> BTreeMap<u16, Vec<String>> {
-    let mut listeners = BTreeMap::<u16, Vec<String>>::new();
-    for radio in radios.iter().filter(|radio| radio.enabled) {
-        listeners
-            .entry(radio.iax_port)
-            .or_default()
-            .push(radio.node.as_str().to_owned());
-    }
-    listeners
+fn resolve_listener_nodes(
+    radios: &[crate::ResolvedRadioNode],
+) -> Result<BTreeMap<u16, Vec<String>>, ForegroundError> {
+    // Provider account activation remains unavailable. The shared profile mapper
+    // is exercised here with no active accounts, preserving ordinary numeric routes.
+    let accounts = crate::phone_accounts::PreparedAccounts::default();
+    crate::iax::listeners::resolve_profiles(radios, &accounts)
+        .map(|profiles| {
+            profiles
+                .into_iter()
+                .map(|(port, profile)| (port, profile.local_nodes))
+                .collect()
+        })
+        .map_err(ForegroundError::Iax)
 }
 
 fn bind_iax_listeners(
     client: &crate::iax::IaxClient,
     radios: &[crate::ResolvedRadioNode],
 ) -> Result<BTreeMap<u16, crate::iax::IaxServer>, ForegroundError> {
-    resolve_listener_nodes(radios)
+    resolve_listener_nodes(radios)?
         .into_iter()
         .map(|(port, nodes)| Ok((port, bind_iax_listener(client, port, &nodes)?)))
         .collect()
@@ -248,47 +249,45 @@ fn bind_iax_listener(
     crate::iax::IaxServer::bind(client, address, nodes).map_err(ForegroundError::Iax)
 }
 
-fn update_iax_listeners(
+fn update_iax_listeners<C>(
     listeners: &mut BTreeMap<u16, crate::iax::IaxServer>,
     nodes: BTreeMap<u16, Vec<String>>,
     client: &crate::iax::IaxClient,
-    reload_product: impl FnOnce(
-        &mut BTreeMap<u16, crate::iax::IaxServer>,
-    ) -> Result<(), ForegroundError>,
+    context: &mut C,
+    enable_added: impl FnMut(&mut C, &mut crate::iax::IaxServer) -> Result<(), crate::iax::IaxError>,
+    reload_product: impl FnOnce(&mut C) -> Result<(), ForegroundError>,
 ) -> Result<(), ForegroundError> {
-    let mut added = BTreeMap::new();
-    for (port, local_nodes) in &nodes {
-        if !listeners.contains_key(port) {
-            added.insert(*port, bind_iax_listener(client, *port, local_nodes)?);
-        }
-    }
-    let result = reload_product(&mut added);
-    if let Err(error) = &result {
-        let publication = match error {
-            ForegroundError::Runtime(error) => error.publication(),
-            _ => rptadv_peer_support::reload::ReloadOutcome::Rejected,
-        };
-        if !publication.published() {
-            if matches!(
-                publication,
-                rptadv_peer_support::reload::ReloadOutcome::Fatal(_)
-            ) {
-                listeners.extend(added);
+    use rptadv_peer_support::reload::ReloadOutcome;
+    let profiles = nodes
+        .into_iter()
+        .map(|(port, local_nodes)| {
+            (
+                port,
+                crate::iax::listeners::ListenerProfile {
+                    local_nodes,
+                    accounts: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    let mut result = Ok(());
+    crate::iax::listeners::update(
+        listeners,
+        &profiles,
+        client,
+        context,
+        enable_added,
+        |context| {
+            result = reload_product(context);
+            match &result {
+                Ok(()) => ReloadOutcome::Committed,
+                Err(ForegroundError::Runtime(error)) => error.publication(),
+                Err(_) => ReloadOutcome::Rejected,
             }
-            return result;
-        }
-    }
-    // Adopt candidate listeners on committed operational errors as well. A
-    // later numeric-binding failure cannot make publication disappear.
-    listeners.extend(added);
-    for (port, local_nodes) in &nodes {
-        if let Some(listener) = listeners.get_mut(port) {
-            listener
-                .set_local_nodes(local_nodes)
-                .map_err(ForegroundError::CommittedIax)?;
-        }
-    }
-    listeners.retain(|port, _| nodes.contains_key(port));
+        },
+    )
+    .map_err(ForegroundError::Iax)?;
+    // Keep the exact original product/host error, including its raw fatal status.
     result
 }
 
@@ -611,12 +610,13 @@ mod tests {
 
     #[test]
     fn listener_reload_commits_new_nodes_only_after_product_reload() {
+        let client = test_client();
         let reservation = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
         let current_port = reservation.local_addr().unwrap().port();
         drop(reservation);
-        let stale = super::bind_iax_listener(&test_client(), 0, &["506310".to_owned()]).unwrap();
+        let stale = super::bind_iax_listener(&client, 0, &["506310".to_owned()]).unwrap();
         let current =
-            super::bind_iax_listener(&test_client(), current_port, &["506315".to_owned()]).unwrap();
+            super::bind_iax_listener(&client, current_port, &["506315".to_owned()]).unwrap();
         let mut listeners =
             std::collections::BTreeMap::from([(current_port, current), (65000, stale)]);
         let nodes = std::collections::BTreeMap::from([
@@ -625,10 +625,17 @@ mod tests {
         ]);
         let mut reloaded = false;
 
-        super::update_iax_listeners(&mut listeners, nodes, &test_client(), |_| {
-            reloaded = true;
-            Ok(())
-        })
+        super::update_iax_listeners(
+            &mut listeners,
+            nodes,
+            &client,
+            &mut (),
+            |_, _| Ok(()),
+            |_| {
+                reloaded = true;
+                Ok(())
+            },
+        )
         .unwrap();
 
         assert!(reloaded);
@@ -658,15 +665,23 @@ mod tests {
 
     #[test]
     fn listener_reload_keeps_current_set_when_product_reload_fails() {
-        let current = super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
+        let client = test_client();
+        let current = super::bind_iax_listener(&client, 0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
         let nodes = std::collections::BTreeMap::from([(0, vec!["55553".to_owned()])]);
 
-        let error = super::update_iax_listeners(&mut listeners, nodes, &test_client(), |_| {
-            Err(ForegroundError::Runtime(
-                crate::runtime::RuntimeError::Reload,
-            ))
-        })
+        let error = super::update_iax_listeners(
+            &mut listeners,
+            nodes,
+            &client,
+            &mut (),
+            |_, _| Ok(()),
+            |_| {
+                Err(ForegroundError::Runtime(
+                    crate::runtime::RuntimeError::Reload,
+                ))
+            },
+        )
         .unwrap_err();
 
         assert!(matches!(
@@ -678,17 +693,24 @@ mod tests {
 
     #[test]
     fn listener_reload_retains_candidate_owners_for_committed_error_and_fatal_shutdown() {
+        let client = test_client();
         use rptadv_peer_support::reload::ReloadOutcome;
         for outcome in [ReloadOutcome::CommittedWithError, ReloadOutcome::Fatal(73)] {
-            let current =
-                super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
+            let current = super::bind_iax_listener(&client, 0, &["506315".to_owned()]).unwrap();
             let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
             let nodes = std::collections::BTreeMap::from([(0, vec!["55553".to_owned()])]);
-            let result = super::update_iax_listeners(&mut listeners, nodes, &test_client(), |_| {
-                Err(ForegroundError::Runtime(
-                    crate::runtime::RuntimeError::ReloadOutcome(outcome),
-                ))
-            });
+            let result = super::update_iax_listeners(
+                &mut listeners,
+                nodes,
+                &client,
+                &mut (),
+                |_, _| Ok(()),
+                |_| {
+                    Err(ForegroundError::Runtime(
+                        crate::runtime::RuntimeError::ReloadOutcome(outcome),
+                    ))
+                },
+            );
             assert!(result.is_err());
             assert!(
                 listeners.contains_key(&0),
@@ -700,30 +722,47 @@ mod tests {
 
     #[test]
     fn listener_reload_prepares_async_candidates_before_committing() {
-        let current = super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
+        let client = test_client();
+        let current = super::bind_iax_listener(&client, 0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
         let nodes = std::collections::BTreeMap::from([(0, vec!["55553".to_owned()])]);
-        let result =
-            super::update_iax_listeners(&mut listeners, nodes, &test_client(), |candidates| {
-                assert_eq!(candidates.keys().copied().collect::<Vec<_>>(), [0]);
-                Err(ForegroundError::Iax(crate::iax::IaxError::Operation))
-            });
+        let enabled = std::cell::Cell::new(0);
+        let result = super::update_iax_listeners(
+            &mut listeners,
+            nodes,
+            &client,
+            &mut (),
+            |_, _| {
+                enabled.set(enabled.get() + 1);
+                Err(crate::iax::IaxError::Operation)
+            },
+            |_| panic!("enable failure reached product publication"),
+        );
+        assert_eq!(enabled.get(), 1);
         assert!(matches!(result, Err(ForegroundError::Iax(_))));
         assert_eq!(listeners.keys().copied().collect::<Vec<_>>(), [4569]);
     }
 
     #[test]
     fn listener_reload_rejects_invalid_existing_node_assignment() {
-        let current = super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
+        let client = test_client();
+        let current = super::bind_iax_listener(&client, 0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
-        let nodes = std::collections::BTreeMap::from([(4569, Vec::new())]);
+        let nodes = std::collections::BTreeMap::from([(4569, vec!["invalid".to_owned()])]);
 
-        let error = super::update_iax_listeners(&mut listeners, nodes, &test_client(), |_| Ok(()))
-            .unwrap_err();
+        let error = super::update_iax_listeners(
+            &mut listeners,
+            nodes,
+            &client,
+            &mut (),
+            |_, _| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap_err();
 
         assert!(matches!(
             error,
-            ForegroundError::CommittedIax(crate::iax::IaxError::Operation)
+            ForegroundError::Iax(crate::iax::IaxError::InvalidParameters)
         ));
         assert_eq!(listeners.keys().copied().collect::<Vec<_>>(), [4569]);
     }
@@ -1409,7 +1448,7 @@ mod tests {
     fn inbound_listener_settings_group_nodes_by_effective_iax_port() {
         let text = "[general]\nnode_enabled=yes\niax_local_port=4569\n[1000]\n[radio 1000]\n[2000]\niax_local_port=4570\n[radio 2000]\n";
         let radios = super::resolve_radios(text).unwrap();
-        let listeners = super::resolve_listener_nodes(&radios);
+        let listeners = super::resolve_listener_nodes(&radios).unwrap();
 
         assert_eq!(listeners.get(&4569).unwrap(), &["1000"]);
         assert_eq!(listeners.get(&4570).unwrap(), &["2000"]);

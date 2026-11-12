@@ -5,6 +5,7 @@ pub mod accounts;
 /// Reserved whole-listener transactions from released alpha12.
 pub mod configuration;
 pub(crate) mod executor;
+pub(crate) mod listeners;
 
 use crate::{abi, secrets::SecretsFile};
 use std::{
