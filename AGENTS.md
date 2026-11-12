@@ -111,10 +111,14 @@ constrained test serialization separate from production scheduling and capacity;
 do not impose the test runner's single-core limit on the production design.
 
 Prefer simple, linear control flow and minimize branches, especially in error
-handling. Share validation and error paths when their observable behavior is
-the same; introduce a branch only for a genuine behavioral, safety, or
-diagnostic distinction. Do not weaken validation or hide useful errors merely
-to reduce coverage surface.
+handling. Consolidate edge-case handling, validation, and error paths when
+their observable behavior is the same to minimize code size; introduce a
+branch only for a genuine behavioral, safety, or diagnostic distinction.
+Handle foreseeable and unforeseen failures consistently at the appropriate
+shared boundary, preserving error propagation and logging useful, redacted
+warnings or errors for troubleshooting. Do not add sweeping catch-all handlers,
+suppress errors, weaken validation, or hide useful errors merely to reduce code
+size or coverage surface.
 
 Treat test-surface size as an implementation cost. Prefer one shared,
 data-driven test over duplicated cases for equivalent behavior, and design
@@ -146,13 +150,20 @@ When an explicitly approved patch targets an arm64 node, use a native build in
 the target user's home-directory workspace rather than `/tmp`. Keep the source
 revision and installed artifacts synchronized with the local worktree.
 
-When a new requirement benefits from live-node validation, first implement the
-simplest core behavior that satisfies it with the fewest edge cases. Preserve
-required automated quality checks and never deploy without explicit approval.
-After approved live testing, obtain user confirmation that the core behavior is
-correct before adding noncritical edge-case handling. Safety, data integrity,
-configuration validity, and required compatibility are core behavior and must
-not be deferred.
+When implementing any new feature, plan meaningful periodic milestones and
+stop at each for manual testing on real hardware unless that hardware is
+unavailable. Use these checkpoints to catch misunderstood requirements early.
+Implement and test the simplest happy path first; after manual testing, obtain
+user confirmation that the core behavior is correct before adding comprehensive
+noncritical edge-case and error handling. Keep later increments small enough
+for further manual feedback before completing the feature. If hardware is
+unavailable, report that limitation and continue with available automated and
+simulated checks; do not claim hardware validation. Safety, security, privacy,
+data integrity, configuration validity, and required compatibility are core
+behavior and must not be deferred. Preserve required automated checks and the
+full before-merge gate. Hardware availability does not authorize deployment,
+node configuration changes, or RF operation; obtain explicit approval for those
+actions.
 
 Treat every published ABI as stable. Reuse existing ABI functions, opaque
 objects, callbacks, fields, and extension points before adding a new contract.
