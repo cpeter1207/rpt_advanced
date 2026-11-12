@@ -4955,3 +4955,113 @@ fn phone_parrot_adapter_refresh_retains_domain_and_rejects_changed_identity() {
         assert!(runtime.stop(1003));
     }
 }
+
+#[test]
+fn private_site_report_requires_live_phone_and_existing_recipe_producer() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    struct Refuse(TestStation, Arc<AtomicBool>);
+    impl StationMediaSession for Refuse {
+        fn register_program(
+            &mut self,
+            program: crate::media::MediaProgram,
+            one_shot: bool,
+        ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+            if self.1.load(Ordering::Acquire) {
+                Err(MediaError::Unavailable)
+            } else {
+                self.0.register_program(program, one_shot)
+            }
+        }
+        fn start(&mut self) -> Result<(), MediaError> {
+            Ok(())
+        }
+    }
+    struct FailingMedia(Arc<Mutex<Vec<String>>>, Arc<AtomicBool>);
+    impl NativeFilePreparer for FailingMedia {
+        fn file(&self, request: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Media.file(request)
+        }
+    }
+    impl NativeSpeechPreparer for FailingMedia {
+        fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Media.speech(request)
+        }
+    }
+    impl NativeMediaPreparer for FailingMedia {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(Refuse(
+                TestStation(Some(Arc::clone(&self.0))),
+                Arc::clone(&self.1),
+            )))
+        }
+    }
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let failure = Arc::new(AtomicBool::new(false));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &FailingMedia(messages.clone(), Arc::clone(&failure)),
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    let signals = PeerSignals::for_phone(source);
+    let reply = signals.reply_target();
+    for invalid in [PeerSignals::new().reply_target(), reply.clone()] {
+        assert!(matches!(
+            runtime.prepare_phone_site_report("1000", "1", clock(), &invalid),
+            Err(RuntimeError::Rejected)
+        ));
+    }
+    assert!(signals.authenticate_phone());
+    for selector in ["", "01"] {
+        assert!(matches!(
+            runtime.prepare_phone_site_report("1000", selector, clock(), &reply),
+            Err(RuntimeError::Rejected)
+        ));
+    }
+    assert!(matches!(
+        runtime.prepare_phone_site_report("missing", "1", clock(), &reply),
+        Err(RuntimeError::MissingNode)
+    ));
+    assert!(matches!(
+        runtime.prepare_phone_site_report(
+            "1000",
+            "1",
+            RuntimeClock {
+                civil: None,
+                ..clock()
+            },
+            &reply
+        ),
+        Err(RuntimeError::Clock)
+    ));
+    let stream = runtime
+        .prepare_phone_site_report("1000", "1", clock(), &reply)
+        .unwrap();
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["The requested site reading is unavailable."]
+    );
+    drop(stream);
+    failure.store(true, Ordering::Release);
+    assert!(matches!(
+        runtime.prepare_phone_site_report("1000", "1", clock(), &reply),
+        Err(RuntimeError::Preparation)
+    ));
+    reply.retire();
+    assert!(matches!(
+        runtime.prepare_phone_site_report("1000", "1", clock(), &reply),
+        Err(RuntimeError::Rejected)
+    ));
+    assert!(runtime.stop(20));
+}

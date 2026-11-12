@@ -526,7 +526,7 @@ fn initial_private_retry_completes_privately_then_transport_loss_uses_ordinary_p
 }
 
 #[test]
-fn rejected_private_report_does_not_cancel_an_unrelated_rf_macro() {
+fn private_site_report_and_rejected_message_preserve_unrelated_rf_macro() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -537,7 +537,7 @@ fn rejected_private_report_does_not_cancel_an_unrelated_rf_macro() {
         configuration()
     );
     let engine = engine(config, services, Arc::clone(&voice));
-    let (_source, reply, state) = admit(&engine);
+    let (source, reply, state) = admit(&engine);
     wait_for(&engine, || state.lock().unwrap().audio.len() >= 320);
     let clock = engine.clock();
     engine
@@ -565,7 +565,13 @@ fn rejected_private_report_does_not_cancel_an_unrelated_rf_macro() {
         .unwrap();
     let map = rpt_advanced_core::command::DtmfCommandMap::standard();
     let mut delivered = 320;
-    for action in [LinkAction::Message, LinkAction::SiteStatus] {
+    for (action, expected) in [
+        (LinkAction::Message, "Requested operation is unavailable"),
+        (
+            LinkAction::SiteStatus,
+            "The requested site reading is unavailable.",
+        ),
+    ] {
         let prefix = &map
             .mappings()
             .iter()
@@ -590,11 +596,33 @@ fn rejected_private_report_does_not_cancel_an_unrelated_rf_macro() {
         assert_eq!(state.lock().unwrap().audio.len(), delivered);
         let prompts = voice.opened.lock().unwrap();
         assert_eq!(prompts.len(), opened + 1, "one prepared result per command");
-        assert_eq!(
-            prompts.last().unwrap(),
-            "Requested operation is unavailable"
-        );
+        assert_eq!(prompts.last().unwrap(), expected);
     }
+    let protected = map
+        .mappings()
+        .iter()
+        .find(|mapping| mapping.action == LinkAction::ParrotEnable)
+        .unwrap()
+        .digits
+        .clone();
+    let owner = reply.clone();
+    engine
+        .run(move |host| {
+            let node = host.runtime.node("1000").unwrap();
+            let outcomes: Vec<_> = format!("*{protected}#")
+                .chars()
+                .filter_map(|digit| {
+                    node.links()
+                        .phone_digit(&source, digit, clock.now_ms, owner.clone())
+                })
+                .collect();
+            assert!(
+                outcomes.is_empty(),
+                "read-only report must not confer node unlock"
+            );
+            Ok(())
+        })
+        .unwrap();
     let due_ms = clock.now_ms + 2000;
     let remaining = engine
         .run(move |host| {

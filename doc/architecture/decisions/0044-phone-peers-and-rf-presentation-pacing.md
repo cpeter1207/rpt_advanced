@@ -946,3 +946,36 @@ Outgoing bidirectional isolation and its per-call source-unlock bypass are
 separate, unimplemented authority. A command-time decision cannot authorize
 later serial adoption: lifecycle/policy revocation, source revision, qualified
 provider media and RF readiness must join that actual handoff before activation.
+
+## Bound-node private site replies — 2026-11-12
+
+The existing public read-only SiteStatus command now prepares its same compiled
+site recipe for the authenticated caller's private reply queue. It authorizes
+only the sensor/input reading selected by the existing configured DTMF selector
+on that call's bound node: localized label, value/unit and current reading
+quality. It does not enumerate arbitrary site data or expose credentials,
+provider settings, another node's readings or administrative controls.
+
+The ordinary source-scoped node grammar and command permission still produce
+the SiteStatus effect. Before snapshot or producer preparation, Host requires
+the exact live PhoneSource/PeerReply owner, its authenticated mailbox, and the
+current enabled account with unchanged configured local binding. This does not
+grant or renew node unlock, select another destination or grant attachment.
+General Message and RemoteBase private reports retain their existing explicit
+unavailable behavior.
+
+Public and private site replies share the same control-side value snapshot and
+compiled recipe. Private preparation registers one stream with the existing
+station producer and queues it only to the original call; it never enters
+controller telemetry or creates RF demand. Stale, faulted, missing or unknown
+readings retain existing unavailable wording. Invalid selectors, absent clock,
+producer failure and queue refusal propagate without a public fallback.
+A full private queue retains its prior FIFO owners; a rejected prepared reader
+is dropped through the existing producer cancellation contract.
+
+The queued and borrowed reader retain the original call token. Hangup/reload
+cancels them, and an equal provider call ID with a different actual ingress
+cannot inherit their output. There is no new producer, PCM buffer, transport,
+ABI field, worker, cross-node permission, reservation or media activation.
+Provider/RF qualifications and a lifecycle-spanning attachment grant remain
+separate prerequisites.

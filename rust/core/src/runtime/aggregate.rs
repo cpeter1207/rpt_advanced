@@ -177,6 +177,56 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     echo_telemetry: crate::link::EchoTelemetryPolicy,
 }
 impl<A: Send, C: Send> RuntimeNode<A, C> {
+    /// Capture values once on control for public and exact-origin private recipes.
+    fn message_values(
+        &self,
+        clock: RuntimeClock,
+    ) -> Result<super::MessageValueSnapshot, RuntimeError> {
+        let (civil, _) = clock.civil.ok_or(RuntimeError::Clock)?;
+        let site = self.site.snapshot(clock.now_ms);
+        let (mut links, identity) =
+            render::direct_status(self.links.manager(), &self.control.catalog)?;
+        links.tts = render::telemetry_speech(&links.tts, &[&identity]);
+        Ok::<_, RuntimeError>(super::MessageValueSnapshot {
+            civil,
+            time_format: TimeFormat::try_from(self.time_format)
+                .map_err(|_| RuntimeError::Preparation)?,
+            node: self.name.clone(),
+            callsign: self.settings.callsign.clone(),
+            links,
+            sensors: site
+                .sensors
+                .into_iter()
+                .map(|(name, sensor)| {
+                    (
+                        name,
+                        crate::site::Observation {
+                            value: sensor.current.value.map(MessageArgument::Number),
+                            observed_at_ms: sensor.current.observed_at_ms,
+                            quality: sensor.current.quality,
+                        },
+                    )
+                })
+                .collect(),
+            inputs: site
+                .inputs
+                .into_iter()
+                .map(|(name, input)| {
+                    (
+                        name,
+                        crate::site::Observation {
+                            value: input
+                                .value
+                                .map(|value| MessageArgument::Number(f64::from(value))),
+                            observed_at_ms: input.observed_at_ms,
+                            quality: input.quality,
+                        },
+                    )
+                })
+                .collect(),
+            time_remaining: None,
+        })
+    }
     /// Station-owned site policy; callers deliver observations/effects off audio.
     pub fn site(&mut self) -> &mut crate::site::SiteController {
         &mut self.site
@@ -1240,52 +1290,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             let Some(first) = node.control.telemetry.take_message_request() else {
                 continue;
             };
-            let values = (|| {
-                let (civil, _) = clock.civil.ok_or(RuntimeError::Clock)?;
-                let site = node.site.snapshot(clock.now_ms);
-                let (mut links, identity) =
-                    render::direct_status(node.links.manager(), &node.control.catalog)?;
-                links.tts = render::telemetry_speech(&links.tts, &[&identity]);
-                Ok::<_, RuntimeError>(super::MessageValueSnapshot {
-                    civil,
-                    time_format: TimeFormat::try_from(node.time_format)
-                        .map_err(|_| RuntimeError::Preparation)?,
-                    node: node.name.clone(),
-                    callsign: node.settings.callsign.clone(),
-                    links,
-                    sensors: site
-                        .sensors
-                        .into_iter()
-                        .map(|(name, sensor)| {
-                            (
-                                name,
-                                crate::site::Observation {
-                                    value: sensor.current.value.map(MessageArgument::Number),
-                                    observed_at_ms: sensor.current.observed_at_ms,
-                                    quality: sensor.current.quality,
-                                },
-                            )
-                        })
-                        .collect(),
-                    inputs: site
-                        .inputs
-                        .into_iter()
-                        .map(|(name, input)| {
-                            (
-                                name,
-                                crate::site::Observation {
-                                    value: input
-                                        .value
-                                        .map(|value| MessageArgument::Number(f64::from(value))),
-                                    observed_at_ms: input.observed_at_ms,
-                                    quality: input.quality,
-                                },
-                            )
-                        })
-                        .collect(),
-                    time_remaining: None,
-                })
-            })();
+            let values = node.message_values(clock);
             let mut first = Some(first);
             // At most one visit per configured recipe per pump. Fast failed retries
             // cannot monopolize the host's other control work.
@@ -1361,6 +1366,41 @@ impl<A: Send, C: Send> Runtime<A, C> {
         selector: &str,
         reply: Option<crate::link::PeerReply>,
     ) -> Result<(), RuntimeError> {
+        let (node, index) = self.site_report_request(local, selector)?;
+        Self::queue_message_index(node, index, reply)
+    }
+
+    /// Prepare a compiled read-only site reply for an authenticated private sink.
+    /// The product validates current call/account/mailbox ownership before this
+    /// control-side snapshot; no controller telemetry or radio queue is used.
+    pub fn prepare_phone_site_report(
+        &mut self,
+        local: &str,
+        selector: &str,
+        clock: RuntimeClock,
+        reply: &crate::link::PeerReply,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
+        if reply.phone_source().is_none() || !reply.phone_authenticated() {
+            return Err(RuntimeError::Rejected);
+        }
+        let (node, index) = self.site_report_request(local, selector)?;
+        let values = node.message_values(clock)?;
+        let program = node.control.messages.items[index]
+            .prepare(&node.control.catalog, &values)
+            .map_err(|_| RuntimeError::Preparation)?;
+        node.control
+            .media_session
+            .as_mut()
+            .ok_or(RuntimeError::Preparation)?
+            .register_program(program, true)
+            .map_err(|_| RuntimeError::Preparation)
+    }
+
+    fn site_report_request(
+        &mut self,
+        local: &str,
+        selector: &str,
+    ) -> Result<(&mut RuntimeNode<A, C>, usize), RuntimeError> {
         if selector.is_empty() || !crate::config::message_selector_valid(selector) {
             return Err(RuntimeError::Rejected);
         }
@@ -1376,7 +1416,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .get(selector)
             .copied()
             .unwrap_or(node.control.messages.site_unavailable);
-        Self::queue_message_index(node, index, reply)
+        Ok((node, index))
     }
 
     /// Admit a read-only macro to the existing reply queue; resolve values after source unkey.

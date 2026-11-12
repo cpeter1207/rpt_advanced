@@ -1192,3 +1192,6 @@ pub(crate) fn install_controlled_source(host: &mut Host, calls: crate::phone::Ph
 
 #[path = "host_phone_attachment_policy_tests.rs"]
 mod attachment_policy;
+
+#[path = "host_phone_site_tests.rs"]
+mod site_reports;

@@ -1230,10 +1230,28 @@ impl Host {
                     .map_err(|_| RuntimeError::Rejected);
             }
         }
-        let private_reply = match &effect {
-            LinkEffect::Message { reply, .. } | LinkEffect::SiteStatus { reply, .. } => {
-                reply.as_ref()
+        if let LinkEffect::SiteStatus {
+            selector,
+            reply: Some(reply),
+        } = &effect
+        {
+            if let Some(source) = reply.phone_source() {
+                self.current_private_phone(local, reply)?;
+                self.phone_calls
+                    .mailbox(source, reply)
+                    .ok_or(RuntimeError::Rejected)?;
+                self.authorize_phone_account(source.account(), local)?;
+                let stream = self
+                    .runtime
+                    .prepare_phone_site_report(local, selector, clock, reply)?;
+                return self
+                    .phone_calls
+                    .queue_reply(source, reply, stream)
+                    .map_err(|_| RuntimeError::Rejected);
             }
+        }
+        let private_reply = match &effect {
+            LinkEffect::Message { reply, .. } => reply.as_ref(),
             LinkEffect::RemoteBase(operation) => operation.reply.as_ref(),
             _ => None,
         };
