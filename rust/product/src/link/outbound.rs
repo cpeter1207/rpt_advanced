@@ -116,6 +116,7 @@ pub(super) struct Outbound {
     anchor: Option<Anchor>,
     clock: Option<Arc<SourceClock>>,
     private: bool,
+    private_finishing: bool,
     private_clock: Option<SourceTimeClock>,
     next_audio_ms: u64,
     unkey_ns: Option<u64>,
@@ -144,6 +145,7 @@ impl Outbound {
             anchor: None,
             clock: None,
             private: false,
+            private_finishing: false,
             private_clock: None,
             next_audio_ms: 0,
             unkey_ns: None,
@@ -156,6 +158,15 @@ impl Outbound {
         let mut outbound = Self::new(rate, queue)?;
         outbound.private = true;
         Ok(outbound)
+    }
+    /// Only successful finite playback authorizes private codec tail completion.
+    pub(super) fn finish_private(&mut self) {
+        self.private_finishing = self.private
+            && (self.pending.is_some()
+                || self.pcm_position != self.pcm_used
+                || self.queue.peek_span().is_some()
+                || self.conversion.as_ref().is_some_and(|value| !value.drained)
+                || self.encoder.as_ref().is_some_and(|value| !value.drained));
     }
     pub(super) fn bind_private_clock(&mut self, clock: SourceTimeClock) -> Result<(), Error> {
         let epoch = clock.reference().host_clock_epoch;
@@ -176,6 +187,7 @@ impl Outbound {
     }
     fn discard_media(&mut self, io: &mut PeerIo) -> Result<(), Error> {
         self.discard()?;
+        self.private_finishing = false;
         if self.private {
             self.anchor = None;
             self.unkey_ns = None;
@@ -190,7 +202,8 @@ impl Outbound {
     }
     /// Private prompt playback admits at most one native block behind retained conversion.
     pub(super) fn ready_for_input(&mut self) -> bool {
-        self.pending.is_none()
+        !self.private_finishing
+            && self.pending.is_none()
             && self.pcm_position == self.pcm_used
             && self.queue.peek_span().is_none()
     }
@@ -247,11 +260,43 @@ impl Outbound {
             .as_ref()
             .map(|pending| pending.expires.saturating_sub(AGE_NS))
             .or_else(|| self.encoder.as_ref().map(|encoder| encoder.born_ns))
+            .or_else(|| {
+                self.conversion
+                    .as_ref()
+                    .filter(|_| self.private)
+                    .map(|value| value.born_ns)
+            })
             .or_else(|| self.queue.peek_span().and_then(|span| span.span.born_ns));
         if let Some(born) = oldest {
             self.statistics
                 .queue_age
                 .fetch_max(now.saturating_sub(born), Ordering::Relaxed);
+        }
+        if self.private
+            && self.pending.is_none()
+            && (self.encoder.is_some() || self.conversion.is_some())
+            && oldest.is_some_and(|born| now >= born.saturating_add(AGE_NS))
+        {
+            let retained = self.encoder.as_ref().map_or_else(
+                || {
+                    self.conversion.as_ref().map_or(0, |value| {
+                        value.next.saturating_sub(value.span.source_start)
+                    })
+                },
+                |value| {
+                    ((self.pcm_used - self.pcm_position) as u64
+                        + value.input_frames.saturating_sub(value.source_end))
+                        * 48_000
+                        / u64::from(self.rate)
+                },
+            );
+            self.statistics
+                .expired
+                .fetch_add(retained, Ordering::Relaxed);
+            let finishing = self.private_finishing && self.queue.peek_span().is_some();
+            self.discard_media(io)?;
+            self.private_finishing = finishing;
+            return Ok(Some(now));
         }
         if let Some(pending) = &self.pending {
             if now >= pending.expires || !self.current(pending.stream) {
@@ -305,6 +350,12 @@ impl Outbound {
         if next.is_some_and(|deadline| deadline <= now) {
             return Ok(next);
         }
+        if self.private && !self.private_finishing {
+            return Ok(next
+                .into_iter()
+                .chain(oldest.map(|born| born.saturating_add(AGE_NS)))
+                .min());
+        }
         if let Some(deadline) = self.unkey_ns.filter(|deadline| now >= *deadline) {
             if self
                 .conversion
@@ -348,6 +399,7 @@ impl Outbound {
             }
             self.sent = false;
             self.unkey_ns = None;
+            self.private_finishing = false;
         }
         Ok(next.into_iter().chain(self.unkey_ns).min())
     }
@@ -367,7 +419,10 @@ impl Outbound {
                 && now < previous.born_ns.saturating_add(AGE_NS)
         });
         if !continuous {
+            // Completion belongs to the newly admitted span, not discarded history.
+            let finishing = self.private_finishing;
             self.discard_media(io)?;
+            self.private_finishing = finishing;
             self.conversion = Some(Conversion {
                 span,
                 next: span.source_start,
@@ -452,17 +507,56 @@ impl Outbound {
             );
             return self.discard_media(io);
         }
-        let result = io.prepare_audio(
-            &self.converter.retained_output(self.pcm_used)[self.pcm_position..],
-            &mut self.encoded,
-            flush,
-        )?;
+        // Released private G.711 requires complete 160-frame packets. Complete
+        // the retained finite tail with PCM silence before asking the codec to
+        // flush; encoded-byte padding would not represent codec silence.
+        let padding = if self.private && self.rate == 8000 && flush {
+            if !self.private_finishing
+                || self.pcm_position != self.pcm_used
+                || !self.conversion.as_ref().is_some_and(|value| value.drained)
+            {
+                return Err(Error::Translation);
+            }
+            let retained = encoder
+                .input_frames
+                .checked_sub(encoder.source_end)
+                .filter(|retained| *retained < 160)
+                .ok_or(Error::Translation)?;
+            if retained == 0 {
+                0
+            } else {
+                160 - retained as usize
+            }
+        } else {
+            0
+        };
+        let result = if padding != 0 {
+            self.native[..padding].fill(0.0);
+            io.prepare_audio(&self.native[..padding], &mut self.encoded, false)?
+        } else {
+            io.prepare_audio(
+                &self.converter.retained_output(self.pcm_used)[self.pcm_position..],
+                &mut self.encoded,
+                flush,
+            )?
+        };
+        if padding != 0
+            && (result.consumed_frames != padding
+                || result.encoded_bytes != 160
+                || result.packet_frames != 160
+                || result.source_frames != 160)
+        {
+            return Err(Error::Translation);
+        }
+        let source_frames = result.source_frames - padding as u32;
         if result.status == 2
             || (result.consumed_frames == 0 && result.encoded_bytes == 0 && !flush)
         {
             return Err(Error::Translation);
         }
-        self.pcm_position += result.consumed_frames;
+        if padding == 0 {
+            self.pcm_position += result.consumed_frames;
+        }
         let encoder = self.encoder.as_mut().expect("encoder origin");
         encoder.input_frames = encoder
             .input_frames
@@ -525,7 +619,7 @@ impl Outbound {
                 .and_then(|remaining| elapsed.checked_add(remaining))
             else {
                 self.statistics.expired.fetch_add(
-                    u64::from(result.source_frames) * 48_000 / u64::from(self.rate),
+                    u64::from(source_frames) * 48_000 / u64::from(self.rate),
                     Ordering::Relaxed,
                 );
                 return self.discard_media(io);
@@ -537,7 +631,7 @@ impl Outbound {
         self.pending = Some(Pending {
             bytes: result.encoded_bytes,
             frames: result.packet_frames,
-            source_frames: result.source_frames,
+            source_frames,
             timestamp,
             end_timestamp,
             deadline,

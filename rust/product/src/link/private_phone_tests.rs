@@ -2258,3 +2258,188 @@ fn private_160_frame_packet_retains_oldest_birth_and_deadline_across_turns() {
     assert_eq!(state.timed_deadlines, [deadline, deadline, deadline]);
     assert_eq!(session.outbound.statistics.snapshot().accepted, 1);
 }
+
+#[test]
+fn private_finite_g711_tail_completes_with_zero_pcm_before_flush() {
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    let origin = Instant::now();
+    let clock = SourceTimeClock::new(origin).unwrap();
+    session.set_epoch(origin);
+    session.set_source_clock(clock);
+    {
+        let mut state = state.lock().unwrap();
+        state.encode_unit = Some(160);
+        state.g711_partial_flush = true;
+        state.prepared_result = 1;
+    }
+    control
+        .send(crate::phone::tests::private_prompt(
+            &reply,
+            Box::new(Speech::new(480)),
+        ))
+        .ok()
+        .unwrap();
+    session.step(0).unwrap();
+    let oldest_upper = clock.reference().now_ns;
+    assert!(state.lock().unwrap().prepared.is_empty());
+    let mut before_completion = oldest_upper;
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        before_completion = clock.reference().now_ns;
+        session.step(before_completion / 1_000_000).unwrap();
+        if !state.lock().unwrap().prepared.is_empty() {
+            break;
+        }
+    }
+    let (packet, deadline) = {
+        let state = state.lock().unwrap();
+        assert_eq!(state.prepared.len(), 1, "finite tail must reach the caller");
+        assert_eq!(state.prepared[0].0.len(), 160);
+        assert!(state.prepared[0].0[..80].iter().any(|sample| *sample != 0));
+        assert_eq!(
+            state.prepared[0].0[80..],
+            [0xff; 80],
+            "complete PCM with silence, not encoded bytes"
+        );
+        (state.prepared[0].clone(), state.timed_deadlines[0])
+    };
+    let maximum_remaining = (200_000_000 - (before_completion - oldest_upper)) / 1_000_000;
+    assert!(
+        u64::from(deadline) <= maximum_remaining,
+        "padding cannot renew retained speech birth"
+    );
+    session.step(clock.reference().now_ns / 1_000_000).unwrap();
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(state.prepared, [packet.clone(), packet.clone()]);
+        assert_eq!(state.timed_deadlines, [deadline, deadline]);
+    }
+    state.lock().unwrap().prepared_result = 0;
+    session.step(clock.reference().now_ns / 1_000_000).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    session.step(clock.reference().now_ns / 1_000_000).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.prepared, [packet.clone(), packet.clone(), packet]);
+    assert_eq!(state.timed_deadlines, [deadline, deadline, deadline]);
+    assert_eq!(session.outbound.statistics.snapshot().accepted, 1);
+    assert_eq!(
+        session.source_position, 480,
+        "padding is not rendered source speech"
+    );
+    assert!(!reply.ended());
+}
+
+#[test]
+fn private_partial_reader_waits_for_successful_empty_finish_before_padding() {
+    struct PausedTail {
+        emitted: bool,
+        finish: Arc<AtomicBool>,
+    }
+    impl PcmStreamReader for PausedTail {
+        fn render(&mut self, output: &mut [f32]) -> PcmRead {
+            if !self.emitted {
+                self.emitted = true;
+                output[..480].fill(0.25);
+                PcmRead::Samples(480)
+            } else if self.finish.load(Ordering::Acquire) {
+                PcmRead::Finished
+            } else {
+                PcmRead::Pending
+            }
+        }
+    }
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    let origin = Instant::now();
+    let clock = SourceTimeClock::new(origin).unwrap();
+    session.set_epoch(origin);
+    session.set_source_clock(clock);
+    {
+        let mut state = state.lock().unwrap();
+        state.encode_unit = Some(160);
+        state.g711_partial_flush = true;
+    }
+    let finish = Arc::new(AtomicBool::new(false));
+    control
+        .send(crate::phone::tests::private_prompt(
+            &reply,
+            Box::new(PausedTail {
+                emitted: false,
+                finish: Arc::clone(&finish),
+            }),
+        ))
+        .ok()
+        .unwrap();
+    session.step(0).unwrap();
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        session.step(clock.reference().now_ns / 1_000_000).unwrap();
+        assert!(
+            state.lock().unwrap().prepared.is_empty(),
+            "Pending is not finite completion"
+        );
+    }
+    assert_eq!(session.source_position, 480);
+    finish.store(true, Ordering::Release);
+    for _ in 0..20 {
+        session.step(clock.reference().now_ns / 1_000_000).unwrap();
+        if !state.lock().unwrap().prepared.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let state = state.lock().unwrap();
+    assert_eq!(
+        state.prepared.len(),
+        1,
+        "Finished with zero new samples releases the retained tail"
+    );
+    assert_eq!(state.prepared[0].0.len(), 160);
+    assert!(state.prepared[0].0[..80].iter().any(|sample| *sample != 0));
+    assert_eq!(state.prepared[0].0[80..], [0xff; 80]);
+    assert_eq!(session.source_position, 480);
+    assert!(!reply.ended());
+}
+
+#[test]
+fn private_queued_only_expired_span_is_consumed_in_one_owner_turn() {
+    let (mut session, _control, state, reply) = source_session_with_auth(true);
+    let origin = Instant::now() - std::time::Duration::from_millis(300);
+    let clock = SourceTimeClock::new(origin).unwrap();
+    session.set_epoch(origin);
+    session.set_source_clock(clock);
+    let source = reply.phone_source().unwrap();
+    assert_eq!(
+        session.output.write(
+            AudioSpan {
+                generation: source.call_generation(),
+                burst: 0,
+                source_start: 0,
+                stream: source.ingress(),
+                born_ns: Some(0),
+            },
+            &[0.25; 480],
+        ),
+        0
+    );
+    session.step(clock.reference().now_ns / 1_000_000).unwrap();
+    assert!(
+        session.outbound.ready_for_input(),
+        "expired queued PCM must be consumed, not repeatedly revisited"
+    );
+    assert_eq!(
+        session
+            .outbound
+            .statistics
+            .snapshot()
+            .expired_native_samples,
+        480
+    );
+    let resets = state.lock().unwrap().encoder_resets;
+    session.step(clock.reference().now_ns / 1_000_000).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(
+        state.encoder_resets, resets,
+        "empty retry must not retire the same queue again"
+    );
+    assert!(state.prepared.is_empty());
+}

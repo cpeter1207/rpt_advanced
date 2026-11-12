@@ -51,6 +51,7 @@ pub(crate) struct State {
     encoded_bytes: Option<usize>,
     encode_position: u64,
     pub(crate) encode_unit: Option<usize>,
+    pub(crate) g711_partial_flush: bool,
     encode_full: bool,
     encode_failure: bool,
     encode_pending: Vec<f32>,
@@ -1777,7 +1778,11 @@ unsafe extern "C" fn prepare_audio(
         .iter()
         .zip(unsafe { std::slice::from_raw_parts_mut(output, bytes) })
     {
-        *output = (input * 100.0) as u8;
+        *output = if state.g711_partial_flush && *input == 0.0 {
+            0xff // PCMU silence is not a zero encoded byte.
+        } else {
+            (input * 100.0) as u8
+        };
     }
     unsafe {
         *result = abi::rptadv_codec_encode_result_v1 {
@@ -1787,7 +1792,13 @@ unsafe extern "C" fn prepare_audio(
             encoded_bytes: bytes,
             source_start_frames: state.encode_position,
             source_frames: real as u32,
-            packet_frames: if ready { unit as u32 } else { 0 },
+            packet_frames: if !ready {
+                0
+            } else if state.g711_partial_flush && flush != 0 {
+                real as u32
+            } else {
+                unit as u32
+            },
             required_capacity: bytes,
         };
     }
@@ -1834,12 +1845,17 @@ unsafe extern "C" fn send_prepared_timed(
     timestamp: u32,
     deadline: u32,
 ) -> i32 {
-    unsafe { state(peer) }
-        .lock()
-        .unwrap()
-        .timed_deadlines
-        .push(deadline);
-    unsafe { send_prepared(context, peer, input, count, frames, timestamp) }
+    let strict = {
+        let mut state = unsafe { state(peer) }.lock().unwrap();
+        state.timed_deadlines.push(deadline);
+        state.g711_partial_flush
+    };
+    let result = unsafe { send_prepared(context, peer, input, count, frames, timestamp) };
+    if strict && (count != 160 || frames != 160) {
+        -1
+    } else {
+        result
+    }
 }
 unsafe extern "C" fn elapsed(_: *mut c_void, peer: *mut c_void) -> u32 {
     unsafe { state(peer) }.lock().unwrap().call_elapsed

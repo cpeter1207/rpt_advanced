@@ -1209,3 +1209,17 @@ physically short prefix, capability groups, immutable retry/expiry and immediate
 reset failure. Actual-product mailbox login/status and manual telephone smoke
 remain separate integration milestones. RF timing, half-duplex receive,
 outgoing authority and live hardware acceptance are not established here.
+
+### Finite private prompt completion
+
+A successful private playback result, not an idle interval or temporary reader
+Pending, authorizes finite converter/encoder drain. The existing Outbound owner
+holds later prompt input until that drain completes. A released G.711 encoder
+may flush a short final packet; after the converter has fully drained, the
+private 8 kHz owner completes its checked retained PCM to 160 frames with silence
+in existing scratch, then asks the codec to encode it. It never appends encoded
+zero bytes, discards spoken tail, or weakens the fixed provider packet contract.
+The original oldest birth, timestamp and immutable retry deadline remain intact;
+padding is excluded from real-source expiry accounting. Waiting incomplete
+history still expires at its original age, while the existing queue consumer
+discards stale queued spans rather than rescheduling them indefinitely.

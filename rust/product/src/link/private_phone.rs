@@ -593,7 +593,10 @@ impl PrivatePhoneSession {
                 }
                 match reply.outcome() {
                     PlaybackOutcome::Active => {}
-                    PlaybackOutcome::Succeeded => self.current = None,
+                    PlaybackOutcome::Succeeded => {
+                        self.current = None;
+                        self.outbound.finish_private();
+                    }
                     PlaybackOutcome::Failed | PlaybackOutcome::Cancelled => {
                         return Err(Error::Operation);
                     }
