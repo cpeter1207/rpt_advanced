@@ -511,3 +511,35 @@ introduced. The measured amd64 representation is 88 bytes versus the previous
 72-byte ordinary input; the 16-byte ordinary-slot cost avoids another allocation
 or virtual call. The mixed worker remains a preparation prerequisite, not
 permission to attach a phone or publish unqualified RF programme.
+
+## Shared phone account preparation, 2026-11-11
+
+The protocol-neutral standalone account owner consumes copied
+`ResolvedPhoneAccount` records from the existing product visitor. It does not
+parse ordinary configuration or link another controller implementation.
+An immutable prepared account owns its settings, one resolved numeric endpoint,
+literal credential, and nonzero generation. A sorted vector shares unchanged
+accounts through `Arc`; complete settings, endpoint and credential equality
+preserves the exact generation. Changed or newly enabled accounts receive a
+fresh generation from one serialized owner. Failed or abandoned preparation
+leaves active snapshots unchanged; generation gaps are allowed, reuse is not.
+
+Each `secrets_file` is one UTF-8 literal secret, not an INI document. Strip only
+one terminal LF or CRLF; preserve spaces, semicolons and hash characters. Reject
+empty values and remaining control characters. Resolve relative paths against
+the host configuration directory and reuse the shared opened-file ownership,
+regular-file, mode 0600 and no-final-symlink checks. Accept at most 4096 file bytes, with a capped read to reject concurrent
+growth; IAX additionally requires at most 255 credential bytes. SIP
+uses the bounded literal string without a smaller digest-specific limit.
+Diagnostics and Debug output must never contain credentials, credential paths,
+provider usernames or endpoints.
+
+Preparation belongs off foreground/control and accepts a caller-owned resolver;
+numeric endpoints bypass DNS. A blocking resolver's admission permit remains
+inside its actual job until completion, including after async cancellation.
+Stale results cannot publish. This module creates no executor, thread, queue,
+listener, registration refresh or call. The host must know whether product
+publication occurred before committing a reserved listener transaction.
+Rejected preparation preserves existing calls; a post-publication operational
+failure must not be presented as a successful rollback. Account activation,
+shared listener lifecycle and both-host composition remain separate work.

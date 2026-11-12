@@ -36,6 +36,16 @@ impl AccountSecrets {
 
 /// Read an opened regular file owned by the effective host user with mode 0600.
 pub fn read_private_file(path: &Path) -> Result<String, SecretError> {
+    read_private_file_with_limit(path, u64::MAX)
+}
+
+/// Read a private file with a hard byte bound, retaining the opened-descriptor checks.
+pub fn read_private_file_bounded(path: &Path, maximum_bytes: usize) -> Result<String, SecretError> {
+    read_private_file_with_limit(path, maximum_bytes as u64)
+}
+
+/// Keep descriptor validation and growth-safe bounded reads identical for both callers.
+fn read_private_file_with_limit(path: &Path, maximum_bytes: u64) -> Result<String, SecretError> {
     #[cfg(unix)]
     {
         use std::{
@@ -44,7 +54,7 @@ pub fn read_private_file(path: &Path) -> Result<String, SecretError> {
         };
         // Inspect the opened descriptor, not a pathname that can change underneath us.
         // Nonblocking open also lets us reject a FIFO without waiting for its writer.
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
@@ -60,14 +70,23 @@ pub fn read_private_file(path: &Path) -> Result<String, SecretError> {
                 "secrets file must be owned by this user with mode 0600",
             ));
         }
+        if metadata.len() > maximum_bytes {
+            return Err(SecretError("secrets file exceeds size limit"));
+        }
+        // A regular file can grow after metadata inspection. Consume at most one
+        // byte beyond the limit so growth cannot make this read unbounded.
         let mut text = String::new();
-        file.read_to_string(&mut text)
+        file.take(maximum_bytes.saturating_add(1))
+            .read_to_string(&mut text)
             .map_err(|_| SecretError("cannot read secrets file"))?;
+        if text.len() as u64 > maximum_bytes {
+            return Err(SecretError("secrets file exceeds size limit"));
+        }
         Ok(text)
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = (path, maximum_bytes);
         Err(SecretError("secrets files require Unix permissions"))
     }
 }
@@ -279,5 +298,24 @@ mod tests {
         }
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn bounded_private_secret_reader_rejects_oversized_utf8() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let path =
+            std::env::temp_dir().join(format!("rptadv-bounded-secret-{}", std::process::id()));
+        fs::write(&path, "éé").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_private_file_bounded(&path, 4).unwrap(), "éé");
+        for limit in [0, 1, 3] {
+            assert_eq!(
+                read_private_file_bounded(&path, limit)
+                    .unwrap_err()
+                    .to_string(),
+                "secrets file exceeds size limit"
+            );
+        }
+        fs::remove_file(path).unwrap();
     }
 }

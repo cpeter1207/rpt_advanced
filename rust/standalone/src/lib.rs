@@ -20,6 +20,8 @@ mod local_control;
 mod local_radio;
 /// Native SIP signaling and packet-media boundaries.
 pub mod phone;
+/// Protocol-neutral preparation of owned phone account snapshots.
+pub mod phone_accounts;
 pub(crate) mod processing;
 /// Runtime provider loading and version validation.
 pub mod providers;
