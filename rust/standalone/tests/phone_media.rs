@@ -1,5 +1,7 @@
 //! Independent wire-format contract for the native phone media boundary.
-use rpt_advanced_standalone::phone::media::{G711, MediaDescription, MediaError};
+use rpt_advanced_standalone::phone::media::{
+    G711, MediaDescription, MediaError, SendStatus, TimedAudio,
+};
 use std::net::SocketAddr;
 
 fn offer(payload: &str, attributes: &str) -> String {
@@ -77,7 +79,7 @@ fn session_attributes_and_media_connection_are_honored() {
 }
 
 #[tokio::test]
-async fn rtp_socket_preserves_packet_order_and_wraps_the_wire_clock() {
+async fn rtp_socket_preserves_packet_order_and_original_source_clock() {
     use rpt_advanced_standalone::phone::media::{RtpEndpoint, RtpEvent};
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let description = MediaDescription {
@@ -90,14 +92,33 @@ async fn rtp_socket_preserves_packet_order_and_wraps_the_wire_clock() {
         description,
         0x12345678,
         u16::MAX,
-        u32::MAX - 79,
     )
     .await
     .unwrap();
     let local = transport.local_addr().unwrap();
     let mut wire = [0; 2048];
-    for (sequence, timestamp) in [(u16::MAX, u32::MAX - 79), (0, 80)] {
-        transport.send_audio(&[0xff; 160], true).await.unwrap();
+    for (sequence, timestamp) in [(u16::MAX, u32::MAX - 79), (0, 400)] {
+        let request = TimedAudio {
+            payload: &[0xff; 160],
+            marker: true,
+            timestamp,
+            deadline_ms: transport.elapsed_ms().checked_add(200).unwrap(),
+            epoch: transport.tx_epoch(),
+        };
+        loop {
+            match transport.try_send_audio(request).unwrap() {
+                SendStatus::Sent => break,
+                SendStatus::WouldBlock => {
+                    assert!(transport.wants_writable());
+                    tokio::time::timeout(Duration::from_secs(1), transport.writable())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                SendStatus::Expired => panic!("loopback missed its source deadline"),
+            }
+        }
+        assert!(!transport.wants_writable());
         let (length, source) = peer.recv_from(&mut wire).await.unwrap();
         assert_eq!(source, local);
         assert_eq!(length, 172);
@@ -136,7 +157,7 @@ async fn telephone_events_are_bounded_and_end_repetitions_are_deduplicated() {
         codec: G711::Alaw,
         telephone_event: Some(101),
     };
-    let mut transport = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), description, 1, 1, 1)
+    let mut transport = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), description, 1, 1)
         .await
         .unwrap();
     let local = transport.local_addr().unwrap();
@@ -239,7 +260,7 @@ async fn constructing_media_cannot_bypass_payload_and_endpoint_validation() {
             telephone_event: event,
         };
         assert!(matches!(
-            RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), media, 1, 1, 1).await,
+            RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), media, 1, 1).await,
             Err(MediaError::UnsupportedDescription)
         ));
     }
@@ -352,7 +373,6 @@ async fn media_pair() -> (tokio::net::UdpSocket, RtpEndpoint) {
             codec: G711::Mulaw,
             telephone_event: Some(101),
         },
-        1,
         1,
         1,
     )

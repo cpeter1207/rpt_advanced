@@ -297,8 +297,9 @@ independent of PCM admission; repeated ends do not repeat command digits.
 
 The fixed 172-byte RTP send follows Rust 1.88's
 [atomic UDP send contract](https://github.com/rust-lang/rust/blob/1.88.0/library/std/src/net/udp.rs#L683-L702).
-Real socket errors remain redacted; sequence and timestamp advance only after
-successful submission of the entire datagram. Success does not establish peer
+Real socket errors remain redacted; sequence advances only after successful
+submission of the entire datagram. The caller supplies the original source
+timestamp, including skipped or expired spans. Success does not establish peer
 delivery.
 
 SRTP, SDES/DTLS, ICE, RTCP multiplexing, additional codecs and non-20-ms profiles
@@ -1255,3 +1256,30 @@ This is a shared private-audio integration regression, not a supported
 headless deployment configuration, native SIP acceptance, RF presentation
 qualification or a live hardware milestone. It introduces no production
 interface or authority change.
+
+
+### Prepared timed RTP submission, 2026-11-12
+
+The signaling-neutral media owner now accepts exactly one prepared 160-byte
+G.711 payload with its original wrapping 8 kHz timestamp, marker, immutable
+nonwrapping call-elapsed deadline and transmit epoch. The existing product
+Outbound owner remains responsible for mapping original source age to at most
+200 ms remaining; its millisecond source timestamps must be converted to 8 kHz
+RTP units by the future SIP host. RTP does not stamp a new source birth,
+re-anchor a gap, convert PCM or drain a prompt itself.
+
+Submission uses Tokio try_send on the same connected UDP socket. WouldBlock
+retains one fixed 172-byte datagram, its deadline and sequence; changed retries
+are rejected without replacing it. Only actual WouldBlock requests writable
+readiness, and the existing serial owner must also service the original
+deadline and call lifecycle. No timer, scheduler, task, queue or codec is added.
+Expiry discards uncommitted bytes without consuming a sequence number.
+Retirement discards staged bytes and advances a nonwrapping epoch; old work
+cannot send or clear a newer generation's pending datagram. Already submitted
+UDP datagrams cannot be revoked.
+
+This replaces the unused untimed send interface and removes the redundant
+initial RTP timestamp from bind. It is an internal initial-alpha Rust API
+change with no C ABI, SONAME or package change. Focused framing and loopback
+tests establish source-gap, immutable-retry, expiry and retirement behavior,
+not active SIP signaling, product admission or hardware acceptance.

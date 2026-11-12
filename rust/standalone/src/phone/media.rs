@@ -1,5 +1,8 @@
 //! Narrow 8 kHz G.711 phone profile. All operations run off audio.
 use std::net::SocketAddr;
+
+#[cfg(test)]
+mod tests;
 /// Selected static RTP audio format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum G711 {
@@ -29,6 +32,8 @@ pub enum MediaError {
     Network,
     /// Released G.711 provider operation failed.
     Codec,
+    /// The nonwrapping transmit generation is exhausted; replace the call owner.
+    Retired,
 }
 impl G711 {
     fn payload(self) -> u8 {
@@ -221,23 +226,48 @@ pub enum RtpEvent {
         ended: bool,
     },
 }
+/// Encoded source media; timing is fixed before its first submission.
+#[derive(Clone, Copy)]
+pub struct TimedAudio<'a> {
+    /// Exactly one 20 ms packet from the released G.711 encoder.
+    pub payload: &'a [u8; 160],
+    /// First packet following a source discontinuity.
+    pub marker: bool,
+    /// Original wrapping 8 kHz source sample position, including discarded gaps.
+    pub timestamp: u32,
+    /// Immutable deadline in this endpoint's nonwrapping elapsed milliseconds.
+    pub deadline_ms: u32,
+    /// Exact nonzero generation returned by the most recent retirement.
+    pub epoch: u64,
+}
+/// Result of one nonblocking submission; no result claims remote delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendStatus {
+    /// Complete UDP datagram accepted by the socket.
+    Sent,
+    /// No acceptance; wait for writable readiness or the original deadline.
+    WouldBlock,
+    /// No acceptance; source deadline or generation is no longer current.
+    Expired,
+}
+
 /// Serial datagram owner, separate from packet jitter and PCM processing.
 pub struct RtpEndpoint {
     socket: tokio::net::UdpSocket,
     media: MediaDescription,
-    header: rtp::header::Header,
+    egress: RtpEgress,
+    started: std::time::Instant,
     source: Option<u32>,
     events: [Option<(u32, u8, bool)>; 16],
     next_event: usize,
 }
 impl RtpEndpoint {
-    /// Bind one exact negotiated remote with caller-provided initial wire clocks.
+    /// Bind one exact negotiated remote with caller-provided SSRC and sequence.
     pub async fn bind(
         local: SocketAddr,
         media: MediaDescription,
         ssrc: u32,
         sequence: u16,
-        timestamp: u32,
     ) -> Result<Self, MediaError> {
         if media.remote.port() == 0
             || media.remote.ip().is_unspecified()
@@ -257,14 +287,18 @@ impl RtpEndpoint {
             .map_err(|_| MediaError::Network)?;
         Ok(Self {
             socket,
-            header: rtp::header::Header {
-                version: 2,
-                payload_type: media.codec.payload(),
-                sequence_number: sequence,
-                timestamp,
-                ssrc,
-                ..Default::default()
+            egress: RtpEgress {
+                header: rtp::header::Header {
+                    version: 2,
+                    payload_type: media.codec.payload(),
+                    sequence_number: sequence,
+                    ssrc,
+                    ..Default::default()
+                },
+                pending: None,
+                epoch: 1,
             },
+            started: std::time::Instant::now(),
             media,
             source: None,
             events: [None; 16],
@@ -275,27 +309,42 @@ impl RtpEndpoint {
     pub fn local_addr(&self) -> Result<SocketAddr, MediaError> {
         self.socket.local_addr().map_err(|_| MediaError::Network)
     }
-    /// Send exactly 20 ms encoded audio; advance clocks only after a full send.
-    pub async fn send_audio(
-        &mut self,
-        payload: &[u8; 160],
-        marker: bool,
-    ) -> Result<(), MediaError> {
-        use webrtc_util::marshal::Marshal;
-        self.header.marker = marker;
-        let mut wire = [0; 172];
-        self.header
-            .marshal_to(&mut wire[..12])
-            .map_err(|_| MediaError::InvalidPacket)?;
-        wire[12..].copy_from_slice(payload);
-        // UDP submits this fixed 172-byte datagram atomically or returns an error.
+    /// Nonwrapping call time used by the product's original-age deadline mapping.
+    /// At exhaustion, checked deadline creation fails rather than rejuvenating media.
+    pub fn elapsed_ms(&self) -> u32 {
+        u32::try_from(self.started.elapsed().as_millis()).unwrap_or(u32::MAX)
+    }
+    /// Current transmit generation; zero means retirement exhausted the owner.
+    pub fn tx_epoch(&self) -> u64 {
+        self.egress.epoch
+    }
+    /// Drop staged media before acknowledging a source gap, finish or cancellation.
+    /// Already submitted UDP datagrams cannot be recalled.
+    pub fn retire_audio(&mut self) -> Result<u64, MediaError> {
+        self.egress.retire()
+    }
+    /// Submit once without awaiting readiness or changing the source clock.
+    ///
+    /// The caller maps the oldest original source birth to an immutable deadline
+    /// with at most 200 ms remaining, as the existing private Outbound owner does.
+    /// Retry exactly the same request after WouldBlock. Expired means no socket
+    /// acceptance; the caller retires converter/encoder history before new media.
+    pub fn try_send_audio(&mut self, audio: TimedAudio<'_>) -> Result<SendStatus, MediaError> {
+        let now_ms = self.elapsed_ms();
+        self.egress
+            .send(audio, now_ms, |wire| self.socket.try_send(wire))
+    }
+    /// True only while a real WouldBlock retains an uncommitted datagram.
+    pub fn wants_writable(&self) -> bool {
+        self.egress.pending.is_some()
+    }
+    /// Borrow the existing Tokio readiness future only after WouldBlock.
+    /// The serial owner also services the retained deadline and call retirement.
+    pub async fn writable(&self) -> Result<(), MediaError> {
         self.socket
-            .send(&wire)
+            .writable()
             .await
-            .map_err(|_| MediaError::Network)?;
-        self.header.sequence_number = self.header.sequence_number.wrapping_add(1);
-        self.header.timestamp = self.header.timestamp.wrapping_add(160);
-        Ok(())
+            .map_err(|_| MediaError::Network)
     }
     /// Receive a source-filtered packet without reordering it before jitter.
     pub async fn receive(&mut self, output: &mut [u8; 160]) -> Result<RtpEvent, MediaError> {
@@ -366,3 +415,96 @@ impl RtpEndpoint {
 }
 /// Independent encode/decode contexts from the released dynamic G.711 provider.
 pub use super::codec::G711Codec;
+
+/// One immutable datagram retained only after socket backpressure.
+struct PendingAudio {
+    wire: [u8; 172],
+    timestamp: u32,
+    marker: bool,
+    deadline_ms: u32,
+}
+impl PendingAudio {
+    fn matches(&self, audio: TimedAudio<'_>) -> bool {
+        self.timestamp == audio.timestamp
+            && self.marker == audio.marker
+            && self.deadline_ms == audio.deadline_ms
+            && self.wire[12..] == audio.payload[..]
+    }
+}
+
+/// Serial packet framing, separate from socket readiness.
+struct RtpEgress {
+    header: rtp::header::Header,
+    pending: Option<PendingAudio>,
+    epoch: u64,
+}
+impl RtpEgress {
+    fn retire(&mut self) -> Result<u64, MediaError> {
+        self.pending = None;
+        self.epoch = self
+            .epoch
+            .checked_add(1)
+            .filter(|_| self.epoch != 0)
+            .unwrap_or(0);
+        if self.epoch == 0 {
+            Err(MediaError::Retired)
+        } else {
+            Ok(self.epoch)
+        }
+    }
+    fn send(
+        &mut self,
+        audio: TimedAudio<'_>,
+        now_ms: u32,
+        send: impl FnOnce(&[u8]) -> std::io::Result<usize>,
+    ) -> Result<SendStatus, MediaError> {
+        use webrtc_util::marshal::Marshal;
+        if self.epoch == 0 || audio.epoch != self.epoch {
+            return Ok(SendStatus::Expired);
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| !pending.matches(audio))
+        {
+            return Err(MediaError::InvalidPacket);
+        }
+        if now_ms >= audio.deadline_ms {
+            self.pending = None;
+            return Ok(SendStatus::Expired);
+        }
+        if audio.deadline_ms - now_ms > 200 {
+            return Err(MediaError::InvalidPacket);
+        }
+        if self.pending.is_none() {
+            self.header.marker = audio.marker;
+            self.header.timestamp = audio.timestamp;
+            let mut wire = [0; 172];
+            self.header
+                .marshal_to(&mut wire[..12])
+                .map_err(|_| MediaError::InvalidPacket)?;
+            wire[12..].copy_from_slice(audio.payload);
+            self.pending = Some(PendingAudio {
+                wire,
+                timestamp: audio.timestamp,
+                marker: audio.marker,
+                deadline_ms: audio.deadline_ms,
+            });
+        }
+        // UDP submits this fixed 172-byte datagram atomically or returns an error.
+        match send(&self.pending.as_ref().expect("prepared datagram").wire) {
+            Ok(_) => {
+                self.pending = None;
+                self.header.sequence_number = self.header.sequence_number.wrapping_add(1);
+                Ok(SendStatus::Sent)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Ok(SendStatus::WouldBlock)
+            }
+            Err(_) => {
+                self.pending = None;
+                Err(MediaError::Network)
+            }
+        }
+    }
+}
