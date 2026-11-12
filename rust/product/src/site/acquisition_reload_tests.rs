@@ -401,5 +401,6 @@ fn site_acquisition_seal_allocation_failure_preserves_paused_owners_for_retry() 
             assert!(worker.finish());
         }
         assert!(service.output_status("1000", "relay").is_none());
+        close(&mut service, &mut host);
     }
 }
