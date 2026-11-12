@@ -324,3 +324,37 @@ fn reason_phrase_follows_rfc_byte_grammar_without_percent_decoding() {
         assert!(matches!(message.start_line(),StartLine::Response{reason,..} if reason==valid));
     }
 }
+
+#[test]
+fn incomplete_lines_implicit_body_limits_and_short_reason_octets_are_checked() {
+    let mut parser = Parser::default();
+    let mut wire = b"SIP/2.0 200 OK\r\n\r\n".to_vec();
+    wire.resize(wire.len() + 16385, b'x');
+    assert_eq!(
+        parser.parse(&wire, Transport::Udp).err(),
+        Some(ParseError::Limit)
+    );
+    for transport in [Transport::Udp, Transport::Tcp] {
+        assert_eq!(
+            parser.parse(&[b'x'; 16384], transport).err(),
+            Some(ParseError::Limit)
+        );
+        assert_eq!(
+            parser.parse(b"SIP/2.0 200 OK\r", transport).err(),
+            Some(if transport == Transport::Udp {
+                ParseError::Truncated
+            } else {
+                ParseError::Incomplete
+            })
+        );
+        for wire in [
+            b" sip:a SIP/2.0\r\n\r\n".as_slice(),
+            b"SIP/2.0 200 \xc2\r\nl:0\r\n\r\n",
+        ] {
+            assert_eq!(
+                parser.parse(wire, transport).err(),
+                Some(ParseError::Syntax)
+            );
+        }
+    }
+}

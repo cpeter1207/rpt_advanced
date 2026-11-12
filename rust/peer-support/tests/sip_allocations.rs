@@ -121,6 +121,7 @@ fn parse_paths_allocate_zero_and_retain_only_fixed_workspace() {
         b"sip:a;%74ransport=tls",
         b"sip:a;TRANS%70ORT=%74ls",
         b"sip:a;p/=one;p%2f=two",
+        b"sip:a;p%2f=one;p%252f=two;p/=three",
     ] {
         if let Ok(uri) = std::hint::black_box(SipUri::parse(target)) {
             let _ = std::hint::black_box(uri.require_cleartext_routing());

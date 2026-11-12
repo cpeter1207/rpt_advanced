@@ -404,3 +404,95 @@ fn typed_wire_address_validates_odd_and_even_escapes_before_unfolding() {
         );
     }
 }
+
+#[test]
+fn quoted_tabs_del_and_parentheses_keep_their_field_grammar() {
+    let mut parser = Parser::default();
+    for (field, valid) in [
+        (b"Contact: \"a\tb()\"<sip:a@b>".as_slice(), true),
+        (b"Contact: \"bad\x7f\"<sip:a@b>", false),
+        (b"Server: tool (literal \" quote)", true),
+        (b"Contact: <sip:a(b)@host>", true),
+        (b"Contact: <<sip:a@b>>", false),
+    ] {
+        let mut wire = b"SIP/2.0 200 OK\r\n".to_vec();
+        wire.extend_from_slice(field);
+        wire.extend_from_slice(b"\r\n\r\n");
+        let message = parser.parse(&wire, Transport::Udp).unwrap();
+        assert_eq!(
+            message
+                .headers()
+                .next()
+                .unwrap()
+                .values(&mut [0; MAX_FIELD])
+                .all(|v| v.is_ok()),
+            valid
+        );
+    }
+    assert!(NameAddr::parse(b"\"a\tb()\"<sip:a@b>").is_ok());
+    assert!(NameAddr::parse(b"\"bad\x7f\"<sip:a@b>").is_err());
+}
+
+#[test]
+fn lexical_grouping_does_not_claim_complete_server_product_validation() {
+    // `values` documents lexical separation only. Server has no typed product
+    // accessor in this prerequisite; angles here are not a valid product claim.
+    let mut parser = Parser::default();
+    let message = parser
+        .parse(
+            b"SIP/2.0 200 OK\r\nServer: <opaque(a)b)>\r\n\r\n",
+            Transport::Udp,
+        )
+        .unwrap();
+    assert_eq!(
+        message
+            .headers()
+            .next()
+            .unwrap()
+            .values(&mut [0; MAX_FIELD])
+            .next()
+            .unwrap()
+            .unwrap(),
+        b"<opaque(a)b)>"
+    );
+}
+
+#[test]
+fn lexical_address_lists_preserve_bytes_for_stricter_typed_validation() {
+    let mut parser = Parser::default();
+    for wire in [
+        b"SIP/2.0 200 OK\r\nContact: <sip:a\"b@host>,<sip:c@host>\r\n\r\n".as_slice(),
+        b"SIP/2.0 200 OK\r\nContact: <sip:a\\b@host>,<sip:c@host>\r\n\r\n",
+    ] {
+        let message = parser.parse(wire, Transport::Udp).unwrap();
+        let mut scratch = [0; MAX_FIELD];
+        let mut values = message.headers().next().unwrap().values(&mut scratch);
+        let first = values.next().unwrap().unwrap();
+        let typed = NameAddr::parse(first)
+            .and_then(|address| rptadv_peer_support::sip::SipUri::parse(address.uri()));
+        assert!(typed.is_err());
+        assert_eq!(values.next().unwrap().unwrap(), b"<sip:c@host>");
+        assert!(values.next().is_none());
+    }
+    let message = parser
+        .parse(
+            b"SIP/2.0 200 OK\r\nContact: \"a<b>,c\"<sip:a@host>,<sip:b@host>\r\n\r\n",
+            Transport::Udp,
+        )
+        .unwrap();
+    assert_eq!(
+        message
+            .headers()
+            .next()
+            .unwrap()
+            .values(&mut [0; MAX_FIELD])
+            .count(),
+        2
+    );
+    for quoted in [
+        b"\"\xf8\x80\x80\x80\x80\"<sip:a@b>".as_slice(),
+        b"\"\xfc\x80\x80\x80\x80\x80\"<sip:a@b>",
+    ] {
+        assert!(NameAddr::parse(quoted).is_err());
+    }
+}

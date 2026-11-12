@@ -274,3 +274,22 @@ fn reserved_parameter_bytes_do_not_compare_equal_to_percent_escapes() {
     assert_eq!(uri.parameter(b"p/"), Some(Some(b"one".as_slice())));
     assert_eq!(uri.parameter(b"p%2F"), Some(Some(b"two".as_slice())));
 }
+
+#[test]
+fn reserved_escape_units_never_collide_with_decoded_percent_and_literal_hex() {
+    let uri = SipUri::parse(b"sip:a;p%2f=one;p%252f=two;p/=three").unwrap();
+    assert_eq!(uri.parameter(b"p%2F"), Some(Some(b"one".as_slice())));
+    assert_eq!(uri.parameter(b"p%252f"), Some(Some(b"two".as_slice())));
+    assert_eq!(uri.parameter(b"p/"), Some(Some(b"three".as_slice())));
+    assert!(matches!(
+        SipUri::parse(b"sip:a;p%2F=one;p%2f=two"),
+        Err(ParseError::Duplicate)
+    ));
+    assert!(matches!(
+        SipUri::parse(b"sip:a;p%252f=one;p%25%32f=two"),
+        Err(ParseError::Duplicate)
+    ));
+    for value in [b"sip:a?bad%ZZ=x".as_slice(), b"sip:a;ttl="] {
+        assert_eq!(SipUri::parse(value).err(), Some(ParseError::Syntax));
+    }
+}

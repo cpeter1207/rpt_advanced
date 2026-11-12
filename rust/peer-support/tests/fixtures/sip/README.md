@@ -77,3 +77,9 @@ normalization, because unfolding otherwise erases that distinction. `unfold`
 is normalization only; `Header::name_addr` and checked `Header::values` are the
 wire-to-typed entry paths. Odd/even backslashes before a fold are independent
 literal regression cases. No erratum overrides these rules.
+
+The typed name-address profile requires modern UTF-8 in quoted display names and
+parameter values. It intentionally does not accept historical 5/6-byte forms
+from RFC 3261's older UTF8-NONASCII production. Response Reason-Phrase instead
+remains borrowed, non-authoritative octets following its explicit ABNF; it must
+not be used as unchecked text or routing/authorization data.

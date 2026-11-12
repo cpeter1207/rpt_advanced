@@ -1057,7 +1057,7 @@ iterator and 48-byte name-address view (5488 bytes together on the TCP path,
 excluding wire storage and compiler call-stack frames). Instrumented allocation
 checks observe zero allocations across 32 RFC 4475 wsinv datagram/bytewise-TCP
 cycles, 8008 single-byte mutations, four additional RFC fixtures, two reviewed
-header regressions and six URI cases. These are
+header regressions and seven URI cases. These are
 implementation bounds, not universal SIP limits or a process-RSS measurement. RFC 3261 framing/grammar, RFC 5954 IPv6 and RFC 8217
 name-address rules apply; RFC 4475/5118 provide independent torture inputs.
 Valid SIPS syntax remains distinct from unsupported secure routing, which must

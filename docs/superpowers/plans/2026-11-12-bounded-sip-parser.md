@@ -68,12 +68,22 @@ transport names cannot bypass the separate supported-profile check. Response
 Reason-Phrase validates section 25's octet grammar without Unicode/percent
 decoding. Full header capacity without a terminator fails immediately.
 
-Scoped formatting, Clippy/Rustdoc with warnings denied, and all 86 peer-support
+Scoped formatting, Clippy/Rustdoc with warnings denied, and all 91 peer-support
 crate tests passed in the constrained native amd64 container. The five SIP
-checks comprise 13 framing, 14 header, 10 URI, one allocation and one index-layout
+checks comprise 14 framing, 17 header, 11 URI, one allocation and one index-layout
 test (the latter among nine crate unit tests). The expanded allocation guard
 observed zero allocations; explicit decoder, scratch and all exposed view sizes
 total 5488 bytes, with the 32768-byte wire buffer separate. This is not a compiler
 stack-peak or process-RSS measurement. Full native gates, targeted branch
-coverage and final independent review remain outstanding; no SIP provider is
+coverage remains outstanding; independent source review cleared the corrected
+URI comparison and lexical invariants. No SIP provider is
 activated and Task 4's signaling/session acceptance remains open.
+
+The final review correction compares URI components as tagged single-decoded
+units: an escaped reserved byte stays distinct from both its literal byte and
+a decoded percent followed by literal hex characters. Thus `p%2f`, `p%252f`
+and `p/` remain distinct, while `%2F` and `%2f` match. Raw field validation
+precedes folding; normalized list scanning cannot introduce a new lexical
+error. The CSeq method cannot be empty after whole-value boundary trimming and
+a successful separator lookup. Removed only those redundant checks, retaining
+empty/trailing list errors and all actual syntax validation.

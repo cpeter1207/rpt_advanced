@@ -309,26 +309,30 @@ fn validate_uri_parameters(value: &[u8]) -> Result<(), ParseError> {
     Ok(())
 }
 
-// Called only on percent-validated parameter names (or literal lookup names).
+// Parameter comparison is single-pass decoding into tagged units, not text.
+// An encoded reserved byte must remain distinct from both its literal form and
+// a decoded percent followed by hex characters (e.g. %2f versus %252f).
 fn equivalent(first: &[u8], second: &[u8]) -> bool {
-    fn bytes(mut value: &[u8]) -> impl Iterator<Item = u8> + '_ {
+    fn units(mut value: &[u8]) -> impl Iterator<Item = (u8, bool)> + '_ {
         std::iter::from_fn(move || {
-            let mut byte = *value.first()?;
-            if byte == b'%' && value.len() >= 3 {
+            let byte = *value.first()?;
+            value = &value[1..];
+            if byte == b'%' && value.len() >= 2 {
                 let hex = |byte: u8| (byte as char).to_digit(16);
-                if let (Some(high), Some(low)) = (hex(value[1]), hex(value[2])) {
+                if let (Some(high), Some(low)) = (hex(value[0]), hex(value[1])) {
                     let decoded = (high * 16 + low) as u8;
-                    // RFC 2396's reserved set is explicitly excluded from
-                    // percent equivalence by RFC 3261 section 19.1.4.
-                    if !b";/?:@&=+$,".contains(&decoded) {
-                        byte = decoded;
-                        value = &value[2..];
-                    }
+                    value = &value[2..];
+                    // RFC 3261 19.1.4 excludes RFC 2396's reserved set from
+                    // equivalence. Non-reserved bytes, including %, are decoded
+                    // once; comparison never interprets the resulting unit again.
+                    return Some((
+                        decoded.to_ascii_lowercase(),
+                        b";/?:@&=+$,".contains(&decoded),
+                    ));
                 }
             }
-            value = &value[1..];
-            Some(byte.to_ascii_lowercase())
+            Some((byte.to_ascii_lowercase(), false))
         })
     }
-    bytes(first).eq(bytes(second))
+    units(first).eq(units(second))
 }

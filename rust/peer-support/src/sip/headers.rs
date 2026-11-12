@@ -66,7 +66,7 @@ impl Header<'_> {
         &self,
         scratch: &'s mut [u8; MAX_FIELD],
     ) -> Result<NameAddr<'s>, ParseError> {
-        value_end(self.value, false, false)?;
+        validate_value(self.value, false)?;
         NameAddr::parse(self.unfold(scratch))
     }
 
@@ -109,11 +109,10 @@ impl Header<'_> {
         // escaped SP. Opaque fields and Call-ID words do not use this grammar.
         let invalid = !words
             && (list || comments || address)
-            && value_end(self.value, false, comments).is_err();
+            && validate_value(self.value, comments).is_err();
         Values {
             remaining: self.unfold(scratch),
             list,
-            comments,
             words,
             invalid,
         }
@@ -156,7 +155,9 @@ impl<'a> Message<'a> {
             .ok_or(ParseError::Syntax)?;
         let number = decimal(value[..separator].iter().copied(), 2_147_483_647)?;
         let method = trim(&value[separator..]);
-        if method.is_empty() || !method.iter().copied().all(token) {
+        // Whole-value trailing SWS was removed before the separator lookup,
+        // so a successful lookup guarantees at least one non-SWS method byte.
+        if !method.iter().copied().all(token) {
             return Err(ParseError::Syntax);
         }
         Ok(Some((number as u32, method)))
@@ -192,7 +193,6 @@ impl<'a> Message<'a> {
 pub struct Values<'a> {
     remaining: &'a [u8],
     list: bool,
-    comments: bool,
     words: bool,
     invalid: bool,
 }
@@ -211,40 +211,60 @@ impl<'a> Iterator for Values<'a> {
             return None;
         }
         self.remaining = &[];
-        if !self.list && !self.comments {
+        if !self.list {
             return Some(Ok(input));
         }
         let end = if self.words {
-            Ok(input.iter().position(|b| *b == b',').unwrap_or(input.len()))
+            input.iter().position(|b| *b == b',').unwrap_or(input.len())
         } else {
-            value_end(input, self.list, self.comments)
+            list_end(input)
         };
-        match end {
-            Ok(end) => {
-                let value = trim(&input[..end]);
-                if value.is_empty() {
-                    return Some(Err(ParseError::Syntax));
-                }
-                if end < input.len() {
-                    let rest = trim(&input[end + 1..]);
-                    if rest.is_empty() {
-                        return Some(Err(ParseError::Syntax));
-                    }
-                    self.remaining = rest;
-                }
-                Some(Ok(value))
-            }
-            Err(error) => Some(Err(error)),
+        let value = trim(&input[..end]);
+        if value.is_empty() {
+            return Some(Err(ParseError::Syntax));
         }
+        if end < input.len() {
+            let rest = trim(&input[end + 1..]);
+            if rest.is_empty() {
+                return Some(Err(ParseError::Syntax));
+            }
+            self.remaining = rest;
+        }
+        Some(Ok(value))
     }
 }
 
-fn value_end(input: &[u8], list: bool, comments: bool) -> Result<usize, ParseError> {
+// Raw validation rejects malformed quoting before normalization. Folding only
+// replaces legal CRLF/WSP by SP: it introduces no delimiter or escape. Therefore
+// each normalized list suffix can be scanned without a second syntax-error path.
+// Fields admitting comments are non-lists; Call-ID word lists bypass this scan.
+fn list_end(input: &[u8]) -> usize {
+    let mut quote = false;
+    let mut escaped = false;
+    let mut angle = false;
+    for (at, byte) in input.iter().copied().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if quote => escaped = true,
+            b'"' if !angle => quote = !quote,
+            b'<' if !quote => angle = true,
+            b'>' if !quote => angle = false,
+            b',' if !quote && !angle => return at,
+            _ => {}
+        }
+    }
+    input.len()
+}
+
+fn validate_value(input: &[u8], comments: bool) -> Result<(), ParseError> {
     let mut quote = false;
     let mut escaped = false;
     let mut depth = 0usize;
     let mut angle = false;
-    for (at, byte) in input.iter().copied().enumerate() {
+    for byte in input.iter().copied() {
         if escaped {
             if byte > 0x7f || matches!(byte, b'\r' | b'\n') {
                 return Err(ParseError::Syntax);
@@ -276,7 +296,6 @@ fn value_end(input: &[u8], list: bool, comments: bool) -> Result<usize, ParseErr
                 b'<' if !angle => angle = true,
                 b'>' if angle => angle = false,
                 b'<' | b'>' => return Err(ParseError::Syntax),
-                b',' if list && !angle => return Ok(at),
                 _ => {}
             }
         }
@@ -285,11 +304,14 @@ fn value_end(input: &[u8], list: bool, comments: bool) -> Result<usize, ParseErr
     if quote || depth != 0 || angle {
         return Err(ParseError::Syntax);
     }
-    Ok(input.len())
+    Ok(())
 }
 
 /// SIP name-address syntax; URI bytes and header parameters stay distinct.
 /// URI syntax is validated separately before using the address as a target.
+/// Quoted display names and generic parameter values require modern UTF-8;
+/// unlike opaque response Reason-Phrase octets, historical 5/6-byte forms are
+/// outside this typed profile. ASCII quoted-pair bytes remain preserved.
 pub struct NameAddr<'a> {
     display: &'a [u8],
     uri: &'a [u8],
