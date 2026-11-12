@@ -51,7 +51,7 @@ Files: `sip/uri.rs`, `tests/sip_uri.rs`, fixture provenance and ADR/selection up
 - [x] Write and observe failing RFC 3261/5954/8217 cases and independent RFC 4475/5118 fixtures, with invalid escapes, host/port/parameter/header and secure-route cases.
 - [x] Implement borrowed component views, separate profile rejection, and no URL-parser shortcut.
 - [x] Verify zero allocation across framing/header/URI paths with a test-only counting allocator, boundary matrices, formatting, Clippy/Rustdoc and the affected crate suite.
-- [ ] Finish fresh independent review and targeted branch coverage, commit remaining evidence and report full-gate/provider acceptance separately.
+- [x] Finish fresh independent review and targeted branch coverage, commit remaining evidence and report full-gate/provider acceptance separately.
 
 ## Validation constraints
 
@@ -74,9 +74,9 @@ checks comprise 14 framing, 17 header, 11 URI, one allocation and one index-layo
 test (the latter among nine crate unit tests). The expanded allocation guard
 observed zero allocations; explicit decoder, scratch and all exposed view sizes
 total 5488 bytes, with the 32768-byte wire buffer separate. This is not a compiler
-stack-peak or process-RSS measurement. Full native gates, targeted branch
-coverage remains outstanding; independent source review cleared the corrected
-URI comparison and lexical invariants. No SIP provider is
+stack-peak or process-RSS measurement. Full native gates remain outstanding. Independent source review and targeted
+parser coverage are complete, including the corrected URI comparison and lexical
+invariants. No SIP provider is
 activated and Task 4's signaling/session acceptance remains open.
 
 The final review correction compares URI components as tagged single-decoded
@@ -87,3 +87,20 @@ precedes folding; normalized list scanning cannot introduce a new lexical
 error. The CSeq method cannot be empty after whole-value boundary trimming and
 a successful separator lookup. Removed only those redundant checks, retaining
 empty/trailing list errors and all actual syntax validation.
+
+## Parser coverage closure
+
+The final test-only addition passes a real Contact list containing
+`<sip:a,b@host>,<sip:c@host>` through framing, list separation and typed URI parsing.
+It closes the URI-comma branch without changing production code. The reviewed
+parser has 912/912 executable production lines and 412/412 branch arms covered:
+framing 329/329 and 126/126; headers 347/347 and 162/162; URI 236/236 and 124/124.
+The unchanged exporter retains 13 objects and one profile, excluding only the
+repository's standard test/build fixture sources, with no production exclusions.
+
+The complete affected-crate suite passes 91 tests. This is not whole-crate 100%
+coverage: the same report measures peer-support at 2318/2324 production lines
+and 748/750 branch arms, with residuals in untouched EchoLink host/account files.
+The full controller/native platform gate remains pending. No provider session,
+media behavior, authorization/RF rule, vendor source or toolchain requirement
+changes as part of this prerequisite.

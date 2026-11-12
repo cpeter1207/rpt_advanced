@@ -225,7 +225,7 @@ order, jitter, codec state, prepared packets and bounded deadlines.
   only the disposable probe, not production readiness. Current workspace builds
   require Rust 1.88; the independent jitter-client wrapper retains Rust 1.85.
   No Rust 1.91 upgrade or unverified 1.85 production-graph claim is made.
-- [ ] Complete the [owned bounded parser prerequisite](2026-11-12-bounded-sip-parser.md)
+- [x] Implement the experimental [owned bounded parser prerequisite](2026-11-12-bounded-sip-parser.md)
   in shared `rptadv-peer-support`, with RFC-derived framing/header/URI tests,
   independent torture fixtures and measured memory/allocation bounds. The
   2026-11-12 selection rejects rsipstack's unbounded state, RVoIP's runtime/

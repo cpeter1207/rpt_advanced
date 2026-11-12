@@ -1072,4 +1072,5 @@ The owner excluded vendor repairs. No native parser/global allocator hook,
 transaction state machine, DNS parser, cryptography, codec or DSP is added here.
 The approved provider/account/host lifecycle, resolver adapter and existing
 `phone::media` remain unchanged. This prerequisite is not SIP activation or
-complete Task 4. Full native gates and independent review remain required.
+complete Task 4. Independent parser source review and 100% parser production
+line/branch coverage are complete; full native gates remain required before merge.

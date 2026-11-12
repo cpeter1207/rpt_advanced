@@ -489,6 +489,25 @@ fn lexical_address_lists_preserve_bytes_for_stricter_typed_validation() {
             .count(),
         2
     );
+    let message = parser
+        .parse(
+            b"SIP/2.0 200 OK\r\nContact: <sip:a,b@host>,<sip:c@host>\r\n\r\n",
+            Transport::Udp,
+        )
+        .unwrap();
+    let mut scratch = [0; MAX_FIELD];
+    let mut values = message.headers().next().unwrap().values(&mut scratch);
+    let first = values.next().unwrap().unwrap();
+    assert_eq!(first, b"<sip:a,b@host>");
+    let address = NameAddr::parse(first).unwrap();
+    assert_eq!(
+        rptadv_peer_support::sip::SipUri::parse(address.uri())
+            .unwrap()
+            .user(),
+        Some(b"a,b".as_slice())
+    );
+    assert_eq!(values.next().unwrap().unwrap(), b"<sip:c@host>");
+    assert!(values.next().is_none());
     for quoted in [
         b"\"\xf8\x80\x80\x80\x80\"<sip:a@b>".as_slice(),
         b"\"\xfc\x80\x80\x80\x80\x80\"<sip:a@b>",
