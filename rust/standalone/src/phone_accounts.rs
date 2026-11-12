@@ -83,7 +83,10 @@ pub struct AccountPreparer {
     last_generation: u64,
 }
 impl AccountPreparer {
-    /// Prepare off control/foreground; failure or candidate drop never changes active owners.
+    /// Prepare before publication; failure or candidate drop never changes active owners.
+    ///
+    /// A caller that permits name resolution runs this off control/foreground.
+    /// Numeric-only startup/reload may use its existing serialized configuration owner.
     ///
     /// The resolver runs only for nonnumeric endpoints. The caller owns its bounded
     /// execution and cancellation contract. No listener, registrar, poller or thread

@@ -10,8 +10,9 @@ and the affected configuration and test documentation in the same change.
 2026-11-09 approved phone-patch, source-private control/macro and RF presentation
 pacing extension. Typed private call identities, sized metadata and bounded
 call-private reply ownership, mailbox verification and timed audio consumption
-form an unreleased foundation; provider-backed
-phone control/media and RF pacing remain pending. The existing deployed ownership
+form an unreleased foundation. Standalone numeric IAX accounts with registration
+disabled now use prepared startup/reload listener profiles; provider call admission
+remains closed. Provider-backed phone control/media and RF pacing remain pending. The existing deployed ownership
 described below is unchanged. The experimental shared `rptadv-peer-support::sip`
 parser is a bounded borrowed-wire prerequisite only, reusable by both hosts; it
 does not activate signaling, move provider ownership or change the media path.

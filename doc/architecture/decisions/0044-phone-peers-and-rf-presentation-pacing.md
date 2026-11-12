@@ -788,10 +788,10 @@ owner, and return to the existing fenced shutdown path. Original product errors
 remain distinct; no late sequential binding mutation or compensating product
 reload remains.
 
-Production foreground composition still supplies no provider accounts. Shared
-account preparation, registration/dial execution, typed private IAX metadata,
-timed source reads/egress and complete retirement remain required before actual
-phone admission. This cohort join adds no scheduler, worker or live account use.
+The initial cohort join supplied no provider accounts. Numeric IAX startup and
+reload now use that transaction as described below. Registration/dial execution,
+typed private IAX admission, timed source reads/egress and complete retirement
+remain required before actual phone admission. No scheduler or worker is added.
 
 ## Existing prepared-media source revision fence
 
@@ -1074,3 +1074,26 @@ The approved provider/account/host lifecycle, resolver adapter and existing
 `phone::media` remain unchanged. This prerequisite is not SIP activation or
 complete Task 4. Independent parser source review and 100% parser production
 line/branch coverage are complete; full native gates remain required before merge.
+
+## Numeric IAX account foreground composition, 2026-11-12
+
+Standalone startup and reload now prepare enabled, locally hosted IAX accounts
+through the existing secure private-file reader and generation allocator. The
+first production profile requires a numeric endpoint and explicit register=no.
+Enabled SIP, hostname and registration profiles fail before listener/product
+mutation; disabled accounts or disabled local nodes open no account transport.
+No resolver, registrar, thread or runtime is introduced.
+
+One foreground-lifetime allocator preserves identity across failed candidates.
+Complete account profiles feed the existing listener bind and reserved cohort
+transaction. Only published product outcomes replace the active prepared snapshot,
+including published-with-error. Rejection preserves the previous snapshot;
+fatal outcomes retain listener owners and enter the existing fenced shutdown.
+Provider-owned copied credentials survive preparation borrows. Listener-owned
+IAX code and the provider's retained runtime outlive socket-task teardown.
+
+The existing numeric poll has no provider authorization/accept callbacks, so
+configured phone accounts remain admission-closed. This milestone establishes
+actual account/listener ownership, not a connected phone call. Registration,
+outgoing dial/isolation, typed incoming adoption, private executor/media and RF
+composition remain separate requirements; mailbox and attachment guards remain.
