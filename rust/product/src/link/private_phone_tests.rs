@@ -1825,3 +1825,296 @@ fn private_source_inband_saturation_backpressures_loss_and_finite_completion() {
         assert!(!reply.ended());
     }
 }
+
+#[test]
+fn provider_ring_failures_preserve_private_media_boundaries() {
+    use rpt_advanced_core::link::{PeerInput as _, SourceTimeBound};
+    use std::{
+        ffi::{CStr, c_void},
+        process::{Child, Command, Output, Stdio},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+    const CHILD: &str = "RPTADV_TEST_PHONE_RING_CHILD";
+    const TEST: &str =
+        "link::private_phone::tests::provider_ring_failures_preserve_private_media_boundaries";
+    #[repr(C)]
+    #[derive(Debug, Default)]
+    struct Counts {
+        creates: u64,
+        destroys: u64,
+        timed_calls: u64,
+        real_nonzero_forwarded: u64,
+        injected_failures: u64,
+    }
+    if let Ok(mode) = std::env::var(CHILD) {
+        let symbol = |name: &CStr| {
+            // SAFETY: this child alone preloads the owned test DSO for its lifetime.
+            let pointer = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+            assert!(!pointer.is_null(), "missing fault control {name:?}");
+            pointer
+        };
+        // SAFETY: these exact signatures and the C-layout record match the fixture.
+        let snapshot = unsafe {
+            std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*mut Counts)>(symbol(
+                c"rptadv_test_ring_snapshot",
+            ))
+        };
+        // SAFETY: the fixture exports this exact scalar-only control signature.
+        let arm = unsafe {
+            std::mem::transmute::<*mut c_void, unsafe extern "C" fn(u64) -> i32>(symbol(
+                c"rptadv_test_ring_arm_after",
+            ))
+        };
+        let counts = || {
+            let mut result = Counts::default();
+            // SAFETY: the complete writable record lives through the synchronous call.
+            unsafe { snapshot(&mut result) };
+            result
+        };
+        let (mut session, mut control, state, reply) = source_session_at_rate(48000, true);
+        session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+        assert_eq!(counts().creates, 0);
+        let expected_creates = if mode == "missing-tail" {
+            let slots = control.replies.slots();
+            for attempt in 1..=2 {
+                assert!(matches!(
+                    control.prepare_media(None),
+                    Err(Error::UnsupportedFormat)
+                ));
+                assert!(control.media.is_none());
+                assert!(session.media.is_none());
+                assert_eq!(control.replies.slots(), slots);
+                let observed = counts();
+                assert_eq!((observed.creates, observed.destroys), (attempt, attempt));
+                assert_eq!(observed.timed_calls, 0);
+                assert!(reply.phone_authenticated());
+                assert!(!reply.ended());
+            }
+            session.step(0).unwrap();
+            assert!(
+                session.media.is_none(),
+                "failed preparation queued no candidate"
+            );
+            2
+        } else {
+            assert_eq!(mode, "timed-error");
+            let mut input = control.prepare_media(None).unwrap();
+            assert_eq!(input.source(), reply.phone_source().unwrap());
+            assert_eq!(input.phone_reply(), Some(&reply));
+            assert!(!input.active());
+            let generation = input.signals().reply_target();
+            session.step(0).unwrap();
+            assert!(input.active());
+            let (epoch, birth) = state.lock().unwrap().source_reference.unwrap();
+            {
+                let mut state = state.lock().unwrap();
+                state.source_birth = Some(birth);
+                state
+                    .input
+                    .extend((0..12).map(|_| Input::Audio(vec![0.25; 960])));
+            }
+            for now in 1..=16 {
+                session.step(now).unwrap();
+                if state.lock().unwrap().input.is_empty() {
+                    break;
+                }
+            }
+            assert!(state.lock().unwrap().input.is_empty());
+            assert!(input.available() >= 7680);
+            // The released 48 kHz PLC has 180 samples of legitimate startup delay.
+            let mut warmup = [0.0; 480];
+            assert!(input.render_timed_block(&mut warmup).unwrap().real > 0);
+            assert!(warmup.iter().any(|sample| sample.abs() > 0.1));
+            let sample = input.render_timed_sample().unwrap();
+            let provenance = sample.provenance.unwrap();
+            assert!(provenance.real && !provenance.plc && !provenance.gap);
+            assert!(!provenance.zero_extension && !provenance.muted);
+            assert!(
+                provenance
+                    .position
+                    .is_some_and(|position| !position.negative)
+            );
+            assert!((sample.sample - 0.25).abs() < 0.01);
+            assert_eq!(
+                sample.age_bound,
+                Some(SourceTimeBound {
+                    host_clock_epoch: epoch,
+                    not_after_ns: birth,
+                })
+            );
+            let before = counts();
+            assert_eq!(
+                (before.creates, before.destroys, before.injected_failures),
+                (1, 0, 0)
+            );
+            // SAFETY: the sole consumer arms its third subsequent call, outside rendering.
+            assert_eq!(unsafe { arm(3) }, 0);
+            let mut output = [1.0; 8];
+            assert_eq!(input.render_timed_block(&mut output), None);
+            assert_eq!(
+                output, [0.0; 8],
+                "erase genuine partial PCM on provider error"
+            );
+            let failed = counts();
+            assert_eq!(failed.timed_calls - before.timed_calls, 3);
+            assert_eq!(
+                failed.real_nonzero_forwarded - before.real_nonzero_forwarded,
+                3
+            );
+            assert_eq!(failed.injected_failures, 1);
+            assert_eq!(input.render_timed_sample(), None);
+            let repeated = counts();
+            assert_eq!(repeated.timed_calls - failed.timed_calls, 1);
+            assert_eq!(repeated.injected_failures, 2);
+            assert!(
+                input.active(),
+                "render failure is not automatic call retirement"
+            );
+            assert!(!generation.ended());
+            assert!(!reply.ended());
+            drop(input);
+            assert!(
+                generation.ended(),
+                "dropping the consumer retires its generation"
+            );
+            assert!(
+                !reply.ended(),
+                "private control remains live after media retirement"
+            );
+            assert_eq!(
+                counts().destroys,
+                0,
+                "serial/control owners still retain the ring"
+            );
+            1
+        };
+        assert!(state.lock().unwrap().audio.is_empty());
+        assert!(state.lock().unwrap().bound_radio.is_none());
+        drop(control);
+        assert!(reply.ended());
+        drop(session);
+        assert_eq!(state.lock().unwrap().drops, 1);
+        let observed = counts();
+        assert_eq!(
+            (observed.creates, observed.destroys),
+            (expected_creates, expected_creates)
+        );
+        return;
+    }
+
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    struct Running(Option<Child>);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    fn run(command: &mut Command, label: &str) -> (u32, Output) {
+        let mut running = Running(Some(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ));
+        let child = running.0.as_mut().unwrap();
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut timed_out = false;
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                child.kill().unwrap();
+                child.wait().unwrap();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let output = running.0.take().unwrap().wait_with_output().unwrap();
+        assert!(
+            !timed_out && output.status.success(),
+            "{label}: timeout={timed_out}, {}\n{}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (pid, output)
+    }
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let path = std::env::temp_dir().join(format!("rptadv-phone-ring-{unique}"));
+    std::fs::create_dir(&path).unwrap();
+    let directory = Directory(path);
+    let library = directory.0.join("phone_ring_fault.so");
+    run(
+        Command::new("timeout")
+            .args([
+                "--signal=TERM",
+                "--kill-after=2s",
+                "15",
+                "cc",
+                "-std=c11",
+                "-shared",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+            ])
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/phone_ring_fault.c"
+            ))
+            .args(["-pthread", "-ldl", "-lm", "-o"])
+            .arg(&library),
+        "compile ring fault fixture",
+    );
+    for mode in ["missing-tail", "timed-error"] {
+        let mut preload = library.as_os_str().to_os_string();
+        if let Some(inherited) = std::env::var_os("LD_PRELOAD").filter(|value| !value.is_empty()) {
+            preload.push(":");
+            preload.push(inherited);
+        }
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env(CHILD, mode)
+            .env("LD_PRELOAD", preload);
+        let template = std::env::var_os("LLVM_PROFILE_FILE");
+        assert!(std::env::var_os("CARGO_LLVM_COV").is_none() || template.is_some());
+        let profile = template.map(|template| {
+            let directory = std::path::Path::new(&template).parent().unwrap().to_owned();
+            let prefix = format!("phone-ring-{unique}-{mode}-");
+            command.env(
+                "LLVM_PROFILE_FILE",
+                directory.join(format!("{prefix}%p.profraw")),
+            );
+            (directory, prefix)
+        });
+        let (pid, output) = run(&mut command, mode);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("1 passed; 0 failed"), "{mode}: {stdout}");
+        if let Some((directory, prefix)) = profile {
+            assert!(
+                std::fs::metadata(directory.join(format!("{prefix}{pid}.profraw")))
+                    .unwrap()
+                    .len()
+                    > 0
+            );
+        }
+    }
+}

@@ -385,6 +385,7 @@ fn prepared_phone_media_qualifies_original_age_through_the_actual_processor() {
         let call = reply();
         let (mut ingress, mut input, shared) = prepare(call.clone(), rate, Some(graph)).unwrap();
         assert_eq!(input.phone_reply(), Some(&call));
+        assert_eq!(input.input.receive_policy(), ReceivePolicy::Phone);
         assert!(
             input.source_timing_available(),
             "the graph needs the inner exact call token at preparation"
