@@ -645,3 +645,19 @@ fn rejected_mixed_reload_keeps_the_existing_numeric_route_and_peer_usable() {
     drop(listeners);
     drop(executor);
 }
+
+/// Public node records are copied from the product ABI without normalizing these
+/// fields. Malformed external records must not open port zero or create an alias.
+#[test]
+fn listener_profiles_reject_zero_ports_and_ignore_empty_numeric_identities() {
+    let mut nodes = resolve_radio_nodes("[1000]\niax_local_port=4569\n").unwrap();
+    let accounts = PreparedAccounts::default();
+    nodes[0].iax_port = 0;
+    assert!(matches!(
+        resolve_profiles(&nodes, &accounts),
+        Err(IaxError::InvalidParameters)
+    ));
+    nodes[0].iax_port = 4569;
+    nodes[0].node.clear();
+    assert!(resolve_profiles(&nodes, &accounts).unwrap().is_empty());
+}

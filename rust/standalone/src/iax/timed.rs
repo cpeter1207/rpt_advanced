@@ -1,7 +1,7 @@
 //! Released source-time polling; one mode and one serialized owner per private call.
 use super::{IaxError, IaxPeer};
 use crate::abi;
-use std::mem::{size_of, size_of_val};
+use std::mem::size_of;
 
 /// One bounded copied event. Birth remains tied to the supplied host clock.
 #[derive(Clone, Copy)]
@@ -25,10 +25,9 @@ pub(crate) enum Kind {
 impl IaxPeer {
     /// Verify the optional tail before transferring a private call to its host.
     pub(crate) fn supports_timed_source(&self) -> bool {
-        self.api.struct_size as usize
-            >= std::mem::offset_of!(abi::rptadv_iax2_client_descriptor_v2, poll_timed)
-                + size_of_val(&self.api.poll_timed)
-            && self.api.poll_timed.is_some()
+        // IaxClient validates the complete current descriptor before any peer
+        // can be constructed; only this optional callback can be unavailable.
+        self.api.poll_timed.is_some()
     }
 
     /// Read one event into a caller-sized PCM prefix, retaining provider suffixes.

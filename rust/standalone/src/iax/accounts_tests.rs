@@ -91,6 +91,15 @@ unsafe extern "C" fn register(
         10 => output.apparent.family = 7,
         11 => output.apparent.family = 0,
         12 => output.apparent = unsafe { std::mem::zeroed() },
+        13..=15 => {
+            output.apparent = unsafe { std::mem::zeroed() };
+            match MALFORMED.get() {
+                13 => output.apparent.address[0] = 1,
+                14 => output.apparent.flowinfo = 1,
+                _ => output.apparent.scope_id = 1,
+            }
+        }
+        16 => output.apparent.port = 0,
         _ => {}
     }
     RESULT.get()
@@ -110,7 +119,10 @@ unsafe extern "C" fn dial(
     assert_eq!(request.abi_version, 1);
     assert_eq!(request.reserved, 0);
     assert_eq!(unsafe { text(request.account) }, b"home-phone");
-    assert_eq!(request.generation, 7);
+    assert_eq!(
+        request.generation,
+        if MALFORMED.get() == 13 { 0 } else { 7 }
+    );
     assert_eq!(unsafe { text(request.destination) }, b"00911");
     assert_eq!(unsafe { text(request.caller_number) }, b"524950");
     assert_eq!(unsafe { text(request.caller_name) }, b"Not authenticated");
@@ -122,7 +134,7 @@ unsafe extern "C" fn dial(
         size_of::<abi::rptadv_iax2_provider_call_receipt_v1>()
     );
     receipt.abi_version = 1;
-    receipt.account_generation = 7;
+    receipt.account_generation = request.generation;
     receipt.call_generation = 19;
     receipt.format = 4;
     receipt.local_call = 12;
@@ -262,7 +274,7 @@ fn registration_copies_granted_interval_and_endpoints() {
 #[test]
 fn registration_rejects_errors_and_malformed_receipts() {
     let mut server = fixture();
-    for malformed in 1..=11 {
+    for malformed in (1..=11).chain(13..=16) {
         MALFORMED.set(malformed);
         assert_eq!(
             server.register_account(&registration()),
@@ -365,4 +377,43 @@ fn released_provider_binds_phone_only_without_numeric_aliases() {
         unsafe { server.poll_accounts(123, None, None, None, None, std::ptr::null_mut()) },
         Ok(false)
     );
+}
+
+#[test]
+fn provider_account_bind_requires_every_external_callback_before_operations() {
+    for missing in 0..5 {
+        let mut api = legacy::server_descriptor();
+        api.configure_accounts = Some(configure);
+        api.register_account = Some(register);
+        api.poll_accounts = Some(poll);
+        api.dial_provider_account = Some(dial);
+        match missing {
+            0 => api.configure_accounts = None,
+            1 => api.register_account = None,
+            2 => api.poll_accounts = None,
+            3 => api.dial_provider_account = None,
+            _ => {}
+        }
+        assert_eq!(
+            check_account_support(&api),
+            if missing == 4 {
+                Ok(())
+            } else {
+                Err(IaxError::IncompatibleAdapter)
+            }
+        );
+    }
+}
+
+#[test]
+fn zero_generation_provider_success_destroys_the_call_without_exposing_a_receipt() {
+    let mut server = fixture();
+    MALFORMED.set(13);
+    let mut request = request();
+    request.generation = 0;
+    assert!(matches!(
+        server.dial_provider_account(&request),
+        Err(IaxError::Operation)
+    ));
+    assert_eq!(DESTROYED.get(), 1);
 }

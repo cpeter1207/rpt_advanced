@@ -32,6 +32,8 @@ enum Event {
     Digit(u8),
     Audio,
     UnqualifiedTone,
+    Wire(u32, usize, u32),
+    Malformed(fn(&mut abi::rptadv_iax2_timed_event_v1)),
 }
 #[derive(Default)]
 struct Provider {
@@ -95,6 +97,19 @@ unsafe extern "C" fn timed_poll(
         record.flags = 0;
         record.born_ns = 0;
         match state.events.front().cloned() {
+            Some(Event::Wire(kind, length, flags)) => {
+                record.event_kind = kind;
+                record.event_length = length;
+                record.flags = flags;
+                if kind == 4 && text_capacity != 0 {
+                    unsafe { text.write(b'5') };
+                }
+                state.events.pop_front();
+            }
+            Some(Event::Malformed(mutate)) => {
+                mutate(record);
+                state.events.pop_front();
+            }
             Some(Event::Reset(target)) => {
                 state.media_epoch = target;
                 state.source_cursor = 0;
@@ -163,6 +178,13 @@ fn call_with_timing(account: &PreparedAccount, local: SocketAddr, timed: bool) -
     api.poll = Some(legacy_poll);
     api.send_prepared_audio = Some(legacy_send);
     api.poll_timed = timed.then_some(timed_poll);
+    call_with_descriptor(account, local, api)
+}
+fn call_with_descriptor(
+    account: &PreparedAccount,
+    local: SocketAddr,
+    api: abi::rptadv_iax2_client_descriptor_v2,
+) -> ProviderCall {
     ProviderCall {
         peer: tests::host_fixture_peer(api),
         receipt: CallReceipt {
@@ -182,6 +204,9 @@ fn account() -> Arc<PreparedAccount> {
 }
 
 fn account_at(remote: SocketAddr) -> Arc<PreparedAccount> {
+    account_at_protocol(remote, "iax")
+}
+fn account_at_protocol(remote: SocketAddr, protocol: &str) -> Arc<PreparedAccount> {
     use std::os::unix::fs::PermissionsExt;
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -193,7 +218,7 @@ fn account_at(remote: SocketAddr) -> Arc<PreparedAccount> {
     let secret = path.join("phone.secret");
     std::fs::write(&secret, "fixture-secret").unwrap();
     std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let records = crate::configuration::resolve_phone_accounts(&format!("[named-node]\n[phone_account provider]\nenabled=yes\nlocal_node=named-node\nserver={remote}\nusername=login\nsecrets_file=phone.secret\n")).unwrap();
+    let records = crate::configuration::resolve_phone_accounts(&format!("[named-node]\n[phone_account provider]\nenabled=yes\nprotocol={protocol}\nlocal_node=named-node\nserver={remote}\nusername=login\nsecrets_file=phone.secret\n")).unwrap();
     assert_eq!(records.len(), 1, "fixture account was not resolved");
     let prepared = AccountPreparer::default()
         .prepare(
@@ -288,14 +313,18 @@ fn private_adoption_rejects_stale_account_or_wrong_listener_provider_receipt_onc
     let owner = owner();
     let account = account();
     let local = "127.0.0.1:4569".parse().unwrap();
-    for defect in 0..5 {
+    for defect in 0..9 {
         let mut call = call(&account, local);
         match defect {
             0 => call.receipt.account_generation += 1,
             1 => call.receipt.call_generation = 0,
             2 => call.receipt.remote.set_port(4001),
             3 => call.receipt.local.set_port(4570),
-            _ => call.receipt.format = 0,
+            4 => call.receipt.format = 0,
+            5 => call.receipt.local_call = 0,
+            6 => call.receipt.local_call = 32768,
+            7 => call.receipt.remote_call = 0,
+            _ => call.receipt.remote_call = 32768,
         }
         let result = owner.provider_peer_handle(call, &account, local);
         if let Ok(raw) = result {
@@ -366,16 +395,21 @@ struct Sink {
     reset_offers: usize,
     gaps: Vec<(u64, u32)>,
     refuse_reset: bool,
+    audio_accept: Option<usize>,
+    gap_accept: Option<u32>,
+    digit_status: Option<i32>,
+    reset_status: Option<i32>,
 }
 unsafe extern "C" fn digit(context: *mut c_void, symbol: u32) -> i32 {
     let sink = unsafe { &mut *context.cast::<Sink>() };
     sink.digit_offers.push(symbol);
-    i32::from(sink.digit_offers.len() == 1)
+    sink.digit_status
+        .unwrap_or_else(|| i32::from(sink.digit_offers.len() == 1))
 }
 unsafe extern "C" fn reset(context: *mut c_void) -> i32 {
     let sink = unsafe { &mut *context.cast::<Sink>() };
     sink.reset_offers += 1;
-    i32::from(sink.refuse_reset)
+    sink.reset_status.unwrap_or(i32::from(sink.refuse_reset))
 }
 unsafe extern "C" fn audio(
     context: *mut c_void,
@@ -396,26 +430,20 @@ unsafe extern "C" fn audio(
         birth.host_clock_epoch,
         birth.born_ns,
     ));
-    match sink.audio_offers.len() {
-        1 => 2.min(count),
-        2 => 0,
-        _ => count,
-    }
+    sink.audio_accept
+        .unwrap_or_else(|| match sink.audio_offers.len() {
+            1 => 2.min(count),
+            2 => 0,
+            _ => count,
+        })
 }
 unsafe extern "C" fn gap(context: *mut c_void, start: u64, count: u32) -> u32 {
     let sink = unsafe { &mut *context.cast::<Sink>() };
     sink.gaps.push((start, count));
-    count
+    sink.gap_accept.unwrap_or(count)
 }
-fn read(
-    handle: &Handle<'_>,
-    sink: Option<&mut Sink>,
-    now: u64,
-) -> abi::rptadv_peer_source_result_v1 {
-    let mut output: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
-    output.struct_size = size_of::<abi::rptadv_peer_source_result_v1>() as u32;
-    output.abi_version = 1;
-    let sink = sink.map(|sink| abi::rptadv_peer_source_sink_v1 {
+fn callbacks(sink: &mut Sink, now: u64) -> abi::rptadv_peer_source_sink_v1 {
+    abi::rptadv_peer_source_sink_v1 {
         struct_size: size_of::<abi::rptadv_peer_source_sink_v1>() as u32,
         abi_version: 1,
         context: ptr::from_mut(sink).cast(),
@@ -426,22 +454,38 @@ fn read(
         audio_timed: Some(audio),
         source_discontinuity: Some(reset),
         digit: Some(digit),
-    });
+    }
+}
+fn read_callbacks(
+    handle: &Handle<'_>,
+    completion: u32,
+    sink: Option<&abi::rptadv_peer_source_sink_v1>,
+) -> (i32, abi::rptadv_peer_source_result_v1) {
+    let mut output: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
+    output.struct_size = size_of::<abi::rptadv_peer_source_result_v1>() as u32;
+    output.abi_version = 1;
     let api = handle.owner.descriptor();
-    assert_eq!(
-        unsafe {
-            api.peer_read_source.unwrap()(
-                api.context,
-                handle.raw,
-                0,
-                sink.as_ref().map_or(ptr::null(), ptr::from_ref),
-                None,
-                ptr::null_mut(),
-                &mut output,
-            )
-        },
-        0
-    );
+    let status = unsafe {
+        api.peer_read_source.unwrap()(
+            api.context,
+            handle.raw,
+            completion,
+            sink.map_or(ptr::null(), ptr::from_ref),
+            None,
+            ptr::null_mut(),
+            &mut output,
+        )
+    };
+    (status, output)
+}
+fn read(
+    handle: &Handle<'_>,
+    sink: Option<&mut Sink>,
+    now: u64,
+) -> abi::rptadv_peer_source_result_v1 {
+    let sink = sink.map(|sink| callbacks(sink, now));
+    let (status, output) = read_callbacks(handle, 0, sink.as_ref());
+    assert_eq!(status, 0);
     output
 }
 #[test]
@@ -719,3 +763,273 @@ fn terminal_provider_error_remains_closed_without_repolling() {
 
 #[path = "iax_phone_jitter_tests.rs"]
 mod jitter_qualification;
+
+/// Faults enter through the foreign sink table, never by changing private Phone state.
+#[test]
+fn invalid_source_sinks_latch_closed_before_polling_the_provider() {
+    let owner = owner();
+    let account = account();
+    let local = "127.0.0.1:4569".parse().unwrap();
+    for defect in 0..9 {
+        let handle = handle(&owner, &account, local);
+        let mut sink = Sink::default();
+        let mut callbacks = callbacks(&mut sink, 10_000);
+        match defect {
+            0 => callbacks.struct_size -= 1,
+            1 => callbacks.abi_version = 2,
+            2 => callbacks.host_clock_epoch = 0,
+            3 => callbacks.audio_timed = None,
+            4 => callbacks.gap = None,
+            5 => callbacks.digit = None,
+            6 => callbacks.source_discontinuity = None,
+            7 => {
+                PROVIDER.with_borrow_mut(|state| state.events = [Event::Reset(1)].into());
+                read(&handle, Some(&mut sink), 10_000);
+                callbacks.host_clock_epoch = 10;
+            }
+            _ => {}
+        }
+        let polls = PROVIDER.with_borrow(|state| state.polls);
+        let (status, output) = read_callbacks(&handle, u32::from(defect == 8), Some(&callbacks));
+        assert_eq!((status, output.state), (-1, 3), "sink defect {defect}");
+        assert_eq!(read(&handle, None, 11_000).state, 3);
+        assert_eq!(read(&handle, Some(&mut sink), 11_000).state, 3);
+        PROVIDER.with_borrow(|state| assert_eq!(state.polls, polls));
+    }
+}
+
+#[test]
+fn source_ordering_and_sink_contract_failures_retire_the_exact_call() {
+    let owner = owner();
+    let account = account();
+    for defect in 0..7 {
+        let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+        let mut sink = Sink::default();
+        PROVIDER.with_borrow_mut(|state| state.events = [Event::Reset(1)].into());
+        read(&handle, Some(&mut sink), 10_000);
+        let event = match defect {
+            0 => Event::Reset(1), // Discontinuity must advance the acknowledged epoch.
+            1 => Event::Malformed(|record| record.media_epoch = 2),
+            2 => {
+                sink.reset_status = Some(-1);
+                Event::Reset(2)
+            }
+            3 => {
+                sink.digit_status = Some(-1);
+                Event::Digit(b'5')
+            }
+            4 => {
+                sink.audio_accept = Some(5);
+                Event::Audio
+            }
+            5 => {
+                sink.gap_accept = Some(5);
+                Event::Wire(7, 4, 0)
+            }
+            _ => Event::Audio,
+        };
+        PROVIDER.with_borrow_mut(|state| state.events = [event, Event::Digit(b'7')].into());
+        let now = if defect == 6 {
+            // A refused audio suffix keeps its original birth. A regressed host
+            // reference clock cannot make it valid in the future.
+            read(&handle, Some(&mut sink), 11_000);
+            699
+        } else {
+            11_000
+        };
+        let (status, output) = read_callbacks(&handle, 0, Some(&callbacks(&mut sink, now)));
+        assert_eq!((status, output.state), (-1, 3), "source defect {defect}");
+        let polls = PROVIDER.with_borrow(|state| state.polls);
+        assert_eq!(read(&handle, Some(&mut sink), 12_000).state, 3);
+        PROVIDER.with_borrow(|state| assert_eq!(state.polls, polls));
+    }
+}
+
+#[test]
+fn counted_gaps_retain_refused_prefixes_ahead_of_later_events() {
+    let owner = owner();
+    let account = account();
+    let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+    PROVIDER.with_borrow_mut(|state| {
+        state.events = [Event::Reset(1), Event::Wire(7, 4, 0), Event::Digit(b'5')].into();
+    });
+    let mut sink = Sink {
+        gap_accept: Some(2),
+        ..Sink::default()
+    };
+    read(&handle, Some(&mut sink), 10_000);
+    assert_eq!(read(&handle, Some(&mut sink), 11_000).progress, 2);
+    sink.gap_accept = Some(0);
+    assert_eq!(read(&handle, Some(&mut sink), 12_000).progress, 2);
+    PROVIDER.with_borrow(|state| assert_eq!(state.polls, 2));
+    assert!(sink.digit_offers.is_empty());
+    sink.gap_accept = None;
+    assert_eq!(read(&handle, Some(&mut sink), 13_000).progress, 1);
+    assert_eq!(sink.gaps, [(0, 4), (2, 2), (2, 2)]);
+    read(&handle, Some(&mut sink), 14_000);
+    assert_eq!(sink.digit_offers, [b'5' as u32]);
+    read(&handle, Some(&mut sink), 15_000);
+    assert_eq!(read(&handle, Some(&mut sink), 16_000).progress, 0);
+    PROVIDER.with_borrow(|state| assert_eq!(state.acknowledgements, [0, 1, 1, 1]));
+}
+
+#[test]
+fn timed_provider_output_shapes_are_validated_before_exposing_events() {
+    use crate::iax::timed::Kind;
+    let owner = owner();
+    let account = account();
+    let mut peer = call(&account, "127.0.0.1:4569".parse().unwrap()).peer;
+    // One ABI record matrix covers every event shape, including bounded unknown
+    // text/radio events that private calls intentionally consume without commands.
+    for (kind, length, flags, valid) in [
+        (0, 0, 0, true),
+        (0, 1, 0, false),
+        (1, 4, 1, true),
+        (1, 0, 0, false),
+        (1, 5, 0, false),
+        (2, 0, 0, true),
+        (2, 65507, 0, true),
+        (2, 65508, 0, false),
+        (3, 0, 0, true),
+        (3, 1, 0, false),
+        (4, 1, 0, true),
+        (4, 0, 0, false),
+        (5, 0, 0, true),
+        (5, 1, 0, false),
+        (6, 0, 0, true),
+        (6, 1, 0, false),
+        (7, 4, 0, true),
+        (7, 0, 0, false),
+        (7, u32::MAX as usize + 1, 0, false),
+        (8, 0, 2, true),
+        (8, 1, 2, false),
+        (8, 0, 0, false),
+        (9, 0, 0, false),
+    ] {
+        PROVIDER.with_borrow_mut(|state| state.events = [Event::Wire(kind, length, flags)].into());
+        let result = peer.poll_source(&mut [0.0; 4], 9, 10_000, 0);
+        assert_eq!(
+            result.is_ok(),
+            valid,
+            "kind {kind}, length {length}, flags {flags}"
+        );
+        if let Ok(event) = result {
+            let actual = match event.kind {
+                Kind::None => (0, 0),
+                Kind::Audio(count) => (1, count),
+                Kind::Gap(count) => (7, count as usize),
+                Kind::Digit(symbol) => (4, symbol as usize),
+                Kind::Hangup => (3, 0),
+                Kind::Ignored => (2, 0),
+            };
+            let expected = match kind {
+                0 | 8 => (0, 0),
+                1 | 7 => (kind, length),
+                3 => (3, 0),
+                4 => (4, b'5' as usize),
+                _ => (2, 0),
+            };
+            assert_eq!(actual, expected);
+            assert_eq!(event.discontinuity, flags & 2 != 0);
+        }
+    }
+    drop((peer, owner));
+}
+
+#[test]
+fn malformed_timed_provider_records_never_escape_the_abi_boundary() {
+    type Mutate = fn(&mut abi::rptadv_iax2_timed_event_v1);
+    let owner = owner();
+    let account = account();
+    let mut peer = call(&account, "127.0.0.1:4569".parse().unwrap()).peer;
+    let faults: [Mutate; 13] = [
+        |r| r.struct_size = 0,
+        |r| r.abi_version = 2,
+        |r| r.host_clock_epoch += 1,
+        |r| r.reference_now_ns += 1,
+        |r| r.acknowledged_media_epoch += 1,
+        |r| r.media_epoch = 0,
+        |r| r.flags = 4,
+        |r| r.flags = 1, // Birth belongs only to audio.
+        |r| {
+            r.flags = 1;
+            r.event_kind = 1;
+            r.event_length = 1;
+            r.born_ns = 10_001;
+        },
+        |r| {
+            r.flags = 2;
+            r.event_kind = 1;
+            r.event_length = 1;
+        },
+        |r| {
+            r.flags = 2;
+            r.event_kind = 7;
+            r.event_length = 1;
+        },
+        |r| {
+            r.event_kind = 1;
+            r.event_length = 1;
+            r.source_start = u64::MAX;
+        },
+        |r| {
+            r.event_kind = 7;
+            r.event_length = 1;
+            r.source_start = u64::MAX;
+        },
+    ];
+    for (index, mutate) in faults.into_iter().enumerate() {
+        PROVIDER.with_borrow_mut(|state| state.events = [Event::Malformed(mutate)].into());
+        assert!(
+            matches!(
+                peer.poll_source(&mut [0.0; 4], 9, 10_000, 0),
+                Err(IaxError::Operation)
+            ),
+            "record defect {index}"
+        );
+    }
+    drop((peer, owner));
+}
+
+#[test]
+fn private_adoption_rejects_unavailable_host_wrong_protocol_and_nonphone_rate() {
+    unsafe extern "C" fn rate(_: *const c_void) -> u32 {
+        16000
+    }
+    let owner = owner();
+    let account = account();
+    let local = "127.0.0.1:4569".parse().unwrap();
+    let sip = account_at_protocol(account.remote(), "sip");
+    assert_eq!(
+        owner.provider_peer_handle(call(&sip, local), &sip, local),
+        Err(IaxError::InvalidParameters)
+    );
+    let mut api = tests::descriptor();
+    api.destroy = Some(destroy);
+    api.poll_timed = Some(timed_poll);
+    api.sample_rate_hz = Some(rate);
+    assert_eq!(
+        owner.provider_peer_handle(call_with_descriptor(&account, local, api), &account, local),
+        Err(IaxError::InvalidParameters)
+    );
+    let unavailable =
+        HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+    assert_eq!(
+        unavailable.provider_peer_handle(call(&account, local), &account, local),
+        Err(IaxError::IncompatibleAdapter)
+    );
+    PROVIDER.with_borrow(|state| assert_eq!(state.destroyed, 3));
+}
+
+#[test]
+fn numeric_iax_handle_cannot_enter_the_private_source_callback() {
+    let owner = owner();
+    let raw = Box::into_raw(Box::new(super::PeerHandle::Iax(super::IaxHandle::new(
+        tests::peer_for_host_callback(0, false, false),
+        "1000",
+        "2000",
+    ))))
+    .cast();
+    let handle = Handle { owner: &owner, raw };
+    assert_eq!(read_callbacks(&handle, 0, None).0, -1);
+}

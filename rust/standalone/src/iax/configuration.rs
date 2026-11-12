@@ -133,10 +133,10 @@ impl<'listener> ConfigurationBatch<'listener> {
 
     /// Consume a valid reservation once, with no fallible late result.
     pub fn commit(mut self) {
-        if let Some(token) = self.token.take() {
-            // SAFETY: the unique token is consumed while all listener borrows live.
-            unsafe { (self.commit)(token.as_ptr()) };
-        }
+        // Preparation creates the only valid token; consuming self prevents reuse.
+        let token = self.token.take().expect("prepared configuration token");
+        // SAFETY: the unique token is consumed while all listener borrows live.
+        unsafe { (self.commit)(token.as_ptr()) };
     }
 }
 impl Drop for ConfigurationBatch<'_> {

@@ -111,13 +111,7 @@ impl IaxServer {
         accounts: &[ProviderAccount<'_>],
     ) -> Result<Self, IaxError> {
         let api = super::load_server_descriptor(client)?;
-        if api.configure_accounts.is_none()
-            || api.register_account.is_none()
-            || api.poll_accounts.is_none()
-            || api.dial_provider_account.is_none()
-        {
-            return Err(IaxError::IncompatibleAdapter);
-        }
+        check_account_support(&api)?;
         let address = address.to_string();
         let nodes = local_nodes.join(",");
         let handle = with_accounts(accounts, |records| {
@@ -309,6 +303,18 @@ pub(super) fn account_record(
         authentication_timeout_ms: account.authentication_timeout_ms,
         reserved: 0,
     }
+}
+
+/// Require the complete provider-account capability before binding any listener.
+fn check_account_support(api: &super::ServerDescriptor) -> Result<(), IaxError> {
+    if api.configure_accounts.is_none()
+        || api.register_account.is_none()
+        || api.poll_accounts.is_none()
+        || api.dial_provider_account.is_none()
+    {
+        return Err(IaxError::IncompatibleAdapter);
+    }
+    Ok(())
 }
 
 /// Preserve useful non-secret provider failures instead of treating all failures alike.
