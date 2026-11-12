@@ -998,7 +998,14 @@ fn assert_inband_source_queue(rate: u32) {
     );
     assert_eq!(session.io.phone_digit_mode(), Some(PhoneDigitMode::InBand));
     for _ in 0..64 {
-        session.digits.push(('1', 0)).unwrap();
+        session
+            .digits
+            .push(PrivateDigit {
+                symbol: '1',
+                received_ms: 0,
+                revision: NonZeroU32::new(1).unwrap(),
+            })
+            .unwrap_or_else(|_| unreachable!());
     }
     let part = rate as usize / 50;
     let tone: Vec<_> = (0..part * 4)
@@ -1081,7 +1088,14 @@ fn assert_source_reset_completion(rate: u32, blocked: bool, inband: bool) {
     assert!(control.digit().is_none(), "tone completion remains pending");
     if blocked {
         for _ in 0..64 {
-            session.digits.push(('1', 0)).unwrap();
+            session
+                .digits
+                .push(PrivateDigit {
+                    symbol: '1',
+                    received_ms: 0,
+                    revision: NonZeroU32::new(1).unwrap(),
+                })
+                .unwrap_or_else(|_| unreachable!());
         }
     }
     state.lock().unwrap().source_reset = true;
@@ -1156,4 +1170,208 @@ fn private_source_reset_never_dispatches_non_authoritative_tone() {
     for rate in [8000, 48000] {
         assert_source_reset_completion(rate, true, false);
     }
+}
+
+fn assert_private_pound_waits_for_control(rate: u32, inband: bool) {
+    let peer = if inband {
+        crate::link::session::tests::phone_source_peer_inband(rate)
+    } else {
+        crate::link::session::tests::phone_source_peer_at_rate(rate)
+    };
+    let (mut session, mut control, state, reply) = source_session_with_peer(peer, false);
+    let part = rate as usize / 50;
+    let tone: Vec<_> = (0..part * 4)
+        .map(|n| {
+            let phase = n as f32 * std::f32::consts::TAU / rate as f32;
+            0.25 * ((phase * 941.0).sin() + (phase * 1477.0).sin())
+        })
+        .collect();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend(tone.chunks(part).map(|pcm| Input::Audio(pcm.to_vec())));
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.0; part * 3]));
+    if !inband {
+        state.lock().unwrap().input.push_back(Input::Digit(b'#'));
+    }
+    for now in 1..10 {
+        session.step(now).unwrap();
+    }
+    assert!(state.lock().unwrap().input.is_empty());
+    assert_eq!(control.digit().map(|(digit, _)| digit), Some('#'));
+    assert!(control.digit().is_none());
+    assert!(
+        session.source.as_ref().unwrap().muted(),
+        "a private pound cannot release collection before the authoritative grammar"
+    );
+    assert!(!reply.ended());
+}
+
+#[test]
+fn private_collection_pound_waits_for_authoritative_control_8000() {
+    assert_private_pound_waits_for_control(8000, false);
+}
+
+#[test]
+fn private_collection_pound_waits_for_authoritative_control_48000() {
+    assert_private_pound_waits_for_control(48000, false);
+}
+
+#[test]
+fn private_collection_pound_waits_for_authoritative_inband_control_8000() {
+    assert_private_pound_waits_for_control(8000, true);
+}
+
+#[test]
+fn private_collection_pound_waits_for_authoritative_inband_control_48000() {
+    assert_private_pound_waits_for_control(48000, true);
+}
+
+/// Read the actual analyzer latch, without changing source ownership or timing.
+pub(crate) fn collection_suppressed(session: &PrivatePhoneSession) -> bool {
+    session.source.as_ref().is_some_and(SourceIngress::muted)
+}
+
+#[test]
+fn private_collection_revision_keeps_the_digit_slot_small_and_exhaustion_terminal() {
+    assert_eq!(std::mem::size_of::<PrivateDigit>(), 16);
+    assert_eq!(std::mem::size_of::<CollectionRevision>(), 4);
+    for reset in [false, true] {
+        let (mut session, mut control, state, reply) = source_session_with_auth(true);
+        session.revision.0.set(NonZeroU32::new(u32::MAX));
+        if reset {
+            state.lock().unwrap().source_reset = true;
+        } else {
+            state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+        }
+        assert!(session.step(1).is_err());
+        assert!(reply.ended());
+        assert!(control.digit().is_none());
+        assert!(session.step(2).is_err());
+        assert!(session.revision.0.get().is_none());
+    }
+}
+
+#[test]
+fn private_collection_release_matches_exact_token_and_latest_source_revision() {
+    for change in ["none", "digit", "reset", "tone"] {
+        let (mut session, mut control, state, reply) = source_session_with_auth(true);
+        state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+        session.step(1).unwrap();
+        assert_eq!(control.digit(), Some(('5', 1)));
+        assert!(collection_suppressed(&session));
+        let (_, _, _, other) = source_session_with_auth(true);
+        assert!(!control.collection_ended(&other));
+        assert!(control.collection_ended(&reply));
+        match change {
+            "digit" => state.lock().unwrap().input.push_back(Input::Digit(b'6')),
+            "reset" => {
+                state.lock().unwrap().source_reset = true;
+                state.lock().unwrap().input.push_back(Input::Digit(b'6'));
+            }
+            "tone" => {
+                let tone: Vec<_> = (0..640)
+                    .map(|n| {
+                        let phase = n as f32 * std::f32::consts::TAU / 8000.0;
+                        0.25 * ((phase * 770.0).sin() + (phase * 1477.0).sin())
+                    })
+                    .collect();
+                state
+                    .lock()
+                    .unwrap()
+                    .input
+                    .extend(tone.chunks(160).map(|pcm| Input::Audio(pcm.to_vec())));
+            }
+            _ => {}
+        }
+        {
+            let mut fixture = state.lock().unwrap();
+            fixture.source_credits.reserve(16);
+            fixture.source_completions.reserve(64);
+            fixture.deadlines.reserve(16);
+        }
+        let (result, allocations) = crate::fixture::allocations(|| session.step(2));
+        result.unwrap();
+        assert_eq!(allocations, 0, "{change}");
+        assert_eq!(
+            collection_suppressed(&session),
+            change != "none",
+            "{change}"
+        );
+        assert!(
+            session.media.is_none(),
+            "release never prepares a media generation"
+        );
+        assert!(!reply.ended());
+    }
+}
+
+#[test]
+fn private_collection_release_waits_for_the_real_qualified_tone_tail() {
+    for rate in [8000, 48000] {
+        let (mut session, mut control, state, reply) = source_session_at_rate(rate, true);
+        let part = rate as usize / 50;
+        let tone: Vec<_> = (0..part * 4)
+            .map(|n| {
+                let phase = n as f32 * std::f32::consts::TAU / rate as f32;
+                0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+            })
+            .collect();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .extend(tone.chunks(part).map(|pcm| Input::Audio(pcm.to_vec())));
+        state.lock().unwrap().input.extend([
+            Input::Audio(vec![0.0; rate as usize * 1275 / 100_000]),
+            Input::Digit(b'5'),
+        ]);
+        session.step(1).unwrap();
+        assert_eq!(control.digit(), Some(('5', 1)));
+        assert!(control.collection_ended(&reply));
+        session.step(2).unwrap();
+        assert!(
+            collection_suppressed(&session),
+            "pending quiet tail at {rate}"
+        );
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.0; part * 3]));
+        for now in 3..8 {
+            session.step(now).unwrap();
+        }
+        assert!(
+            !collection_suppressed(&session),
+            "completed quiet tail at {rate}"
+        );
+        assert!(
+            control.digit().is_none(),
+            "native mode never duplicates the tone"
+        );
+    }
+}
+
+#[test]
+fn private_collection_control_queue_refusal_preserves_the_same_revision() {
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+    session.step(1).unwrap();
+    control.digit().unwrap();
+    for _ in 0..16 {
+        assert!(control.collection_ended(&reply));
+    }
+    assert!(!control.collection_ended(&reply));
+    session.step(2).unwrap();
+    assert!(control.collection_ended(&reply));
+    session.step(3).unwrap();
+    assert!(!collection_suppressed(&session));
+    reply.retire();
+    assert!(!control.collection_ended(&reply));
 }

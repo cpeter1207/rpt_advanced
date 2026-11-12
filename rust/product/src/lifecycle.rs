@@ -587,6 +587,7 @@ impl Engine {
             if schedule {
                 host.runtime.tick_links(clock);
             }
+            host.reconcile_private_collections();
             Ok((host.take_operations(), host.take_site_links()))
         })?;
         for (local, effect) in site_links {

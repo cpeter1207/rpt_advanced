@@ -21,6 +21,8 @@ use rpt_advanced_core::{
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
+    cell::Cell,
+    num::NonZeroU32,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -33,15 +35,51 @@ pub(crate) mod media;
 
 const BLOCK: usize = 960;
 
+/// Private revision only: typed call/account/actual-ingress fences stay independent.
+/// None is terminal exhaustion, never a wrapping generation.
+struct CollectionRevision(Cell<Option<NonZeroU32>>);
+impl CollectionRevision {
+    fn new() -> Self {
+        Self(Cell::new(NonZeroU32::new(1)))
+    }
+    fn advance(&self) -> Option<NonZeroU32> {
+        let next = self
+            .0
+            .get()
+            .and_then(|current| current.get().checked_add(1))
+            .and_then(NonZeroU32::new);
+        self.0.set(next);
+        next
+    }
+    fn emit(&self, digits: &mut Producer<PrivateDigit>, symbol: char, received_ms: u64) {
+        if let Some(revision) = self.advance() {
+            digits
+                .push(PrivateDigit {
+                    received_ms,
+                    revision,
+                    symbol,
+                })
+                .unwrap_or_else(|_| unreachable!("reserved private digit slot"));
+        }
+    }
+}
+struct PrivateDigit {
+    received_ms: u64,
+    revision: NonZeroU32,
+    symbol: char,
+}
+
 enum PrivateCommand {
     Reply(PrivatePhoneReply),
     Media(Box<media::Ingress>),
+    CollectionEnded(NonZeroU32),
 }
 
 /// Control endpoint retains the exact source's revocation fence, never a radio handle.
 pub(crate) struct PrivatePhoneControl {
     replies: Producer<PrivateCommand>,
-    digits: Consumer<(char, u64)>,
+    digits: Consumer<PrivateDigit>,
+    consumed_revision: Option<NonZeroU32>,
     reply: PeerReply,
     wake: PeerWake,
     stop: Arc<AtomicBool>,
@@ -94,7 +132,28 @@ impl PrivatePhoneControl {
         self.wake.notify();
     }
     pub(crate) fn digit(&mut self) -> Option<(char, u64)> {
-        self.digits.pop().ok()
+        let event = self.digits.pop().ok()?;
+        self.consumed_revision = Some(event.revision);
+        Some((event.symbol, event.received_ms))
+    }
+    /// Called only after the authoritative grammars are idle on ordinary control.
+    /// Refusal retains the same consumed revision; no new source activity is inferred.
+    pub(crate) fn collection_ended(&mut self, reply: &PeerReply) -> bool {
+        if self.reply != *reply || !reply.phone_authenticated() {
+            return false;
+        }
+        let Some(revision) = self.consumed_revision.filter(|_| self.source_media) else {
+            return true;
+        };
+        if self
+            .replies
+            .push(PrivateCommand::CollectionEnded(revision))
+            .is_err()
+        {
+            return false;
+        }
+        self.wake.notify();
+        true
     }
     #[cfg(test)]
     pub(crate) fn pending_digits(&self) -> usize {
@@ -123,7 +182,9 @@ pub(crate) struct PrivatePhoneSession {
     // A 20 ms offer needs at most three 8 ms partitions at either released rate.
     source: Option<SourceIngress<4>>,
     replies: Consumer<PrivateCommand>,
-    digits: Producer<(char, u64)>,
+    digits: Producer<PrivateDigit>,
+    revision: CollectionRevision,
+    pending_release: Option<NonZeroU32>,
     current: Option<PrivatePhoneReply>,
     media: Option<Box<media::Ingress>>,
     source_end: u64,
@@ -150,7 +211,9 @@ impl PrivatePhoneSession {
         let digit_mode = io.phone_digit_mode().ok_or(Error::Admission)?;
         let rate = io.rate();
         let source = if io.source_media() {
-            Some(SourceIngress::<4>::at_rate(true, rate, rate as usize / 50)?)
+            let mut source = SourceIngress::<4>::at_rate(true, rate, rate as usize / 50)?;
+            source.require_control_release();
+            Some(source)
         } else {
             None
         };
@@ -165,6 +228,7 @@ impl PrivatePhoneSession {
         let control = PrivatePhoneControl {
             replies,
             digits: events,
+            consumed_revision: None,
             reply: reply.clone(),
             wake: wake.clone(),
             stop: Arc::clone(&stop),
@@ -185,6 +249,8 @@ impl PrivatePhoneSession {
                 source,
                 replies: incoming,
                 digits,
+                revision: CollectionRevision::new(),
+                pending_release: None,
                 current: None,
                 media: None,
                 source_end: 0,
@@ -213,9 +279,8 @@ impl PrivatePhoneSession {
             return Err(Error::InvalidFrame);
         }
         if let Some(digit) = digit {
-            self.digits
-                .push((digit, now_ms))
-                .expect("reserved digit slot");
+            self.revision.emit(&mut self.digits, digit, now_ms);
+            self.revision.0.get().ok_or(Error::Admission)?;
         }
         Ok(seen)
     }
@@ -225,6 +290,7 @@ impl PrivatePhoneSession {
             .map(SourceTimeClock::reference)
             .unwrap_or_default();
         let digits = &mut self.digits;
+        let revision = &self.revision;
         let media = &mut self.media;
         let source_end = &mut self.source_end;
         let source = self.source.as_mut().ok_or(Error::Operation)?;
@@ -245,10 +311,9 @@ impl PrivatePhoneSession {
                         if let Some(media) = media.as_ref() {
                             media.retire();
                         }
-                        if digit == '#' {
-                            source.end_command();
-                        }
-                        return usize::from(digits.push((digit, now_ms)).is_ok());
+                        source.hold_command();
+                        revision.emit(digits, digit, now_ms);
+                        return usize::from(revision.0.get().is_some());
                     }
                     SourceInput::Audio {
                         start,
@@ -278,12 +343,12 @@ impl PrivatePhoneSession {
                             },
                             |digit| {
                                 if mode == PhoneDigitMode::InBand {
-                                    digits
-                                        .push((digit, now_ms))
-                                        .expect("reserved private analysis digit slots");
+                                    revision.emit(digits, digit, now_ms);
                                 }
                             },
                             || {
+                                // Exhaustion is checked before this source read returns.
+                                let _ = revision.advance();
                                 if let Some(media) = current_media {
                                     media.retire();
                                 }
@@ -311,9 +376,7 @@ impl PrivatePhoneSession {
                         source
                             .discontinuity(|digit| {
                                 if mode == PhoneDigitMode::InBand {
-                                    digits
-                                        .push((digit, now_ms))
-                                        .expect("reserved private loss digit slot");
+                                    revision.emit(digits, digit, now_ms);
                                 }
                             })
                             .and_then(|()| {
@@ -330,11 +393,13 @@ impl PrivatePhoneSession {
                         if mode == PhoneDigitMode::InBand && digits.slots() == 0 {
                             return 0;
                         }
+                        if revision.advance().is_none() {
+                            failure = Some(Error::Admission);
+                            return 0;
+                        }
                         match source.reset(|digit| {
                             if mode == PhoneDigitMode::InBand {
-                                digits
-                                    .push((digit, now_ms))
-                                    .expect("reserved private reset digit slot");
+                                revision.emit(digits, digit, now_ms);
                             }
                         }) {
                             Ok(()) => {
@@ -354,6 +419,7 @@ impl PrivatePhoneSession {
                     }
                 }
             })?;
+        revision.0.get().ok_or(Error::Admission)?;
         if let Some(error) = failure {
             return Err(error);
         }
@@ -369,12 +435,11 @@ impl PrivatePhoneSession {
             }
             source.discontinuity(|digit| {
                 if mode == PhoneDigitMode::InBand {
-                    digits
-                        .push((digit, now_ms))
-                        .expect("reserved private finish digit slot");
+                    revision.emit(digits, digit, now_ms);
                 }
             })?;
         }
+        revision.0.get().ok_or(Error::Admission)?;
         let acknowledge =
             result.finish_pending && self.source_completion == SourceCompletion::Pending;
         self.source_completion = if result.finish_pending {
@@ -407,6 +472,9 @@ impl PrivatePhoneSession {
                         );
                         self.media = Some(media);
                     }
+                    Some(PrivateCommand::CollectionEnded(revision)) => {
+                        self.pending_release = Some(revision);
+                    }
                     None => break,
                 }
             }
@@ -424,6 +492,16 @@ impl PrivatePhoneSession {
             };
             if !progressed {
                 break;
+            }
+        }
+        // Read source activity first: a queued release cannot clear a newer onset,
+        // event or reset. A matching release waits for stable raw-retry completion
+        // and the detector's actual qualified tail, never a private timer.
+        if let Some(release) = self.pending_release {
+            if self.revision.0.get() != Some(release)
+                || self.source.as_mut().is_some_and(SourceIngress::end_command)
+            {
+                self.pending_release = None;
             }
         }
         if now_ms >= self.next_audio_ms && self.outbound.ready_for_input() {
@@ -531,4 +609,4 @@ impl Drop for PrivatePhoneSession {
 
 #[cfg(test)]
 #[path = "private_phone_tests.rs"]
-mod tests;
+pub(crate) mod tests;

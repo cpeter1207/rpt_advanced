@@ -1586,7 +1586,9 @@ impl Host {
                 );
                 self.operations.extend(
                     node.links()
-                        .expire_peer_digits(clock.now_ms)
+                        .expire_peer_digits_with_collection(clock.now_ms, |reply| {
+                            self.phone_calls.collection_expired(reply);
+                        })
                         .into_iter()
                         .map(|operation| (local.clone(), operation)),
                 );

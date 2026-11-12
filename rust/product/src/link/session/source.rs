@@ -47,6 +47,8 @@ pub(crate) struct SourceIngress<const N: usize = 64> {
     detector: DtmfDetector,
     muting: bool,
     command_muted: bool,
+    pending_tone: bool,
+    explicit_release: bool,
     generation: u64,
     burst_start: Option<u64>,
     cursor: u64,
@@ -95,6 +97,8 @@ impl<const N: usize> SourceIngress<N> {
             maximum,
             muting,
             command_muted: false,
+            pending_tone: false,
+            explicit_release: false,
             generation: 1,
             burst_start: None,
             cursor: 0,
@@ -105,14 +109,33 @@ impl<const N: usize> SourceIngress<N> {
         })
     }
 
+    /// Private control, rather than pound alone, owns completion of this profile.
+    pub(crate) fn require_control_release(&mut self) {
+        self.explicit_release = true;
+    }
+    pub(crate) fn hold_command(&mut self) {
+        self.command_muted = true;
+    }
+
     /// Cancel retained PCM and start a new source range. End the one already
     /// qualified digit before clearing analysis; the caller reserves its slot.
     pub(crate) fn reset(&mut self, emit: impl FnMut(char)) -> Result<(), Error> {
+        let mut completed = false;
+        let mut emit = emit;
         self.detector
-            .process_spans(false, &mut [], emit, |_| {})
+            .process_spans(
+                false,
+                &mut [],
+                |digit| {
+                    completed = true;
+                    emit(digit);
+                },
+                |_| {},
+            )
             .map_err(|_| Error::InvalidFrame)?;
         self.generation = self.generation.checked_add(1).ok_or(Error::InvalidFrame)?;
-        self.command_muted = false;
+        self.command_muted = self.explicit_release && (self.command_muted || completed);
+        self.pending_tone = false;
         self.burst_start = None;
         self.cached = None;
         self.span_count = 0;
@@ -146,17 +169,20 @@ impl<const N: usize> SourceIngress<N> {
         }
         let command_muted = &mut self.command_muted;
         let muting = self.muting;
+        let explicit_release = self.explicit_release;
         self.detector
             .process_spans(
                 false,
                 &mut [],
                 |digit| {
-                    *command_muted = muting && digit != '#';
+                    *command_muted = muting && (explicit_release || digit != '#');
                     emit(digit);
                 },
                 std::mem::drop,
             )
-            .map_err(|_| Error::InvalidFrame)
+            .map_err(|_| Error::InvalidFrame)?;
+        self.pending_tone = false;
+        Ok(())
     }
 
     /// Bound a new offer or the still-unaccepted suffix; never redetect a retry.
@@ -177,10 +203,14 @@ impl<const N: usize> SourceIngress<N> {
     pub(crate) fn muted(&self) -> bool {
         self.command_muted || self.detector.suppressing()
     }
-    /// A native authoritative command terminator releases command-wide suppression;
-    /// an actually present tone remains suppressed until the detector releases it.
-    pub(crate) fn end_command(&mut self) {
+    /// Only a matching control decision may release private command suppression.
+    /// Retained raw retries and a qualified quiet tail still belong to this input.
+    pub(crate) fn end_command(&mut self) -> bool {
+        if self.pending_tone || self.cached.is_some() {
+            return false;
+        }
         self.command_muted = false;
+        true
     }
     /// Analyze an offer once, then reconstruct each retry from its borrowed raw PCM.
     /// Callbacks are synchronous and must remain nonblocking.
@@ -236,7 +266,7 @@ impl<const N: usize> SourceIngress<N> {
                             |range| {
                                 collect_mute_start(
                                     &mut first,
-                                    &mut onset,
+                                    || {},
                                     start,
                                     end,
                                     burst_start,
@@ -246,6 +276,18 @@ impl<const N: usize> SourceIngress<N> {
                         )
                         .map_err(|_| Error::InvalidFrame)?;
                 }
+                // One eight-ms partition is shorter than a detector interval.
+                // A completion can replace an old active tone with a new one;
+                // quiet-tail qualification outlives the audible suppression bit.
+                let pending = if digit.is_some() {
+                    self.detector.suppressing()
+                } else {
+                    self.pending_tone || first.is_some()
+                };
+                if pending && (!self.pending_tone || digit.is_some()) {
+                    onset();
+                }
+                self.pending_tone = pending;
                 let muted = self.muting
                     && (was_muted || first.is_some() || digit.is_some() || concealed_muted);
                 if muted {
@@ -257,7 +299,7 @@ impl<const N: usize> SourceIngress<N> {
                     );
                 }
                 if !block.concealed {
-                    self.command_muted = muted && digit != Some('#');
+                    self.command_muted = muted && (self.explicit_release || digit != Some('#'));
                 }
             }
             self.cached = Some(Cached {
@@ -762,6 +804,77 @@ mod tests {
         );
         assert_eq!(source.finish(&mut inbound, |_| {}), Err(Error::Write));
     }
+    #[test]
+    fn private_collection_pending_tail_delays_release_without_growing_profiles() {
+        assert_eq!(std::mem::size_of::<SourceIngress>(), 1224);
+        assert_eq!(std::mem::size_of::<SourceIngress<4>>(), 264);
+        for rate in [8000, 48000] {
+            let part = rate as usize / 50;
+            let interval = rate as usize * 1275 / 100_000;
+            let mut source = SourceIngress::<4>::at_rate(true, rate, part).unwrap();
+            let tone: Vec<_> = (0..part * 4)
+                .map(|n| {
+                    let phase = n as f32 * std::f32::consts::TAU / rate as f32;
+                    0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+                })
+                .collect();
+            let mut scratch = [0.0; 960];
+            let mut position = 0;
+            let mut completed = 0;
+            for raw in tone
+                .chunks(part)
+                .chain(std::iter::once(&[0.0; 612][..interval]))
+            {
+                source
+                    .prepare(
+                        &mut scratch,
+                        Decoded {
+                            start: position,
+                            pcm: raw,
+                            concealed: false,
+                            birth: None,
+                        },
+                        |_| completed += 1,
+                        || {},
+                    )
+                    .unwrap();
+                source.accepted(raw.len()).unwrap();
+                position += raw.len() as u64;
+            }
+            assert!(
+                !source.detector.suppressing(),
+                "the first quiet window is not audible tone"
+            );
+            assert_eq!(completed, 0, "a qualified digit still awaits completion");
+            assert!(
+                !source.end_command(),
+                "cannot release pending qualified tail"
+            );
+            for raw in [0.0; 1224][..interval * 2].chunks(part) {
+                source
+                    .prepare(
+                        &mut scratch,
+                        Decoded {
+                            start: position,
+                            pcm: raw,
+                            concealed: false,
+                            birth: None,
+                        },
+                        |_| completed += 1,
+                        || {},
+                    )
+                    .unwrap();
+                source.accepted(raw.len()).unwrap();
+                position += raw.len() as u64;
+            }
+            assert_eq!(completed, 1);
+            let (released, allocations) = crate::fixture::allocations(|| source.end_command());
+            assert!(released);
+            assert_eq!(allocations, 0);
+            assert!(!source.muted());
+        }
+    }
+
     #[test]
     fn source_reset_completes_once_while_cancelling_partial_retry_without_allocation() {
         for rate in [8000, 48000] {

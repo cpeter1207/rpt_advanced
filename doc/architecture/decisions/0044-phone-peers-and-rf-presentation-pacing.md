@@ -636,14 +636,11 @@ These changes prepare source-private control and suppression; no provider,
 manual attachment, RF route or remote call-origin capability is activated.
 
 
-Retirement is not automatic re-admission. Native or detected pound terminates
-the analyzer's local command mute, but private grammar completion, cancellation
-and timeout still need an authoritative control-owner signal before legitimate
-media re-admission is enabled. In particular, a native pound is only a local
-mute release, not proof that the grammar completed: quoting, addressed commands
-and cancellation must be resolved by that authoritative control owner.
-No event-absence or elapsed-time heuristic reopens a retired generation. This remaining join is required before attachment
-activation; the logical private call and its control events remain available.
+Retirement is not automatic re-admission. The source-private completion join
+below replaces the earlier local pound release. No event-absence or elapsed-time
+heuristic reopens a retired generation; the logical call and control events
+remain available. Fresh-media adoption is still required before attachment
+activation.
 The added capability changes no ABI field layout or SONAME; older consumers
 that do not recognize the bit reject that unsupported profile.
 
@@ -703,6 +700,51 @@ Actual released-detector tests distinguish a qualified pending digit from
 current audible suppression at both 8 and 48 kHz. Scalar state inferred during
 the existing 8 ms partitions agrees with the provider's explicit end-of-input
 completion through quiet tails, replacement tones and short unqualified tones.
-This proof introduces no production detector state or automatic readmission.
-Versioned control release, lifecycle fencing and fresh-media adoption remain
-separate pending prerequisites. No attachment, RF or provider capability is enabled.
+The private completion join below uses this scalar proof without automatic
+readmission. Fresh-media adoption remains a separate pending prerequisite.
+No attachment, RF or provider capability is enabled.
+
+
+## Revision-qualified private collection completion — 2026-11-12
+
+Private suppression ends only after the actual outer grammar and exact local
+node collector are idle. The existing ordinary Engine pump reconciles this
+after its normal expiry and scheduled work, inside the same serialized
+accepting/revision/reload/fatal admission fence. Pending-reload servicing does
+not reconcile. Existing grammar expiry marks silent transitions; the node's
+existing collector sweep notifies exact private completions even when no
+operation is emitted. One dirty bit per bounded call avoids repeatedly scanning
+unchanged collectors. Inspection never cancels a selected target, reconstructs
+a collector, or renews a grant.
+
+The existing serial private owner tags its 16-byte digit slots with a checked
+32-bit revision. New authoritative symbols, qualified tone onsets and source
+resets advance it; exhaustion ends the exact call without reuse. Call/account
+generations and actual ingress remain independent typed fences. The same
+bounded command queue carries completion for the last consumed revision.
+Queue refusal retains one dirty intent; a newer processed event replaces that
+intent only after the real grammars run again. The serial owner reads pending
+source activity before applying completion and rejects obsolete revisions.
+A matching request waits for retained raw PCM acceptance and the released
+detector's qualified quiet tail. Only scalar metadata is retained; no extra
+PCM pass, copy, detector or worker is introduced.
+
+Private pound no longer clears suppression on its own, including quoted or
+addressed pound. Ordinary peer analysis keeps its original automatic pound
+behavior and profile footprint. A source reset preserves an existing private
+collection latch while retiring its media, and still emits a qualified in-band
+completion before acknowledging reset when capacity permits.
+
+NativeEvents still cannot correlate a native symbol with a later detected tone
+onset. Such an onset invalidates an earlier completion rather than guessing
+by digit value or timing. Similarly, a reset with no new authoritative symbol
+cannot reuse an old revision to release a preserved latch. These conservative
+orders remain unsupported for automatic readmission under the current source
+contract. InBand completion supplies its actual new revision after the tone
+ends. No timeout is invented in the serial owner.
+
+Completion clears only the source suppression latch. It neither revives the
+retired media generation nor prepares/adopts another ring or graph. A future
+fresh-media handoff must retain the expected revision and full lifecycle,
+source and RF qualification fences. Production attachment, RF routing,
+provider advertisement and remote capability remain unavailable.

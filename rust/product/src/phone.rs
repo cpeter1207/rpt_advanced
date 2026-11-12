@@ -77,6 +77,7 @@ struct Call {
     owner: Option<PrivatePhoneControl>,
     login: LoginCollector,
     grammar: Option<PhoneDtmfGrammar>,
+    collection_dirty: bool,
     source: PhoneSource,
     signals: PeerSignals,
     mailbox: Option<PhoneMailbox>,
@@ -221,6 +222,7 @@ impl PhoneCalls {
             owner: None,
             login: LoginCollector::default(),
             grammar: None,
+            collection_dirty: false,
             source: source.clone(),
             signals: PeerSignals::for_phone(source.clone()),
             mailbox: None,
@@ -339,6 +341,7 @@ impl PhoneCalls {
         now_ms: u64,
     ) -> Result<Vec<PhoneDtmfAction>, Error> {
         let call = self.current(source, reply)?;
+        call.collection_dirty = true;
         Ok(call
             .grammar
             .as_mut()
@@ -349,6 +352,48 @@ impl PhoneCalls {
         if let Ok(call) = self.current(source, reply) {
             if let Some(grammar) = &mut call.grammar {
                 grammar.cancel();
+                call.collection_dirty = true;
+            }
+        }
+    }
+    /// Existing node expiry supplies exact dirty tokens, including silent expiry.
+    pub(crate) fn collection_expired(&mut self, reply: &PeerReply) {
+        let Some(source) = reply.phone_source() else {
+            return;
+        };
+        if let Ok(call) = self.current(source, reply) {
+            call.collection_dirty = true;
+        }
+    }
+    /// Ordinary serialized control supplies the authoritative lifecycle fence.
+    /// Inspect only changed calls; a refused queue write keeps the same bounded
+    /// intent. Source-side revision validation still wins a newer onset or reset.
+    pub(crate) fn reconcile_collections(
+        &mut self,
+        mut pending: impl FnMut(&str, &PhoneSource, &PeerReply) -> Option<bool>,
+    ) {
+        for call in &mut self.calls {
+            if !call.collection_dirty {
+                continue;
+            }
+            call.collection_dirty = false;
+            let reply = call.signals.reply_target();
+            if !reply.phone_authenticated() || call.mailbox.is_none() {
+                continue;
+            }
+            let Some(grammar) = call.grammar.as_ref() else {
+                continue;
+            };
+            if grammar.collecting()
+                || grammar
+                    .selected_target()
+                    .is_some_and(|target| target != call.local)
+                || pending(&call.local, &call.source, &reply) != Some(false)
+            {
+                continue;
+            }
+            if let Some(owner) = call.owner.as_mut() {
+                call.collection_dirty = !owner.collection_ended(&reply);
             }
         }
     }
@@ -360,8 +405,11 @@ impl PhoneCalls {
         for call in &mut self.calls {
             if call.mailbox.is_some() {
                 if let Some(grammar) = &mut call.grammar {
+                    let collecting = grammar.collecting();
+                    let expired = grammar.tick(now_ms);
+                    call.collection_dirty |= collecting && !grammar.collecting();
                     actions.extend(
-                        grammar.tick(now_ms).into_iter().map(|action| {
+                        expired.into_iter().map(|action| {
                             (call.source.clone(), call.signals.reply_target(), action)
                         }),
                     );
@@ -430,6 +478,7 @@ impl PhoneCalls {
         }
         call.login.clear();
         call.mailbox = Some(record.clone());
+        call.collection_dirty = true;
         Ok(PhoneLogin::Authenticated)
     }
     /// The configured profile is visible only for the same authenticated call.

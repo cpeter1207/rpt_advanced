@@ -3219,3 +3219,46 @@ fn phone_collection_query_is_exact_read_only_and_preserves_unlock() {
     );
     assert!(links.manager().snapshot().is_empty());
 }
+
+#[test]
+fn private_collection_expiry_notifies_silent_completion_once() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    let signals = PeerSignals::for_phone(source.clone());
+    assert!(signals.authenticate_phone());
+    let reply = signals.reply_target();
+    let mut links = links();
+    for digit in "*7".chars() {
+        assert!(
+            links
+                .phone_digit(&source, digit, 1, reply.clone())
+                .is_none()
+        );
+    }
+    let mut ended = Vec::new();
+    assert!(
+        links
+            .expire_peer_digits_with_collection(3000, |source| ended.push(source.clone()))
+            .is_empty()
+    );
+    assert!(ended.is_empty());
+    assert!(
+        links
+            .expire_peer_digits_with_collection(3001, |source| ended.push(source.clone()))
+            .is_empty()
+    );
+    assert_eq!(ended, [reply.clone()]);
+    assert!(
+        links
+            .expire_peer_digits_with_collection(4000, |source| ended.push(source.clone()))
+            .is_empty()
+    );
+    assert_eq!(ended, [reply]);
+}

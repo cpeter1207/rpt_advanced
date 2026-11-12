@@ -554,3 +554,135 @@ pub(crate) fn private_prompt(
         playback: Playback::new_stream(stream),
     }
 }
+
+pub(crate) type ControlledSourceFixture = (
+    PhoneCalls,
+    crate::link::private_phone::PrivatePhoneSession,
+    std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+    PhoneSource,
+    PeerReply,
+);
+
+/// Keep the real unique source owner under deterministic test stepping while
+/// station control retains the actual mailbox, grammar and private command queue.
+pub(crate) fn controlled_source_session(rate: u32) -> ControlledSourceFixture {
+    controlled_source_session_mode(rate, true)
+}
+
+pub(crate) fn controlled_source_session_mode(rate: u32, inband: bool) -> ControlledSourceFixture {
+    let (io, state) = if inband {
+        crate::link::session::tests::phone_source_peer_inband(rate)
+    } else {
+        crate::link::session::tests::phone_source_peer_at_rate(rate)
+    };
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let source = calls.admit(io, 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    calls
+        .authenticate(&source, &reply, &records(), "100", "1234", 0)
+        .unwrap();
+    let io = calls.calls[0].io.take().unwrap();
+    let (session, control) =
+        crate::link::private_phone::PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    calls.calls[0].owner = Some(control);
+    calls.calls[0].grammar = Some(
+        rpt_advanced_core::phone_dtmf::PhoneDtmfGrammar::new(
+            &rpt_advanced_core::command::DtmfCommandMap::standard(),
+            rpt_advanced_core::phone_dtmf::PhoneDtmfOptions {
+                default_command_target: Some("1000".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    (calls, session, state, source, reply)
+}
+
+#[test]
+fn private_collection_dirty_tracking_uses_actual_grammar_transitions() {
+    let (mut calls, _session, _state, source, reply) = controlled_source_session(8000);
+    // Authentication is one dirty boundary. Repeated idle control turns do not
+    // repeatedly scan the node's collectors.
+    let mut checks = 0;
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(false)
+    });
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(false)
+    });
+    assert_eq!(checks, 1);
+    calls.actions(&source, &reply, '!', 1).unwrap();
+    calls.reconcile_collections(|_, _, _| panic!("outer discard is still collecting"));
+    assert!(
+        calls.grammar_timeouts(3001).is_empty(),
+        "silent discard expiry"
+    );
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(false)
+    });
+    assert_eq!(checks, 2);
+    let foreign = PeerSignals::for_phone(source.clone()).reply_target();
+    calls.collection_expired(&foreign);
+    calls.reconcile_collections(|_, _, _| panic!("foreign actual ingress cannot dirty this call"));
+    calls.collection_expired(&reply);
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(true)
+    });
+    calls.reconcile_collections(|_, _, _| panic!("unchanged inner collection is not rescanned"));
+    assert_eq!(checks, 3);
+    calls.collection_expired(&reply);
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(false)
+    });
+    assert_eq!(checks, 4);
+}
+
+#[test]
+fn private_collection_dirty_retry_survives_full_existing_prompt_queue() {
+    use crate::link::session::{SerialSession, tests::Input};
+    let (mut calls, mut session, state, source, reply) =
+        controlled_source_session_mode(8000, false);
+    state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+    session.step(1).unwrap();
+    let (_, _, digit, received_ms) = calls.event().unwrap();
+    calls.actions(&source, &reply, digit, received_ms).unwrap();
+    for _ in 0..16 {
+        calls
+            .queue_reply(&source, &reply, Box::new(EmptyCollectionPrompt))
+            .unwrap();
+    }
+    calls.transfer_replies();
+    let mut checks = 0;
+    for _ in 0..2 {
+        calls.reconcile_collections(|_, _, _| {
+            checks += 1;
+            Some(false)
+        });
+    }
+    assert_eq!(checks, 2, "queue refusal retains one dirty intent");
+    session.step(2).unwrap();
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(false)
+    });
+    calls.reconcile_collections(|_, _, _| panic!("accepted release consumes the intent"));
+    for now in 3..23 {
+        session.step(now).unwrap();
+    }
+    assert!(!crate::link::private_phone::tests::collection_suppressed(
+        &session
+    ));
+    assert!(!reply.ended());
+}
+
+struct EmptyCollectionPrompt;
+impl PcmStreamReader for EmptyCollectionPrompt {
+    fn render(&mut self, _output: &mut [f32]) -> PcmRead {
+        PcmRead::Finished
+    }
+}

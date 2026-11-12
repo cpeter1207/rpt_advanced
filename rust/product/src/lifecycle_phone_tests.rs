@@ -611,3 +611,174 @@ fn rejected_private_report_does_not_cancel_an_unrelated_rf_macro() {
     assert!(!reply.ended());
     assert!(engine.stop());
 }
+
+fn assert_actual_private_collection_consumer(rate: u32, pending_reload: bool) {
+    use crate::link::session::{SerialSession, tests::Input};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+    let engine = engine(configuration(), services, speech());
+    let (calls, mut session, state, _source, reply) =
+        crate::phone::tests::controlled_source_session(rate);
+    engine
+        .run(move |host| {
+            crate::host::tests::phone::install_controlled_source(host, calls);
+            Ok(())
+        })
+        .unwrap();
+    let part = rate as usize / 50;
+    let tone: Vec<_> = (0..part * 4)
+        .map(|n| {
+            let phase = n as f32 * std::f32::consts::TAU / rate as f32;
+            0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+        })
+        .collect();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend(tone.chunks(part).map(|pcm| Input::Audio(pcm.to_vec())));
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.0; part * 3]));
+    for now in 1..10 {
+        session.step(now).unwrap();
+    }
+    assert!(state.lock().unwrap().input.is_empty());
+    assert!(crate::link::private_phone::tests::collection_suppressed(
+        &session
+    ));
+    let clock = engine.clock();
+    if pending_reload {
+        engine.reloading.store(true, Ordering::Release);
+        engine
+            .run_inner(true, move |host| host.pump(clock))
+            .unwrap();
+        session.step(10).unwrap();
+        assert!(
+            crate::link::private_phone::tests::collection_suppressed(&session),
+            "reload servicing cannot release private admission"
+        );
+        engine.reloading.store(false, Ordering::Release);
+    }
+    engine.pump(clock, false).unwrap();
+    session.step(11).unwrap();
+    let released = !crate::link::private_phone::tests::collection_suppressed(&session);
+    assert!(!reply.ended());
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    assert!(state.lock().unwrap().texts.is_empty());
+    assert!(engine.stop());
+    assert!(
+        released,
+        "ordinary serialized control must release an actually idle private collection"
+    );
+}
+
+#[test]
+fn private_collection_real_engine_releases_idle_source_8000() {
+    assert_actual_private_collection_consumer(8000, false);
+}
+
+#[test]
+fn private_collection_real_engine_releases_idle_source_48000() {
+    assert_actual_private_collection_consumer(48000, false);
+}
+
+#[test]
+fn private_collection_real_engine_excludes_pending_reload_service() {
+    assert_actual_private_collection_consumer(8000, true);
+}
+
+#[test]
+fn private_collection_real_engine_respects_quotes_cancellation_and_actual_timeout() {
+    use crate::link::session::{SerialSession, tests::Input};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for (prefix, completion, expiry) in [
+        ("*4#*7", "", true),
+        ("*4#*7", "#", false),
+        ("*4#*7", "**#", false),
+        ("*4#**", "#", false),
+    ] {
+        let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+        let engine = engine(configuration(), services, speech());
+        let (calls, mut session, state, source, reply) =
+            crate::phone::tests::controlled_source_session_mode(8000, false);
+        engine
+            .run(move |host| {
+                crate::host::tests::phone::install_controlled_source(host, calls);
+                Ok(())
+            })
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .extend(prefix.bytes().map(Input::Digit));
+        session.step(1).unwrap();
+        let clock = RuntimeClock {
+            now_ms: 1,
+            ..engine.clock()
+        };
+        engine.pump(clock, false).unwrap();
+        session.step(2).unwrap();
+        assert!(
+            crate::link::private_phone::tests::collection_suppressed(&session),
+            "{prefix}"
+        );
+        // An unchanged control pass must not invent a timeout or a completion.
+        engine
+            .pump(
+                RuntimeClock {
+                    now_ms: 100,
+                    ..clock
+                },
+                false,
+            )
+            .unwrap();
+        session.step(3).unwrap();
+        assert!(crate::link::private_phone::tests::collection_suppressed(
+            &session
+        ));
+        state
+            .lock()
+            .unwrap()
+            .input
+            .extend(completion.bytes().map(Input::Digit));
+        session.step(4).unwrap();
+        engine
+            .pump(
+                RuntimeClock {
+                    now_ms: if expiry { 3001 } else { 4 },
+                    ..clock
+                },
+                false,
+            )
+            .unwrap();
+        for now in 5..10 {
+            session.step(now).unwrap();
+        }
+        let released = !crate::link::private_phone::tests::collection_suppressed(&session);
+        let proof_source = source.clone();
+        let proof_reply = reply.clone();
+        assert_eq!(
+            engine
+                .run(move |host| {
+                    Ok(host
+                        .runtime
+                        .node("1000")
+                        .unwrap()
+                        .links()
+                        .phone_collection_pending(&proof_source, &proof_reply))
+                })
+                .unwrap(),
+            Some(false)
+        );
+        assert!(engine.stop());
+        assert!(released, "completion={completion:?}, expiry={expiry}");
+    }
+}

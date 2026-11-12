@@ -331,7 +331,7 @@ pub(crate) trait SerialSession: Send {
     fn wake(&self) -> PeerWake;
     fn epoch(&self) -> Option<Instant>;
     fn set_epoch(&mut self, epoch: Instant);
-    fn set_source_clock(&mut self, _clock: SourceTimeClock) {}
+    fn set_source_clock(&mut self, clock: SourceTimeClock);
 }
 
 /// Bounded peer ownership: one round-robin thread for synchronous hosts, with

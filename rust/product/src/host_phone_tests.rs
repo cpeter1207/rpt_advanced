@@ -1105,3 +1105,9 @@ fn rejected_text_start_preserves_live_calls_and_text_executor() {
         assert!(host.stop(20));
     }
 }
+
+/// Install a real already-authenticated call fixture without a second source owner.
+pub(crate) fn install_controlled_source(host: &mut Host, calls: crate::phone::PhoneCalls) {
+    assert!(host.phone_calls.is_empty());
+    host.phone_calls = calls;
+}

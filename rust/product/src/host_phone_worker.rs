@@ -125,6 +125,17 @@ impl Host {
         self.phone_calls.transfer_replies();
         self.peer_io.reap();
     }
+    /// Called only by the ordinary Engine pump, never pending-reload servicing.
+    pub(crate) fn reconcile_private_collections(&mut self) {
+        let runtime = &mut self.runtime;
+        self.phone_calls
+            .reconcile_collections(|local, source, reply| {
+                runtime
+                    .node(local)?
+                    .links()
+                    .phone_collection_pending(source, reply)
+            });
+    }
     pub(super) fn private_phone_actions(
         &mut self,
         source: &PhoneSource,

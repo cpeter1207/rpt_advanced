@@ -727,14 +727,26 @@ impl NodeLinkControl {
     }
     /// Expire peer commands independently, preserving their exact reply connection.
     pub fn expire_peer_digits(&mut self, now_ms: u64) -> Vec<DigitOutcome> {
+        self.expire_peer_digits_with_collection(now_ms, |_| {})
+    }
+    /// Notify exact private collectors that became idle in this existing sweep,
+    /// including silent discard expiry. This is not permission to admit media.
+    pub fn expire_peer_digits_with_collection(
+        &mut self,
+        now_ms: u64,
+        mut ended: impl FnMut(&PeerReply),
+    ) -> Vec<DigitOutcome> {
         self.peer_commands.retain(|(_, source, _)| !source.ended());
         let outcomes = self
             .peer_commands
             .iter_mut()
             .filter_map(|(origin, reply, commands)| {
-                commands
-                    .expire(now_ms)
-                    .map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
+                let collecting = commands.collecting();
+                let outcome = commands.expire(now_ms);
+                if collecting && !commands.collecting() && reply.phone_source().is_some() {
+                    ended(reply);
+                }
+                outcome.map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
             })
             .collect();
         self.retain_peer_commands(now_ms);
