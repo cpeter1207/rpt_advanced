@@ -1189,3 +1189,6 @@ pub(crate) fn install_controlled_source(host: &mut Host, calls: crate::phone::Ph
     assert!(host.phone_calls.is_empty());
     host.phone_calls = calls;
 }
+
+#[path = "host_phone_attachment_policy_tests.rs"]
+mod attachment_policy;

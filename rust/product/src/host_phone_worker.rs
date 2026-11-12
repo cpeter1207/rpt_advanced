@@ -150,6 +150,31 @@ impl Host {
                 .ok_or(RuntimeError::Rejected)?
                 .to_owned();
             let unavailable = match action {
+                PhoneDtmfAction::Attach(target) => {
+                    // Invalid source authority never receives even a denial.
+                    self.phone_calls
+                        .mailbox(source, reply)
+                        .ok_or(RuntimeError::Rejected)?;
+                    let target = target.as_deref().unwrap_or(&local);
+                    let permitted = self
+                        .authorize_phone_account(source.account(), &local)
+                        .is_ok()
+                        && self.runtime.settings(target).is_some()
+                        && self
+                            .runtime
+                            .document()
+                            .phone_local_attachment_allowed(source.account(), target);
+                    self.prepare_login_prompt(
+                        source,
+                        reply,
+                        if permitted {
+                            Prompt::Unavailable
+                        } else {
+                            Prompt::Failed
+                        },
+                    )?;
+                    false
+                }
                 PhoneDtmfAction::SelectTarget(target) => {
                     if target == local {
                         false

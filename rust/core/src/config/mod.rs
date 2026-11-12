@@ -6,6 +6,7 @@ mod echolink;
 mod messages;
 mod parse;
 mod phone_accounts;
+mod phone_attachment;
 mod phone_mailboxes;
 mod schema;
 mod scope;

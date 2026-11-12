@@ -173,6 +173,21 @@ impl Schema {
                 {
                     continue;
                 }
+                // Phone target admission is explicit at this node only, with no
+                // inherited public-peer policy or retained provider account fields.
+                if parsed.kind == ScopeKind::Node && entry.key == "phone_allow_accounts" {
+                    if !super::phone_attachment::account_list_valid(&entry.value) {
+                        warnings.push(ConfigWarning::new(
+                            entry.line,
+                            section,
+                            &entry.key,
+                            &entry.value,
+                            "invalid option value",
+                            "",
+                        ));
+                    }
+                    continue;
+                }
                 if !key_known(known, &entry.key) {
                     warnings.push(ConfigWarning::new(
                         entry.line,

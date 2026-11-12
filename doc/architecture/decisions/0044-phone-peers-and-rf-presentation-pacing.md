@@ -915,3 +915,34 @@ not transceive attachment. Two-sided target permission, attachment limits,
 outgoing isolation and source-unlock bypass, queued lifecycle-spanning media
 authority, provider readiness and RF qualification remain required. *3 and
 other unavailable attachment/manual actions remain explicitly unavailable.
+
+## Command-time local attachment policy — 2026-11-12
+
+The existing private Attach consumer reads two explicit current-document lists:
+`attach_local_nodes` in `[phone_account label]` and `phone_allow_accounts` in
+the exact target node section. Both use whitespace-separated exact canonical
+NodeId/PhoneAccountId values. A comma or star in a valid node identity is literal,
+never list punctuation or wildcard expansion. Missing or empty lists deny;
+malformed lists warn and fall back to the empty deny list. Target permission
+does not inherit from `[general]`. The account's `local_node` supplies the
+default target only and satisfies neither attachment permission.
+
+Exact live source/reply ownership and the authenticated mailbox are checked
+before any response. The current enabled account must still match the call's
+authorized local binding, and the requested target must remain hosted. Ordinary
+authenticated policy denial uses the existing private Failed response. Both
+permissions currently yield Unavailable, not successful attachment; no media,
+reservation, queued grant, public alias or remote route is created.
+
+These lists stay in the product configuration document. Provider account ABI
+records, host transport snapshots, per-call storage and worker counts are
+unchanged. Reload still retires the old source, and a replacement call checks
+the replacement document. Existing ordinary local command selection and
+source-scoped unlock remain independent.
+
+The approved one-node-per-call and one-reverse-call-per-node defaults still need
+a real candidate/publication owner before reservation storage is introduced.
+Outgoing bidirectional isolation and its per-call source-unlock bypass are
+separate, unimplemented authority. A command-time decision cannot authorize
+later serial adoption: lifecycle/policy revocation, source revision, qualified
+provider media and RF readiness must join that actual handoff before activation.

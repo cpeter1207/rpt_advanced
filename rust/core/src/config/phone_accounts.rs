@@ -67,6 +67,7 @@ impl fmt::Debug for PhoneAccountSettings {
 fn default_value(key: &str) -> Option<&'static str> {
     match key {
         "enabled" | "register" => Some("no"),
+        "attach_local_nodes" => Some(""),
         "protocol" => Some("iax"),
         "registration_interval_s" => Some("300"),
         "authentication_timeout_ms" => Some("30000"),
@@ -114,6 +115,7 @@ fn number(value: &str, maximum: u32) -> Option<u32> {
 fn value_valid(key: &str, value: &str) -> bool {
     match key {
         "enabled" | "register" => parse::boolean(value).is_some(),
+        "attach_local_nodes" => super::phone_attachment::node_list_valid(value),
         "protocol" => matches!(value, "iax" | "sip"),
         "registration_interval_s" => number(value, 65535).is_some(),
         "authentication_timeout_ms" => number(value, 120000).is_some(),
