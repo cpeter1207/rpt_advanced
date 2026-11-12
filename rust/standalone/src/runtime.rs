@@ -326,7 +326,7 @@ impl ProductRuntime {
         }
         unsafe {
             authorize(
-                &incoming_request(local, remote, source),
+                &incoming_request(1, local, remote, source),
                 std::ptr::null_mut(),
             ) == 0
         }
@@ -353,13 +353,30 @@ impl ProductRuntime {
             return false;
         };
         let handle = host.peer_handle(peer, local, remote);
-        let result = unsafe { incoming(&incoming_request(local, remote, source), handle) };
+        let result = unsafe { incoming(&incoming_request(1, local, remote, source), handle) };
         if result == 0 || result == -1 {
             true
         } else {
             host.destroy_peer(handle);
             false
         }
+    }
+
+    /// Consume one transport-authenticated phone call through its actual typed
+    /// host handle. Fatal reloads cannot reopen admission or transfer old owners.
+    pub(crate) fn incoming_provider(
+        &self,
+        call: crate::iax::accounts::ProviderCall,
+        account: &crate::phone_accounts::PreparedAccount,
+        listener: std::net::SocketAddr,
+    ) -> Result<(), crate::iax::IaxError> {
+        if self.reload_fatal() {
+            return Err(crate::iax::IaxError::Rejected);
+        }
+        self.host
+            .as_ref()
+            .ok_or(crate::iax::IaxError::Operation)?
+            .incoming_provider(self.product, call, account, listener)
     }
 
     /// Stop product workers before releasing host state and provider libraries.
@@ -417,7 +434,9 @@ fn with_echo_preparation<T>(
     })
 }
 
-fn incoming_request(
+/// Borrow exact protocol-qualified identities only for one synchronous product call.
+pub(crate) fn incoming_request(
+    protocol: u32,
     local: &str,
     remote: &str,
     source: &str,
@@ -425,7 +444,7 @@ fn incoming_request(
     crate::abi::rptadv_incoming_peer_v1 {
         struct_size: std::mem::size_of::<crate::abi::rptadv_incoming_peer_v1>() as u32,
         abi_version: 1,
-        protocol: 1,
+        protocol,
         local: crate::abi::rptadv_peer_bytes_v1 {
             data: local.as_ptr(),
             length: local.len(),

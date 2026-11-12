@@ -122,7 +122,7 @@ fn run_runtime(
             .map_err(ForegroundError::LocalControl)?;
     eprintln!("rpt-advanced standalone runtime started");
     while !STOP.load(Ordering::Acquire) {
-        poll_iax_listeners(&mut iax_listeners, &runtime, &client);
+        poll_iax_listeners(&mut iax_listeners, &runtime, &client, &accounts.active);
         let mut control = ForegroundControl {
             runtime: &mut runtime,
             configuration,
@@ -362,21 +362,29 @@ fn poll_iax_listeners(
     listeners: &mut BTreeMap<u16, crate::iax::IaxServer>,
     runtime: &crate::runtime::ProductRuntime,
     client: &crate::iax::IaxClient,
+    accounts: &crate::phone_accounts::PreparedAccounts,
 ) {
     let mut context = InboundContext {
         runtime,
         client: client.clone(),
+        accounts,
+        listener: SocketAddr::from(([0, 0, 0, 0], 0)),
     };
     let pointer = ptr::from_mut(&mut context).cast::<c_void>();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs() as u32);
-    for listener in listeners.values_mut() {
-        // The released numeric poll supplies no provider callbacks. Configured
-        // phone accounts stay admission-closed until typed private call/executor
-        // ownership is composed; binding alone is not permission to accept calls.
+    for (port, listener) in listeners {
+        context.listener = SocketAddr::from(([0, 0, 0, 0], *port));
         report_iax_poll(drain_iax_datagrams(|| unsafe {
-            listener.poll(now, Some(authorize_inbound), Some(accept_inbound), pointer)
+            listener.poll_accounts(
+                now,
+                Some(authorize_inbound),
+                Some(accept_inbound),
+                Some(authorize_provider),
+                Some(accept_provider),
+                pointer,
+            )
         }));
     }
 }
@@ -401,6 +409,8 @@ fn drain_iax_datagrams(
 struct InboundContext<'a> {
     runtime: &'a crate::runtime::ProductRuntime,
     client: crate::iax::IaxClient,
+    accounts: &'a crate::phone_accounts::PreparedAccounts,
+    listener: SocketAddr,
 }
 
 unsafe fn callback_text<'a>(pointer: *const u8, length: usize) -> Option<&'a str> {
@@ -462,6 +472,86 @@ unsafe extern "C" fn accept_inbound(
         return -1;
     };
     let _ = context.runtime.incoming(local, remote, source, peer);
+    0
+}
+
+/// Validate only provider-authenticated transport provenance here. The real
+/// product authorization runs with the actual owned host handle at acceptance;
+/// this earlier provider callback exposes metadata only, never a peer handle.
+unsafe fn provider_admission<'a>(
+    context: &'a InboundContext<'_>,
+    metadata: *const crate::abi::rptadv_iax2_provider_incoming_v1,
+) -> Option<(
+    &'a crate::phone_accounts::PreparedAccount,
+    crate::iax::accounts::CallReceipt,
+)> {
+    use crate::{abi, configuration::PhoneAccountProtocol, iax::accounts::call_receipt};
+    if context.runtime.reload_fatal()
+        || metadata.is_null()
+        || unsafe { ptr::addr_of!((*metadata).struct_size).read() }
+            < std::mem::size_of::<abi::rptadv_iax2_provider_incoming_v1>() as u32
+        || unsafe { ptr::addr_of!((*metadata).abi_version).read() } != 1
+    {
+        return None;
+    }
+    let metadata = unsafe { &*metadata };
+    let label = unsafe { callback_text(metadata.account.data, metadata.account.length) }?;
+    let accounts = context.accounts.as_slice();
+    let index = accounts
+        .binary_search_by(|account| account.settings().id.as_str().cmp(label))
+        .ok()?;
+    let account = accounts[index].as_ref();
+    let settings = account.settings();
+    let receipt = call_receipt(metadata.receipt, account.generation()).ok()?;
+    (settings.enabled
+        && settings.protocol == PhoneAccountProtocol::Iax
+        && receipt.local == context.listener
+        && receipt.remote == account.remote()
+        && matches!(receipt.format, 4 | 8)
+        && unsafe { callback_text(metadata.local_binding.data, metadata.local_binding.length) }?
+            == settings.local_node
+        && unsafe { callback_text(metadata.username.data, metadata.username.length) }?
+            == settings.username)
+        .then_some((account, receipt))
+}
+
+unsafe extern "C" fn authorize_provider(
+    context: *mut c_void,
+    metadata: *const crate::abi::rptadv_iax2_provider_incoming_v1,
+) -> i32 {
+    let Some(context) = (unsafe { context.cast::<InboundContext<'_>>().as_ref() }) else {
+        return -1;
+    };
+    if unsafe { provider_admission(context, metadata) }.is_some() {
+        0
+    } else {
+        -1
+    }
+}
+
+unsafe extern "C" fn accept_provider(
+    context: *mut c_void,
+    metadata: *const crate::abi::rptadv_iax2_provider_incoming_v1,
+    raw: *mut c_void,
+) -> i32 {
+    let Some(context) = (unsafe { context.cast::<InboundContext<'_>>().as_ref() }) else {
+        return -1;
+    };
+    let Some((account, receipt)) = (unsafe { provider_admission(context, metadata) }) else {
+        return -1;
+    };
+    // Returning nonzero before adoption leaves destruction with the provider.
+    let Ok(peer) = (unsafe { context.client.clone().adopt_inbound(raw) }) else {
+        return -1;
+    };
+    if let Err(error) = context.runtime.incoming_provider(
+        crate::iax::accounts::ProviderCall { peer, receipt },
+        account,
+        context.listener,
+    ) {
+        eprintln!("IAX2 phone admission rejected: {error}");
+    }
+    // The adopted peer was consumed or destroyed locally, even on rejection.
     0
 }
 
@@ -1100,12 +1190,19 @@ mod tests {
         let mut context = super::InboundContext {
             runtime: &runtime,
             client: test_client(),
+            accounts: &crate::phone_accounts::PreparedAccounts::default(),
+            listener: std::net::SocketAddr::from(([0, 0, 0, 0], 4569)),
         };
         let context = std::ptr::from_mut(&mut context).cast::<c_void>();
         let listener = bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(0, listener)]);
         super::enable_iax_listeners(&mut listeners, &runtime).unwrap();
-        super::poll_iax_listeners(&mut listeners, &runtime, &test_client());
+        super::poll_iax_listeners(
+            &mut listeners,
+            &runtime,
+            &test_client(),
+            &crate::phone_accounts::PreparedAccounts::default(),
+        );
         let local = c"524950";
         let allowed_remote = c"506315";
         let denied_remote = c"506316";

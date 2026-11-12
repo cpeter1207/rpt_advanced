@@ -368,7 +368,7 @@ fn endpoint(value: abi::rptadv_iax2_endpoint_v1) -> Result<Option<SocketAddr>, I
 }
 
 /// Check generation and negotiated transport identities before exposing a call.
-fn call_receipt(
+pub(crate) fn call_receipt(
     receipt: abi::rptadv_iax2_provider_call_receipt_v1,
     generation: u64,
 ) -> Result<CallReceipt, IaxError> {

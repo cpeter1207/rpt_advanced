@@ -167,3 +167,6 @@ fn preparation_rejects_unsupported_profiles_without_replacing_active_accounts() 
             .is_empty()
     );
 }
+
+#[path = "foreground_incoming_tests.rs"]
+mod incoming;

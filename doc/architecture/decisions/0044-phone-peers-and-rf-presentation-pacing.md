@@ -1092,11 +1092,11 @@ fatal outcomes retain listener owners and enter the existing fenced shutdown.
 Provider-owned copied credentials survive preparation borrows. Listener-owned
 IAX code and the provider's retained runtime outlive socket-task teardown.
 
-The existing numeric poll has no provider authorization/accept callbacks, so
-configured phone accounts remain admission-closed. This milestone establishes
-actual account/listener ownership, not a connected phone call. Registration,
-outgoing dial/isolation, typed incoming adoption, private executor/media and RF
-composition remain separate requirements; mailbox and attachment guards remain.
+The initial account checkpoint kept numeric-only polling and provider admission
+closed. The following typed incoming join builds on those actual account/listener
+owners. Neither checkpoint alone provides a connected phone call. Registration,
+outgoing dial/isolation, private executor/media and RF composition remain separate
+requirements; mailbox and attachment guards remain.
 
 ## Released dependency cohort, 2026-11-12
 
@@ -1143,3 +1143,27 @@ control retention and terminal cleanup are checked separately. These tests do
 not establish working phone calls, provider admission, RF attachment, a physical
 radio timing profile or live hardware acceptance. The existing host ABI and
 SONAMEs are unchanged; alpha13 build/runtime floors are required.
+
+## Typed incoming IAX product handoff, 2026-11-12
+
+Foreground's existing mixed poll checks each borrowed provider receipt against
+the currently committed account label, generation, username, local binding,
+numeric provider endpoint and exact bound listener. Call generations, negotiated
+G.711 format and call numbers must be valid. Caller presentation and called/context
+fields supply no product identity or permission. Removed/replaced accounts and
+fatal reloads cannot reopen admission.
+
+The released provider's pre-answer callback exposes metadata only, not a peer.
+It therefore performs transport/account fencing, never synthetic product
+authorization. On acceptance the host adopts the unique provider peer, constructs
+its existing opaque private handle, then asks product authorization with that
+actual borrowed handle and protocol 3 before product admission. The provider may
+already have answered; a product rejection destroys the call immediately.
+
+Product authorization never consumes ownership. Incoming success and consumed
+failure transfer it; an unconsumed failure is destroyed by the host. The provider
+callback returns transfer success after local adoption even when product admission
+rejects, preventing double destruction. Request identity bytes remain valid through
+consuming callbacks. Existing current-document product checks, mailbox/PIN login,
+private executor/media qualification and attachment guards remain authoritative.
+No new ABI, runtime, worker, radio binding or RF route is introduced.

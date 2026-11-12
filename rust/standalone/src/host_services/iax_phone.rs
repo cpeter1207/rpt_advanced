@@ -1,5 +1,6 @@
-//! Inactive private-call ownership for the existing standalone host callbacks.
-//! No registrar, dial worker, admission callback or additional scheduler is created.
+//! Typed private-call ownership for the existing standalone host callbacks.
+//! Product admission borrows the actual handle before its one ownership transfer.
+//! No registrar, dial worker or additional scheduler is created.
 use super::{HostServicesOwner, IaxHandle, PeerHandle};
 use crate::{
     abi,
@@ -48,6 +49,47 @@ impl HostServicesOwner {
         listener: SocketAddr,
     ) -> Result<*mut c_void, IaxError> {
         self.provider_peer_handle_allocated(call, account, listener, &HOST_CALL_SEQUENCE)
+    }
+
+    /// Authorize the actual borrowed private handle, then transfer it only under
+    /// the product's existing consumed/unconsumed incoming contract. This grants
+    /// neither mailbox authentication nor transceive attachment.
+    pub(crate) fn incoming_provider(
+        &self,
+        product: &abi::rptadv_product_descriptor_v1,
+        call: ProviderCall,
+        account: &PreparedAccount,
+        listener: SocketAddr,
+    ) -> Result<(), IaxError> {
+        let (Some(authorize), Some(incoming)) = (product.authorize_incoming, product.incoming)
+        else {
+            return Err(IaxError::IncompatibleAdapter);
+        };
+        let source = call.receipt.remote.ip().to_string();
+        let handle = self.provider_peer_handle(call, account, listener)?;
+        // This constructor exclusively creates an IAX phone handle. Copy the
+        // opaque identity so request bytes survive a consuming product callback.
+        let remote = unsafe { super::iax_peer_ref(handle) }
+            .expect("provider constructor returns an IAX handle")
+            .remote
+            .clone();
+        let request =
+            crate::runtime::incoming_request(3, &account.settings().local_node, &remote, &source);
+        let result = unsafe {
+            if authorize(&request, handle) == 0 {
+                incoming(&request, handle)
+            } else {
+                1 // Borrowed authorization never consumes the handle.
+            }
+        };
+        if !matches!(result, 0 | -1) {
+            self.destroy_peer(handle);
+        }
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(IaxError::Rejected)
+        }
     }
 
     pub(super) fn provider_peer_handle_allocated(
