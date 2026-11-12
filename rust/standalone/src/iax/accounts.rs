@@ -268,7 +268,7 @@ impl IaxServer {
 }
 
 /// Borrow UTF-8 without converting credentials to NUL-terminated or printable storage.
-fn bytes(value: &str) -> abi::rptadv_iax2_bytes_v1 {
+pub(super) fn bytes(value: &str) -> abi::rptadv_iax2_bytes_v1 {
     abi::rptadv_iax2_bytes_v1 {
         data: value.as_ptr(),
         length: value.len(),
@@ -287,24 +287,32 @@ fn with_accounts<T>(
     let records: Vec<_> = accounts
         .iter()
         .zip(&addresses)
-        .map(|(account, address)| abi::rptadv_iax2_provider_account_v1 {
-            struct_size: size_of::<abi::rptadv_iax2_provider_account_v1>() as u32,
-            abi_version: 1,
-            generation: account.generation,
-            account: bytes(account.account),
-            local_binding: bytes(account.local_binding),
-            remote_address: bytes(address),
-            username: bytes(account.username),
-            secret: bytes(account.secret),
-            authentication_timeout_ms: account.authentication_timeout_ms,
-            reserved: 0,
-        })
+        .map(|(account, address)| account_record(account, address))
         .collect();
     action(&records)
 }
 
+/// Borrow strings only for the synchronous provider copy; callers retain both inputs.
+pub(super) fn account_record(
+    account: &ProviderAccount<'_>,
+    address: &str,
+) -> abi::rptadv_iax2_provider_account_v1 {
+    abi::rptadv_iax2_provider_account_v1 {
+        struct_size: size_of::<abi::rptadv_iax2_provider_account_v1>() as u32,
+        abi_version: 1,
+        generation: account.generation,
+        account: bytes(account.account),
+        local_binding: bytes(account.local_binding),
+        remote_address: bytes(address),
+        username: bytes(account.username),
+        secret: bytes(account.secret),
+        authentication_timeout_ms: account.authentication_timeout_ms,
+        reserved: 0,
+    }
+}
+
 /// Preserve useful non-secret provider failures instead of treating all failures alike.
-fn status(result: i32) -> Result<(), IaxError> {
+pub(super) fn status(result: i32) -> Result<(), IaxError> {
     match result {
         0 => Ok(()),
         -1 => Err(IaxError::InvalidParameters),

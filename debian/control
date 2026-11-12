@@ -7,7 +7,7 @@ Build-Depends: debhelper-compat (= 13), cargo (>= 1.88), rustc (>= 1.88),
  librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha3),
  librptadv-codec-dev (>= 0.1.0~alpha1),
- librptadv-iax2-client-dev (>= 0.1.0~alpha11),
+ librptadv-iax2-client-dev (>= 0.1.0~alpha12),
  librptadvtone-dev (>= 0.1.0~alpha1),
  librptadvmorse-dev (>= 0.1.0~alpha1-1),
  librptadvdtmf-dev (>= 0.1.0~alpha3-1),
@@ -49,7 +49,7 @@ Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
  librptadv-codec-ilbc1 (>= 0.1.0~alpha1),
  librptadv-codec-spandsp1 (>= 0.1.0~alpha1),
  librptadv-codec-dialogic1 (>= 0.1.0~alpha1),
- librptadv-iax2-client2 (>= 0.1.0~alpha11)
+ librptadv-iax2-client2 (>= 0.1.0~alpha12)
 Description: standalone Rust-owned radio controller
  Standalone controller service for configured radio nodes. It has no runtime
  dependency on Asterisk or ASL3; the deprecated Asterisk adapter is packaged

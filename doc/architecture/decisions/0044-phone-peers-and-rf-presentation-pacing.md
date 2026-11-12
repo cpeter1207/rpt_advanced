@@ -580,3 +580,23 @@ qualified matching host-clock and RF age admission, so retaining the original
 bound alone cannot safely enable it. Legitimate qualified private replay and
 final-RF enforcement remain feature-completion prerequisites. Ordinary replay
 is unchanged. This checkpoint does not enable phone attachment or commands.
+
+## Reserved listener wrapper, 2026-11-12
+
+The alpha12 consumer prepares complete numeric and provider-account listener
+replacements in one borrowed RAII batch. It verifies every transaction slot and
+the same retained provider owner before passing opaque handles. Numeric elements
+remain decimal identities; empty whole profiles can disable admission. Copied
+configuration spans need not outlive preparation. The token retains safe mutable
+listener borrows, not another long-lived transport owner.
+
+All wrapper allocation precedes provider reservation. Commit consumes the token
+without a fallible result; dropping an uncommitted token aborts before releasing
+listener borrows. The wrapper does not decide product publication. Its outer
+coordinator commits after either committed terminal outcome. Confirmed rejection
+discards the uncommitted reservation. Unknown or fatal outcomes keep admission
+fenced: the coordinator may discard only the uncommitted provider reservation
+while retaining all old and candidate listener and DSO owners through orderly
+shutdown. That fail-stop cleanup neither compensates product publication nor
+resumes operation or claims rollback. Current boolean reload results cannot
+activate this path. Committed reload/stop still retire all product phone calls under this ADR.

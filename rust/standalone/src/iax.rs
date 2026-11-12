@@ -2,6 +2,8 @@
 
 /// General provider account operations, separate from numeric ASL identities.
 pub mod accounts;
+/// Reserved whole-listener transactions from released alpha12.
+pub mod configuration;
 pub(crate) mod executor;
 
 use crate::{abi, secrets::SecretsFile};
@@ -958,6 +960,9 @@ pub(crate) mod tests {
             register_account: None,
             poll_accounts: None,
             dial_provider_account: None,
+            prepare_configuration_batch: None,
+            commit_configuration_batch: None,
+            destroy_configuration_batch: None,
         }
     }
 
