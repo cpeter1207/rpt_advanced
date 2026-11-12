@@ -4,6 +4,9 @@
 #[path = "host_services/echo_tests.rs"]
 pub(crate) mod echo_tests;
 
+#[cfg(test)]
+mod product_phone_tests;
+
 mod iax_phone;
 
 use crate::{

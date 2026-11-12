@@ -1238,3 +1238,20 @@ sample counts, not by scheduling lateness. The exact next-render deadline joins
 the existing bounded control wake. An unready reader pauses that cadence; its
 next real samples anchor at the actual owner time. No sample birth is advanced
 to hide scheduler delay, and the 200 ms maximum age is unchanged.
+
+
+### Genuine product private-call regression
+
+The standalone loopback fixture now loads the actual product DSO and released
+IAX provider, prepares a numeric account with a synthetic private secret, and
+uses the real product authorization, mailbox/PIN verification and serial
+private executor. It sends telephone digits and checks the exact decoded Morse
+envelopes for login, authenticated/unlock guidance and the no-links status
+reply. Physical radio activate/ready/quiesce are the only simulated host
+callbacks; the fixture checks that private replies never appear in radio TX
+samples or PTT. Stop joins the callback pump and releases both UDP bindings.
+
+This is a shared private-audio integration regression, not a supported
+headless deployment configuration, native SIP acceptance, RF presentation
+qualification or a live hardware milestone. It introduces no production
+interface or authority change.

@@ -227,6 +227,22 @@ unsafe extern "C" fn unused_timed_read(
     -1
 }
 
+// Ownership-only fixture: advertise the complete private provider contract,
+// but fail closed if the fake product unexpectedly tries to use media.
+unsafe extern "C" fn unused_timed_send(
+    _: *mut c_void,
+    _: *const u8,
+    _: usize,
+    _: u32,
+    _: u32,
+    _: *const abi::rptadv_iax2_timed_send_v1,
+) -> i32 {
+    -1
+}
+unsafe extern "C" fn unused_retire_egress(_: *mut c_void, _: *mut u64) -> i32 {
+    -1
+}
+
 fn fixture_call(
     account: &crate::phone_accounts::PreparedAccount,
     local: SocketAddr,
@@ -234,6 +250,8 @@ fn fixture_call(
     let mut api = crate::iax::tests::descriptor();
     api.destroy = Some(destroy_fixture_peer);
     api.poll_timed = Some(unused_timed_read);
+    api.send_prepared_audio_timed = Some(unused_timed_send);
+    api.retire_egress = Some(unused_retire_egress);
     crate::iax::accounts::ProviderCall {
         peer: crate::iax::tests::host_fixture_peer(api),
         receipt: crate::iax::accounts::CallReceipt {
