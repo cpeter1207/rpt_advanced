@@ -880,6 +880,87 @@ mod tests {
     }
 
     #[test]
+    fn replacement_tone_retains_qualified_tail_after_ordinary_timeout() {
+        for rate in [8000, 48000] {
+            let part = rate as usize / 50;
+            let interval = rate as usize * 1275 / 100_000;
+            let mut source = SourceIngress::<4>::at_rate(true, rate, part).unwrap();
+            let (inbound, _consumer) = InboundRing::open(rate, InboundPolicy::Peer).unwrap();
+            let tone = |column: f32, count| {
+                (0..count)
+                    .map(|sample| {
+                        let phase = sample as f32 * std::f32::consts::TAU / rate as f32;
+                        0.25 * ((phase * 770.0).sin() + (phase * column).sin())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut scratch = [0.0; 960];
+            let mut position = 0;
+            let mut digits = Vec::new();
+            let mut onsets = 0;
+            for (phase, samples) in [
+                tone(1336.0, interval * 4), // Qualified '5'.
+                tone(1477.0, interval * 2), // '6' replaces it without silence.
+                vec![0.0; interval],
+                vec![0.0; interval * 2],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for raw in samples.chunks(part) {
+                    source
+                        .prepare(
+                            &mut scratch,
+                            Decoded {
+                                start: position,
+                                pcm: raw,
+                                concealed: false,
+                                birth: None,
+                            },
+                            |digit| digits.push(digit),
+                            || onsets += 1,
+                        )
+                        .unwrap();
+                    source.accepted(raw.len()).unwrap();
+                    position += raw.len() as u64;
+                }
+                match phase {
+                    0 => {
+                        assert!(digits.is_empty());
+                        assert_eq!(onsets, 1);
+                        assert!(!source.ready_for_media());
+                    }
+                    1 => {
+                        assert_eq!(digits, ['5']);
+                        assert_eq!(onsets, 2, "replacement owns a new onset");
+                        assert!(!source.end_command());
+                    }
+                    2 => {
+                        assert_eq!(digits, ['5']);
+                        assert!(!source.detector.suppressing());
+                        assert!(source.muted(), "command latch outlives audible tone");
+                        // Ordinary command expiry may follow the completed '5'
+                        // while its replacement still awaits two quiet windows.
+                        // This is a shared-source contract, not private adoption.
+                        source.timeout(&inbound);
+                        assert!(!source.muted());
+                        assert!(!source.ready_for_media(), "quiet tail is still pending");
+                        assert!(!source.end_command());
+                    }
+                    _ => {
+                        assert_eq!(digits, ['5', '6']);
+                        assert_eq!(onsets, 2);
+                        assert!(source.end_command());
+                        assert!(source.ready_for_media());
+                    }
+                }
+            }
+            source.discontinuity(|digit| digits.push(digit)).unwrap();
+            assert_eq!(digits, ['5', '6'], "completed digits cannot replay");
+        }
+    }
+
+    #[test]
     fn source_reset_completes_once_while_cancelling_partial_retry_without_allocation() {
         for rate in [8000, 48000] {
             for accepted in [0, 1] {
