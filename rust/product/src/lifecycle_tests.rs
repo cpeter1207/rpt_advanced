@@ -1647,9 +1647,21 @@ fn dial_retry_background_and_remote_command_paths_are_serialized() {
     engine
         .background("1000".into(), LinkEffect::Connect(attempt), revision, true)
         .unwrap();
-    engine.pump(engine.clock(), false).unwrap();
-    std::thread::sleep(Duration::from_millis(30));
-    engine.pump(engine.clock(), false).unwrap();
+    // A provider delay is not a deadline for the entire background dial.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        engine.pump(engine.clock(), false).unwrap();
+        let pending = engine.jobs.lock().unwrap().len();
+        if pending == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background dial did not complete: {pending} jobs, {} command notices",
+            crate::fixture::NOTICE_COUNT.load(Ordering::Acquire)
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(crate::fixture::NOTICE_COUNT.load(Ordering::Acquire), 2);
 
     let stale_revision = engine.revision.load(Ordering::Acquire);
