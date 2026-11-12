@@ -20,6 +20,7 @@ static BANK: Mutex<Bank> = Mutex::new(Bank {
 static FOLLOW_PANIC: Mutex<Option<(Weak<Engine>, Arc<std::sync::atomic::AtomicBool>)>> =
     Mutex::new(None);
 static FATAL_BEFORE_RUN: Mutex<Option<Weak<Engine>>> = Mutex::new(None);
+static ADVANCE_AFTER_BASIS: Mutex<Option<Weak<Engine>>> = Mutex::new(None);
 static SUBMISSIONS: AtomicUsize = AtomicUsize::new(0);
 static REJECT_AFTER: AtomicUsize = AtomicUsize::new(0);
 static CLOSE_AFTER: Mutex<Option<(usize, Weak<Engine>)>> = Mutex::new(None);
@@ -125,7 +126,16 @@ unsafe extern "C" fn submit(context: *mut c_void, task: abi::rptadv_control_task
         engine.reloading.store(true, Ordering::Release);
         engine.reload_status.store(-3, Ordering::Release);
     }
+    let interleave = ADVANCE_AFTER_BASIS.lock().unwrap().take();
     let result = unsafe { (*crate::fixture::control_descriptor()).submit.unwrap()(context, task) };
+    if let Some(engine) = interleave.and_then(|engine| engine.upgrade()) {
+        engine
+            .reload_configuration(
+                document("[1000]\nradio_channel=usb\nduplex=full\ntransmit_hang_ms=77\n").unwrap(),
+            )
+            .unwrap();
+    }
+
     let follower = FOLLOW_PANIC.lock().unwrap().take();
     if let Some((engine, executed)) = follower {
         if let Some(engine) = engine.upgrade() {
@@ -564,4 +574,69 @@ fn reload_final_clear_race_keeps_authoritative_fatal_admission_closed() {
         "fatal ticker must not schedule ordinary work"
     );
     assert_eq!(stopped, 0);
+}
+
+#[test]
+fn reload_stale_site_basis_rejects_without_replaying_the_newer_document() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    *ADVANCE_AFTER_BASIS.lock().unwrap() = Some(Arc::downgrade(&engine));
+    let result = engine.reload_configuration(
+        document("[1000]\nradio_channel=usb\nduplex=full\ntransmit_hang_ms=123\n").unwrap(),
+    );
+    assert_eq!(result, Err(RuntimeError::Rejected));
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -1);
+    assert!(!engine.reload_fenced());
+    assert_eq!(
+        engine.run(|host| Ok(host.runtime.settings("1000").unwrap().hang_ms)),
+        Ok(77)
+    );
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_finish_preserves_prior_error_when_resume_fails() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    engine.reloading.store(true, Ordering::Release);
+    engine.record_reload_status(-1);
+    REJECT_AFTER.store(2, Ordering::Release);
+    assert_eq!(
+        engine.finish_reload(Err(RuntimeError::Device)),
+        Err(RuntimeError::Device)
+    );
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
+    assert!(engine.reload_fenced());
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_finish_reports_operational_error_after_confirmed_publication() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    engine.reloading.store(true, Ordering::Release);
+    engine.record_reload_status(0);
+    assert_eq!(
+        engine.finish_reload(Err(RuntimeError::Preparation)),
+        Err(RuntimeError::Preparation)
+    );
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -2);
+    assert!(!engine.reload_fenced());
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_abi_without_engine_is_fatal_not_safe_rejection() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(rptadv_product_stop(), 0);
+    assert_eq!(unsafe { rptadv_product_reload(std::ptr::null(), 0) }, -3);
+    assert_eq!(unsafe { rptadv_product_reload_poll() }, -3);
 }
