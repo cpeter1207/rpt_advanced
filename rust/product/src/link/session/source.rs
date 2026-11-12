@@ -2,15 +2,16 @@
 use crate::{
     Error,
     link::ring::{InboundProducer, MuteSpan},
+    services::SourceBirth,
 };
-use rpt_advanced_core::{audio::DtmfDetector, link::PeerSignals};
+use rpt_advanced_core::audio::DtmfDetector;
 
 const EMPTY: MuteSpan = MuteSpan { start: 0, end: 0 };
 
 /// Collect valid lookback in this burst's half-open window before opening mute.
 fn collect_mute_start(
     first: &mut Option<u64>,
-    signals: &PeerSignals,
+    mut onset: impl FnMut(),
     start: u64,
     end: u64,
     burst_start: u64,
@@ -20,7 +21,7 @@ fn collect_mute_start(
     let to = start.saturating_add_signed(range.end).min(end);
     if from < to {
         *first = Some(first.map_or(from, |old| old.min(from)));
-        signals.set_dtmf_muted(true);
+        onset();
     }
 }
 
@@ -30,17 +31,19 @@ struct Cached {
     count: usize,
     next: usize,
     concealed: bool,
+    birth: Option<SourceBirth>,
 }
 
-pub(super) struct Decoded<'a> {
+pub(crate) struct Decoded<'a> {
     pub start: u64,
     pub pcm: &'a [f32],
     pub concealed: bool,
+    pub birth: Option<SourceBirth>,
 }
 
-/// One serial receive owner. Cached metadata describes transformed samples in
-/// PeerSession's existing scratch block; raw rejected PCM remains provider-owned.
-pub(super) struct SourceIngress {
+/// One serial analyzer. Cache only identity/cursor and mute metadata; each retry
+/// rematerializes stable provider-owned PCM into the caller's reusable scratch.
+pub(crate) struct SourceIngress<const N: usize = 64> {
     detector: DtmfDetector,
     muting: bool,
     command_muted: bool,
@@ -48,14 +51,16 @@ pub(super) struct SourceIngress {
     burst_start: Option<u64>,
     cursor: u64,
     cached: Option<Cached>,
-    spans: [MuteSpan; 64],
+    spans: [MuteSpan; N],
+    partition: usize,
+    maximum: usize,
     span_count: usize,
     pending_mute: Option<MuteSpan>,
 }
 
 // PeerIo admits at most 4096 samples, divided into 64-sample partitions.
 // Each pass appends at most 64 ranges; merging can only reduce that count.
-fn span(spans: &mut [MuteSpan; 64], count: &mut usize, start: u64, end: u64) {
+fn span<const N: usize>(spans: &mut [MuteSpan; N], count: &mut usize, start: u64, end: u64) {
     if start >= end {
         return;
     }
@@ -71,23 +76,40 @@ fn span(spans: &mut [MuteSpan; 64], count: &mut usize, start: u64, end: u64) {
 
 impl SourceIngress {
     pub(super) fn new(muting: bool) -> Result<Self, Error> {
+        Self::at_rate(muting, 8000, 4096)
+    }
+}
+impl<const N: usize> SourceIngress<N> {
+    /// Prepare one released source-rate detector and an exact bounded offer profile.
+    pub(crate) fn at_rate(muting: bool, rate: u32, maximum: usize) -> Result<Self, Error> {
+        if !matches!(rate, 8000 | 48000) {
+            return Err(Error::UnsupportedFormat);
+        }
+        let partition = rate as usize / 125;
+        if maximum == 0 || maximum.div_ceil(partition) > N {
+            return Err(Error::InvalidFrame);
+        }
         Ok(Self {
-            detector: DtmfDetector::at_rate(muting, 8000).map_err(|_| Error::UnsupportedFormat)?,
+            detector: DtmfDetector::at_rate(muting, rate).map_err(|_| Error::UnsupportedFormat)?,
+            partition,
+            maximum,
             muting,
             command_muted: false,
             generation: 1,
             burst_start: None,
             cursor: 0,
             cached: None,
-            spans: [EMPTY; 64],
+            spans: [EMPTY; N],
             span_count: 0,
             pending_mute: None,
         })
     }
 
-    pub(super) fn reset(&mut self) -> Result<(), Error> {
+    /// Cancel retained PCM and start a new source range. End the one already
+    /// qualified digit before clearing analysis; the caller reserves its slot.
+    pub(crate) fn reset(&mut self, emit: impl FnMut(char)) -> Result<(), Error> {
         self.detector
-            .process_spans(false, &mut [], |_| {}, |_| {})
+            .process_spans(false, &mut [], emit, |_| {})
             .map_err(|_| Error::InvalidFrame)?;
         self.generation = self.generation.checked_add(1).ok_or(Error::InvalidFrame)?;
         self.command_muted = false;
@@ -118,7 +140,10 @@ impl SourceIngress {
 
     // Loss is not contiguous fresh tone. Complete only an already qualified
     // real digit; never let analysis windows straddle unknown or codec-PLC PCM.
-    fn discontinuity(&mut self, mut emit: impl FnMut(char)) -> Result<(), Error> {
+    pub(crate) fn discontinuity(&mut self, mut emit: impl FnMut(char)) -> Result<(), Error> {
+        if self.cached.is_some() {
+            return Err(Error::InvalidFrame);
+        }
         let command_muted = &mut self.command_muted;
         let muting = self.muting;
         self.detector
@@ -134,31 +159,67 @@ impl SourceIngress {
             .map_err(|_| Error::InvalidFrame)
     }
 
-    pub(super) fn audio(
+    /// Bound a new offer or the still-unaccepted suffix; never redetect a retry.
+    pub(crate) fn limit(&self, count: usize) -> usize {
+        count.min(
+            self.cached
+                .map_or(self.maximum, |cached| cached.count - cached.next),
+        )
+    }
+    /// Conservative upper bound on completed digits from this bounded analysis.
+    pub(crate) fn digit_capacity(&self, count: usize) -> usize {
+        if self.cached.is_some() {
+            0
+        } else {
+            count.div_ceil(self.partition)
+        }
+    }
+    pub(crate) fn muted(&self) -> bool {
+        self.command_muted || self.detector.suppressing()
+    }
+    /// A native authoritative command terminator releases command-wide suppression;
+    /// an actually present tone remains suppressed until the detector releases it.
+    pub(crate) fn end_command(&mut self) {
+        self.command_muted = false;
+    }
+    /// Analyze an offer once, then reconstruct each retry from its borrowed raw PCM.
+    /// Callbacks are synchronous and must remain nonblocking.
+    pub(crate) fn prepare(
         &mut self,
-        inbound: &mut InboundProducer,
         scratch: &mut [f32],
         block: Decoded<'_>,
         mut emit: impl FnMut(char),
-    ) -> Result<usize, Error> {
-        if !self.flush_mute(inbound)? || block.pcm.is_empty() {
-            return Ok(0);
+        mut onset: impl FnMut(),
+    ) -> Result<(), Error> {
+        if block.pcm.is_empty()
+            || block.pcm.len() > scratch.len()
+            || block.pcm.len() > self.limit(block.pcm.len())
+            || block.start.checked_add(block.pcm.len() as u64).is_none()
+        {
+            return Err(Error::InvalidFrame);
         }
+        if let Some(cached) = self.cached {
+            if block.start != cached.start + cached.next as u64
+                || block.concealed != cached.concealed
+                || block.birth != cached.birth
+            {
+                return Err(Error::InvalidFrame);
+            }
+        }
+        scratch[..block.pcm.len()].copy_from_slice(block.pcm);
         if self.cached.is_none() {
-            // PeerIo bounds input to 4096 samples before entering this method;
-            // the sole caller supplies its equally sized, preallocated scratch.
             let burst_start = *self.burst_start.get_or_insert(block.start);
-            let concealed_muted =
-                block.concealed && (self.command_muted || self.detector.suppressing());
+            let concealed_muted = block.concealed && self.muted();
             if block.concealed {
                 self.discontinuity(&mut emit)?;
             }
-            scratch[..block.pcm.len()].copy_from_slice(block.pcm);
             self.span_count = 0;
-            // Eight-ms partitions bound the end-of-command mute granularity.
-            // Each offered source block is detected once, never again on retry.
-            for (part, pcm) in scratch[..block.pcm.len()].chunks_mut(64).enumerate() {
-                let start = block.start + (part * 64) as u64;
+            // Fixed eight-ms partitions preserve the existing completion/mute granularity.
+            for (part, pcm) in scratch[..block.pcm.len()]
+                .chunks_mut(self.partition)
+                .enumerate()
+            {
+                let start = block.start + (part * self.partition) as u64;
                 let end = start + pcm.len() as u64;
                 let was_muted = self.command_muted;
                 let mut digit = None;
@@ -175,12 +236,12 @@ impl SourceIngress {
                             |range| {
                                 collect_mute_start(
                                     &mut first,
-                                    inbound.signals(),
+                                    &mut onset,
                                     start,
                                     end,
                                     burst_start,
                                     range,
-                                );
+                                )
                             },
                         )
                         .map_err(|_| Error::InvalidFrame)?;
@@ -188,8 +249,6 @@ impl SourceIngress {
                 let muted = self.muting
                     && (was_muted || first.is_some() || digit.is_some() || concealed_muted);
                 if muted {
-                    // The complete muted suffix already covers every detector
-                    // interval in this partition; publish their union once.
                     span(
                         &mut self.spans,
                         &mut self.span_count,
@@ -206,43 +265,71 @@ impl SourceIngress {
                 count: block.pcm.len(),
                 next: 0,
                 concealed: block.concealed,
+                birth: block.birth,
             });
         }
+        // Never rely on detector-mutated scratch surviving an intervening prompt.
+        // Reapply the cached union, including command-wide suppression, to this prefix.
+        let end = block.start + block.pcm.len() as u64;
+        for interval in &self.spans[..self.span_count] {
+            let first = interval.start.max(block.start);
+            let last = interval.end.min(end);
+            if first < last {
+                scratch[(first - block.start) as usize..(last - block.start) as usize].fill(0.0);
+            }
+        }
+        Ok(())
+    }
+    /// Advance only actual accepted source samples after publication succeeds.
+    pub(crate) fn accepted(&mut self, count: usize) -> Result<(), Error> {
         let cached = self.cached.as_mut().ok_or(Error::InvalidFrame)?;
-        if block.start != cached.start + cached.next as u64
-            || block.pcm.len() > cached.count - cached.next
-            || block.concealed != cached.concealed
-        {
+        if count > cached.count - cached.next {
             return Err(Error::InvalidFrame);
         }
-        let end = block.start + block.pcm.len() as u64;
-        let mut offered = [EMPTY; 64];
-        let mut count = 0;
+        cached.next += count;
+        self.cursor = cached.start + cached.next as u64;
+        if cached.next == cached.count {
+            self.cached = None;
+        }
+        Ok(())
+    }
+    pub(super) fn audio(
+        &mut self,
+        inbound: &mut InboundProducer,
+        scratch: &mut [f32],
+        block: Decoded<'_>,
+        emit: impl FnMut(char),
+    ) -> Result<usize, Error> {
+        if !self.flush_mute(inbound)? || block.pcm.is_empty() {
+            return Ok(0);
+        }
+        let start = block.start;
+        let count = block.pcm.len();
+        self.prepare(scratch, block, emit, || {
+            inbound.signals().set_dtmf_muted(true)
+        })?;
+        let end = start + count as u64;
+        let mut offered = [EMPTY; N];
+        let mut intervals = 0;
         for interval in &self.spans[..self.span_count] {
             span(
                 &mut offered,
-                &mut count,
+                &mut intervals,
                 interval.start,
                 interval.end.min(end),
             );
         }
         let accepted = inbound
             .write_tagged(
-                &scratch[cached.next..cached.next + block.pcm.len()],
+                &scratch[..count],
                 self.generation,
-                block.start,
-                &offered[..count],
+                start,
+                &offered[..intervals],
             )
             .map_err(|_| Error::Write)?;
-        cached.next += accepted;
-        self.cursor = block.start + accepted as u64;
-        if cached.next == cached.count {
-            self.cached = None;
-        }
+        self.accepted(accepted)?;
         if accepted != 0 {
-            inbound
-                .signals()
-                .set_dtmf_muted(self.command_muted || self.detector.suppressing());
+            inbound.signals().set_dtmf_muted(self.muted());
         }
         Ok(accepted)
     }
@@ -310,18 +397,40 @@ mod tests {
     use super::super::tests::five_tone;
     use super::*;
     use crate::link::ring::{InboundPolicy, InboundRing, tests::delayed_mute_endpoints};
+    use rpt_advanced_core::link::PeerSignals;
 
     #[test]
     fn clipped_empty_spans_are_ignored_and_disjoint_metadata_is_bounded() {
         let signals = PeerSignals::new();
         let mut first = None;
-        collect_mute_start(&mut first, &signals, 100, 164, 100, -64..0);
+        collect_mute_start(
+            &mut first,
+            || signals.set_dtmf_muted(true),
+            100,
+            164,
+            100,
+            -64..0,
+        );
         assert_eq!(first, None);
         assert!(!signals.dtmf_muted());
-        collect_mute_start(&mut first, &signals, 100, 164, 100, 32..100);
+        collect_mute_start(
+            &mut first,
+            || signals.set_dtmf_muted(true),
+            100,
+            164,
+            100,
+            32..100,
+        );
         assert_eq!(first, Some(132));
         assert!(signals.dtmf_muted());
-        collect_mute_start(&mut first, &signals, 100, 164, 100, -32..16);
+        collect_mute_start(
+            &mut first,
+            || signals.set_dtmf_muted(true),
+            100,
+            164,
+            100,
+            -32..16,
+        );
         assert_eq!(first, Some(100));
         let mut spans = [EMPTY; 64];
         let mut count = 0;
@@ -354,6 +463,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        birth: None,
                         start: 0,
                         pcm: &[],
                         concealed: false
@@ -377,6 +487,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        birth: None,
                         start: 0,
                         pcm: &tone,
                         concealed: false
@@ -391,6 +502,7 @@ mod tests {
                         &mut inbound,
                         &mut scratch,
                         Decoded {
+                            birth: None,
                             start: 256,
                             pcm: &tone[..160],
                             concealed: true
@@ -431,6 +543,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        birth: None,
                         start,
                         pcm: &pcm,
                         concealed: false
@@ -447,6 +560,7 @@ mod tests {
                 &mut inbound,
                 &mut scratch,
                 Decoded {
+                    birth: None,
                     start: 408,
                     pcm: &[0.0; 102],
                     concealed: false
@@ -475,6 +589,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        birth: None,
                         start,
                         pcm: &pcm,
                         concealed: false
@@ -505,6 +620,7 @@ mod tests {
                 &mut inbound,
                 &mut scratch,
                 Decoded {
+                    birth: None,
                     start: 4096,
                     pcm: &pcm,
                     concealed: false
@@ -524,6 +640,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        birth: None,
                         start,
                         pcm: samples,
                         concealed
@@ -546,6 +663,7 @@ mod tests {
                 &mut inbound,
                 &mut scratch,
                 Decoded {
+                    birth: None,
                     start: 6176,
                     pcm: remaining,
                     concealed: false
@@ -574,6 +692,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        birth: None,
                         start: 0,
                         pcm: &five_tone(256),
                         concealed: false
@@ -594,6 +713,7 @@ mod tests {
                         &mut inbound,
                         &mut scratch,
                         Decoded {
+                            birth: None,
                             start: 416,
                             pcm: &[],
                             concealed: false
@@ -627,6 +747,7 @@ mod tests {
                 &mut inbound,
                 &mut scratch,
                 Decoded {
+                    birth: None,
                     start: 0,
                     pcm: &five_tone(256),
                     concealed: false
@@ -640,5 +761,179 @@ mod tests {
             Err(Error::Write)
         );
         assert_eq!(source.finish(&mut inbound, |_| {}), Err(Error::Write));
+    }
+    #[test]
+    fn source_reset_completes_once_while_cancelling_partial_retry_without_allocation() {
+        for rate in [8000, 48000] {
+            for accepted in [0, 1] {
+                let part = rate as usize / 50;
+                let mut source = SourceIngress::<4>::at_rate(true, rate, part).unwrap();
+                let tone: Vec<_> = (0..part * 4)
+                    .map(|n| {
+                        let phase = n as f32 * std::f32::consts::TAU / rate as f32;
+                        0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+                    })
+                    .collect();
+                let mut scratch = [0.0; 960];
+                for (index, pcm) in tone.chunks(part).enumerate() {
+                    source
+                        .prepare(
+                            &mut scratch,
+                            Decoded {
+                                start: (index * part) as u64,
+                                pcm,
+                                concealed: false,
+                                birth: None,
+                            },
+                            |_| panic!("the active tone has not ended"),
+                            || {},
+                        )
+                        .unwrap();
+                    source
+                        .accepted(if index == 3 { accepted } else { part })
+                        .unwrap();
+                }
+                let mut digit = None;
+                let (_, allocations) = crate::fixture::allocations(|| {
+                    source
+                        .reset(|symbol| {
+                            assert_eq!(digit.replace(symbol), None);
+                        })
+                        .unwrap();
+                    source
+                        .reset(|_| panic!("reset cannot repeat completion"))
+                        .unwrap();
+                });
+                assert_eq!(allocations, 0);
+                assert_eq!(digit, Some('5'));
+                assert!(!source.muted());
+                assert_eq!(source.limit(part), part);
+                source
+                    .prepare(
+                        &mut scratch,
+                        Decoded {
+                            start: 0,
+                            pcm: &tone[..part],
+                            concealed: false,
+                            birth: None,
+                        },
+                        |_| panic!("the new range must not inherit qualification"),
+                        || {},
+                    )
+                    .unwrap();
+                source.accepted(part).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn private_source_analysis_cached_retry_keeps_birth_and_does_not_decode_twice() {
+        let mut source = SourceIngress::<4>::at_rate(true, 8000, 160).unwrap();
+        let mut scratch = [0.0; 960];
+        let birth = Some(SourceBirth {
+            host_clock_epoch: 7,
+            born_ns: 9,
+        });
+        let mut digits = ['?'; 4];
+        let mut emitted = 0;
+        let mut start = 0;
+        let tone = five_tone(640);
+        let quiet = [0.0; 160];
+        for pcm in tone.chunks(160).chain(std::iter::once(quiet.as_slice())) {
+            source
+                .prepare(
+                    &mut scratch,
+                    Decoded {
+                        start,
+                        pcm,
+                        concealed: false,
+                        birth,
+                    },
+                    |digit| {
+                        digits[emitted] = digit;
+                        emitted += 1;
+                    },
+                    || {},
+                )
+                .unwrap();
+            source.accepted(160).unwrap();
+            start += 160;
+        }
+        let raw = [0.0; 160];
+        source
+            .prepare(
+                &mut scratch,
+                Decoded {
+                    start,
+                    pcm: &raw,
+                    concealed: false,
+                    birth,
+                },
+                |digit| {
+                    digits[emitted] = digit;
+                    emitted += 1;
+                },
+                || {},
+            )
+            .unwrap();
+        assert_eq!((&digits[..emitted], emitted), (&['5'][..], 1));
+        source.accepted(1).unwrap();
+        scratch.fill(0.25);
+        let changed = Some(SourceBirth {
+            host_clock_epoch: 7,
+            born_ns: 10,
+        });
+        assert_eq!(
+            source.prepare(
+                &mut scratch,
+                Decoded {
+                    start: start + 1,
+                    pcm: &raw[1..],
+                    concealed: false,
+                    birth: changed
+                },
+                |_| panic!("retry cannot decode"),
+                || {}
+            ),
+            Err(Error::InvalidFrame)
+        );
+        let (_, allocations) = crate::fixture::allocations(|| {
+            source
+                .prepare(
+                    &mut scratch,
+                    Decoded {
+                        start: start + 1,
+                        pcm: &raw[1..],
+                        concealed: false,
+                        birth,
+                    },
+                    |_| panic!("retry cannot decode"),
+                    || {},
+                )
+                .unwrap();
+            source.accepted(0).unwrap();
+            scratch.fill(0.5);
+            source
+                .prepare(
+                    &mut scratch,
+                    Decoded {
+                        start: start + 1,
+                        pcm: &raw[1..],
+                        concealed: false,
+                        birth,
+                    },
+                    |_| panic!("retry cannot decode"),
+                    || {},
+                )
+                .unwrap();
+            source.accepted(159).unwrap();
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(&scratch[..159], &[0.0; 159]);
+        eprintln!(
+            "source_analysis_bytes ordinary={} private={}",
+            std::mem::size_of::<SourceIngress>(),
+            std::mem::size_of::<SourceIngress<4>>()
+        );
     }
 }

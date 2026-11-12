@@ -35,6 +35,15 @@ pub enum PeerInput<'a> {
     RadioUnkey,
 }
 
+/// Immutable authoritative private-call digit source, selected at admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneDigitMode {
+    /// Negotiated/native source events; in-band analysis still mutes tones.
+    NativeEvents,
+    /// Explicit supported in-band profile; native symbols are consumed but ignored.
+    InBand,
+}
+
 /// Borrowed provider-owned source input. Only the accepted prefix transfers.
 pub enum SourceInput<'a> {
     /// One negotiated private telephone digit; one credit accepts it exactly once.
@@ -943,13 +952,14 @@ impl HostServices {
         };
         if identity.wire_identity() != remote
             || !local_valid
-            || capabilities & !63 != 0
-            || (protocol != ProtocolId::Phone && capabilities & 32 != 0)
+            || capabilities & !127 != 0
+            || (protocol != ProtocolId::Phone && capabilities & 96 != 0)
             || (protocol == ProtocolId::Phone
                 && (capabilities & 32 == 0
-                    || capabilities & !51 != 0
+                    || capabilities & !115 != 0
                     || raw.account_generation == 0
                     || raw.qso_generation == 0))
+            || (capabilities & abi::RPTADV_PEER_PHONE_INBAND_DIGITS != 0 && capabilities & 51 != 51)
             || (capabilities & 1 != 0 && !self.peer_step_available())
             || (capabilities & 2 != 0
                 && (capabilities & 1 == 0 || self.0.peer_prepare_audio.is_none()))
@@ -1334,6 +1344,17 @@ impl PeerIo {
     /// Copied local provider account; absent for conventional node peers.
     pub fn phone_account(&self) -> Option<&PhoneAccountId> {
         self.provider_account.as_ref()
+    }
+    /// The absence of the explicit in-band capability selects native events,
+    /// never an event-absence fallback. Ordinary peers have no phone digit mode.
+    pub fn phone_digit_mode(&self) -> Option<PhoneDigitMode> {
+        self.phone_account().map(|_| {
+            if self.capabilities & abi::RPTADV_PEER_PHONE_INBAND_DIGITS != 0 {
+                PhoneDigitMode::InBand
+            } else {
+                PhoneDigitMode::NativeEvents
+            }
+        })
     }
     /// Human-text routing support belongs to this connection, not the host table.
     pub fn can_forward_text(&self) -> bool {

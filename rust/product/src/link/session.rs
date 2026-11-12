@@ -20,7 +20,7 @@ use rpt_advanced_core::{
     },
 };
 use rtrb::{Consumer, Producer, RingBuffer};
-mod source;
+pub(crate) mod source;
 use source::{Decoded, SourceIngress};
 use std::{
     ffi::{CString, c_void},
@@ -828,11 +828,12 @@ impl PeerSession {
                         start,
                         samples,
                         concealed,
-                        birth: _,
+                        birth,
                     } => source.audio(
                         inbound,
                         scratch,
                         Decoded {
+                            birth,
                             start,
                             pcm: samples,
                             concealed,
@@ -895,7 +896,7 @@ impl PeerSession {
                 self.source_finish = None;
                 self.source_completion = SourceCompletion::Pending;
                 self.source_dirty = false;
-                source.reset()?;
+                source.reset(|_| {})?;
             }
             self.source_dirty |= accepted;
             if let Some(keyed) = result.activity {
@@ -1014,7 +1015,7 @@ impl PeerSession {
                     self.source_finish = None;
                     self.source_dirty = false;
                     if let Some(source) = &mut self.source {
-                        source.reset()?;
+                        source.reset(|_| {})?;
                         source.set_muting(dtmf_muting);
                     }
                     self.inbound = inbound;

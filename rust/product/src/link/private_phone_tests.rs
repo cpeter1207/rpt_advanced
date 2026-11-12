@@ -463,7 +463,36 @@ fn source_session_with_auth(
     Arc<std::sync::Mutex<crate::link::session::tests::State>>,
     PeerReply,
 ) {
-    let (io, state) = crate::link::session::tests::phone_source_peer();
+    source_session_at_rate(8000, authenticated)
+}
+
+fn source_session_at_rate(
+    rate: u32,
+    authenticated: bool,
+) -> (
+    PrivatePhoneSession,
+    PrivatePhoneControl,
+    Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+    PeerReply,
+) {
+    source_session_with_peer(
+        crate::link::session::tests::phone_source_peer_at_rate(rate),
+        authenticated,
+    )
+}
+
+fn source_session_with_peer(
+    (io, state): (
+        PeerIo,
+        Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+    ),
+    authenticated: bool,
+) -> (
+    PrivatePhoneSession,
+    PrivatePhoneControl,
+    Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+    PeerReply,
+) {
     let (account, call) = io.generations();
     let source = PhoneSource::new(
         io.phone_account().unwrap().clone(),
@@ -788,4 +817,343 @@ fn prepared_phone_media_missing_birth_retires_only_media_before_later_source_aud
         "loss of timing cannot disconnect private control"
     );
     assert_eq!(input.available(), 0);
+}
+
+/// Native-event mode still detects onset and never dispatches its in-band completion.
+fn assert_native_source_onset(rate: u32) {
+    use rpt_advanced_core::link::PeerInput as _;
+    let (mut session, mut control, state, reply) = source_session_at_rate(rate, true);
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    let mut media = control.prepare_media(None).unwrap();
+    session.step(0).unwrap();
+    let birth = state.lock().unwrap().source_reference.unwrap().1;
+    state.lock().unwrap().source_birth = Some(birth);
+    let part = rate as usize / 50;
+    let tone: Vec<_> = (0..part * 4)
+        .map(|n| {
+            let phase = n as f32 * std::f32::consts::TAU / rate as f32;
+            0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+        })
+        .collect();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend(tone.chunks(part).map(|pcm| Input::Audio(pcm.to_vec())));
+    for now in 1..10 {
+        session.step(now).unwrap();
+    }
+    assert!(
+        !media.active(),
+        "onset must revoke buffered phone media before any completed digit"
+    );
+    assert_eq!(media.render_timed_sample(), None);
+    assert!(
+        control.digit().is_none(),
+        "NativeEvents does not dispatch in-band digits"
+    );
+    assert!(
+        !reply.ended(),
+        "private call control survives media retirement"
+    );
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend([Input::Audio(vec![0.0; part * 3]), Input::Digit(b'5')]);
+    for now in 10..20 {
+        session.step(now).unwrap();
+    }
+    assert_eq!(control.digit().map(|(digit, _)| digit), Some('5'));
+    assert!(
+        control.digit().is_none(),
+        "simultaneous native/tone event is exactly one command"
+    );
+    assert!(state.lock().unwrap().texts.is_empty());
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    assert_eq!(state.lock().unwrap().legacy_reads, 0);
+}
+
+#[test]
+fn private_source_analysis_retires_onset_but_native_digit_remains_the_only_command_8000() {
+    assert_native_source_onset(8000);
+}
+
+#[test]
+fn private_source_analysis_retires_onset_but_native_digit_remains_the_only_command_48000() {
+    assert_native_source_onset(48000);
+}
+
+#[test]
+fn private_source_analysis_rejects_unsupported_detector_rate_without_legacy_regression() {
+    let (io, _state) = crate::link::session::tests::phone_source_peer_at_rate(16000);
+    let (account, call) = io.generations();
+    let source = PhoneSource::new(
+        io.phone_account().unwrap().clone(),
+        account,
+        io.identity().call_id().unwrap(),
+        call,
+        13,
+    )
+    .unwrap();
+    let signals = PeerSignals::for_phone(source);
+    assert!(matches!(
+        PrivatePhoneSession::prepare(io, signals.reply_target()),
+        Err(Error::UnsupportedFormat)
+    ));
+    // Legacy command-only readers still retain their established preparation.
+    let (_session, _control, _state, _reply) = source_session_with_peer(
+        crate::link::session::tests::phone_peer_at_rate(16000),
+        false,
+    );
+}
+
+#[test]
+fn private_source_analysis_retry_survives_prompt_overwrite_without_renewing_birth() {
+    use rpt_advanced_core::link::PeerInput as _;
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    let mut media = control.prepare_media(None).unwrap();
+    session.step(0).unwrap();
+    let (epoch, birth) = state.lock().unwrap().source_reference.unwrap();
+    state.lock().unwrap().source_birth = Some(birth);
+    // The real 8 kHz phone ring has 2400 source slots. The next offer accepts one
+    // sample, then refuses its retained 159-sample suffix until the consumer runs.
+    state.lock().unwrap().input.extend([
+        Input::Audio(vec![0.75; 2399]),
+        Input::Audio(vec![0.75; 160]),
+    ]);
+    for now in 1..30 {
+        session.step(now).unwrap();
+        if state
+            .lock()
+            .unwrap()
+            .source_credits
+            .iter()
+            .map(|(_, n)| n)
+            .sum::<usize>()
+            == 2400
+        {
+            break;
+        }
+    }
+    assert!(state.lock().unwrap().source_credits.contains(&(2399, 1)));
+    let prompt = crate::phone::tests::private_prompt(&reply, Box::new(Speech::new(960)));
+    control.send(prompt).ok().unwrap();
+    session.step(40).unwrap();
+    assert_eq!(
+        state.lock().unwrap().source_credits.last(),
+        Some(&(2400, 0))
+    );
+    assert_eq!(
+        session.pcm, [0.25; 960],
+        "real outgoing prompt overwrote the shared scratch"
+    );
+    assert!(
+        matches!(state.lock().unwrap().input.front(), Some(Input::Audio(pcm)) if pcm == &[0.75; 159])
+    );
+    assert!(control.digit().is_none());
+    for _ in 0..4800 {
+        media.render_timed_sample().unwrap();
+    }
+    session.step(41).unwrap();
+    assert!(state.lock().unwrap().input.is_empty());
+    assert!(state.lock().unwrap().source_credits.contains(&(2400, 159)));
+    let mut checked = 0;
+    for _ in 0..14000 {
+        let value = media.render_timed_sample().unwrap();
+        if value.provenance.is_some_and(|p| {
+            p.real
+                && !p.plc
+                && p.position
+                    .is_some_and(|at| !at.negative && (2420..2500).contains(&at.frame))
+        }) {
+            checked += 1;
+            assert!(
+                value.sample > 0.6,
+                "retry must use original caller PCM, not prompt scratch"
+            );
+            assert_eq!(
+                value.age_bound,
+                Some(rpt_advanced_core::link::SourceTimeBound {
+                    host_clock_epoch: epoch,
+                    not_after_ns: birth,
+                })
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "inspect the actual accepted retry, not earlier queued audio"
+    );
+    assert!(control.digit().is_none());
+    assert_eq!(state.lock().unwrap().legacy_reads, 0);
+    assert!(!reply.ended());
+}
+
+fn assert_inband_source_queue(rate: u32) {
+    let (mut session, mut control, state, _reply) = source_session_with_peer(
+        crate::link::session::tests::phone_source_peer_inband(rate),
+        false,
+    );
+    assert_eq!(session.io.phone_digit_mode(), Some(PhoneDigitMode::InBand));
+    for _ in 0..64 {
+        session.digits.push(('1', 0)).unwrap();
+    }
+    let part = rate as usize / 50;
+    let tone: Vec<_> = (0..part * 4)
+        .map(|n| {
+            let phase = n as f32 * std::f32::consts::TAU / rate as f32;
+            0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+        })
+        .collect();
+    state.lock().unwrap().input.push_back(Input::Digit(b'9'));
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend(tone.chunks(part).map(|pcm| Input::Audio(pcm.to_vec())));
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend([Input::Digit(b'5'), Input::Audio(vec![0.0; part * 3])]);
+    session.step(1).unwrap();
+    assert!(matches!(
+        state.lock().unwrap().input.front(),
+        Some(Input::Audio(_))
+    ));
+    assert_eq!(
+        control.pending_digits(),
+        64,
+        "ignored native symbol must not wedge the stream"
+    );
+    for _ in 0..64 {
+        assert_eq!(control.digit(), Some(('1', 0)));
+    }
+    for now in 2..20 {
+        session.step(now).unwrap();
+    }
+    assert!(state.lock().unwrap().input.is_empty());
+    assert_eq!(control.digit().map(|(digit, _)| digit), Some('5'));
+    assert!(
+        control.digit().is_none(),
+        "native event and in-band completion are not double-dispatched"
+    );
+    assert_eq!(state.lock().unwrap().legacy_reads, 0);
+    assert!(state.lock().unwrap().texts.is_empty());
+    assert!(state.lock().unwrap().bound_radio.is_none());
+}
+
+#[test]
+fn private_source_analysis_inband_discards_native_events_even_with_a_full_command_queue_8000() {
+    assert_inband_source_queue(8000);
+}
+
+#[test]
+fn private_source_analysis_inband_discards_native_events_even_with_a_full_command_queue_48000() {
+    assert_inband_source_queue(48000);
+}
+
+/// Source reset ends analysis without ending this call's authoritative control.
+fn assert_source_reset_completion(rate: u32, blocked: bool, inband: bool) {
+    let peer = if inband {
+        crate::link::session::tests::phone_source_peer_inband(rate)
+    } else {
+        crate::link::session::tests::phone_source_peer_at_rate(rate)
+    };
+    let (mut session, mut control, state, reply) = source_session_with_peer(peer, false);
+    let part = rate as usize / 50;
+    let tone: Vec<_> = (0..part * 4)
+        .map(|n| {
+            let phase = n as f32 * std::f32::consts::TAU / rate as f32;
+            0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+        })
+        .collect();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend(tone.chunks(part).map(|pcm| Input::Audio(pcm.to_vec())));
+    session.step(1).unwrap();
+    assert!(state.lock().unwrap().input.is_empty());
+    assert_eq!(session.source_end, (part * 4) as u64);
+    assert!(control.digit().is_none(), "tone completion remains pending");
+    if blocked {
+        for _ in 0..64 {
+            session.digits.push(('1', 0)).unwrap();
+        }
+    }
+    state.lock().unwrap().source_reset = true;
+    session.step(2).unwrap();
+    if blocked && inband {
+        assert!(
+            state.lock().unwrap().source_reset,
+            "a full command queue must retain reset for retry"
+        );
+        assert_eq!(session.source_end, (part * 4) as u64);
+        session.step(3).unwrap();
+        assert!(state.lock().unwrap().source_reset);
+        assert_eq!(control.pending_digits(), 64);
+        assert_eq!(control.digit(), Some(('1', 0)));
+        session.step(4).unwrap();
+        // The one available slot belongs to the pending completion, after the
+        // existing commands. A retry must not consume a second slot.
+        for _ in 0..63 {
+            assert_eq!(control.digit(), Some(('1', 0)));
+        }
+    } else if blocked {
+        for _ in 0..64 {
+            assert_eq!(control.digit(), Some(('1', 0)));
+        }
+    }
+    assert!(!state.lock().unwrap().source_reset);
+    assert_eq!(session.source_end, 0);
+    assert_eq!(
+        control.digit(),
+        inband.then_some(('5', if blocked { 4 } else { 2 })),
+        "acknowledge reset only after its qualified authoritative digit"
+    );
+    // A repeated reset and subsequent silence cannot duplicate completion.
+    state.lock().unwrap().source_reset = true;
+    session.step(5).unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.0; part * 3]));
+    session.step(6).unwrap();
+    assert!(control.digit().is_none());
+    assert!(
+        !reply.ended(),
+        "source reset must preserve private call control"
+    );
+    assert_eq!(state.lock().unwrap().legacy_reads, 0);
+}
+
+#[test]
+fn private_source_reset_preserves_qualified_inband_digit_8000() {
+    assert_source_reset_completion(8000, false, true);
+}
+
+#[test]
+fn private_source_reset_preserves_qualified_inband_digit_48000() {
+    assert_source_reset_completion(48000, false, true);
+}
+
+#[test]
+fn private_source_reset_retries_full_inband_queue_8000() {
+    assert_source_reset_completion(8000, true, true);
+}
+
+#[test]
+fn private_source_reset_retries_full_inband_queue_48000() {
+    assert_source_reset_completion(48000, true, true);
+}
+
+#[test]
+fn private_source_reset_never_dispatches_non_authoritative_tone() {
+    for rate in [8000, 48000] {
+        assert_source_reset_completion(rate, true, false);
+    }
 }

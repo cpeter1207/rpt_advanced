@@ -64,6 +64,12 @@ struct UrpAstSiteSnapshot;
 /** Call-addressed control/reply lifetime, independent of RF attachment.
  * This does not advertise remote call-origin or legacy-D isolation support. */
 #define RPTADV_PEER_PRIVATE_CALL 32U
+/** Explicit in-band private control digits. Requires PHONE and ASYNC, PREPARED,
+ * SOURCE_MEDIA and PRIVATE_CALL together. Absence selects native source events,
+ * never an event-absence fallback. Both modes retain the source digit callback;
+ * the private owner consumes and ignores native symbols in this mode.
+ * Current timed private analysis supports exactly 8000 or 48000 Hz. */
+#define RPTADV_PEER_PHONE_INBAND_DIGITS 64U
 
 /** Borrowed immutable bytes. Null is valid only with zero length. */
 struct rptadv_peer_bytes_v1 {

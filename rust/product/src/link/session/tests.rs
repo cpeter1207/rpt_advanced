@@ -69,7 +69,7 @@ pub(crate) struct State {
     source_interleave: bool,
     source_acknowledgements: usize,
     pub(crate) source_completions: Vec<u32>,
-    source_credits: Vec<(u64, usize)>,
+    pub(crate) source_credits: Vec<(u64, usize)>,
     pub(crate) source_text: VecDeque<(&'static [u8], &'static [u8], u32)>,
     pub(crate) source_reference: Option<(u64, u64)>,
     pub(crate) source_birth: Option<u64>,
@@ -1438,13 +1438,22 @@ pub(crate) fn source_peer() -> (PeerIo, Shared) {
     make_peer(8000, true, true, true, true, false)
 }
 pub(crate) fn phone_source_peer() -> (PeerIo, Shared) {
-    make_peer(8000, true, true, true, false, true)
+    phone_source_peer_at_rate(8000)
+}
+pub(crate) fn phone_source_peer_at_rate(rate: u32) -> (PeerIo, Shared) {
+    make_peer(rate, true, true, true, false, true)
+}
+pub(crate) fn phone_source_peer_inband(rate: u32) -> (PeerIo, Shared) {
+    make_peer_with_local(rate, true, true, true, false, Some(true), None)
 }
 pub(crate) fn phone_peer() -> (PeerIo, Shared) {
     make_peer(8000, false, false, false, false, true)
 }
+pub(crate) fn phone_peer_at_rate(rate: u32) -> (PeerIo, Shared) {
+    make_peer(rate, false, false, false, false, true)
+}
 pub(crate) fn phone_peer_named(local: &str) -> (PeerIo, Shared) {
-    make_peer_with_local(8000, false, false, false, false, true, Some(local))
+    make_peer_with_local(8000, false, false, false, false, Some(false), Some(local))
 }
 pub(crate) fn phone_with_egress(async_enabled: bool, egress: bool) -> (PeerIo, Shared) {
     make_peer(8000, async_enabled || egress, egress, false, false, true)
@@ -1466,7 +1475,7 @@ fn make_peer(
         egress,
         source,
         forward_text,
-        phone,
+        phone.then_some(false),
         None,
     )
 }
@@ -1476,14 +1485,17 @@ fn make_peer_with_local(
     egress: bool,
     source: bool,
     forward_text: bool,
-    phone: bool,
+    phone: Option<bool>,
     local: Option<&str>,
 ) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
         local: local.map(Box::from),
-        capabilities: if phone {
-            32 | u32::from(async_enabled) | (u32::from(egress) << 1) | (u32::from(source) << 4)
+        capabilities: if let Some(inband) = phone {
+            32 | (u32::from(inband) << 6)
+                | u32::from(async_enabled)
+                | (u32::from(egress) << 1)
+                | (u32::from(source) << 4)
         } else if source {
             23
         } else {

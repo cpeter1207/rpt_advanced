@@ -600,3 +600,59 @@ while retaining all old and candidate listener and DSO owners through orderly
 shutdown. That fail-stop cleanup neither compensates product publication nor
 resumes operation or claims rollback. Current boolean reload results cannot
 activate this path. Committed reload/stop still retire all product phone calls under this ADR.
+
+## Private source digit authority and shared analysis — 2026-11-12
+
+The named PHONE_INBAND_DIGITS capability is an optional bit in the unchanged
+sized peer metadata record. It is valid only with the complete asynchronous,
+prepared, source-media private Phone profile. Its absence explicitly selects
+NativeEvents, not an event-absence fallback. Both modes retain the validated
+source digit callback and its accepted/refused retry contract. NativeEvents
+dispatches native symbols only. InBand consumes non-authoritative native
+symbols without inserting commands or wedging provider order.
+
+Both timed private modes use the existing SourceIngress source-rate detector.
+The released DTMF alpha3 contract accepts exactly 8 or 48 kHz. Current G.711
+phone media is 8 kHz; other timed private formats return UnsupportedFormat
+rather than silently resampling. Legacy private readers and ordinary peers
+keep their existing preparation behavior.
+
+The shared analyzer separates one-time analysis from accepted-prefix commit.
+It retains only source identity, original birth, progress and bounded mute
+intervals. Ordinary source ingress keeps its existing 4096-sample/64-interval
+profile. Private ingress retains the existing 20 ms writer limit, requiring
+at most three 8 ms partitions and four interval slots. A retry copies the
+provider-owned raw suffix back into existing scratch and reapplies cached
+muting without advancing detection or emitting another digit. Outgoing private
+prompts may overwrite that scratch between partial or refused retries.
+
+Before authoritative in-band analysis, the private owner reserves bounded
+command-queue space. Native symbols retain their individual acceptance checks.
+Detected onset revokes its prepared media generation before publication;
+the logical call remains alive for private control. Original birth and actual
+accepted source credit are preserved, including partial writes. Native-event
+backpressure remains exact and only the one serial provider reader is used.
+These changes prepare source-private control and suppression; no provider,
+manual attachment, RF route or remote call-origin capability is activated.
+
+
+Retirement is not automatic re-admission. Native or detected pound terminates
+the analyzer's local command mute, but private grammar completion, cancellation
+and timeout still need an authoritative control-owner signal before legitimate
+media re-admission is enabled. In particular, a native pound is only a local
+mute release, not proof that the grammar completed: quoting, addressed commands
+and cancellation must be resolved by that authoritative control owner.
+No event-absence or elapsed-time heuristic reopens a retired generation. This remaining join is required before attachment
+activation; the logical private call and its control events remain available.
+The added capability changes no ABI field layout or SONAME; older consumers
+that do not recognize the bit reject that unsupported profile.
+
+
+A source reset cancels provider-owned PCM retries but does not erase an already
+qualified authoritative in-band digit. The serial private owner reserves one
+command slot before flushing that completion and acknowledging the reset. A
+full queue retains the provider reset for retry without advancing detection or
+source position. NativeEvents never dispatches the in-band completion; ordinary
+peer reset behavior is unchanged. Media retirement still happens immediately
+and does not wait for command capacity. This is not the pending private-grammar
+collection-ended/re-admission join described above.

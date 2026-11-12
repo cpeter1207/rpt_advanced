@@ -542,3 +542,15 @@ fn prepared_phone_media_api_requires_current_mailbox_and_serial_owner_identity()
         Err(Error::Admission)
     ));
 }
+
+/// Prepare real private playback against the supplied exact test call token.
+pub(crate) fn private_prompt(
+    reply: &PeerReply,
+    stream: Box<dyn PcmStreamReader>,
+) -> PrivatePhoneReply {
+    PrivatePhoneReply {
+        source: reply.phone_source().unwrap().clone(),
+        reply: reply.clone(),
+        playback: Playback::new_stream(stream),
+    }
+}

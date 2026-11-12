@@ -1,9 +1,19 @@
 //! Command-only phone I/O on the existing serial peer owner, independent of RF.
-use super::{dispatcher::PeerWake, outbound::Outbound, session::SerialSession};
+use super::{
+    dispatcher::PeerWake,
+    outbound::Outbound,
+    session::{
+        SerialSession,
+        source::{Decoded, SourceIngress},
+    },
+};
 use crate::{
     Error,
     phone::PrivatePhoneReply,
-    services::{PcmProcessor, PeerInput, PeerIo, SourceCompletion, SourceInput, SourceTimeClock},
+    services::{
+        PcmProcessor, PeerInput, PeerIo, PhoneDigitMode, SourceCompletion, SourceInput,
+        SourceTimeClock,
+    },
 };
 use rpt_advanced_core::{
     audio::{AudioSpan, LinkAudioProducer, LinkAudioQueue, PlaybackOutcome},
@@ -109,6 +119,9 @@ pub(crate) struct PrivatePhoneSession {
     epoch: Option<Instant>,
     source_clock: Option<SourceTimeClock>,
     source_completion: SourceCompletion,
+    digit_mode: PhoneDigitMode,
+    // A 20 ms offer needs at most three 8 ms partitions at either released rate.
+    source: Option<SourceIngress<4>>,
     replies: Consumer<PrivateCommand>,
     digits: Producer<(char, u64)>,
     current: Option<PrivatePhoneReply>,
@@ -134,10 +147,17 @@ impl PrivatePhoneSession {
         {
             return Err(Error::Admission);
         }
+        let digit_mode = io.phone_digit_mode().ok_or(Error::Admission)?;
+        let rate = io.rate();
+        let source = if io.source_media() {
+            Some(SourceIngress::<4>::at_rate(true, rate, rate as usize / 50)?)
+        } else {
+            None
+        };
         let (output, input) = LinkAudioQueue::new(BLOCK, 1)
             .expect("fixed nonzero private block and span capacities")
             .into_endpoints();
-        let outbound = Outbound::new(io.rate(), input)?;
+        let outbound = Outbound::new(rate, input)?;
         let (replies, incoming) = RingBuffer::new(16);
         let (digits, events) = RingBuffer::new(64);
         let wake = PeerWake::default();
@@ -148,7 +168,7 @@ impl PrivatePhoneSession {
             reply: reply.clone(),
             wake: wake.clone(),
             stop: Arc::clone(&stop),
-            rate: io.rate(),
+            rate,
             source_media: io.source_media(),
             media: None,
         };
@@ -161,6 +181,8 @@ impl PrivatePhoneSession {
                 epoch: None,
                 source_clock: None,
                 source_completion: SourceCompletion::Pending,
+                digit_mode,
+                source,
                 replies: incoming,
                 digits,
                 current: None,
@@ -205,16 +227,26 @@ impl PrivatePhoneSession {
         let digits = &mut self.digits;
         let media = &mut self.media;
         let source_end = &mut self.source_end;
+        let source = self.source.as_mut().ok_or(Error::Operation)?;
+        let mode = self.digit_mode;
+        let scratch = &mut self.pcm;
         let mut failure = None;
         let result = self
             .io
             .read_source_at(self.source_completion, reference, |input| {
                 let credit = match input {
                     SourceInput::Digit(digit) => {
-                        // The first received control event retires all retained
-                        // PCM/DSP output without ending this caller's private control.
+                        if mode == PhoneDigitMode::InBand {
+                            return 1;
+                        }
+                        if digits.slots() == 0 {
+                            return 0;
+                        }
                         if let Some(media) = media.as_ref() {
                             media.retire();
+                        }
+                        if digit == '#' {
+                            source.end_command();
                         }
                         return usize::from(digits.push((digit, now_ms)).is_ok());
                     }
@@ -224,27 +256,93 @@ impl PrivatePhoneSession {
                         concealed,
                         birth,
                     } => {
-                        *source_end = (*source_end).max(start + samples.len() as u64);
-                        match media.as_mut() {
-                            Some(media) if concealed => media.gap(start, samples.len()),
-                            Some(media) => media.audio(start, samples, birth),
-                            None => Ok(samples.len()),
+                        if samples.is_empty() {
+                            return 0;
                         }
+                        let count = source.limit(samples.len());
+                        // Reserve the worst-case completions before advancing detection.
+                        if mode == PhoneDigitMode::InBand
+                            && digits.slots() < source.digit_capacity(count)
+                        {
+                            return 0;
+                        }
+                        *source_end = (*source_end).max(start + count as u64);
+                        let current_media = media.as_ref();
+                        let analyzed = source.prepare(
+                            scratch,
+                            Decoded {
+                                start,
+                                pcm: &samples[..count],
+                                concealed,
+                                birth,
+                            },
+                            |digit| {
+                                if mode == PhoneDigitMode::InBand {
+                                    digits
+                                        .push((digit, now_ms))
+                                        .expect("reserved private analysis digit slots");
+                                }
+                            },
+                            || {
+                                if let Some(media) = current_media {
+                                    media.retire();
+                                }
+                            },
+                        );
+                        analyzed.and_then(|()| {
+                            if source.muted() {
+                                if let Some(media) = media.as_ref() {
+                                    media.retire();
+                                }
+                            }
+                            let accepted = match media.as_mut() {
+                                Some(media) if concealed => media.gap(start, count)?,
+                                Some(media) => media.audio(start, &scratch[..count], birth)?,
+                                None => count,
+                            };
+                            source.accepted(accepted)?;
+                            Ok(accepted)
+                        })
                     }
                     SourceInput::Gap { start, count } => {
-                        *source_end = (*source_end).max(start + count as u64);
-                        media
-                            .as_mut()
-                            .map_or(Ok(count), |media| media.gap(start, count))
+                        if mode == PhoneDigitMode::InBand && digits.slots() == 0 {
+                            return 0;
+                        }
+                        source
+                            .discontinuity(|digit| {
+                                if mode == PhoneDigitMode::InBand {
+                                    digits
+                                        .push((digit, now_ms))
+                                        .expect("reserved private loss digit slot");
+                                }
+                            })
+                            .and_then(|()| {
+                                *source_end = (*source_end).max(start + count as u64);
+                                media
+                                    .as_mut()
+                                    .map_or(Ok(count), |media| media.gap(start, count))
+                            })
                     }
                     SourceInput::Discontinuity => {
                         if let Some(media) = media.take() {
                             media.retire();
                         }
-                        // Acknowledged reset may restart the provider coordinate.
-                        // The retired generation cannot be resumed under this floor.
-                        *source_end = 0;
-                        return 1;
+                        if mode == PhoneDigitMode::InBand && digits.slots() == 0 {
+                            return 0;
+                        }
+                        match source.reset(|digit| {
+                            if mode == PhoneDigitMode::InBand {
+                                digits
+                                    .push((digit, now_ms))
+                                    .expect("reserved private reset digit slot");
+                            }
+                        }) {
+                            Ok(()) => {
+                                *source_end = 0;
+                                return 1;
+                            }
+                            Err(error) => Err(error),
+                        }
                     }
                     SourceInput::Text { .. } => return 0,
                 };
@@ -266,6 +364,16 @@ impl PrivatePhoneSession {
             if let Some(media) = self.media.take() {
                 media.retire();
             }
+            if mode == PhoneDigitMode::InBand && digits.slots() == 0 {
+                return Ok(false);
+            }
+            source.discontinuity(|digit| {
+                if mode == PhoneDigitMode::InBand {
+                    digits
+                        .push((digit, now_ms))
+                        .expect("reserved private finish digit slot");
+                }
+            })?;
         }
         let acknowledge =
             result.finish_pending && self.source_completion == SourceCompletion::Pending;
@@ -288,6 +396,9 @@ impl PrivatePhoneSession {
                         break;
                     }
                     Some(PrivateCommand::Media(mut media)) => {
+                        if self.source.as_ref().is_some_and(SourceIngress::muted) {
+                            media.retire();
+                        }
                         media.adopt(
                             self.source_end,
                             self.source_clock
@@ -300,10 +411,10 @@ impl PrivatePhoneSession {
                 }
             }
         }
-        // Both profiles retain one serial provider reader. Full control queues
-        // leave the next source digit unread, preserving exact order.
+        // One serial provider reader. Source callbacks retain native digits or
+        // unanalyzed PCM under backpressure; non-authoritative symbols can drain.
         for _ in 0..64 {
-            if self.digits.slots() == 0 {
+            if !self.io.source_media() && self.digits.slots() == 0 {
                 break;
             }
             let progressed = if self.io.source_media() {
