@@ -1223,3 +1223,18 @@ The original oldest birth, timestamp and immutable retry deadline remain intact;
 padding is excluded from real-source expiry accounting. Waiting incomplete
 history still expires at its original age, while the existing queue consumer
 discards stale queued spans rather than rescheduling them indefinitely.
+
+### Retained codec birth and private sample cadence
+
+A persistent sub-packet codec remainder must not pin later real samples to the
+first span's birth. Conversion retains one source boundary for its existing
+output-end birth mapping. Once a produced packet consumes through that boundary,
+only the next uncommitted encoder sample adopts the mapped birth; the produced
+packet keeps its captured birth, timestamp and immutable deadline. Projection
+is limited to real converted output, so completion silence adds no provenance.
+
+Private prompts advance the existing wake deadline by actual rendered 48 kHz
+sample counts, not by scheduling lateness. The exact next-render deadline joins
+the existing bounded control wake. An unready reader pauses that cadence; its
+next real samples anchor at the actual owner time. No sample birth is advanced
+to hide scheduler delay, and the 200 ms maximum age is unchanged.

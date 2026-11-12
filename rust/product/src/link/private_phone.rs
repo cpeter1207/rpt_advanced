@@ -197,7 +197,9 @@ pub(crate) struct PrivatePhoneSession {
     output: LinkAudioProducer,
     outbound: Outbound,
     source_position: u64,
-    next_audio_ms: u64,
+    // Inactive cadence anchors at the next actual rendered samples.
+    next_audio_ns: u64,
+    audio_cadence_active: bool,
     pcm: [f32; BLOCK],
 }
 impl PrivatePhoneSession {
@@ -268,7 +270,8 @@ impl PrivatePhoneSession {
                 output,
                 outbound,
                 source_position: 0,
-                next_audio_ms: 0,
+                next_audio_ns: 0,
+                audio_cadence_active: false,
                 pcm: [0.0; BLOCK],
             },
             control,
@@ -484,11 +487,14 @@ impl PrivatePhoneSession {
         if self.stop.load(Ordering::Acquire) || self.reply.ended() {
             return Err(Error::Hangup);
         }
+        let now_ns = now_ms.saturating_mul(1_000_000);
         if self.current.is_none() {
             for _ in 0..16 {
                 match self.replies.pop().ok() {
                     Some(PrivateCommand::Reply(reply)) => {
                         self.current = Some(reply);
+                        self.next_audio_ns = 0;
+                        self.audio_cadence_active = false;
                         break;
                     }
                     Some(PrivateCommand::Media(media)) => {
@@ -561,7 +567,7 @@ impl PrivatePhoneSession {
                 media.retire();
             }
         }
-        if now_ms >= self.next_audio_ms && self.outbound.ready_for_input() {
+        if now_ns >= self.next_audio_ns && self.outbound.ready_for_input() {
             if let Some(reply) = &mut self.current {
                 let count = reply.render(false, &mut self.pcm);
                 if count != 0 {
@@ -588,8 +594,23 @@ impl PrivatePhoneSession {
                         },
                         &self.pcm[..count],
                     );
+                    // Advance the planned sample cadence, not this wake's lateness.
+                    // Phase preserves sub-millisecond durations for partial readers.
+                    let phase = self.source_position % 48_000;
+                    let duration_ns = (phase + count as u64) * 1_000_000_000 / 48_000
+                        - phase * 1_000_000_000 / 48_000;
                     self.source_position = self.source_position.wrapping_add(count as u64);
-                    self.next_audio_ms = now_ms.saturating_add(20);
+                    let due = if self.audio_cadence_active {
+                        self.next_audio_ns
+                    } else {
+                        now_ns
+                    };
+                    self.next_audio_ns = due.saturating_add(duration_ns);
+                    self.audio_cadence_active = true;
+                } else {
+                    // An unready producer has no new samples to pace or age.
+                    self.audio_cadence_active = false;
+                    self.next_audio_ns = now_ns.saturating_add(10_000_000);
                 }
                 match reply.outcome() {
                     PlaybackOutcome::Active => {}
@@ -609,16 +630,17 @@ impl PrivatePhoneSession {
             return Err(Error::Hangup);
         }
         let deadline = self.outbound.step(&mut self.io, now_ms)?;
+        let next_audio = (self.current.is_some() && self.outbound.ready_for_input())
+            .then_some(self.next_audio_ns);
         let next = deadline
             .into_iter()
-            .chain(Some(now_ms.saturating_add(10).saturating_mul(1_000_000)))
+            .chain(next_audio)
+            .chain(Some(now_ns.saturating_add(10_000_000)))
             .min()
             .unwrap();
-        let elapsed = self
-            .epoch
-            .map_or(now_ms.saturating_mul(1_000_000), |epoch| {
-                epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
-            });
+        let elapsed = self.epoch.map_or(now_ns, |epoch| {
+            epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+        });
         self.io.set_deadline(next.saturating_sub(elapsed))
     }
 }

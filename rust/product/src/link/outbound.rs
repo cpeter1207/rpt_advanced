@@ -75,6 +75,8 @@ struct Conversion {
     next: u64,
     output_samples: u64,
     born_ns: u64,
+    /// First source position covered by the current output-end birth mapping.
+    mapped_start: u64,
     drained: bool,
 }
 impl Conversion {
@@ -428,6 +430,7 @@ impl Outbound {
                 next: span.source_start,
                 output_samples: 0,
                 born_ns: span.born_ns.expect("validated birth"),
+                mapped_start: span.source_start,
                 drained: false,
             });
         }
@@ -459,6 +462,7 @@ impl Outbound {
         // input span may adopt this span's new clock mapping.
         conversion.born_ns =
             if let Some(span) = input.filter(|span| next_origin >= source_ns(span.source_start)) {
+                conversion.mapped_start = span.source_start;
                 span.born_ns
                     .expect("validated birth")
                     .saturating_add((next_origin - source_ns(span.source_start)) as u64)
@@ -576,10 +580,28 @@ impl Outbound {
         let source_end = result
             .source_start_frames
             .saturating_add(u64::from(result.source_frames));
-        encoder.born_ns = encoder.born_ns.saturating_add(
-            (u128::from(source_end.saturating_sub(encoder.source_end)) * 1_000_000_000
-                / u128::from(self.rate)) as u64,
-        );
+        // This packet retains `born` above. Only its NEXT uncommitted sample
+        // may adopt the newer mapping after consuming through its boundary.
+        // Padding beyond real converter output never establishes provenance.
+        let conversion = self.conversion.as_ref().expect("conversion origin");
+        let next_source_ns =
+            encoder.origin_ns + u128::from(source_end) * 1_000_000_000 / u128::from(self.rate);
+        let converted_end = conversion.source_ns(self.rate);
+        let mapped_birth = if next_source_ns >= source_ns(conversion.mapped_start)
+            && next_source_ns <= converted_end
+        {
+            u64::try_from(converted_end - next_source_ns)
+                .ok()
+                .and_then(|offset| conversion.born_ns.checked_sub(offset))
+        } else {
+            None
+        };
+        encoder.born_ns = mapped_birth.unwrap_or_else(|| {
+            encoder.born_ns.saturating_add(
+                (u128::from(source_end.saturating_sub(encoder.source_end)) * 1_000_000_000
+                    / u128::from(self.rate)) as u64,
+            )
+        });
         encoder.source_end = source_end;
         let anchor = self.anchor.get_or_insert_with(|| Anchor {
             stream,
@@ -727,6 +749,72 @@ mod tests {
         if let Some(hook) = hook {
             hook();
         }
+    }
+
+    #[test]
+    fn retained_g711_remainder_adopts_next_birth_without_renewing_packet() {
+        let (mut io, state) = peer_with_egress(8000, true, true);
+        state.lock().unwrap().encode_unit = Some(160);
+        let (mut writer, reader) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(8000, reader).unwrap();
+        let mut next_birth = 0;
+        for block in 0..80_u64 {
+            let now_ms = block * 23;
+            assert_eq!(
+                writer.write(
+                    AudioSpan {
+                        source_start: block * BLOCK as u64,
+                        born_ns: Some(now_ms * 1_000_000),
+                        ..AudioSpan::default()
+                    },
+                    &[0.25; BLOCK]
+                ),
+                0
+            );
+            if block == 1 {
+                state.lock().unwrap().prepared_result = 1;
+            }
+            outbound.step(&mut io, now_ms).unwrap();
+            if block == 0 {
+                let encoder = outbound.encoder.as_ref().unwrap();
+                assert!(
+                    (1..160).contains(&encoder.input_frames),
+                    "real FIR leaves a codec remainder"
+                );
+                assert_eq!(encoder.source_end, 0);
+            }
+            if block == 1 {
+                assert_eq!(
+                    outbound.pending.as_ref().unwrap().expires,
+                    AGE_NS,
+                    "mixed first packet must retain the first span's original birth"
+                );
+                next_birth = outbound.encoder.as_ref().unwrap().born_ns;
+                state.lock().unwrap().prepared_result = 0;
+                outbound.step(&mut io, now_ms).unwrap();
+            }
+            outbound.step(&mut io, now_ms).unwrap();
+        }
+        assert_eq!(
+            next_birth, 23_000_000,
+            "next packet starts in the second actual source span"
+        );
+        let observation = outbound.statistics.snapshot();
+        assert_eq!(
+            observation.expired_native_samples, 0,
+            "fresh spans must not inherit accumulated scheduling drift"
+        );
+        assert_eq!(observation.accepted, 79);
+        assert!(observation.maximum_queue_age_ns < 50_000_000);
+        let state = state.lock().unwrap();
+        let accepted = &state.prepared[1..]; // Skip the first blocked attempt.
+        assert_eq!(accepted.len(), 79);
+        assert!(accepted.iter().all(|(bytes, _)| bytes.len() == 160));
+        assert!(
+            accepted
+                .windows(2)
+                .all(|pair| pair[1].1 == pair[0].1.wrapping_add(20))
+        );
     }
 
     #[test]

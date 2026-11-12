@@ -2443,3 +2443,110 @@ fn private_queued_only_expired_span_is_consumed_in_one_owner_turn() {
     );
     assert!(state.prepared.is_empty());
 }
+
+#[test]
+fn private_prompt_cadence_uses_rendered_samples_not_late_wake_time() {
+    struct Blocks {
+        frames: usize,
+        remaining: usize,
+    }
+    impl PcmStreamReader for Blocks {
+        fn render(&mut self, output: &mut [f32]) -> PcmRead {
+            let count = self.frames.min(self.remaining);
+            output[..count].fill(0.25);
+            self.remaining -= count;
+            if self.remaining == 0 {
+                PcmRead::FinalSamples(count)
+            } else {
+                PcmRead::Samples(count)
+            }
+        }
+    }
+    for frames in [960, 480] {
+        let (_calls, mut session, mut control, state, _source, reply) = private_session(true, true);
+        control
+            .send(crate::phone::tests::private_prompt(
+                &reply,
+                Box::new(Blocks {
+                    frames,
+                    remaining: frames * 5,
+                }),
+            ))
+            .ok()
+            .unwrap();
+        let duration_ms = frames as u64 / 48;
+        session.step(100).unwrap();
+        assert_eq!(session.source_position, frames as u64);
+        session.step(100 + duration_ms + 3).unwrap();
+        assert_eq!(session.source_position, (frames * 2) as u64);
+        session.step(100 + duration_ms * 2 - 1).unwrap();
+        assert_eq!(session.source_position, (frames * 2) as u64);
+        assert_eq!(
+            state.lock().unwrap().deadlines.last(),
+            Some(&1_000_000),
+            "the exact next sample deadline must beat the control poll"
+        );
+        session.step(100 + duration_ms * 2).unwrap();
+        assert_eq!(
+            session.source_position,
+            (frames * 3) as u64,
+            "lateness must not be added to every following block"
+        );
+        assert!(!reply.ended());
+    }
+}
+
+#[test]
+fn private_next_prompt_anchors_when_prior_packet_releases_credit() {
+    let (_calls, mut session, mut control, state, _source, reply) = private_session(true, true);
+    for frames in [960, 1920] {
+        control
+            .send(crate::phone::tests::private_prompt(
+                &reply,
+                Box::new(Speech::new(frames)),
+            ))
+            .ok()
+            .unwrap();
+    }
+    state.lock().unwrap().prepared_result = 1;
+    session.step(0).unwrap();
+    session.step(10).unwrap();
+    assert_eq!(session.source_position, 960);
+    state.lock().unwrap().prepared_result = 0;
+    session.step(100).unwrap();
+    session.step(100).unwrap();
+    assert_eq!(session.source_position, 1920);
+    session.step(100).unwrap();
+    assert_eq!(
+        session.source_position, 1920,
+        "a queued reply must not catch up time before its first rendered sample"
+    );
+    session.step(120).unwrap();
+    assert_eq!(session.source_position, 2880);
+}
+
+#[test]
+fn private_pending_reader_anchors_cadence_at_first_actual_samples() {
+    let (_calls, mut session, mut control, state, _source, reply) = private_session(true, true);
+    let mut speech = Speech::new(2880);
+    speech.pending = true;
+    control
+        .send(crate::phone::tests::private_prompt(
+            &reply,
+            Box::new(speech),
+        ))
+        .ok()
+        .unwrap();
+    session.step(100).unwrap();
+    assert_eq!(session.source_position, 0);
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&10_000_000));
+    session.step(140).unwrap();
+    assert_eq!(session.source_position, 960);
+    session.step(140).unwrap();
+    assert_eq!(
+        session.source_position, 960,
+        "producer retry time is not the birth of unrendered samples"
+    );
+    session.step(160).unwrap();
+    assert_eq!(session.source_position, 1920);
+}
