@@ -83,12 +83,14 @@ fn parrot_capture_returns_a_clip_buffer_when_the_completion_queue_is_full() {
     completed
         .push(super::CapturedParrot {
             samples: vec![0.25],
+            phone: None,
         })
         .unwrap();
     let (recycled, recycled_consumer) = rtrb::RingBuffer::new(1);
     let mut capture = ParrotCapture {
         active: true,
         recording: true,
+        phone: None,
         current: Some(vec![0.25]),
         free: Vec::new(),
         completed,

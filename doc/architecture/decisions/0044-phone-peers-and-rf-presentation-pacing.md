@@ -543,3 +543,40 @@ publication occurred before committing a reserved listener transaction.
 Rejected preparation preserves existing calls; a post-publication operational
 failure must not be presented as a successful rollback. Account activation,
 shared listener lifecycle and both-host composition remain separate work.
+
+## Timed block rendering and bounded parrot capture — 2026-11-12
+
+Private mixer inputs use a shared timed-block result carrying the original
+real/PLC activity count separately from the conservative oldest receipt bound.
+Ordinary inputs retain their existing block path. Opaque inputs remain unknown.
+The qualified private processor fills PCM and records original metadata once,
+then executes one native block process and one buffering query. It does not
+replace batching with per-sample DSP/FFI calls or scan output PCM for metadata.
+
+For every emitted sample the audited SDK prepared maximum, rather than the
+last output's current delay, bounds the whole block's possible lookback. Before
+new input reuses the existing fixed metadata buckets, a scalar folds retained
+history from block start minus that prepared maximum. The sole fill pass folds
+new source metadata. Missing history, source generation or clock changes, PLC,
+unknown original receipt, invalid counters, zero padding, failed processing,
+or a prepared bound beyond the 500 ms metadata horizon withhold qualification.
+No additional PCM buffer, age vector, native graph or worker is introduced.
+This is a conservative original-age bound, not exact post-DSP provenance or
+end-to-end RF latency qualification.
+
+The existing capture tap includes all active peer inputs, independently of RF
+group selection. During that same render it aggregates private taint and the
+oldest original receipt, including real zero-valued PCM. Unknown or mixed clock
+epochs stay unknown for the whole inseparable clip. Capture and control share
+the existing prepared node retirement domain; adapter refresh must preserve
+that domain's identity. A revision change discards a tainted recording or
+completed clip, while ordinary-only clips survive unrelated retirement. The
+two existing preallocated recording buffers retain only scalar metadata and
+never assign a fresh receipt time.
+
+Phone-tainted replay is currently rejected on control before PCM copying,
+report preparation or playback publication. The existing replay owner has no
+qualified matching host-clock and RF age admission, so retaining the original
+bound alone cannot safely enable it. Legitimate qualified private replay and
+final-RF enforcement remain feature-completion prerequisites. Ordinary replay
+is unchanged. This checkpoint does not enable phone attachment or commands.

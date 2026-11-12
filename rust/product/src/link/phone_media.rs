@@ -5,8 +5,8 @@ use crate::{
     services::{PcmProcessor, ProcessedPeer, SourceBirth, SourceTimeReference},
 };
 use rpt_advanced_core::link::{
-    PeerInput, PeerReply, PeerSignals, PhoneSource, ReceivePolicy, SourceCoordinate,
-    SourceTimeBound, TimedPeerSample,
+    PeerInput, PeerReply, PeerSignals, PhoneSource, ReceivePolicy, RenderedPeerBlock,
+    SourceCoordinate, SourceTimeBound, TimedPeerSample,
 };
 use std::sync::{
     Arc,
@@ -237,17 +237,33 @@ impl PeerInput for TimedInput {
         }
         Some(sample)
     }
-    fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+    fn render_timed_block(&mut self, output: &mut [f32]) -> Option<RenderedPeerBlock> {
         let mut real = 0;
-        for sample in output.iter_mut() {
+        let mut age_bound = None;
+        for (index, sample) in output.iter_mut().enumerate() {
             let Some(value) = self.render_timed_sample() else {
                 output.fill(0.0);
                 return None;
             };
             *sample = value.sample;
-            real += usize::from(value.provenance.is_some_and(|p| p.real));
+            real += usize::from(value.provenance.is_some_and(|provenance| provenance.real));
+            age_bound = if index == 0 {
+                value.age_bound
+            } else {
+                age_bound.zip(value.age_bound).and_then(|(previous, next)| {
+                    (previous.host_clock_epoch != 0
+                        && previous.host_clock_epoch == next.host_clock_epoch)
+                        .then_some(SourceTimeBound {
+                            host_clock_epoch: previous.host_clock_epoch,
+                            not_after_ns: previous.not_after_ns.min(next.not_after_ns),
+                        })
+                })
+            };
         }
-        Some(real)
+        Some(RenderedPeerBlock { real, age_bound })
+    }
+    fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+        self.render_timed_block(output).map(|block| block.real)
     }
     fn render_sample(&mut self) -> Option<f32> {
         let sample = self.render_timed_sample()?;
@@ -307,6 +323,16 @@ impl PeerInput for PhoneMediaInput {
         }
         let sample = self.input.render_timed_sample()?;
         self.active().then_some(sample)
+    }
+    fn render_timed_block(&mut self, output: &mut [f32]) -> Option<RenderedPeerBlock> {
+        if self.active() {
+            let result = self.input.render_timed_block(output);
+            if self.active() {
+                return result;
+            }
+        }
+        output.fill(0.0);
+        None
     }
     fn render(&mut self, output: &mut [f32]) -> Option<usize> {
         if self.active() {

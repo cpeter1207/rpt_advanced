@@ -13,10 +13,13 @@ pub(crate) struct State {
     flags: AtomicU32,
     fault: AtomicU32,
     previous: AtomicU32,
+    calls: AtomicU64,
+    queries: AtomicU64,
 }
 
 unsafe extern "C" fn process(context: *mut c_void, pcm: *mut f32, count: usize) -> i32 {
     let state = unsafe { &*context.cast::<State>() };
+    state.calls.fetch_add(1, Ordering::Relaxed);
     state.accepted.fetch_add(count as u64, Ordering::Relaxed);
     state.delivered.fetch_add(count as u64, Ordering::Relaxed);
     for sample in unsafe { std::slice::from_raw_parts_mut(pcm, count) } {
@@ -32,6 +35,7 @@ unsafe extern "C" fn process(context: *mut c_void, pcm: *mut f32, count: usize) 
 }
 unsafe extern "C" fn query(context: *mut c_void, output: *mut abi::UrpProgrammeBuffering) -> i32 {
     let state = unsafe { &*context.cast::<State>() };
+    state.queries.fetch_add(1, Ordering::Relaxed);
     let output = unsafe { &mut *output };
     output.flags = state.flags.load(Ordering::Relaxed);
     output.prepared_max_delay_frames = state.prepared;
@@ -65,6 +69,7 @@ struct Source {
     epoch: u64,
     known: bool,
     plc: bool,
+    fault_at: Option<(u64, u8)>,
 }
 impl Source {
     fn new(phone: bool) -> Self {
@@ -86,6 +91,7 @@ impl Source {
             epoch: 7,
             known: true,
             plc: false,
+            fault_at: None,
         }
     }
 }
@@ -112,21 +118,25 @@ impl rpt_advanced_core::link::PeerInput for Source {
     }
     fn render_timed_sample(&mut self) -> Option<TimedPeerSample> {
         self.next += 1;
+        let fault = self
+            .fault_at
+            .filter(|(at, _)| *at == self.next)
+            .map(|(_, kind)| kind);
         Some(TimedPeerSample {
             sample: self.next as f32 * 0.25,
-            age_bound: self.known.then_some(SourceTimeBound {
-                host_clock_epoch: self.epoch,
+            age_bound: (self.known && fault != Some(0)).then_some(SourceTimeBound {
+                host_clock_epoch: self.epoch + u64::from(fault == Some(1)),
                 not_after_ns: self.next * 1_000_000,
             }),
             provenance: Some(SampleProvenance {
                 position: Some(SourceCoordinate {
-                    generation: self.generation,
+                    generation: self.generation + u64::from(fault == Some(2)),
                     frame: self.next,
                     fraction_billionths: 0,
                     negative: false,
                 }),
-                real: true,
-                plc: self.plc,
+                real: fault != Some(4),
+                plc: self.plc || matches!(fault, Some(3 | 4)),
                 ..SampleProvenance::default()
             }),
         })
@@ -143,6 +153,8 @@ pub(crate) fn processor_fixture(prepared: u64, delay: u64) -> (Box<State>, PcmPr
         flags: AtomicU32::new(15),
         fault: AtomicU32::new(0),
         previous: AtomicU32::new(0),
+        calls: AtomicU64::new(0),
+        queries: AtomicU64::new(0),
     });
     let processor = PcmProcessor {
         maximum: 960,
@@ -381,4 +393,154 @@ fn prepared_history_audio_paths_allocate_nothing() {
         peer.render_sample();
     });
     assert_eq!(allocations, 0);
+}
+
+#[test]
+fn timed_block_history_batches_dsp_and_keeps_original_activity_and_oldest_age() {
+    for phone in [false, true] {
+        for delay in [0, 1] {
+            let (state, mut peer) = fixture(delay, delay, phone);
+            let mut pcm = [0.0; 4];
+            let first = peer.render_timed_block(&mut pcm).unwrap();
+            assert_eq!(first.real, 4);
+            assert_eq!(peer.input.next, 4, "one input fill, not two renders");
+            assert_eq!(state.calls.load(Ordering::Relaxed), 1);
+            if phone {
+                assert_eq!(
+                    state.queries.load(Ordering::Relaxed),
+                    2,
+                    "prepare plus one block query"
+                );
+                assert_eq!(first.age_bound.is_some(), delay == 0);
+            } else {
+                assert_eq!(first.age_bound, None);
+                assert_eq!(
+                    state.queries.load(Ordering::Relaxed),
+                    0,
+                    "ordinary block path stays unchanged"
+                );
+            }
+            // A changing last-frame delay cannot erase the prepared lookback of
+            // an earlier sample in the same output block.
+            state.delay.store(0, Ordering::Relaxed);
+            let second = peer.render_timed_block(&mut pcm).unwrap();
+            assert_eq!(second.real, 4);
+            assert_eq!(state.calls.load(Ordering::Relaxed), 2);
+            if phone {
+                let bound = second.age_bound.unwrap();
+                assert_eq!(bound.host_clock_epoch, 7);
+                assert!(bound.not_after_ns <= (5 - delay) * 1_000_000);
+            } else {
+                assert_eq!(second.age_bound, None);
+            }
+        }
+    }
+}
+
+#[test]
+fn timed_block_history_keeps_unknown_middle_input_and_epoch_mismatch_sticky() {
+    for fault in 0..=4 {
+        let (_state, mut peer) = fixture(0, 0, true);
+        peer.input.fault_at = Some((2, fault));
+        let block = peer.render_timed_block(&mut [0.0; 4]).unwrap();
+        assert_eq!(
+            block.real,
+            if fault == 4 { 3 } else { 4 },
+            "preserve original real/PLC count"
+        );
+        assert_eq!(
+            block.age_bound, None,
+            "fault {fault} cannot be hidden by a valid last sample"
+        );
+    }
+}
+
+#[test]
+fn timed_block_history_rejects_failed_reset_and_no_output_observations() {
+    for fault in 1..=13 {
+        let (state, mut peer) = fixture(1, 1, true);
+        peer.render_timed_block(&mut [0.0; 4]).unwrap();
+        state.fault.store(fault, Ordering::Relaxed);
+        let mut pcm = [9.0; 4];
+        let block = peer.render_timed_block(&mut pcm);
+        if fault == 7 {
+            assert!(block.is_none());
+            assert_eq!(pcm, [0.0; 4]);
+        } else {
+            assert_eq!(block.unwrap().age_bound, None, "fault {fault}");
+        }
+    }
+    for missing in [1, 2, 4, 8] {
+        let (state, mut peer) = fixture(1, 1, true);
+        peer.render_timed_block(&mut [0.0; 4]).unwrap();
+        state.flags.store(15 & !missing, Ordering::Relaxed);
+        assert_eq!(
+            peer.render_timed_block(&mut [0.0; 4]).unwrap().age_bound,
+            None
+        );
+    }
+    let (state, mut peer) = fixture(1, 1, true);
+    peer.render_timed_block(&mut [0.0; 4]).unwrap();
+    state.accepted.store(0, Ordering::Relaxed);
+    state.delivered.store(0, Ordering::Relaxed);
+    assert_eq!(
+        peer.render_timed_block(&mut [0.0; 4]).unwrap().age_bound,
+        None
+    );
+}
+
+#[test]
+fn timed_block_history_horizon_and_empty_blocks_do_not_invent_age_or_work() {
+    let (state, mut peer) = fixture(48_000, 0, true);
+    let bytes = peer.history.as_ref().unwrap().metadata_bytes();
+    assert!(bytes <= 1024);
+    let queries = state.queries.load(Ordering::Relaxed);
+    let empty = peer.render_timed_block(&mut []).unwrap();
+    assert_eq!(empty.real, 0);
+    assert_eq!(empty.age_bound, None);
+    assert_eq!(state.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(state.queries.load(Ordering::Relaxed), queries);
+    let (_, allocations) = crate::fixture::allocations(|| {
+        for _ in 0..60 {
+            let block = peer.render_timed_block(&mut [0.0; 480]).unwrap();
+            assert_eq!(block.real, 480);
+            assert_eq!(
+                block.age_bound, None,
+                "last-output delay0 cannot qualify a larger whole-block bound"
+            );
+        }
+    });
+    assert_eq!(allocations, 0);
+    assert_eq!(peer.history.as_ref().unwrap().metadata_bytes(), bytes);
+}
+
+#[test]
+fn timed_block_history_rejects_oversize_before_source_or_processor_work() {
+    let (state, mut peer) = fixture(1, 1, true);
+    let mut pcm = [9.0; 961];
+    assert_eq!(peer.render_timed_block(&mut pcm), None);
+    assert_eq!(pcm, [0.0; 961]);
+    assert_eq!(peer.input.next, 0);
+    assert_eq!(state.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(state.queries.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn timed_block_history_wrap_keeps_earlier_bound_before_bucket_reuse() {
+    for prepared in [1, 960, 961, 24_000] {
+        let (_state, mut peer) = fixture(prepared, 0, true);
+        let mut qualified = 0;
+        for _ in 0..80 {
+            let first = peer.input.next;
+            let block = peer.render_timed_block(&mut [0.0; 960]).unwrap();
+            if let Some(bound) = block.age_bound {
+                qualified += 1;
+                assert_eq!(bound.host_clock_epoch, 7);
+                let earliest = (first + 1 - prepared) * 1_000_000;
+                assert!(bound.not_after_ns <= earliest);
+                assert!(earliest - bound.not_after_ns < 960_000_000);
+            }
+        }
+        assert!(qualified > 0);
+    }
 }

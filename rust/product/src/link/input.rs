@@ -1,7 +1,9 @@
 //! Unique product mixer input; each variant retains its existing ring and graph owner.
 use super::{private_phone::media::PhoneMediaInput, ring::InboundConsumer};
 use crate::services::ProcessedPeer;
-use rpt_advanced_core::link::{PeerInput, PeerReply, PeerSignals, ReceivePolicy, TimedPeerSample};
+use rpt_advanced_core::link::{
+    PeerInput, PeerReply, PeerSignals, ReceivePolicy, RenderedPeerBlock, TimedPeerSample,
+};
 
 /// Direct owned variants avoid another allocation or per-sample virtual dispatch.
 /// Private identity, source timing and retirement remain with the original input.
@@ -41,6 +43,12 @@ impl PeerInput for AudioInput {
         match self {
             Self::Peer(input) => input.render_timed_sample(),
             Self::Phone(input) => input.render_timed_sample(),
+        }
+    }
+    fn render_timed_block(&mut self, output: &mut [f32]) -> Option<RenderedPeerBlock> {
+        match self {
+            Self::Peer(input) => input.render_timed_block(output),
+            Self::Phone(input) => input.render_timed_block(output),
         }
     }
     fn signals(&self) -> &PeerSignals {

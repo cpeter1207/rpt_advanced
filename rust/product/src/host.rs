@@ -325,8 +325,9 @@ fn prepared(
             },
         ));
     }
+    let retirement = worker.retirement_domain();
     let (mut audio, dispatcher) =
-        LinkAudio::new_in_domain(audio, MAXIMUM_FRAMES, worker.retirement_domain())
+        LinkAudio::new_in_domain(audio, MAXIMUM_FRAMES, retirement.clone())
             .map_err(|_| RuntimeError::Preparation)?;
     audio = audio.with_text(Box::new(TextMix(text_readers)));
     let regeneration = if settings.dtmf_regeneration.enabled {
@@ -342,6 +343,7 @@ fn prepared(
         .prepare(dispatcher, wakes, regeneration)
         .map_err(|_| RuntimeError::Busy)?;
     Ok(PreparedAdapter {
+        phone_retirement: Some(retirement),
         remote_commands,
         state: audio,
         control: GenerationControl {

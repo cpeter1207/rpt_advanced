@@ -1005,3 +1005,6 @@ pub(super) fn after_validation() {
         }
     });
 }
+
+#[path = "audio_phone_parrot_tests.rs"]
+pub(crate) mod phone_parrot;

@@ -10,6 +10,10 @@ use std::sync::{
 #[derive(Clone, Debug, Default)]
 pub struct RetirementDomain(Arc<AtomicU64>);
 impl RetirementDomain {
+    /// Whether two prepared owners share the same configured-node domain.
+    pub fn same_domain(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
     /// Snapshot only; this is not evidence that a source contributed to RF.
     pub fn revision(&self) -> Option<u64> {
         let revision = self.0.load(Ordering::Acquire);

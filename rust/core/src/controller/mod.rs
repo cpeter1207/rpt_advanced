@@ -23,7 +23,7 @@ use courtesy::CourtesyPlanner;
 pub use courtesy::CourtesySettings;
 pub(crate) use message::MessagePreparation;
 pub use message::{MessageAttemptId, MessageCompletion, MessageRequest};
-pub use parrot::{CapturedParrot, ParrotLevels};
+pub use parrot::{CapturedParrot, ParrotLevels, ParrotPhoneSource};
 use parrot::{ParrotAck, ParrotCapture, ParrotLifecycle, ParrotRequest};
 use std::sync::{
     Arc,
@@ -151,6 +151,7 @@ pub struct NodeController {
     release_pending: bool,
     suppress_release: bool,
     parrot_capture: Option<parrot::ParrotCapture>,
+    phone_retirement: Option<crate::link::RetirementDomain>,
     parrot_lifecycle: ParrotLifecycle,
     parrot_enabled_flag: Arc<AtomicBool>,
     parrot_pending_ack: Option<ParrotAck>,
@@ -301,6 +302,7 @@ impl NodeController {
                 release_pending: false,
                 suppress_release: false,
                 parrot_capture,
+                phone_retirement: None,
                 parrot_lifecycle,
                 parrot_enabled_flag,
                 parrot_pending_ack: None,
@@ -323,9 +325,35 @@ impl NodeController {
 
     /// Feed the already mixed receive tap to the preallocated parrot capture owner.
     pub fn observe_parrot(&mut self, active: bool, samples: &[f32]) {
+        self.observe_parrot_with_phone(active, samples, None);
+    }
+
+    /// Bind both retained-capture owners to the prepared node domain on control.
+    pub fn bind_phone_retirement(
+        &mut self,
+        control: &mut ControllerControl,
+        domain: crate::link::RetirementDomain,
+    ) {
+        self.phone_retirement = Some(domain.clone());
+        control.phone_retirement = Some(domain);
+    }
+
+    pub(crate) fn phone_retirement_matches(&self, domain: &crate::link::RetirementDomain) -> bool {
+        self.phone_retirement
+            .as_ref()
+            .is_some_and(|current| current.same_domain(domain))
+    }
+
+    /// Observe the actual mixed capture contribution without assigning a new receipt time.
+    pub fn observe_parrot_with_phone(
+        &mut self,
+        active: bool,
+        samples: &[f32],
+        phone: Option<ParrotPhoneSource>,
+    ) {
         self.sync_parrot_lifecycle();
         if let Some(capture) = &mut self.parrot_capture {
-            capture.observe(active, samples);
+            capture.observe_with_phone(active, samples, phone, self.phone_retirement.as_ref());
         }
     }
 

@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     audio::{AudioSpan, LinkAudioProducer},
-    controller::{NodeController, ParrotOutput, PeerReplySample},
+    controller::{NodeController, ParrotOutput, ParrotPhoneSource, PeerReplySample},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
@@ -158,6 +158,16 @@ pub struct TimedPeerSample {
     pub provenance: Option<SampleProvenance>,
 }
 
+/// One rendered native block, with original activity independent of DSP sample values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenderedPeerBlock {
+    /// Original real/PLC activity count, with the same meaning as PeerInput::render.
+    pub real: usize,
+    /// Oldest conservative original receipt bound across the complete output block.
+    /// Missing input, mixed clocks or unqualified processing leaves this unknown.
+    pub age_bound: Option<SourceTimeBound>,
+}
+
 /// Unique adapter-owned consumer of one released inbound ring.
 pub trait PeerInput: Send {
     /// Exact private-call token, never a numeric node identity or mailbox grant.
@@ -180,6 +190,14 @@ pub trait PeerInput: Send {
     /// reports failure or absent capability; the default consumes nothing.
     fn render_timed_sample(&mut self) -> Option<TimedPeerSample> {
         None
+    }
+    /// Render once with an optional conservative bound for the whole block.
+    /// Ordinary and opaque inputs retain their existing block path and activity.
+    fn render_timed_block(&mut self, output: &mut [f32]) -> Option<RenderedPeerBlock> {
+        self.render(output).map(|real| RenderedPeerBlock {
+            real,
+            age_bound: None,
+        })
     }
     /// Shared PCM-before-epoch, activity and terminal snapshots.
     fn signals(&self) -> &PeerSignals;
@@ -314,6 +332,7 @@ impl<P: PeerInput> AudioPeer<P> {
 
 /// Fixed prepared peer set retained until its generation is detached and reclaimed.
 pub struct LinkAudio<P: PeerInput> {
+    retirement: RetirementDomain,
     peer_source_active: bool,
     text: Option<Box<dyn LocalTextInput>>,
     text_samples: Vec<f32>,
@@ -613,7 +632,7 @@ impl<P: PeerInput> LinkAudio<P> {
             recycle,
             outbound,
             fences,
-            retirement,
+            retirement: retirement.clone(),
             checked_revision: None,
             private_contributor: false,
             scratch: vec![0.0; maximum],
@@ -623,6 +642,7 @@ impl<P: PeerInput> LinkAudio<P> {
         };
         Ok((
             Self {
+                retirement,
                 peer_source_active: false,
                 text: None,
                 text_samples: vec![0.0; maximum],
@@ -679,6 +699,11 @@ impl<P: PeerInput> LinkAudio<P> {
         if count > self.local.len() {
             return Err(AdmissionError::Invalid);
         }
+        let retirement_revision = controller
+            .phone_retirement_matches(&self.retirement)
+            .then(|| self.retirement.revision())
+            .flatten();
+        let mut capture_phone: Option<ParrotPhoneSource> = None;
         self.local[..count].copy_from_slice(audio);
         self.mix[..count].fill(0.0);
         for peer in &mut self.peers {
@@ -687,6 +712,8 @@ impl<P: PeerInput> LinkAudio<P> {
                 (signal.pcm_epoch(), peer.input.available(), peer.ended())
             };
             let mut render_attempted = false;
+            let mut age_bound = None;
+            let private = peer.phone.is_some();
             let audio_active = match peer.input.finite_playout() {
                 Some(pending) => {
                     // An explicit finite boundary bypasses ordinary startup and
@@ -695,11 +722,19 @@ impl<P: PeerInput> LinkAudio<P> {
                     peer.receive.rendered(None, count);
                     !ended && pending && {
                         render_attempted = true;
-                        peer.input
-                            .render(&mut peer.audio[..count])
-                            .is_some_and(|real| {
-                                real != 0 || peer.input.finite_playout() == Some(true)
-                            })
+                        let rendered = if private {
+                            peer.input
+                                .render_timed_block(&mut peer.audio[..count])
+                                .map(|block| {
+                                    age_bound = block.age_bound;
+                                    block.real
+                                })
+                        } else {
+                            peer.input.render(&mut peer.audio[..count])
+                        };
+                        rendered.is_some_and(|real| {
+                            real != 0 || peer.input.finite_playout() == Some(true)
+                        })
                     }
                 }
                 None => {
@@ -707,8 +742,17 @@ impl<P: PeerInput> LinkAudio<P> {
                         .should_render(pcm_epoch, available, ended, count)
                         && {
                             render_attempted = true;
-                            peer.receive
-                                .rendered(peer.input.render(&mut peer.audio[..count]), count)
+                            let rendered = if private {
+                                peer.input.render_timed_block(&mut peer.audio[..count]).map(
+                                    |block| {
+                                        age_bound = block.age_bound;
+                                        block.real
+                                    },
+                                )
+                            } else {
+                                peer.input.render(&mut peer.audio[..count])
+                            };
+                            peer.receive.rendered(rendered, count)
                         }
                 }
             };
@@ -721,6 +765,19 @@ impl<P: PeerInput> LinkAudio<P> {
             }
             let active = !peer.ended() && (audio_active || peer.input.signals().radio_keyed());
             peer.active = active;
+            // The capture tap includes every active peer, independently of RF group
+            // selection. Classify during the sole source render, never by amplitude.
+            if private && count != 0 && render_attempted && audio_active && active {
+                let source = ParrotPhoneSource {
+                    age_bound,
+                    retirement_revision,
+                };
+                if let Some(retained) = capture_phone.as_mut() {
+                    retained.include(source);
+                } else {
+                    capture_phone = Some(source);
+                }
+            }
         }
         let inputs_idle = !receiving && self.peers.iter().all(|peer| !peer.active);
         for (index, group) in self.groups.iter().enumerate() {
@@ -795,7 +852,13 @@ impl<P: PeerInput> LinkAudio<P> {
         for sample in &mut self.parrot_mix[..count] {
             *sample = sample.clamp(-1.0, 1.0);
         }
-        controller.observe_parrot(receiving || any_peer_active, &self.parrot_mix[..count]);
+        #[cfg(test)]
+        tests::phone_parrot::before_capture();
+        controller.observe_parrot_with_phone(
+            receiving || any_peer_active,
+            &self.parrot_mix[..count],
+            capture_phone,
+        );
         let mut parrot_active = false;
         for sample in &mut self.regeneration_samples[..count] {
             *sample = self

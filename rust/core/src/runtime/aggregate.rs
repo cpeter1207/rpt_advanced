@@ -79,6 +79,8 @@ pub struct RuntimeClock {
 }
 /// Fixed callback bounds and candidate-owned adapter state prepared before publication.
 pub struct PreparedAdapter<A: Send, C: Send = ()> {
+    /// Prepared per-node private retirement domain, retained across adapter refresh.
+    pub phone_retirement: Option<crate::link::RetirementDomain>,
     /// Canonical shared-radio command family, absent when remote control is disabled.
     pub remote_commands: Option<crate::remote_base_command::RemoteCommandConfiguration>,
     /// Unique TX link/ring/encoder state; never clone live consumers into a candidate.
@@ -408,6 +410,13 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .checked_add(1)
             .ok_or(RuntimeError::Preparation)?;
         let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        if !node
+            .control
+            .telemetry
+            .phone_retirement_matches(prepared.phone_retirement.as_ref())
+        {
+            return Err(RuntimeError::Preparation);
+        }
         if node.status(now_ms).retiring.is_some()
             || prepared.receive_maximum != node.bounds.receive_maximum
             || prepared.transmit_maximum != node.bounds.transmit_maximum
@@ -627,20 +636,24 @@ impl<A: Send, C: Send> Runtime<A, C> {
             if links.requires_civil_time() && clock.civil.is_none_or(|(_, second)| second >= 60) {
                 return Err(RuntimeError::Clock);
             }
-            let (controller, telemetry, status, media_session, mut messages) = prepare::controller(
-                &document,
-                &id,
-                &settings,
-                media,
-                generation_id,
-                &catalog,
-                clock.civil.map(|(civil, _)| civil),
-            )?;
+            let (mut controller, mut telemetry, status, media_session, mut messages) =
+                prepare::controller(
+                    &document,
+                    &id,
+                    &settings,
+                    media,
+                    generation_id,
+                    &catalog,
+                    clock.civil.map(|(civil, _)| civil),
+                )?;
             warnings.append(&mut messages.warnings);
             let activity = controller.activity();
             let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting)
                 .map_err(|_| RuntimeError::Preparation)?;
             let prepared = adapter(name, &settings)?;
+            if let Some(domain) = prepared.phone_retirement.as_ref() {
+                controller.bind_phone_retirement(&mut telemetry, domain.clone());
+            }
             let mut remote_commands = prepared.remote_commands.unwrap_or(
                 crate::remote_base_command::RemoteCommandConfiguration {
                     prefix: String::new(),
@@ -968,7 +981,10 @@ impl<A: Send, C: Send> Runtime<A, C> {
             node.control.telemetry.reclaim().for_each(drop);
             if node.control.telemetry.parrot_enabled() {
                 while let Some(clip) = node.control.telemetry.take_parrot_capture() {
-                    if node.control.activity.is_active() {
+                    // Private capture retains original age, but this replay owner has no
+                    // matching host clock or qualified RF admission yet. Reject before
+                    // copying PCM or preparing the report; never assign a fresh birth.
+                    if clip.phone_source().is_some() || node.control.activity.is_active() {
                         node.control.telemetry.recycle_parrot_capture(clip);
                         continue;
                     }

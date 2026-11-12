@@ -461,16 +461,21 @@ fn prepared_phone_media_joins_the_product_mixer_with_an_ordinary_peer() {
     )
     .unwrap();
     // This is the actual fixed product worker type, not a separate test mixer.
+    let domain = rpt_advanced_core::link::RetirementDomain::default();
     let (mut mixer, mut dispatcher): (crate::worker::Audio, _) =
-        LinkAudio::new(vec![phone, public], 480).unwrap();
+        LinkAudio::new_in_domain(vec![phone, public], 480, domain.clone()).unwrap();
     let status = mixer.status();
-    let (mut controller, _) = NodeController::new(
-        ControllerSettings::default(),
+    let (mut controller, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
         vec![],
         vec![],
         CourtesySettings::default(),
     )
     .unwrap();
+    controller.bind_phone_retirement(&mut control, domain);
     let (_, allocations) = crate::fixture::allocations(|| {
         mixer
             .process(
@@ -503,4 +508,45 @@ fn prepared_phone_media_joins_the_product_mixer_with_an_ordinary_peer() {
     assert_eq!(dispatcher.dispatch(1), 1);
     assert_eq!(public_reader.read(&mut pcm), 480);
     assert_eq!(pcm, [0.0; 480]);
+}
+
+#[test]
+fn prepared_phone_media_timed_blocks_keep_real_receipt_without_callback_allocations() {
+    for rate in [8000, 48000] {
+        let (_state, graph) = crate::services::history_tests::processor_fixture(1, 1);
+        let call = reply();
+        let (mut ingress, mut input, shared) = prepare(call.clone(), rate, Some(graph)).unwrap();
+        ingress.adopt(0, reference());
+        let count = rate as usize / 50;
+        let samples = vec![0.25; count];
+        for index in 0..10 {
+            assert_eq!(
+                ingress.audio(index * count as u64, &samples, Some(birth(10))),
+                Ok(count)
+            );
+        }
+        let mut known = None;
+        let (_, allocations) = crate::fixture::allocations(|| {
+            for _ in 0..10 {
+                let block = input.render_timed_block(&mut [0.0; 480]).unwrap();
+                if block.age_bound.is_some() {
+                    known = block.age_bound;
+                    break;
+                }
+            }
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(
+            known,
+            Some(SourceTimeBound {
+                host_clock_epoch: 7,
+                not_after_ns: 10
+            })
+        );
+        shared.retire();
+        let mut pcm = [9.0; 480];
+        assert_eq!(input.render_timed_block(&mut pcm), None);
+        assert_eq!(pcm, [0.0; 480]);
+        assert!(!call.ended());
+    }
 }

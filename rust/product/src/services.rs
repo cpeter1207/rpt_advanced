@@ -281,6 +281,62 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         }
         Some(sample)
     }
+    fn render_timed_block(
+        &mut self,
+        output: &mut [f32],
+    ) -> Option<rpt_advanced_core::link::RenderedPeerBlock> {
+        use rpt_advanced_core::link::RenderedPeerBlock;
+        if self.processor.is_none() {
+            let block = self.input.render_timed_block(output);
+            if block.is_none() || self.input.signals().dtmf_muted() {
+                output.fill(0.0);
+            }
+            return block;
+        }
+        let Some(history) = self.history.as_mut() else {
+            return self.render(output).map(|real| RenderedPeerBlock {
+                real,
+                age_bound: None,
+            });
+        };
+        if output.is_empty() {
+            return Some(RenderedPeerBlock {
+                real: 0,
+                age_bound: None,
+            });
+        }
+        let processor = self
+            .processor
+            .as_mut()
+            .expect("qualified history has a processor");
+        if output.len() > processor.maximum {
+            history.invalidate();
+            output.fill(0.0);
+            return None;
+        }
+        let mut receipt = history.begin_block();
+        let mut real = 0;
+        for sample in output.iter_mut() {
+            let Some(input) = self.input.render_timed_sample() else {
+                history.invalidate();
+                output.fill(0.0);
+                return None;
+            };
+            real += usize::from(input.provenance.is_some_and(|provenance| provenance.real));
+            history.append_block(&mut receipt, input);
+            *sample = input.sample;
+        }
+        if !processor.process(output) {
+            history.invalidate();
+            output.fill(0.0);
+            return None;
+        }
+        let age_bound = history.finish_block(receipt, processor.buffering());
+        if self.input.signals().dtmf_muted() {
+            output.fill(0.0);
+        }
+        Some(RenderedPeerBlock { real, age_bound })
+    }
     fn signals(&self) -> &rpt_advanced_core::link::PeerSignals {
         self.input.signals()
     }

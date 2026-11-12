@@ -1164,6 +1164,7 @@ fn clock() -> RuntimeClock {
 }
 fn adapter(_: &str, _: &ResolvedNodeSettings) -> Result<PreparedAdapter<()>, RuntimeError> {
     Ok(PreparedAdapter {
+        phone_retirement: None,
         remote_commands: None,
         state: (),
         control: (),
@@ -3212,6 +3213,7 @@ fn adapter_dispatcher_is_owned_off_audio_and_requires_explicit_drain_acknowledgm
     let drops = Arc::new(AtomicUsize::new(0));
     let prepare = |_: &str, _: &ResolvedNodeSettings| {
         Ok(PreparedAdapter {
+            phone_retirement: None,
             remote_commands: None,
             state: (),
             control: Dispatcher(drops.clone()),
@@ -3475,6 +3477,7 @@ fn abnormal_runtime_drop_retains_protected_adapter_instead_of_freeing_live_audio
         &Media,
         |_, _| {
             Ok(PreparedAdapter {
+                phone_retirement: None,
                 remote_commands: None,
                 state: Adapter(dropped.clone()),
                 control: (),
@@ -4852,5 +4855,103 @@ fn prepared_reload_does_not_run_commit_hook_after_readiness_or_finalization_fail
             );
         }
         assert!(runtime.stop(0));
+    }
+}
+
+#[test]
+fn phone_parrot_tainted_capture_is_rejected_before_copy_or_report_until_clock_is_qualified() {
+    use crate::{
+        controller::ParrotPhoneSource,
+        link::{RetirementDomain, SourceTimeBound},
+    };
+    for private in [
+        None,
+        Some(None),
+        Some(Some(SourceTimeBound {
+            host_clock_epoch: 7,
+            not_after_ns: 1,
+        })),
+    ] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let domain = RetirementDomain::default();
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+            &CapturingMedia(messages.clone()),
+            |local, settings| {
+                let mut prepared = adapter(local, settings)?;
+                prepared.phone_retirement = Some(domain.clone());
+                Ok(prepared)
+            },
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+        let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+        {
+            let mut callback = receive.acquire_pair(&mut transmit).unwrap();
+            let phone = private.map(|age_bound| ParrotPhoneSource {
+                age_bound,
+                retirement_revision: domain.revision(),
+            });
+            callback
+                .transmit()
+                .controller
+                .observe_parrot_with_phone(true, &[0.5, 0.25], phone);
+            callback.transmit().controller.observe_parrot(false, &[]);
+        }
+        runtime.tick_links(clock());
+        assert_eq!(
+            messages.lock().unwrap().is_empty(),
+            private.is_some(),
+            "known old age must not become a fresh recording, and unknown age cannot qualify"
+        );
+        assert!(runtime.stop(clock().now_ms));
+    }
+}
+
+#[test]
+fn phone_parrot_adapter_refresh_retains_domain_and_rejects_changed_identity() {
+    use crate::link::RetirementDomain;
+    for initial in [None, Some(RetirementDomain::default())] {
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse("[1000]\n").unwrap(),
+            &Media,
+            |local, settings| {
+                let mut prepared = adapter(local, settings)?;
+                prepared.phone_retirement = initial.clone();
+                Ok(prepared)
+            },
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+        let settings = runtime.settings("1000").unwrap().clone();
+        for changed in [None, Some(RetirementDomain::default())] {
+            if initial.is_none() && changed.is_none() {
+                continue;
+            }
+            let mut prepared = adapter("1000", &settings).unwrap();
+            prepared.phone_retirement = changed;
+            assert_eq!(
+                runtime.replace_adapter("1000", prepared, 1001),
+                Err(RuntimeError::Preparation)
+            );
+        }
+        let mut prepared = adapter("1000", &settings).unwrap();
+        prepared.phone_retirement = initial.clone();
+        assert_eq!(runtime.replace_adapter("1000", prepared, 1002), Ok(2));
+        if let Some(domain) = initial.as_ref() {
+            let (mut receive, mut transmit) =
+                runtime.node("1000").unwrap().register_audio().unwrap();
+            assert!(
+                receive
+                    .acquire_pair(&mut transmit)
+                    .unwrap()
+                    .transmit()
+                    .controller
+                    .phone_retirement_matches(domain)
+            );
+        }
+        assert!(runtime.stop(1003));
     }
 }

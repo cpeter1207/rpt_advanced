@@ -358,6 +358,7 @@ pub struct ControllerControl {
     settings: MorseSettings,
     outstanding: usize,
     pub(super) parrot: Option<ParrotCaptureControl>,
+    pub(super) phone_retirement: Option<crate::link::RetirementDomain>,
     parrot_pending: Producer<PreparedMedia>,
     parrot_completed: Consumer<PreparedMedia>,
     parrot_busy: Arc<AtomicBool>,
@@ -478,7 +479,28 @@ impl ControllerControl {
 
     /// Take a completed parrot burst without entering the callback owner.
     pub fn take_parrot_capture(&mut self) -> Option<CapturedParrot> {
-        self.parrot.as_mut()?.take_completed()
+        let capture = self.parrot.as_mut()?;
+        let clip = capture.take_completed()?;
+        if clip
+            .phone_source()
+            .is_some_and(|source| !source.current(self.phone_retirement.as_ref()))
+        {
+            capture.recycle(clip);
+            None
+        } else {
+            Some(clip)
+        }
+    }
+
+    pub(crate) fn phone_retirement_matches(
+        &self,
+        domain: Option<&crate::link::RetirementDomain>,
+    ) -> bool {
+        match (self.phone_retirement.as_ref(), domain) {
+            (None, None) => true,
+            (Some(current), Some(next)) => current.same_domain(next),
+            _ => false,
+        }
     }
 
     /// Recycle a capture slot after control/media has finished with its samples.
@@ -705,6 +727,7 @@ impl TelemetryPlanner {
                 settings,
                 outstanding: 0,
                 parrot: None,
+                phone_retirement: None,
                 parrot_pending,
                 parrot_completed: parrot_reclaimer,
                 parrot_busy,
