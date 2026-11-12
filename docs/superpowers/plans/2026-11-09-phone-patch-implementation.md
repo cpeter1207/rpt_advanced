@@ -203,8 +203,9 @@ Operations preserve actual ingress and generation through dispatch and replies.
 
 ### Task 4: Native SIP/IAX provider sessions
 
-**Files:** add a focused phone transport module in `rust/standalone`; extend the
-existing released IAX provider for general account/registration only where needed;
+**Files:** keep the owned parser and shared provider prerequisites in
+`rust/peer-support`, with host composition in the existing standalone/Asterisk
+boundaries; extend the existing released IAX provider for general account/registration only where needed;
 reuse product codec, jitter, async-owner and egress interfaces; dependency manifests,
 test-only provider fixtures and transport ADR.
 
@@ -212,11 +213,11 @@ test-only provider fixtures and transport ADR.
 canonical source PCM to Task 3. Existing per-call ingress/egress own packet
 order, jitter, codec state, prepared packets and bounded deadlines.
 
-- [x] Resolve and build a disposable native dependency probe before selection:
-  candidate `rsipstack 0.8.2` signaling plus `sdp/rtp/rtcp/webrtc-srtp 0.17.3`
-  leaf crates. Inspect actual licenses/MSRV/transitives; preserve Rust 1.85 claims
-  until the graph proves them. Choose a supported compatible graph or a separately
-  verified toolchain/image prerequisite, never an untested manifest assumption.
+- [x] Historical only: resolve and build the disposable native dependency probe
+  for the former `rsipstack 0.8.2` signaling candidate and media leaf crates.
+  Preserve its recorded compatibility evidence below, not candidate selection or
+  production readiness. The current choice is owned in-house SIP signaling,
+  beginning with the bounded parser prerequisite; vendor repairs are out of scope.
 
   Historical probe: `rsipstack 0.8.2`, `sdp 0.8.0`, `rtp/rtcp 0.13.0`,
   `webrtc-srtp 0.15.0` and `webrtc-util 0.11.0` compiled in the earlier

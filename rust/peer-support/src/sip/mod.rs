@@ -36,13 +36,13 @@ pub enum ParseError {
     Incomplete,
     /// A datagram ended before its declared or syntactic boundary.
     Truncated,
-    /// Invalid start-line, field name, or line termination.
+    /// Invalid syntax in the interpreted message, field, or URI.
     Syntax,
     /// A fixed admission bound would be exceeded.
     Limit,
-    /// More than one singleton field is present, including compact aliases.
+    /// Repeated singleton fields, compact aliases, or parameter names.
     Duplicate,
-    /// A decimal length is absent, signed, malformed, or overflowing.
+    /// A decimal value is absent, signed, malformed, or overflowing.
     InvalidLength,
     /// Stream framing requires a Content-Length field.
     MissingLength,
@@ -286,12 +286,7 @@ impl Parser {
             self.status = (code[0] - b'0') as u16 * 100
                 + (code[1] - b'0') as u16 * 10
                 + (code[2] - b'0') as u16;
-            if line[second + 1..]
-                .iter()
-                .any(|b| *b < b' ' && *b != b'\t' || *b == 0x7f)
-            {
-                return Err(ParseError::Syntax);
-            }
+            reason_phrase(&line[second + 1..])?;
         } else if first == 0
             || !line[..first].iter().copied().all(token)
             || second == first + 1
@@ -394,6 +389,37 @@ fn decimal(value: impl Iterator<Item = u8>, maximum: usize) -> Result<usize, Par
     Ok(result)
 }
 
+// RFC 3261 section 25 defines an octet grammar, not a decoded Unicode string.
+// In particular UTF8-CONT alone and RFC 2279's historical widths are admitted.
+// Preserve these display-only bytes; never interpret them as routing data.
+fn reason_phrase(mut value: &[u8]) -> Result<(), ParseError> {
+    while let Some(&byte) = value.first() {
+        let count = match byte {
+            b'%' => {
+                if value.len() < 3 || !value[1..3].iter().all(u8::is_ascii_hexdigit) {
+                    return Err(ParseError::Syntax);
+                }
+                3
+            }
+            0x80..=0xbf => 1,
+            0xc0..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf7 => 4,
+            0xf8..=0xfb => 5,
+            0xfc..=0xfd => 6,
+            _ if byte.is_ascii_alphanumeric() || b"-_.!~*'();/?:@&=+$, \t".contains(&byte) => 1,
+            _ => return Err(ParseError::Syntax),
+        };
+        if byte >= 0xc0
+            && (value.len() < count || !value[1..count].iter().all(|b| (0x80..=0xbf).contains(b)))
+        {
+            return Err(ParseError::Syntax);
+        }
+        value = &value[count..];
+    }
+    Ok(())
+}
+
 /// Incremental single-frame TCP owner, borrowing one admitted buffer generation.
 ///
 /// `push` consumes only through this message, leaving pipeline bytes to the
@@ -460,6 +486,9 @@ impl<'a> TcpDecoder<'a> {
                 }
                 self.line_start = self.used;
             }
+        }
+        if self.expected.is_none() && self.used == MAX_HEADERS {
+            return Err(ParseError::Limit);
         }
         if let Some(expected) = self.expected {
             let count = (expected - self.used).min(bytes.len() - taken);

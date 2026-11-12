@@ -309,8 +309,8 @@ call lifecycle are separate pending integration work. The existing product DTMF
 provider remains the in-band detection owner. This boundary does not imply a
 secure media session, a usable account or a completed Task 4.
 
-The selected signaling candidate `rsipstack 0.8.2` and latest published `0.8.4`
-retain unbounded transport, transaction, incoming-call and state queues. A capped
+The former signaling candidate `rsipstack 0.8.2` and the `0.8.4` version
+inspected during that historical probe retain unbounded transport, transaction, incoming-call and state queues. A capped
 outer socket does not bound the per-transaction queues. Production SIP activation
 therefore requires a qualified bounded admission/control contract; timer,
 cancellation and teardown must progress even under packet saturation. No
@@ -1052,15 +1052,20 @@ The selected limits are 32 KiB wire, 16 KiB start-line/headers, 16 KiB body,
 unfolding scratch together target at most 8 KiB, excluding admitted wire bytes;
 allocation/layout tests prove the explicit workspace target on native amd64:
 8-byte entries, 1096-byte parser, 1144-byte TCP decoder, 4096-byte scratch,
-48-byte message view and 96-byte URI view (5384 bytes together on the TCP path,
+48-byte message view, 96-byte URI view, 32-byte header view, 24-byte value
+iterator and 48-byte name-address view (5488 bytes together on the TCP path,
 excluding wire storage and compiler call-stack frames). Instrumented allocation
-checks observe zero allocations across valid and mutated wire inputs. These are
+checks observe zero allocations across 32 RFC 4475 wsinv datagram/bytewise-TCP
+cycles, 8008 single-byte mutations, four additional RFC fixtures, two reviewed
+header regressions and six URI cases. These are
 implementation bounds, not universal SIP limits or a process-RSS measurement. RFC 3261 framing/grammar, RFC 5954 IPv6 and RFC 8217
 name-address rules apply; RFC 4475/5118 provide independent torture inputs.
 Valid SIPS syntax remains distinct from unsupported secure routing, which must
 fail closed. URI headers never supply arbitrary request headers or authority.
 
-Third-party signaling candidates remain unselected: rsipstack retains unbounded
+Owned in-house SIP signaling is the current choice under the owner's no-vendor-
+repairs direction, starting with this parser prerequisite. Third-party signaling
+candidates remain unselected: rsipstack retains unbounded
 queues/state, RVoIP conflicts with runtime/resolver/toolchain ownership, and
 unmodified oSIP 5.3.1/5.3.2 loses allocations on parser list-insertion failure.
 The owner excluded vendor repairs. No native parser/global allocator hook,

@@ -9,6 +9,7 @@ not instructions. RFC 4475/5118 are informational tests, not normative grammar.
 | Fixture | Source section and original label | Expected scope |
 | --- | --- | --- |
 | rfc4475-wsinv.sip | RFC 4475 3.1.1.1, wsinv | Valid folded fields, aliases, unusual unknown value, ordered Via values, exact 150-byte body |
+| rfc4475-unreason.sip | RFC 4475 3.1.1.12, unreason | Expanded allOneLine/hex notation; valid non-ASCII reason and exact 154-byte body |
 | rfc4475-lwsdisp.sip | RFC 4475 3.1.1.6, lwsdisp | Accept display token immediately before `<` per RFC 3261 20.10 prose and torture guidance |
 | rfc5118-ipv6-good.sip | RFC 5118 4.1, ipv6-good | Valid bracketed IPv6 request URI |
 | rfc5118-ipv6-bad.sip | RFC 5118 4.2, ipv6-bad | Framing succeeds, typed URI rejects missing IPv6 brackets |
@@ -56,3 +57,23 @@ Published-text SHA-256 identities:
 - RFC5118: 56a76623496c2b834646b39a89c30aa8d1922fdc9e6a9e463e118a636ae1e55e
 - RFC5954: aef25c159111f744004b416a974fd5ec1cd3218cf2af7a4d8cd0112844a063a4
 - RFC8217: e02fed2a0546a50d18564eccfa6d6f5627c38814aca59983ebf028d50201dbc4
+
+Reason-Phrase follows section 25 byte productions, including its explicit
+UTF8-CONT alternative and historical RFC 2279 widths. The view preserves bytes
+without decoding, comparing or granting authority from the human reason text.
+
+### Review-specific interpretation
+
+RFC 3261 section 7.3.1 forbids repeated header parameter names. Header token
+names compare case-insensitively without URI percent decoding. Section 19.1.4
+separately makes non-reserved URI bytes equivalent to their percent encoding;
+encoded `transport` names must receive the same supported-profile check, while
+reserved `/` and `%2f` remain distinct. This is component matching, not a claim
+to implement complete SIP URI equality.
+
+Section 25 explicitly excludes CR and LF from quoted-pair, including inside
+generic parameter values and comments. Raw field quoting must be checked before
+normalization, because unfolding otherwise erases that distinction. `unfold`
+is normalization only; `Header::name_addr` and checked `Header::values` are the
+wire-to-typed entry paths. Odd/even backslashes before a fold are independent
+literal regression cases. No erratum overrides these rules.

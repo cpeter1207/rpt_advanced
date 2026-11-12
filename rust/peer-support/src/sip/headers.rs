@@ -46,8 +46,10 @@ impl Header<'_> {
 
     /// Unfold into reusable caller storage and remove boundary SWS.
     ///
-    /// Parsing already validated the bound. Bytes including quoted-pair NUL
-    /// and percent escapes remain uninterpreted; no global UTF-8 conversion.
+    /// Normalization only: framing validated the size, not field-specific
+    /// quoted-pair syntax. For wire addresses use `name_addr`, or `values`
+    /// before `NameAddr::parse`, so illegal escaped folds are not hidden.
+    /// Bytes and percent escapes remain uninterpreted; no UTF-8 conversion.
     pub fn unfold<'s>(&self, scratch: &'s mut [u8; MAX_FIELD]) -> &'s [u8] {
         let mut count = 0;
         for byte in unfolded(self.value) {
@@ -55,6 +57,17 @@ impl Header<'_> {
             count += 1;
         }
         trim(&scratch[..count])
+    }
+
+    /// Validate a single wire address before unfolding into reusable storage.
+    /// This preserves the distinction between a legal fold and an illegal
+    /// escaped CRLF inside display names or quoted generic parameters.
+    pub fn name_addr<'s>(
+        &self,
+        scratch: &'s mut [u8; MAX_FIELD],
+    ) -> Result<NameAddr<'s>, ParseError> {
+        value_end(self.value, false, false)?;
+        NameAddr::parse(self.unfold(scratch))
     }
 
     /// Iterate grammar-defined list values, never arbitrary comma-delimited text.
@@ -88,11 +101,21 @@ impl Header<'_> {
         let comments = [b"Server".as_slice(), b"User-Agent", b"Retry-After"]
             .iter()
             .any(|name| self.is(name));
+        let words = self.is(b"In-Reply-To");
+        let address = [b"From".as_slice(), b"To", b"Reply-To"]
+            .iter()
+            .any(|name| self.is(name));
+        // Validate raw quoted pairs before folding can turn escaped CRLF into
+        // escaped SP. Opaque fields and Call-ID words do not use this grammar.
+        let invalid = !words
+            && (list || comments || address)
+            && value_end(self.value, false, comments).is_err();
         Values {
             remaining: self.unfold(scratch),
             list,
             comments,
-            words: self.is(b"In-Reply-To"),
+            words,
+            invalid,
         }
     }
 }
@@ -171,12 +194,18 @@ pub struct Values<'a> {
     list: bool,
     comments: bool,
     words: bool,
+    invalid: bool,
 }
 
 impl<'a> Iterator for Values<'a> {
     type Item = Result<&'a [u8], ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.invalid {
+            self.invalid = false;
+            self.remaining = &[];
+            return Some(Err(ParseError::Syntax));
+        }
         let input = self.remaining;
         if input.is_empty() {
             return None;
@@ -223,6 +252,11 @@ fn value_end(input: &[u8], list: bool, comments: bool) -> Result<usize, ParseErr
             escaped = false;
             continue;
         }
+        // Both callers provide framed fields. A raw CRLF is therefore a
+        // legal fold, but never legal immediately after a quoted backslash.
+        if matches!(byte, b'\r' | b'\n') {
+            continue;
+        }
         if byte < 0x20 && byte != b'\t' || byte == 0x7f {
             return Err(ParseError::Syntax);
         }
@@ -247,7 +281,8 @@ fn value_end(input: &[u8], list: bool, comments: bool) -> Result<usize, ParseErr
             }
         }
     }
-    if quote || escaped || depth != 0 || angle {
+    // An outstanding escape always belongs to an open quote or comment.
+    if quote || depth != 0 || angle {
         return Err(ParseError::Syntax);
     }
     Ok(input.len())
@@ -263,6 +298,8 @@ pub struct NameAddr<'a> {
 
 impl<'a> NameAddr<'a> {
     /// Parse one already-unfolded value, not a comma-separated address list.
+    /// Wire callers must first validate raw quoting through `Header::name_addr`
+    /// or `Header::values`; normalization alone cannot preserve illegal folds.
     pub fn parse(value: &'a [u8]) -> Result<Self, ParseError> {
         if value.len() > MAX_FIELD {
             return Err(ParseError::Limit);
@@ -351,6 +388,7 @@ fn quoted_end(value: &[u8]) -> Result<usize, ParseError> {
 }
 
 fn validate_parameters(mut value: &[u8]) -> Result<(), ParseError> {
+    let original = value;
     while !value.is_empty() {
         if value[0] != b';' {
             return Err(ParseError::Syntax);
@@ -380,5 +418,40 @@ fn validate_parameters(mut value: &[u8]) -> Result<(), ParseError> {
             value = trim(&value[count..]);
         }
     }
+    // RFC 3261 section 7.3.1 forbids repeated header-parameter names.
+    // Token names are case-insensitive, without URI percent decoding.
+    for (index, name) in parameter_names(original).enumerate() {
+        if parameter_names(original)
+            .take(index)
+            .any(|prior| prior.eq_ignore_ascii_case(name))
+        {
+            return Err(ParseError::Duplicate);
+        }
+    }
     Ok(())
+}
+
+// Walk already-validated parameters, ignoring semicolons inside quoted values.
+// The repeated comparison is bounded by MAX_FIELD and needs no name collection.
+fn parameter_names(mut value: &[u8]) -> impl Iterator<Item = &[u8]> {
+    std::iter::from_fn(move || {
+        let mut quote = false;
+        let mut escaped = false;
+        for (at, &byte) in value.iter().enumerate() {
+            if escaped {
+                escaped = false;
+            } else if quote && byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quote = !quote;
+            } else if byte == b';' && !quote {
+                value = trim(&value[at + 1..]);
+                let count = value.iter().take_while(|b| token(**b)).count();
+                let name = &value[..count];
+                value = &value[count..];
+                return Some(name);
+            }
+        }
+        None
+    })
 }

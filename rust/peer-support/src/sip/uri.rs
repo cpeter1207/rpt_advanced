@@ -147,7 +147,8 @@ impl<'a> SipUri<'a> {
         self.headers
     }
 
-    /// Find a unique parameter, matching escaped name bytes case-insensitively.
+    /// Find a unique parameter case-insensitively, equating percent escapes
+    /// only for non-reserved bytes as specified by RFC 3261 section 19.1.4.
     /// Outer `None` means absent; inner `None` means a valueless flag.
     pub fn parameter(&self, name: &[u8]) -> Option<Option<&'a [u8]>> {
         parameters(self.parameters)
@@ -316,8 +317,13 @@ fn equivalent(first: &[u8], second: &[u8]) -> bool {
             if byte == b'%' && value.len() >= 3 {
                 let hex = |byte: u8| (byte as char).to_digit(16);
                 if let (Some(high), Some(low)) = (hex(value[1]), hex(value[2])) {
-                    byte = (high * 16 + low) as u8;
-                    value = &value[2..];
+                    let decoded = (high * 16 + low) as u8;
+                    // RFC 2396's reserved set is explicitly excluded from
+                    // percent equivalence by RFC 3261 section 19.1.4.
+                    if !b";/?:@&=+$,".contains(&decoded) {
+                        byte = decoded;
+                        value = &value[2..];
+                    }
                 }
             }
             value = &value[1..];

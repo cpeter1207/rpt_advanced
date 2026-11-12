@@ -32,27 +32,48 @@ SIP/SIPS URI syntax is separate from `require_cleartext_routing`: valid SIPS par
 
 Files: `rust/peer-support/src/sip/mod.rs`, `tests/sip.rs`, shared leaf module declaration.
 
-- [ ] Add literal UDP/TCP length, binary body, leading CRLF, compact name, invalid line, duplicate length and size/count tests; run and observe the missing implementation fail.
-- [ ] Implement fixed span index, message views, checked length and bounded incremental decoder; run targeted tests until green.
-- [ ] Add fragmentation and decoder-reset regressions plus index/workspace layout assertions; verify and make one coherent local recovery commit.
+- [x] Add literal UDP/TCP length, binary body, leading CRLF, compact name, invalid line, duplicate length and size/count tests; run and observe the missing implementation fail.
+- [x] Implement fixed span index, message views, checked length and bounded incremental decoder; run targeted tests until green.
+- [x] Add fragmentation and decoder-reset regressions plus index/workspace layout assertions; verify and make one coherent local recovery commit.
 
 ### 2. Parse header syntax without generic comma splitting
 
 Files: `sip/headers.rs`, `tests/sip_headers.rs` and authoritative RFC fixtures.
 
-- [ ] Write and observe failing tests for case/compact aliases, folded quoted fields, escaped/control bytes, repeated list order, comments/name-addresses and authentication commas.
-- [ ] Implement bounded unfolding and field-aware list/name-address accessors. Add typed accessors only required by this profile.
-- [ ] Run targeted checks and commit the verified prerequisite.
+- [x] Write and observe failing tests for case/compact aliases, folded quoted fields, escaped/control bytes, repeated list order, comments/name-addresses and authentication commas.
+- [x] Implement bounded unfolding and field-aware list/name-address accessors. Add typed accessors only required by this profile.
+- [x] Run targeted checks and commit the verified prerequisite.
 
 ### 3. Parse SIP URI syntax and qualify supported routing
 
 Files: `sip/uri.rs`, `tests/sip_uri.rs`, fixture provenance and ADR/selection updates.
 
-- [ ] Write and observe failing RFC 3261/5954/8217 cases and independent RFC 4475/5118 fixtures, with invalid escapes, host/port/parameter/header and secure-route cases.
-- [ ] Implement borrowed component views, separate profile rejection, and no URL-parser shortcut.
-- [ ] Verify zero allocation across framing/header/URI paths with a test-only counting allocator, boundary matrices, formatting, Clippy/Rustdoc and the affected crate suite.
-- [ ] Request fresh independent review, address findings test-first, commit evidence and report remaining full-gate/provider acceptance separately.
+- [x] Write and observe failing RFC 3261/5954/8217 cases and independent RFC 4475/5118 fixtures, with invalid escapes, host/port/parameter/header and secure-route cases.
+- [x] Implement borrowed component views, separate profile rejection, and no URL-parser shortcut.
+- [x] Verify zero allocation across framing/header/URI paths with a test-only counting allocator, boundary matrices, formatting, Clippy/Rustdoc and the affected crate suite.
+- [ ] Finish fresh independent review and targeted branch coverage, commit remaining evidence and report full-gate/provider acceptance separately.
 
 ## Validation constraints
 
 All builds/tests use the freshly pulled maintained Debian 13 image and labeled launcher with `RPTADV_CONTAINER_PROFILE=constrained` after the lead grants the sole server slot. One CPU, 1536 MiB, no extra swap, 256 PIDs, serial execution and a bounded deadline. No host build, deployment, live account/DNS/call/RF test or toolchain upgrade. Full native gates remain required before merge; targeted green does not claim that gate.
+
+## Verified recovery checkpoint, 2026-11-12
+
+After observed RED regressions, raw escaped-CRLF is rejected before unfolding,
+including generic parameter quotes and comments. `Header::name_addr` supplies a
+checked wire-to-address path; `unfold` remains explicitly normalization-only.
+Header parameter duplicates compare case-insensitively without URI decoding.
+URI matching applies section 19.1.4's reserved-byte exception, and encoded
+transport names cannot bypass the separate supported-profile check. Response
+Reason-Phrase validates section 25's octet grammar without Unicode/percent
+decoding. Full header capacity without a terminator fails immediately.
+
+Scoped formatting, Clippy/Rustdoc with warnings denied, and all 86 peer-support
+crate tests passed in the constrained native amd64 container. The five SIP
+checks comprise 13 framing, 14 header, 10 URI, one allocation and one index-layout
+test (the latter among nine crate unit tests). The expanded allocation guard
+observed zero allocations; explicit decoder, scratch and all exposed view sizes
+total 5488 bytes, with the 32768-byte wire buffer separate. This is not a compiler
+stack-peak or process-RSS measurement. Full native gates, targeted branch
+coverage and final independent review remain outstanding; no SIP provider is
+activated and Task 4's signaling/session acceptance remains open.

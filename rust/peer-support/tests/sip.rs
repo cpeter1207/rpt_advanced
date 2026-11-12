@@ -266,3 +266,61 @@ fn folded_lengths_require_one_decimal_and_stream_errors_are_sticky() {
     let mut decoder = TcpDecoder::new(&mut storage);
     assert_eq!(decoder.push(&[b'x'; 16_385]), Err(ParseError::Limit));
 }
+
+#[test]
+fn full_header_capacity_without_terminator_fails_without_waiting_for_another_byte() {
+    let mut storage = [0; MAX_MESSAGE];
+    let mut decoder = TcpDecoder::new(&mut storage);
+    assert_eq!(decoder.push(&[b'x'; 16_384]), Err(ParseError::Limit));
+    assert!(decoder.message().is_none());
+}
+
+#[test]
+fn reason_phrase_follows_rfc_byte_grammar_without_percent_decoding() {
+    use rptadv_peer_support::sip::StartLine;
+    let mut parser = Parser::default();
+    let message = parser
+        .parse(
+            include_bytes!("fixtures/sip/rfc4475-unreason.sip"),
+            Transport::Udp,
+        )
+        .unwrap();
+    assert_eq!(message.body().len(), 154);
+    assert!(
+        matches!(message.start_line(),StartLine::Response{status:200,reason} if reason.starts_with(b"= 2**3 * 5**2 \xd0\xbd\xd0\xbe"))
+    );
+    for invalid in [
+        b"%ZZ".as_slice(),
+        b"%",
+        b"%0",
+        b"\xff",
+        b"\xc2x",
+        b"\"quote\"",
+        b"\x7f",
+    ] {
+        let mut wire = b"SIP/2.0 200 ".to_vec();
+        wire.extend_from_slice(invalid);
+        wire.extend_from_slice(b"\r\nl:0\r\n\r\n");
+        assert_eq!(
+            parser.parse(&wire, Transport::Udp).err(),
+            Some(ParseError::Syntax)
+        );
+    }
+    // Literal section-25 UTF8-CONT and RFC2279 widths are preserved as bytes,
+    // not decoded to Unicode strings or used for any routing/security decision.
+    for valid in [
+        b"%20\t".as_slice(),
+        b"\x80",
+        b"\xc2\xa9",
+        b"\xe0\xa0\x80",
+        b"\xf0\x90\x80\x80",
+        b"\xf8\x88\x80\x80\x80",
+        b"\xfc\x84\x80\x80\x80\x80",
+    ] {
+        let mut wire = b"SIP/2.0 200 ".to_vec();
+        wire.extend_from_slice(valid);
+        wire.extend_from_slice(b"\r\nl:0\r\n\r\n");
+        let message = parser.parse(&wire, Transport::Udp).unwrap();
+        assert!(matches!(message.start_line(),StartLine::Response{reason,..} if reason==valid));
+    }
+}

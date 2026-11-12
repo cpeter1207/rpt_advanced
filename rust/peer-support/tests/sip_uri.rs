@@ -203,3 +203,74 @@ fn percent_equivalent_transport_values_do_not_change_profile_meaning() {
         matches!(SipUri::parse(b"sip:192.168.001.001").unwrap().host(), Host::Ipv4(ip) if ip.octets() == [192,168,1,1])
     );
 }
+
+#[test]
+fn host_numeric_and_parameter_lookup_boundaries_use_real_wire_values() {
+    for value in [
+        b"sip:1.2.3".as_slice(),
+        b"sip:1.2.3.4.5",
+        b"sip:1234.2.3.4",
+        b"sip:[\xff]",
+        b"sip:[::1]junk",
+        b"sip:a;maddr",
+        b"sip:a;ttl",
+        b"sip:a;p=%GG",
+        b"sip:a:p",
+        b"sip:a%01:b%q0@c",
+        b"sip:a:p;bad@c",
+    ] {
+        assert!(SipUri::parse(value).is_err());
+    }
+    let uri = SipUri::parse(b"SIP:a:@b.;p=%25;lr").unwrap();
+    assert_eq!(uri.password(), Some(b"".as_slice()));
+    assert_eq!(uri.port(), None);
+    for missing in [b"%".as_slice(), b"%q0", b"%0q", b"%70x"] {
+        assert_eq!(uri.parameter(missing), None);
+    }
+    // Known transport's other-transport alternative is token, where literal '%'
+    // is legal. Unknown transports stay unsupported by the cleartext profile.
+    assert_eq!(
+        SipUri::parse(b"sip:a;transport=%")
+            .unwrap()
+            .require_cleartext_routing(),
+        Err(RouteError::Transport)
+    );
+    assert_eq!(
+        SipUri::parse(b"sip:a;transport=%ZZ")
+            .unwrap()
+            .require_cleartext_routing(),
+        Err(RouteError::Transport)
+    );
+}
+
+#[test]
+fn unreserved_parameter_name_escapes_cannot_bypass_transport_policy() {
+    // RFC 3261 19.1.4: non-reserved characters compare to their percent
+    // encoding, and parameter components compare case-insensitively.
+    for target in [
+        b"sip:a;%74ransport=tls".as_slice(),
+        b"sip:a;TRANS%70ORT=%74ls",
+    ] {
+        let uri = SipUri::parse(target).unwrap();
+        assert_eq!(uri.require_cleartext_routing(), Err(RouteError::Transport));
+        assert!(uri.parameter(b"transport").is_some());
+    }
+    assert_eq!(
+        SipUri::parse(b"sip:a;%74ransport=udp")
+            .unwrap()
+            .require_cleartext_routing(),
+        Ok(())
+    );
+    assert!(matches!(
+        SipUri::parse(b"sip:a;transport=tcp;TRANS%70ORT=tls"),
+        Err(ParseError::Duplicate)
+    ));
+}
+
+#[test]
+fn reserved_parameter_bytes_do_not_compare_equal_to_percent_escapes() {
+    // The reserved-set exception in 19.1.4 applies to names as well as values.
+    let uri = SipUri::parse(b"sip:a;p/=one;p%2f=two").unwrap();
+    assert_eq!(uri.parameter(b"p/"), Some(Some(b"one".as_slice())));
+    assert_eq!(uri.parameter(b"p%2F"), Some(Some(b"two".as_slice())));
+}
