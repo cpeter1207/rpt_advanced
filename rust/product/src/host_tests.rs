@@ -3037,3 +3037,36 @@ fn reload_disposition_distinguishes_idle_rejection_publication_and_restore_failu
     );
     assert!(host.stop(20));
 }
+
+#[test]
+fn source_retirement_skips_removed_nodes_awaiting_reclamation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = Host::start(document("usb", &format!("{}\n[phone_account provider]\nlocal_node=1000\nenabled=yes\nserver=pbx.example:4569\nusername=fixture\nsecrets_file=unused.secret\n", include_str!("tests/fixtures/phone_mailbox.conf"))), media(), services(), Instant::now(), clock()).unwrap();
+    let (phone, _) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    assert!(host.retire_phone(&source));
+    // Publish logical removal before the distinct host dispatcher-detach/pump step.
+    host.runtime
+        .reload(
+            ConfigDocument::parse("[general]\nenabled=no\n").unwrap(),
+            &host.media,
+            |_, _| Err(RuntimeError::Preparation),
+            |_, _| Err(RuntimeError::Preparation),
+            clock(),
+        )
+        .unwrap();
+    assert!(host.runtime.node_names().is_empty());
+    assert!(
+        !host.runtime.status(0).is_empty(),
+        "removed generation remains owned until detached"
+    );
+    Host::retire_phone_source(&mut host.runtime, &reply);
+    assert!(host.runtime.node_names().is_empty());
+    pump_until(&mut host, |host| host.runtime.status(40).is_empty());
+    assert!(host.stop(40));
+}
