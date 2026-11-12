@@ -4,3 +4,6 @@ pub mod control;
 pub mod echolink;
 pub mod reload;
 pub mod secrets;
+
+/// Experimental bounded SIP parsing shared by both host compositions.
+pub mod sip;

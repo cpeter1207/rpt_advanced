@@ -12,7 +12,10 @@ pacing extension. Typed private call identities, sized metadata and bounded
 call-private reply ownership, mailbox verification and timed audio consumption
 form an unreleased foundation; provider-backed
 phone control/media and RF pacing remain pending. The existing deployed ownership
-described below is unchanged.
+described below is unchanged. The experimental shared `rptadv-peer-support::sip`
+parser is a bounded borrowed-wire prerequisite only, reusable by both hosts; it
+does not activate signaling, move provider ownership or change the media path.
+Its limits and verification are recorded in ADR 0044.
 
 These are initial-version alpha releases. [ADR 0040](decisions/0040-initial-alpha-compatibility-policy.md)
 supersedes backward-compatibility requirements for project-owned interfaces.

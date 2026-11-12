@@ -1036,3 +1036,31 @@ total. Retired phone identities count until the existing pump/reload/stop owner
 actually drops their receipts. Busy is returned privately before another native
 submission; full reply queues preserve prior queued owners. No extra pending
 queue, permission map, provider capability or radio/media activation is added.
+
+## Owned bounded SIP parsing prerequisite, 2026-11-12
+
+One experimental parser belongs to the existing shared `rptadv-peer-support`
+leaf, reusable by both hosts without a new C ABI, shared-object boundary or
+external dependency. It borrows an admitted immutable wire buffer and keeps a
+fixed header-span index. TCP framing leases one caller-owned buffer generation;
+message borrows prevent reuse while views survive. UDP trailing bytes and TCP
+pipelined bytes have distinct consumption semantics. Retained transactions and
+calls still require their own explicit admission/storage reservations.
+
+The selected limits are 32 KiB wire, 16 KiB start-line/headers, 16 KiB body,
+128 logical fields and 4 KiB unfolded field. The parser/framing index and caller
+unfolding scratch together target at most 8 KiB, excluding admitted wire bytes;
+allocation/layout tests must prove that target. These are implementation bounds,
+not universal SIP limits. RFC 3261 framing/grammar, RFC 5954 IPv6 and RFC 8217
+name-address rules apply; RFC 4475/5118 provide independent torture inputs.
+Valid SIPS syntax remains distinct from unsupported secure routing, which must
+fail closed. URI headers never supply arbitrary request headers or authority.
+
+Third-party signaling candidates remain unselected: rsipstack retains unbounded
+queues/state, RVoIP conflicts with runtime/resolver/toolchain ownership, and
+unmodified oSIP 5.3.1/5.3.2 loses allocations on parser list-insertion failure.
+The owner excluded vendor repairs. No native parser/global allocator hook,
+transaction state machine, DNS parser, cryptography, codec or DSP is added here.
+The approved provider/account/host lifecycle, resolver adapter and existing
+`phone::media` remain unchanged. This prerequisite is not SIP activation or
+complete Task 4. Full native gates and independent review remain required.

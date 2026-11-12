@@ -70,10 +70,15 @@ Do not encode phone legs as numeric AllStar nodes merely to pass current
 standalone and the optional Asterisk host use the same product behavior; neither
 adds a second radio-device owner. Asterisk must not process link audio twice.
 
-Native Rust SIP dependency selection remains a builder task, with an explicit
-interoperability spike before adoption. Review signaling, RTP/SRTP, DTMF, codecs,
-NAT, licenses, maintenance and workspace Rust-version support together.
-`rsipstack` is a signaling candidate, not a selected complete media stack.
+The 2026-11-12 signaling selection rejects the unqualified third-party SIP
+stacks rather than maintaining vendor fixes. The owned bounded parsing
+prerequisite lives in the existing shared `rptadv-peer-support` leaf so both
+hosts can reuse one implementation. It parses admitted bytes only; it is not a
+transaction engine, provider, resolver, media stack or authorization boundary.
+The [parser plan](../plans/2026-11-12-bounded-sip-parser.md) records its limits,
+RFC applicability and verification sequence. Signaling interoperability and
+bounded transaction/admission lifecycles remain prerequisites to activation.
+Existing released codec and selected SDP/RTP media dependencies are unchanged.
 
 ## Call admission and routing
 
