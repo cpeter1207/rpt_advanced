@@ -244,3 +244,307 @@ async fn constructing_media_cannot_bypass_payload_and_endpoint_validation() {
         ));
     }
 }
+
+use rpt_advanced_standalone::phone::media::{RtpEndpoint, RtpEvent};
+use std::time::Duration;
+
+#[test]
+fn sdp_size_media_and_connection_boundaries_fail_closed() {
+    let valid = offer("0", "");
+    let at_limit = valid.replace(
+        "s=fixture",
+        &format!("s=fixture{}", "x".repeat(16_384 - valid.len())),
+    );
+    assert!(MediaDescription::parse(at_limit.as_bytes()).is_ok());
+    assert_eq!(
+        MediaDescription::parse(format!("{at_limit}x").as_bytes()),
+        Err(MediaError::UnsupportedDescription)
+    );
+    for candidate in [
+        valid.replace("m=audio", "m=video"),
+        valid.replace("42000", "42000/2"),
+        valid.replace("m=audio", "k=clear:fixture\r\nm=audio"),
+        valid.clone() + "k=clear:fixture\r\n",
+        valid.replace("c=IN IP4 127.0.0.1", "c=AT IP4 127.0.0.1"),
+        valid.replace("c=IN IP4 127.0.0.1", "c=IN IP4 127.0.0.1/1"),
+        valid.replace("c=IN IP4 127.0.0.1", "c=IN IP4 127.0.0.1/1/2"),
+        valid.replace("c=IN IP4 127.0.0.1", "c=IN IP4 0.0.0.0"),
+        valid.replace("c=IN IP4 127.0.0.1", "c=IN IP4 239.1.1.1"),
+        valid.replace("c=IN IP4 127.0.0.1", "c=IN IP6 127.0.0.1"),
+        valid.replace("c=IN IP4 127.0.0.1", "c=IN IP4 ::1"),
+    ] {
+        assert_eq!(
+            MediaDescription::parse(candidate.as_bytes()),
+            Err(MediaError::UnsupportedDescription),
+            "{candidate}"
+        );
+    }
+}
+
+#[test]
+fn g711_mapping_and_ipv6_answers_preserve_the_selected_profile() {
+    for (payload, name, codec) in [("0", "PCMU", G711::Mulaw), ("8", "PCMA", G711::Alaw)] {
+        for channels in ["", "/1"] {
+            let source = offer(
+                payload,
+                &format!("a=rtpmap:{payload} {name}/8000{channels}\r\n"),
+            )
+            .replace("c=IN IP4 127.0.0.1", "c=IN IP6 ::1");
+            let media = MediaDescription::parse(source.as_bytes()).unwrap();
+            assert_eq!(media.codec, codec);
+            assert_eq!(media.remote, "[::1]:42000".parse().unwrap());
+            let answer = media.answer("[::1]:43000".parse().unwrap(), 9).unwrap();
+            let answered = MediaDescription::parse(&answer).unwrap();
+            assert_eq!(answered.codec, codec);
+            assert_eq!(answered.remote, "[::1]:43000".parse().unwrap());
+            assert_eq!(answered.telephone_event, None);
+            for local in [
+                "0.0.0.0:43000",
+                "239.1.1.1:43000",
+                "127.0.0.1:0",
+                "[::]:43000",
+                "[ff02::1]:43000",
+            ] {
+                assert_eq!(
+                    media.answer(local.parse().unwrap(), 9),
+                    Err(MediaError::UnsupportedDescription)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn telephone_event_mappings_require_offered_dynamic_payloads_and_valid_ranges() {
+    for (payloads, mapping, range) in [
+        ("0 95", "95", "0-15"),
+        ("0 128", "128", "0-15"),
+        ("0", "101", "0-15"),
+        ("0 101", "101", "bad-15"),
+        ("0 101", "101", "0-bad"),
+        ("0 101", "101", "15-0"),
+    ] {
+        let source = offer(
+            payloads,
+            &format!("a=rtpmap:{mapping} telephone-event/8000\r\na=fmtp:{mapping} {range}\r\n"),
+        );
+        let media = MediaDescription::parse(source.as_bytes()).unwrap();
+        assert_eq!(media.codec, G711::Mulaw);
+        assert_eq!(media.telephone_event, None, "{source}");
+    }
+    let media = MediaDescription::parse(
+        offer(
+            "0 101",
+            "a=rtpmap:101 telephone-event/8000/1\r\na=fmtp:101 0-7,8-15\r\n",
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(media.telephone_event, Some(101));
+}
+
+async fn media_pair() -> (tokio::net::UdpSocket, RtpEndpoint) {
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let transport = RtpEndpoint::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        MediaDescription {
+            remote: peer.local_addr().unwrap(),
+            codec: G711::Mulaw,
+            telephone_event: Some(101),
+        },
+        1,
+        1,
+        1,
+    )
+    .await
+    .unwrap();
+    (peer, transport)
+}
+
+fn packet(payload_type: u8, timestamp: u32, ssrc: u32, payload: &[u8]) -> Vec<u8> {
+    let mut wire = vec![0x80, payload_type, 0, 1];
+    wire.extend_from_slice(&timestamp.to_be_bytes());
+    wire.extend_from_slice(&ssrc.to_be_bytes());
+    wire.extend_from_slice(payload);
+    wire
+}
+
+async fn receive_packet(
+    peer: &tokio::net::UdpSocket,
+    transport: &mut RtpEndpoint,
+    wire: &[u8],
+    output: &mut [u8; 160],
+) -> Result<RtpEvent, MediaError> {
+    peer.send_to(wire, transport.local_addr().unwrap())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), transport.receive(output))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn rtp_rejects_bad_framing_without_accepting_a_source_or_overwriting_audio() {
+    let mut wrong_version = packet(0, 160, 7, &[0xff; 160]);
+    wrong_version[0] = 0x40;
+    let mut invalid = vec![
+        vec![0; 2048],
+        vec![0; 2049],
+        wrong_version,
+        packet(0, 160, 7, &[0xff; 159]),
+        packet(0, 160, 7, &[0xff; 161]),
+    ];
+    for payload in [vec![], vec![0], vec![2]] {
+        let mut wire = packet(0, 160, 7, &payload);
+        wire[0] |= 0x20;
+        invalid.push(wire);
+    }
+    for wire in invalid {
+        let (peer, mut transport) = media_pair().await;
+        let mut output = [0x55; 160];
+        assert_eq!(
+            receive_packet(&peer, &mut transport, &wire, &mut output).await,
+            Err(MediaError::InvalidPacket)
+        );
+        assert_eq!(output, [0x55; 160]);
+        assert_eq!(
+            receive_packet(
+                &peer,
+                &mut transport,
+                &packet(0, 320, 8, &[0xff; 160]),
+                &mut output
+            )
+            .await,
+            Ok(RtpEvent::Audio {
+                sequence: 1,
+                timestamp: 320,
+                ssrc: 8
+            })
+        );
+        assert_eq!(output, [0xff; 160]);
+    }
+}
+
+#[tokio::test]
+async fn rtp_strips_valid_padding_and_keeps_the_first_valid_source() {
+    let (peer, mut transport) = media_pair().await;
+    let mut output = [0; 160];
+    for padding in [1, 4] {
+        let mut payload = vec![0xd5; 160];
+        payload.extend(std::iter::repeat_n(padding, usize::from(padding)));
+        let mut wire = packet(0, 160, 7, &payload);
+        wire[0] |= 0x20;
+        assert_eq!(
+            receive_packet(&peer, &mut transport, &wire, &mut output).await,
+            Ok(RtpEvent::Audio {
+                sequence: 1,
+                timestamp: 160,
+                ssrc: 7
+            })
+        );
+        assert_eq!(output, [0xd5; 160]);
+    }
+    assert_eq!(
+        receive_packet(
+            &peer,
+            &mut transport,
+            &packet(0, 320, 8, &[0xff; 160]),
+            &mut output
+        )
+        .await,
+        Err(MediaError::InvalidPacket)
+    );
+    assert_eq!(output, [0xd5; 160]);
+    assert_eq!(
+        receive_packet(
+            &peer,
+            &mut transport,
+            &packet(0, 480, 7, &[0xff; 160]),
+            &mut output
+        )
+        .await,
+        Ok(RtpEvent::Audio {
+            sequence: 1,
+            timestamp: 480,
+            ssrc: 7
+        })
+    );
+    assert_eq!(output, [0xff; 160]);
+}
+
+#[tokio::test]
+async fn telephone_events_reject_malformed_updates_and_deduplicate_only_the_same_identity() {
+    let (peer, mut transport) = media_pair().await;
+    let mut output = [0x55; 160];
+    for payload in [
+        &[5, 0, 160][..],
+        &[5, 0, 0, 160, 0],
+        &[5, 0x40, 0, 160],
+        &[5, 0, 0, 0],
+    ] {
+        assert_eq!(
+            receive_packet(
+                &peer,
+                &mut transport,
+                &packet(101, 90, 7, payload),
+                &mut output
+            )
+            .await,
+            Err(MediaError::InvalidPacket)
+        );
+    }
+    for (timestamp, event, end, expected) in [
+        (
+            90,
+            5,
+            false,
+            RtpEvent::Digit {
+                digit: b'5',
+                ended: false,
+            },
+        ),
+        (90, 5, false, RtpEvent::None),
+        (
+            90,
+            5,
+            true,
+            RtpEvent::Digit {
+                digit: b'5',
+                ended: true,
+            },
+        ),
+        (90, 5, true, RtpEvent::None),
+        (
+            91,
+            5,
+            false,
+            RtpEvent::Digit {
+                digit: b'5',
+                ended: false,
+            },
+        ),
+        (
+            91,
+            6,
+            true,
+            RtpEvent::Digit {
+                digit: b'6',
+                ended: true,
+            },
+        ),
+        (91, 6, false, RtpEvent::None),
+    ] {
+        let payload = [event, if end { 0x80 } else { 0 }, 0, 160];
+        assert_eq!(
+            receive_packet(
+                &peer,
+                &mut transport,
+                &packet(101, timestamp, 7, &payload),
+                &mut output
+            )
+            .await,
+            Ok(expected)
+        );
+        assert_eq!(output, [0x55; 160]);
+    }
+}

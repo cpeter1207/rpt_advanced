@@ -96,6 +96,7 @@ lint:
 	$(CARGO) fmt --all -- --check
 	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c tests/test_radio_interlock.c
 	clang-format --dry-run --Werror tests/test_site_gpio_abi.c tests/test_site_hwmon_abi.c
+	clang-format --dry-run --Werror rust/standalone/tests/fixtures/phone_codec.c
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
@@ -104,6 +105,7 @@ static-analysis: dependency-boundary product-surface
 	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) '-DAST_MODULE_INFO(key,flags,description,...)=;' $(LOADER)
 	clang-tidy $(LOADER) --warnings-as-errors='*' -- $(CPPFLAGS) $(MODULE_FLAGS) -fblocks
 	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 tests/test_radio_interlock.c tests/test_site_gpio_abi.c tests/test_site_hwmon_abi.c
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) rust/standalone/tests/fixtures/phone_codec.c
 	$(TEST_ENV) $(CARGO) clippy --locked --workspace --all-targets -- -D warnings
 
 rust-quality:
