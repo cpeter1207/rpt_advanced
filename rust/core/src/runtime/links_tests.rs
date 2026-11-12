@@ -3262,3 +3262,195 @@ fn private_collection_expiry_notifies_silent_completion_once() {
     );
     assert_eq!(ended, [reply]);
 }
+
+#[test]
+fn remote_operation_custody_keeps_only_outstanding_exact_source_collectors() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use crate::remote_base_command::RemoteDtmfAccess;
+    for phone in [false, true] {
+        let mut links = links();
+        links
+            .configure_remote("6", RemoteDtmfAccess::Disabled)
+            .unwrap();
+        links.accept("2000", true).unwrap();
+        let source = PhoneSource::new(
+            PhoneAccountId::new("provider").unwrap(),
+            1,
+            "aabbccddeeff00112233445566778899".parse().unwrap(),
+            2,
+            3,
+        )
+        .unwrap();
+        let signals = if phone {
+            PeerSignals::for_phone(source.clone())
+        } else {
+            PeerSignals::new()
+        };
+        if phone {
+            assert!(signals.authenticate_phone());
+        }
+        let reply = signals.reply_target();
+        let operation = "*652#"
+            .chars()
+            .filter_map(|digit| {
+                if phone {
+                    links.phone_digit(&source, digit, 1, reply.clone())
+                } else {
+                    links.peer_digit("2000", digit, 1, reply.clone())
+                }
+            })
+            .find_map(|outcome| match outcome {
+                DigitOutcome::Operation(operation) => Some(operation),
+                _ => None,
+            })
+            .unwrap();
+        assert!(links.expire_peer_digits(2).is_empty());
+        assert!(links.advance_macros(2).is_empty());
+        assert_eq!(
+            links.peer_commands.len(),
+            1,
+            "queued command keeps its original collector"
+        );
+        assert!(links.remote_authorized(&operation, 2));
+        let copy = operation.clone();
+        drop(operation);
+        links.expire_peer_digits(3);
+        assert_eq!(
+            links.peer_commands.len(),
+            1,
+            "last copy, not first drop, owns custody"
+        );
+        links.lost_digits();
+        links.expire_peer_digits(4);
+        assert!(
+            links.remote_authorized(&copy, 4),
+            "Lost still cancels only partial input/macros, not completed human work"
+        );
+        drop(copy);
+        links.expire_peer_digits(5);
+        assert!(
+            links.peer_commands.is_empty(),
+            "ordinary idle sweep reclaims after final command ownership ends"
+        );
+    }
+}
+
+#[test]
+fn remote_operation_custody_never_overrides_exact_retirement_or_reconfiguration() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use crate::remote_base_command::RemoteDtmfAccess;
+    let mut links = links();
+    links
+        .configure_remote("6", RemoteDtmfAccess::Disabled)
+        .unwrap();
+    let make = |ingress| {
+        let source = PhoneSource::new(
+            PhoneAccountId::new("provider").unwrap(),
+            1,
+            "aabbccddeeff00112233445566778899".parse().unwrap(),
+            2,
+            ingress,
+        )
+        .unwrap();
+        let signals = PeerSignals::for_phone(source);
+        assert!(signals.authenticate_phone());
+        signals
+    };
+    let query = |links: &mut NodeLinkControl, reply: &PeerReply| {
+        "*652#"
+            .chars()
+            .filter_map(|digit| {
+                links.phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone())
+            })
+            .find_map(|outcome| match outcome {
+                DigitOutcome::Operation(operation) => Some(operation),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let old = make(3);
+    let operation = query(&mut links, &old.reply_target());
+    links.expire_peer_digits(2);
+    assert!(links.remote_authorized(&operation, 2));
+    links.retire_source(&old.reply_target());
+    assert!(links.peer_commands.is_empty());
+    let replacement = make(4);
+    let fresh = query(&mut links, &replacement.reply_target());
+    links.expire_peer_digits(3);
+    assert!(!links.remote_authorized(&operation, 3));
+    assert!(links.remote_authorized(&fresh, 3));
+    links.reconfigure(
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        None,
+    );
+    assert!(
+        links.peer_commands.is_empty(),
+        "configuration owner can reclaim collectors while copies exist"
+    );
+    assert!(!links.remote_authorized(&fresh, 4));
+}
+
+#[test]
+fn remote_operation_custody_does_not_extend_a_private_source_grant() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use crate::remote_base_command::RemoteDtmfAccess;
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let mut links = links();
+    links.configure_admin(&digest, &digest, 100);
+    links
+        .configure_remote("6", RemoteDtmfAccess::Locked)
+        .unwrap();
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    let signals = PeerSignals::for_phone(source.clone());
+    assert!(signals.authenticate_phone());
+    let reply = signals.reply_target();
+    for digit in "*8001234#".chars() {
+        assert!(
+            links
+                .phone_digit(&source, digit, 1, reply.clone())
+                .is_none()
+        );
+    }
+    let collect = |links: &mut NodeLinkControl, text: &str, now_ms| {
+        text.chars()
+            .filter_map(|digit| links.phone_digit(&source, digit, now_ms, reply.clone()))
+            .find_map(|outcome| match outcome {
+                DigitOutcome::Operation(operation) => Some(operation),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let mutation = collect(&mut links, "*661#", 2);
+    let query = collect(&mut links, "*652#", 3);
+    links.expire_peer_digits(100);
+    assert!(links.remote_authorized(&mutation, 100));
+    links.expire_peer_digits(101);
+    assert!(
+        links.remote_authorized(&query, 101),
+        "read-only permission remains public"
+    );
+    assert!(
+        !links.remote_authorized(&mutation, 101),
+        "retention cannot renew the source's expired grant"
+    );
+    links
+        .configure_remote("6", RemoteDtmfAccess::Disabled)
+        .unwrap();
+    assert!(!links.remote_authorized(&mutation, 102));
+    assert!(links.remote_authorized(&query, 102));
+    drop((query, mutation));
+    links.expire_peer_digits(103);
+    assert!(links.peer_commands.is_empty());
+}

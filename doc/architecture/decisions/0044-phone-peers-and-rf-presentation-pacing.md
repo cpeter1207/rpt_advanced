@@ -979,3 +979,26 @@ cannot inherit their output. There is no new producer, PCM buffer, transport,
 ABI field, worker, cross-node permission, reservation or media activation.
 Provider/RF qualifications and a lifecycle-spanning attachment grant remain
 separate prerequisites.
+
+## Completed source commands retain their collector — 2026-11-12
+
+A completed peer or private-phone RemoteBase operation retains custody of its
+original source collector while the copied operation or native pending receipt
+is owned. One lazy Arc allocation is shared by concurrent completed operations
+from that collector; the collector observes it weakly. Local commands and
+non-remote operations do not allocate custody. When the final owned copy drops,
+the existing idle sweep reclaims a collector that has no other required state.
+A collector retained for selection or a grant can keep the small weak control
+block until its next pending batch or reclamation; no custody history accumulates.
+
+Custody is not authorization. The exact reply/origin, current policy, grant
+expiry, macro cancellation and runtime revision checks remain authoritative.
+Explicit retirement, ended sources and configuration replacement still remove
+collectors even when copied work exists. Lost input keeps its prior semantics:
+partial collection and macro work are canceled, not already completed human
+commands. No remembered target or synthetic grant is introduced.
+
+This prerequisite fixes the same pump-before-dispatch pruning gap for ordinary
+peers and phone callers. It does not enable private RemoteBase responses or
+phone attachment; their existing product authorization and unavailable paths
+remain unchanged.

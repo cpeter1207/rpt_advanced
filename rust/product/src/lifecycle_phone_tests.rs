@@ -901,3 +901,6 @@ fn private_collection_real_engine_reconciles_loss_without_clearing_new_input() {
         );
     }
 }
+
+#[path = "lifecycle_phone_remote_tests.rs"]
+mod radio_status;
