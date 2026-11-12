@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check that standalone and Asterisk packages remain independently installable."""
 
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,9 +77,9 @@ def test_either_host_installs_the_dynamically_loaded_echolink_runtime() -> None:
 def test_radio_product_dependency_does_not_require_the_asterisk_integration() -> None:
     stanzas = package_stanzas()
     source = (ROOT / "debian/control").read_text().split("\n\n", 1)[0]
-    assert "libusbradioplus-product-dev (>= 0.1.0~alpha34-1)" in source
+    assert "libusbradioplus-product-dev (>= 0.1.0~alpha35-1)" in source
     standalone = depends(stanzas["rpt-advanced"])
-    assert "libusbradioplus-product1 (>= 0.1.0~alpha34-1)" in standalone
+    assert "libusbradioplus-product1 (>= 0.1.0~alpha35-1)" in standalone
     assert "usbradioplus" not in standalone.replace("libusbradioplus-product1", "")
     for package in ("app-rpt-advanced", "librptadv-product3"):
         assert "usbradioplus" not in depends(stanzas[package]).replace(
@@ -86,12 +87,41 @@ def test_radio_product_dependency_does_not_require_the_asterisk_integration() ->
         )
         assert "librptadv-resolver-adapter1" not in depends(stanzas[package])
         assert "librptadv-jitter-adapter1" not in depends(stanzas[package])
-    assert "libusbradioplus-product1 (>= 0.1.0~alpha34-1)" in depends(
+    assert "libusbradioplus-product1 (>= 0.1.0~alpha35-1)" in depends(
         stanzas["librptadv-product3"]
     )
-    assert "libusbradioplus-product-dev (>= 0.1.0~alpha34-1)" in depends(
+    assert "libusbradioplus-product-dev (>= 0.1.0~alpha35-1)" in depends(
         stanzas["librptadv-product-dev"]
     )
+
+
+def test_phone_release_cohort_pins_match_runtime_package_identities() -> None:
+    """Pin released providers without changing their ABI-2 package identities."""
+    manifest = json.loads((ROOT / ".github/dependencies.json").read_text())
+    repositories = [dependency["repository"] for dependency in manifest]
+    dependencies = {dependency["repository"]: dependency for dependency in manifest}
+    assert len(repositories) == len(dependencies), "duplicate dependency repository"
+    for repository, sha, packages in (
+        (
+            "librptadviax2",
+            "ce9fe2da0d8480c1503f5eb80c3c95d8ac2e5360",
+            ["librptadv-iax2-client2", "librptadv-iax2-client-dev"],
+        ),
+        (
+            "rptadv-portaudio-alsa-adapter",
+            "cc63a779d9619c9b3c1f9096d33f81cad4ea720d",
+            [
+                "librptadv-portaudio-alsa-adapter2",
+                "librptadv-portaudio-alsa-adapter-dev",
+            ],
+        ),
+    ):
+        assert dependencies[repository]["sha"] == sha, repository
+        assert dependencies[repository]["packages"] == packages, repository
+    assert repositories.index("rptadv-codec-adapters") < repositories.index(
+        "librptadviax2"
+    ), "codec packages must precede their IAX consumer"
+    assert "USBRadioPlus" not in repositories, "SDK packages come from signed APT"
 
 
 def test_jitter_runtime_and_development_manifests() -> None:
@@ -182,6 +212,7 @@ if __name__ == "__main__":
         test_standalone_package_declares_its_native_runtime_providers,
         test_either_host_installs_the_dynamically_loaded_echolink_runtime,
         test_radio_product_dependency_does_not_require_the_asterisk_integration,
+        test_phone_release_cohort_pins_match_runtime_package_identities,
         test_standalone_package_declares_its_service_account_provisioner,
         test_standalone_build_profile_excludes_asterisk_adapter_packages,
         test_resolver_runtime_and_development_manifests,

@@ -1097,3 +1097,23 @@ configured phone accounts remain admission-closed. This milestone establishes
 actual account/listener ownership, not a connected phone call. Registration,
 outgoing dial/isolation, typed incoming adoption, private executor/media and RF
 composition remain separate requirements; mailbox and attachment guards remain.
+
+## Released dependency cohort, 2026-11-12
+
+The controller package floors now select these released prerequisites:
+
+- [IAX alpha13](https://github.com/cpeter1207/librptadviax2/tree/ce9fe2da0d8480c1503f5eb80c3c95d8ac2e5360)
+  supports bounded protocol-only progress while private source delivery is
+  refused. Client package and SONAME 2 are unchanged.
+- [PortAudio adapter alpha5](https://github.com/cpeter1207/rptadv-portaudio-alsa-adapter/tree/cc63a779d9619c9b3c1f9096d33f81cad4ea720d)
+  adds timed output observations while retaining ABI/SONAME 2. Their uncertainty
+  is explicitly unbounded; they do not establish a physical RF deadline.
+- [USBRadioPlus SDK alpha35](https://github.com/cpeter1207/USBRadioPlus/tree/b7dc3d35a242c4bdfea7166b6f959539d500a363)
+  adds stopped-bound post-DSP programme fences on existing owners. Runtime and
+  development packages retain identity 1 and require at least
+  `0.1.0~alpha35-1` (`0.1.0~alpha35-1.deb13` in signed APT).
+
+The immutable source manifest preserves codec-before-IAX ordering. The SDK
+remains a signed-APT dependency rather than an unsupported source-manifest
+entry. Raising these floors does not activate phone attachment or qualify RF
+timing; consumers must still negotiate their required capabilities.

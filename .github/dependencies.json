@@ -27,12 +27,12 @@
   },
   {
     "repository": "librptadviax2",
-    "sha": "4e7026c5234a7c7fb61907bbe56fbaef3a18963b",
+    "sha": "ce9fe2da0d8480c1503f5eb80c3c95d8ac2e5360",
     "packages": ["librptadv-iax2-client2", "librptadv-iax2-client-dev"]
   },
   {
     "repository": "rptadv-portaudio-alsa-adapter",
-    "sha": "af2fc704e316fd2d58b52de146b8a97d1a2a302d",
+    "sha": "cc63a779d9619c9b3c1f9096d33f81cad4ea720d",
     "packages": [
       "librptadv-portaudio-alsa-adapter2",
       "librptadv-portaudio-alsa-adapter-dev"
