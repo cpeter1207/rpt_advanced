@@ -268,3 +268,22 @@ fn native_rate_prepares_only_output_storage_without_a_samplerate_context() {
         assert!(Egress::from_descriptor(48000, 4096, &api).is_err());
     }
 }
+
+#[test]
+fn egress_reset_propagates_converter_failure_after_discarding_local_history() {
+    unsafe extern "C" fn failed_reset(_: *mut ffi::rptadv_samplerate_converter) -> i32 {
+        -1
+    }
+    // SAFETY: the copied table and real provider context remain live through drop.
+    unsafe {
+        let mut api = *ffi::rptadv_samplerate_adapter_descriptor();
+        api.reset = Some(failed_reset);
+        let mut converter = Egress::from_descriptor(8000, 16, &api).unwrap();
+        converter.process(&[0.5; 16]).unwrap();
+        assert!(converter.reset().is_err());
+        assert_eq!(converter.used, 0);
+        assert_eq!(converter.input_frames, 0);
+        assert_eq!(converter.output_frames, 0);
+        assert!(!converter.finishing);
+    }
+}

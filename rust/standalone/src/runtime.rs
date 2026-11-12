@@ -1305,6 +1305,7 @@ mod tests {
 
     #[test]
     fn fixture_echo_retirement_retains_failed_owner_until_a_successful_stop() {
+        use rptadv_peer_support::reload::ReloadOutcome;
         use std::os::unix::fs::{PermissionsExt, symlink};
         const CHILD: &str = "RPTADV_TEST_ECHO_RUNTIME_FIXTURE";
         if let Some(directory) = std::env::var_os(CHILD) {
@@ -1355,7 +1356,20 @@ mod tests {
             unsafe { fail(1) };
             // A disabled node still owns its disabled Echo account. Remove the
             // node itself to exercise retirement, not just final shutdown.
-            process.reload("[general]\nenabled=no\n").unwrap();
+            let candidate = "[general]\nenabled=no\n";
+            let error = process.reload(candidate).unwrap_err();
+            assert_eq!(
+                error,
+                RuntimeError::EchoCommitted(rptadv_peer_support::echolink::host::UpdateOutcome {
+                    product: ReloadOutcome::Committed,
+                    failure: None,
+                    retirement: Some(rptadv_peer_support::echolink::host::Error::Status(
+                        rptadv_peer_support::echolink::abi::Status::Failed,
+                    )),
+                })
+            );
+            assert_eq!(error.publication(), ReloadOutcome::Committed);
+            assert_eq!(process.configuration_text(), candidate);
             assert!(matches!(process.stop(), Err(RuntimeError::Echo(_))));
             unsafe { fail(0) };
             process.stop().unwrap();
@@ -1379,11 +1393,9 @@ mod tests {
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
         );
-        assert!(
-            String::from_utf8_lossy(&result.stderr)
-                .contains("EchoLink retired account remains retained"),
-            "removal must report its retained account, not merely fail final shutdown"
-        );
+        // The child asserts the exact returned retirement diagnostic before
+        // shutdown. The typed API reports errors to its caller instead of
+        // requiring a duplicate internal stderr message.
     }
 
     #[test]

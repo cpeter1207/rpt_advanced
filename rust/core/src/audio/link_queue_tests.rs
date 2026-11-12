@@ -406,3 +406,27 @@ fn revocable_queue_cancelled_peek_never_substitutes_the_following_span() {
         assert_eq!(output, [0.5; 2]);
     }
 }
+
+#[test]
+fn synchronous_read_silences_individually_valid_spans_from_different_revisions() {
+    let (mut writer, mut reader, domain, source) = revocable_queue(16, 8);
+    let span = super::AudioSpan::default();
+    assert_eq!(writer.write_revocable(span, &[0.25], domain.revision()), 0);
+    assert_eq!(writer.write(span, &[0.5]), 0);
+    // Retire while copying the ordinary bridge. The earlier private sample was
+    // current when copied; the later private sample belongs to the new revision.
+    AFTER_COPY.with(|slot| {
+        *slot.borrow_mut() = Some((
+            1,
+            Box::new(move || {
+                source.retire();
+                assert_eq!(writer.write_revocable(span, &[0.75], domain.revision()), 0);
+            }),
+        ));
+    });
+    let mut pcm = [9.0; 3];
+    assert_eq!(reader.read(&mut pcm), 3);
+    assert_eq!(pcm, [0.0; 3]);
+    assert_eq!(reader.shortfall_samples(), 3);
+    assert!(reader.peek_span().is_none());
+}

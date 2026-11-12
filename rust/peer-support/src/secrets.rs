@@ -48,10 +48,7 @@ pub fn read_private_file_bounded(path: &Path, maximum_bytes: usize) -> Result<St
 fn read_private_file_with_limit(path: &Path, maximum_bytes: u64) -> Result<String, SecretError> {
     #[cfg(unix)]
     {
-        use std::{
-            io::Read,
-            os::unix::fs::{MetadataExt, OpenOptionsExt},
-        };
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         // Inspect the opened descriptor, not a pathname that can change underneath us.
         // Nonblocking open also lets us reject a FIFO without waiting for its writer.
         let file = std::fs::OpenOptions::new()
@@ -73,22 +70,28 @@ fn read_private_file_with_limit(path: &Path, maximum_bytes: u64) -> Result<Strin
         if metadata.len() > maximum_bytes {
             return Err(SecretError("secrets file exceeds size limit"));
         }
-        // A regular file can grow after metadata inspection. Consume at most one
-        // byte beyond the limit so growth cannot make this read unbounded.
-        let mut text = String::new();
-        file.take(maximum_bytes.saturating_add(1))
-            .read_to_string(&mut text)
-            .map_err(|_| SecretError("cannot read secrets file"))?;
-        if text.len() as u64 > maximum_bytes {
-            return Err(SecretError("secrets file exceeds size limit"));
-        }
-        Ok(text)
+        read_bounded(file, maximum_bytes)
     }
     #[cfg(not(unix))]
     {
         let _ = (path, maximum_bytes);
         Err(SecretError("secrets files require Unix permissions"))
     }
+}
+
+/// Bound the opened stream even when a regular file grows after metadata inspection.
+#[cfg(unix)]
+fn read_bounded(reader: impl std::io::Read, maximum_bytes: u64) -> Result<String, SecretError> {
+    use std::io::Read;
+    let mut text = String::new();
+    reader
+        .take(maximum_bytes.saturating_add(1))
+        .read_to_string(&mut text)
+        .map_err(|_| SecretError("cannot read secrets file"))?;
+    if text.len() as u64 > maximum_bytes {
+        return Err(SecretError("secrets file exceeds size limit"));
+    }
+    Ok(text)
 }
 
 /// Resolve omitted and relative paths against the actual host configuration file.
@@ -317,5 +320,23 @@ mod tests {
             );
         }
         fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_opened_stream_rejects_growth_without_reading_the_remaining_secret() {
+        for limit in [0, 1, 4] {
+            let mut reader = std::io::Cursor::new(b"private material");
+            assert_eq!(
+                read_bounded(&mut reader, limit).unwrap_err(),
+                SecretError("secrets file exceeds size limit")
+            );
+            assert_eq!(reader.position(), limit + 1);
+        }
+        assert_eq!(read_bounded(&b"safe"[..], 4).unwrap(), "safe");
+        assert_eq!(
+            read_bounded(&[0xff][..], 1).unwrap_err(),
+            SecretError("cannot read secrets file")
+        );
     }
 }

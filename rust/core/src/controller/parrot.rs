@@ -235,6 +235,8 @@ impl ParrotCapture {
                                 0.0
                             }
                         }));
+                    #[cfg(test)]
+                    tests::after_capture();
                     if self.phone.is_some_and(|source| !source.current(domain)) {
                         self.cancel_burst();
                     }

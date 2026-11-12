@@ -219,7 +219,7 @@ fn callback_rejects_wrong_frame_lifecycle_or_replayed_position() {
     assert!(
         !feedback_status(&mut worker, port, Some(&valid)).contains("radio-feedback: unavailable")
     );
-    for changed in [0, 1, 2, 3, 4, 5] {
+    for changed in 0..7 {
         let mut value = physical_feedback(16);
         match changed {
             0 => value.frame_count = 7,
@@ -227,7 +227,8 @@ fn callback_rejects_wrong_frame_lifecycle_or_replayed_position() {
             2 => value.sample_index = 8,
             3 => value.generation_id = 0,
             4 => value.abi_version = 2,
-            _ => value.struct_size = 4,
+            5 => value.struct_size = 4,
+            _ => value.frame_count = 0,
         }
         assert!(
             feedback_status(&mut worker, port, Some(&value))
@@ -383,4 +384,25 @@ fn programme_feedback_keeps_retirement_separate_from_unknown_or_invalid_bounds()
         assert!(status.contains("observed=off"), "{status}");
     }
     drop(worker.stop());
+}
+
+#[test]
+fn oversized_feedback_callback_consumes_evidence_without_advancing_accepted_position() {
+    let mut state = feedback::FeedbackState::default();
+    let value = physical_feedback(8);
+    // SAFETY: this complete local record remains live through each synchronous copy.
+    unsafe { state.publish(&value) };
+    state.begin(8, 7);
+    assert!(state.current.is_none());
+    state.begin(8, 8);
+    assert!(
+        state.current.is_none(),
+        "rejected evidence is still consumed once"
+    );
+    unsafe { state.publish(&value) };
+    state.begin(8, 8);
+    assert!(
+        state.current.is_some(),
+        "a rejected span cannot advance the last position"
+    );
 }

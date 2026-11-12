@@ -73,3 +73,56 @@ fn retirement_completion_helps_an_already_started_owner_without_waiting() {
     assert_eq!(domain.revision(), Some(1));
     assert_eq!(reply.0.phase.load(Ordering::Acquire), RETIRED);
 }
+
+#[test]
+fn saturated_retirement_domain_discards_dispatch_without_publishing_pcm() {
+    use crate::audio::LinkAudioQueue;
+    use crate::controller::{ControllerSettings, CourtesySettings, NodeController};
+    use crate::link::{AudioPeer, LinkAudio, Mode, PeerIdentity, PeerInput, SourcePosition};
+
+    struct Input(PeerSignals);
+    impl PeerInput for Input {
+        fn signals(&self) -> &PeerSignals {
+            &self.0
+        }
+        fn source_rate(&self) -> u32 {
+            48_000
+        }
+        fn available(&self) -> u64 {
+            0
+        }
+        fn render(&mut self, _: &mut [f32]) -> Option<usize> {
+            panic!("idle source must not render");
+        }
+    }
+    let domain = RetirementDomain(Arc::new(AtomicU64::new(u64::MAX)));
+    let (writer, mut output) = LinkAudioQueue::new(16, 4).unwrap().into_endpoints();
+    let peer = AudioPeer::new(
+        PeerIdentity::from_operator("200").unwrap(),
+        Mode::TRANSCEIVE,
+        Input(PeerSignals::new()),
+        writer,
+        4,
+        0,
+    )
+    .unwrap();
+    let (mut links, mut dispatcher) = LinkAudio::new_in_domain(vec![peer], 4, domain).unwrap();
+    let (mut node, _control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    for _ in 0..3 {
+        links
+            .process(&mut node, true, &mut [0.5; 4], SourcePosition::default())
+            .unwrap();
+        assert_eq!(
+            dispatcher.dispatch(1),
+            1,
+            "cancelled blocks must be recycled"
+        );
+        assert!(output.peek_span().is_none());
+    }
+}

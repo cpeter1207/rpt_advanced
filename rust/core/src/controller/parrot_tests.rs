@@ -108,3 +108,69 @@ fn parrot_capture_returns_a_clip_buffer_when_the_completion_queue_is_full() {
     assert_eq!(capture.free.len(), 1);
     assert!(capture.free[0].is_empty());
 }
+
+thread_local! {
+    static AFTER_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+pub(super) fn after_capture() {
+    let hook = AFTER_CAPTURE.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[test]
+fn mixed_retirement_revisions_never_qualify_a_retained_private_clip() {
+    let domain = crate::link::RetirementDomain::default();
+    let mut source = super::ParrotPhoneSource {
+        age_bound: Some(crate::link::SourceTimeBound {
+            host_clock_epoch: 7,
+            not_after_ns: 30,
+        }),
+        retirement_revision: domain.revision(),
+    };
+    source.include(super::ParrotPhoneSource {
+        age_bound: source.age_bound,
+        retirement_revision: Some(1),
+    });
+    assert!(!source.current(Some(&domain)));
+    assert_eq!(source.retirement_revision, None);
+    assert_eq!(source.age_bound.unwrap().not_after_ns, 30);
+}
+
+#[test]
+fn cancelling_without_a_capture_buffer_preserves_capacity_for_the_next_burst() {
+    let (mut capture, mut control) = ParrotCapture::new();
+    capture.cancel_burst();
+    capture.observe(true, &[0.5]);
+    capture.cancel_burst();
+    capture.cancel_burst();
+    assert_eq!(capture.free.len(), 2);
+    capture.observe(false, &[]);
+    assert!(control.take_completed().is_none());
+    capture.observe(true, &[0.25]);
+    capture.observe(false, &[]);
+    assert_eq!(control.take_completed().unwrap().samples(), &[0.25]);
+}
+
+#[test]
+fn retirement_during_capture_copy_discards_the_clip_and_recycles_its_buffer() {
+    let domain = crate::link::RetirementDomain::default();
+    let reply = crate::link::PeerSignals::new().reply_target();
+    reply.bind_retirement_domain(&domain);
+    let phone = super::ParrotPhoneSource {
+        age_bound: None,
+        retirement_revision: domain.revision(),
+    };
+    let (mut capture, mut control) = ParrotCapture::new();
+    AFTER_CAPTURE.with(|slot| *slot.borrow_mut() = Some(Box::new(move || reply.retire())));
+    capture.observe_with_phone(true, &[0.5], Some(phone), Some(&domain));
+    assert!(!capture.recording);
+    assert_eq!(capture.free.len(), 2);
+    capture.observe_with_phone(false, &[], None, Some(&domain));
+    assert!(control.take_completed().is_none());
+    capture.observe(true, &[0.25]);
+    capture.observe(false, &[]);
+    assert_eq!(control.take_completed().unwrap().samples(), &[0.25]);
+}

@@ -443,3 +443,71 @@ fn rf_programme_metadata_does_not_delay_network_mix_minus_or_replace_egress_cloc
         assert_eq!(read.span.born_ns, source.born_ns);
     }
 }
+
+#[test]
+fn dispatcher_skips_a_retired_noncontributing_destination() {
+    let (mut source, _source_output) = peer(0, false);
+    source.input.value = 0.5;
+    let (mut destination, mut output) = peer(1, false);
+    destination.input.finite = Some(false);
+    let (mut links, mut dispatcher, mut node, _control, _domain) =
+        fixture(vec![source, destination]);
+    tick(&mut links, &mut node);
+    links.peers[1].input.signals.end();
+    assert_eq!(dispatcher.dispatch(1), 1);
+    assert!(output.peek_span().is_none());
+    assert_eq!(links.peers[1].input.renders, 0);
+}
+
+#[test]
+fn ordinary_programme_for_a_phone_destination_remains_revocable() {
+    let (mut source, _source_output) = peer(0, false);
+    source.input.value = 0.5;
+    let (mut destination, mut output) = peer(1, true);
+    destination.input.finite = Some(false);
+    let (mut links, mut dispatcher, mut node, _control, _domain) =
+        fixture(vec![source, destination]);
+    tick(&mut links, &mut node);
+    assert_eq!(dispatcher.dispatch(1), 1);
+    assert!(!dispatcher.private_contributor);
+    assert!(
+        output.peek_span().is_some(),
+        "ordinary source reached the live phone"
+    );
+    links.peers[1].input.call.as_ref().unwrap().retire();
+    let mut pcm = [9.0; 4];
+    assert_eq!(output.read(&mut pcm), 4);
+    assert_eq!(pcm, [0.0; 4]);
+}
+
+#[test]
+fn prepared_mixer_rejects_an_output_queue_already_owned_by_a_retirement_domain() {
+    let (mut source, mut output) = peer(0, false);
+    let domain = RetirementDomain::default();
+    assert!(
+        source
+            .outbound
+            .as_mut()
+            .unwrap()
+            .bind_retirement_domain(&domain)
+    );
+    assert!(matches!(
+        LinkAudio::new_in_domain(vec![source], 4, domain),
+        Err(AdmissionError::Invalid)
+    ));
+    assert!(output.peek_span().is_none());
+}
+
+#[test]
+fn private_source_retiring_inside_its_render_cannot_enter_capture_or_rf_programme() {
+    let (mut source, _output) = peer(0, true);
+    source.input.value = 0.5;
+    source.input.retire_on_render = source.input.call.clone();
+    let (mut links, _dispatcher, mut node, mut control, _domain) = fixture(vec![source]);
+    tick(&mut links, &mut node);
+    assert_eq!(links.peers[0].input.renders, 1);
+    assert_programme(&links, false, false, None);
+    assert_eq!(links.active_count(), 0);
+    tick(&mut links, &mut node);
+    assert!(control.take_parrot_capture().is_none());
+}

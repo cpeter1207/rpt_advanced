@@ -563,5 +563,14 @@ fn programme_query_requires_complete_advertised_sdk_tail() {
     let mut output = output();
     assert_eq!(prepared(&api, &mut output), Ok(true));
     assert!(output.programme_buffering.is_none());
+    let mut bound: abi::UrpProgrammeBuffering = unsafe { std::mem::zeroed() };
+    bound.flags = 7;
+    // SAFETY: this live prepared context has no optional provider query. A direct
+    // callback must reject it without modifying the caller's output record.
+    assert_eq!(
+        unsafe { programme_buffering(output.context, &mut bound) },
+        -1
+    );
+    assert_eq!(bound.flags, 7);
     unsafe { output.destroy.unwrap()(output.context) };
 }

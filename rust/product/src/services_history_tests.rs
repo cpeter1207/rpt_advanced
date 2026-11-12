@@ -351,14 +351,16 @@ fn retained_bucket_wrap_keeps_conservative_oldest_original_receipt() {
 
 #[test]
 fn unqualified_prepared_counts_or_bound_never_allocate_phone_history() {
-    for missing in [1, 2] {
+    for (missing, fault) in [(1, 0), (2, 0), (0, 9)] {
         let (state, mut peer) = fixture(1, 1, true);
         state.flags.store(15 & !missing, Ordering::Relaxed);
+        state.fault.store(fault, Ordering::Relaxed);
         let mut other = ProcessedPeer::new(Source::new(true), peer.processor.take());
         assert!(other.history.is_none());
         assert!(!other.source_timing_available());
         assert_eq!(other.render_timed_sample().unwrap().age_bound, None);
         state.flags.store(15, Ordering::Relaxed);
+        state.fault.store(0, Ordering::Relaxed);
         assert!(
             !other.source_timing_available(),
             "an unqualified plan cannot adopt retained output midway"
@@ -501,7 +503,7 @@ fn timed_block_history_horizon_and_empty_blocks_do_not_invent_age_or_work() {
     assert_eq!(state.calls.load(Ordering::Relaxed), 0);
     assert_eq!(state.queries.load(Ordering::Relaxed), queries);
     let (_, allocations) = crate::fixture::allocations(|| {
-        for _ in 0..60 {
+        for _ in 0..120 {
             let block = peer.render_timed_block(&mut [0.0; 480]).unwrap();
             assert_eq!(block.real, 480);
             assert_eq!(

@@ -1360,7 +1360,7 @@ pub(crate) mod tests {
             provider
         ));
         let mut incompatible = descriptor;
-        incompatible.abi_version = 8;
+        incompatible.abi_version = 7;
         assert!(!valid_descriptor(
             (&incompatible as *const InlineDescriptor).cast(),
             provider
@@ -1525,7 +1525,7 @@ pub(crate) mod tests {
             super::inspection_api(pointer, spec).err(),
             Some(ProviderError::IncompleteDescriptor(spec.library))
         );
-        descriptor.abi_version = 8;
+        descriptor.abi_version = 7;
         assert_eq!(
             super::inspection_api(pointer, spec).err(),
             Some(ProviderError::IncompatibleDescriptor(spec.library))

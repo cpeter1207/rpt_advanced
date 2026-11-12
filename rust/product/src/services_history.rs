@@ -286,3 +286,7 @@ impl History {
         std::mem::size_of::<Self>() + std::mem::size_of_val(&*self.buckets)
     }
 }
+
+#[cfg(test)]
+#[path = "services_history_boundary_tests.rs"]
+mod boundary_tests;
