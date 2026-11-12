@@ -351,8 +351,8 @@ impl Host {
             if !self.site_acquisition.seal() {
                 return Err(RuntimeError::Preparation);
             }
-            // This serialized turn staged and checked the radio barrier above;
-            // no callback can mutate its handoff between readiness and sealing.
+            // Staging may precede this turn; readiness was rechecked above.
+            // No callback can mutate the handoff between that check and sealing.
             assert!(
                 self.site_radio.seal(),
                 "ready staged radio handoff must seal"

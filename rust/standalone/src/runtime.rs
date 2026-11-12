@@ -956,6 +956,8 @@ mod tests {
                     )
                 }
                 .unwrap();
+                // Empty settings exercise disposition/document ownership, fencing,
+                // and no replay; real radio-owner retention is tested separately.
                 let result = process.reload_with_radios("candidate", Vec::new());
                 assert_eq!(result.is_ok(), status == 0);
                 assert_eq!(SEEN.with_borrow(Clone::clone), ["candidate"]);
