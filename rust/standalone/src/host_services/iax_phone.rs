@@ -32,6 +32,7 @@ pub(super) struct Phone {
     offset: usize,
     acknowledged: u64,
     host_epoch: Option<u64>,
+    closed: bool,
 }
 
 impl HostServicesOwner {
@@ -90,6 +91,7 @@ impl HostServicesOwner {
             offset: 0,
             acknowledged: 0,
             host_epoch: None,
+            closed: false,
         });
         Ok(Box::into_raw(Box::new(PeerHandle::Iax(IaxHandle {
             peer: call.peer,
@@ -118,8 +120,31 @@ impl Phone {
         output.progress = 0;
         output.activity = 0;
         output.finish_pending = 0;
-        output.state = 1;
+        output.state = if self.closed { 3 } else { 1 };
         output.represented_node_number = 0;
+        if self.closed {
+            return Ok(());
+        }
+        let result = unsafe { self.read_open(peer, samples, completion, sink, output) };
+        if result.is_err() {
+            // Every terminal source failure retires this owner before a later
+            // state query or provider access. Never revive a failed call.
+            self.closed = true;
+            self.pending = None;
+            output.state = 3;
+        }
+        result
+    }
+
+    /// Advance only a live source; the outer boundary latches every terminal error.
+    unsafe fn read_open(
+        &mut self,
+        peer: &mut IaxPeer,
+        samples: &mut [f32],
+        completion: u32,
+        sink: *const abi::rptadv_peer_source_sink_v1,
+        output: &mut abi::rptadv_peer_source_result_v1,
+    ) -> Result<(), IaxError> {
         if completion != 0 {
             return Err(IaxError::Operation);
         }
@@ -220,6 +245,7 @@ impl Phone {
                 }
             }
             Kind::Hangup => {
+                self.closed = true;
                 output.state = 3;
                 true
             }

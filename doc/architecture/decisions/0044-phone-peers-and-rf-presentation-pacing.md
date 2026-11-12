@@ -867,3 +867,8 @@ Zero-capacity polling is not a service-only operation. A separate bounded
 provider progress prerequisite and timed egress/source authorization composition
 must be qualified before production admission. This slice changes no host ABI,
 SONAME, scheduler, thread count or live account behavior.
+
+Remote Hangup and terminal source errors latch the private host owner closed.
+Later null-sink queries report the same closure without consuming input; later
+source reads cannot poll again or publish retained media/control. Destruction
+remains the existing unique handle owner's responsibility, exactly once.

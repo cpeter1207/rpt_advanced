@@ -27,6 +27,8 @@ use std::{
 #[derive(Clone)]
 enum Event {
     Reset(u64),
+    Hangup,
+    Failure,
     Digit(u8),
     Audio,
     UnqualifiedTone,
@@ -140,6 +142,11 @@ unsafe extern "C" fn timed_poll(
             Some(Event::UnqualifiedTone) => {
                 record.event_length = 160;
                 return 1;
+            }
+            Some(Event::Failure) => return -1,
+            Some(Event::Hangup) => {
+                record.event_kind = 3;
+                state.events.pop_front();
             }
             Some(Event::Digit(_)) => return -1,
             None => {}
@@ -621,4 +628,87 @@ fn host_identity_issues_final_counter_once_then_remains_exhausted() {
         assert_eq!(sequence.load(Ordering::Relaxed), u64::MAX);
     }
     PROVIDER.with_borrow(|state| assert_eq!(state.destroyed, 3));
+}
+
+#[test]
+fn hangup_remains_closed_for_null_queries_and_repeated_source_reads() {
+    let owner = owner();
+    let account = account();
+    let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+    PROVIDER.with_borrow_mut(|state| {
+        state.events = [
+            Event::Reset(1),
+            Event::Hangup,
+            Event::Audio,
+            Event::Digit(b'7'),
+        ]
+        .into();
+    });
+    let mut sink = Sink::default();
+    read(&handle, Some(&mut sink), 10_000);
+    let ended = read(&handle, Some(&mut sink), 11_000);
+    let query = read(&handle, None, 12_000);
+    let repeated = read(&handle, Some(&mut sink), 13_000);
+    let again = read(&handle, None, 14_000);
+    assert_eq!(
+        [ended.state, query.state, repeated.state, again.state],
+        [3; 4],
+        "terminal closure must survive a later state query or source turn"
+    );
+    PROVIDER
+        .with_borrow(|state| assert_eq!(state.polls, 2, "closed call polled later provider input"));
+    assert!(sink.audio_offers.is_empty());
+    assert!(sink.digit_offers.is_empty());
+    drop(handle);
+    PROVIDER.with_borrow(|state| assert_eq!(state.destroyed, 1));
+}
+
+#[test]
+fn terminal_provider_error_remains_closed_without_repolling() {
+    let owner = owner();
+    let account = account();
+    let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+    PROVIDER.with_borrow_mut(|state| {
+        state.events = [Event::Reset(1), Event::Failure, Event::Audio].into();
+    });
+    let mut sink = Sink::default();
+    read(&handle, Some(&mut sink), 10_000);
+    let api = owner.descriptor();
+    let callbacks = abi::rptadv_peer_source_sink_v1 {
+        struct_size: size_of::<abi::rptadv_peer_source_sink_v1>() as u32,
+        abi_version: 1,
+        context: ptr::from_mut(&mut sink).cast(),
+        audio: None,
+        gap: Some(gap),
+        host_clock_epoch: 9,
+        reference_now_ns: 11_000,
+        audio_timed: Some(audio),
+        source_discontinuity: Some(reset),
+        digit: Some(digit),
+    };
+    let mut output: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
+    output.struct_size = size_of::<abi::rptadv_peer_source_result_v1>() as u32;
+    output.abi_version = 1;
+    assert_eq!(
+        unsafe {
+            api.peer_read_source.unwrap()(
+                api.context,
+                handle.raw,
+                0,
+                &callbacks,
+                None,
+                ptr::null_mut(),
+                &mut output,
+            )
+        },
+        -1
+    );
+    let query = read(&handle, None, 12_000);
+    assert_eq!(query.state, 3, "terminal provider error was forgotten");
+    let repeated = read(&handle, Some(&mut sink), 13_000);
+    assert_eq!(repeated.state, 3);
+    PROVIDER.with_borrow(|state| assert_eq!(state.polls, 2));
+    assert!(sink.audio_offers.is_empty());
+    drop(handle);
+    PROVIDER.with_borrow(|state| assert_eq!(state.destroyed, 1));
 }
