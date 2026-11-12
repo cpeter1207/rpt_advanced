@@ -295,6 +295,12 @@ jitter/decode and retire it with the call generation. A connected UDP socket
 accepts only the negotiated media endpoint. RFC 4733 onset and first end remain
 independent of PCM admission; repeated ends do not repeat command digits.
 
+The fixed 172-byte RTP send follows Rust 1.88's
+[atomic UDP send contract](https://github.com/rust-lang/rust/blob/1.88.0/library/std/src/net/udp.rs#L683-L702).
+Real socket errors remain redacted; sequence and timestamp advance only after
+successful submission of the entire datagram. Success does not establish peer
+delivery.
+
 SRTP, SDES/DTLS, ICE, RTCP multiplexing, additional codecs and non-20-ms profiles
 are not advertised. Unsupported security attributes are rejected rather than
 downgraded. RTCP/session reports, outbound telephone-event scheduling, incoming

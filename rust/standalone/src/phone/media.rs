@@ -288,15 +288,11 @@ impl RtpEndpoint {
             .marshal_to(&mut wire[..12])
             .map_err(|_| MediaError::InvalidPacket)?;
         wire[12..].copy_from_slice(payload);
-        if self
-            .socket
+        // UDP submits this fixed 172-byte datagram atomically or returns an error.
+        self.socket
             .send(&wire)
             .await
-            .map_err(|_| MediaError::Network)?
-            != wire.len()
-        {
-            return Err(MediaError::Network);
-        }
+            .map_err(|_| MediaError::Network)?;
         self.header.sequence_number = self.header.sequence_number.wrapping_add(1);
         self.header.timestamp = self.header.timestamp.wrapping_add(160);
         Ok(())
