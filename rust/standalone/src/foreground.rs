@@ -79,7 +79,7 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         let providers = crate::providers::ProviderSet::load().map_err(ForegroundError::Provider)?;
         let client = providers.iax_client().map_err(ForegroundError::Provider)?;
         let mut iax_listeners = bind_iax_listeners(&client, &radios)?;
-        let mut runtime = crate::runtime::ProductRuntime::start_with_providers(
+        let runtime = crate::runtime::ProductRuntime::start_with_providers(
             configuration,
             &text,
             radios,
@@ -88,56 +88,77 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         )
         .map_err(ForegroundError::Runtime)?;
         enable_iax_listeners(&mut iax_listeners, &runtime)?;
-        let mut registration = crate::registration::RegistrationWorker::start(registrations)
+        let registration = crate::registration::RegistrationWorker::start(registrations)
             .map_err(ForegroundError::Registration)?;
-        install_signal_handlers()?;
-        let mut local_control =
-            crate::local_control::Server::bind(Path::new(crate::local_control::SOCKET_PATH))
-                .map_err(ForegroundError::LocalControl)?;
-        eprintln!("rpt-advanced standalone runtime started");
-        while !STOP.load(Ordering::Acquire) {
-            poll_iax_listeners(&mut iax_listeners, &runtime, &client);
-            let mut control = ForegroundControl {
-                runtime: &mut runtime,
-                configuration,
-                secrets_path,
-                listeners: &mut iax_listeners,
-                client: &client,
-                registration: &mut registration,
-            };
-            local_control.poll(&mut control);
-            if RELOAD.swap(false, Ordering::AcqRel) {
-                local_control.close(&mut control);
-                if let Err(error) = control.reload() {
-                    eprintln!("configuration reload failed: {error}");
-                }
-            }
-            if control.runtime.reload_fatal() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        local_control.close(&mut ForegroundControl {
+        run_runtime(
+            configuration,
+            secrets_path,
+            client,
+            iax_listeners,
+            runtime,
+            registration,
+        )
+    }
+}
+
+/// Poll prepared process owners, then quiesce them before releasing their callbacks.
+/// Parameters retain startup's reverse drop order if signal/socket setup fails.
+#[cfg(unix)]
+fn run_runtime(
+    configuration: &Path,
+    secrets_path: Option<&Path>,
+    client: crate::iax::IaxClient,
+    mut iax_listeners: BTreeMap<u16, crate::iax::IaxServer>,
+    mut runtime: crate::runtime::ProductRuntime,
+    mut registration: crate::registration::RegistrationWorker,
+) -> Result<(), ForegroundError> {
+    install_signal_handlers()?;
+    let mut local_control =
+        crate::local_control::Server::bind(Path::new(crate::local_control::SOCKET_PATH))
+            .map_err(ForegroundError::LocalControl)?;
+    eprintln!("rpt-advanced standalone runtime started");
+    while !STOP.load(Ordering::Acquire) {
+        poll_iax_listeners(&mut iax_listeners, &runtime, &client);
+        let mut control = ForegroundControl {
             runtime: &mut runtime,
             configuration,
             secrets_path,
             listeners: &mut iax_listeners,
             client: &client,
             registration: &mut registration,
-        });
-        let fatal = runtime.reload_failure();
-        if let Err(error) = runtime.stop() {
-            // A failed quiescence cannot release listener callbacks underneath the
-            // retained product/provider owners. Process shutdown remains fatal.
-            std::mem::forget(iax_listeners);
-            registration.stop();
-            return Err(ForegroundError::Runtime(error));
+        };
+        local_control.poll(&mut control);
+        if RELOAD.swap(false, Ordering::AcqRel) {
+            local_control.close(&mut control);
+            if let Err(error) = control.reload() {
+                eprintln!("configuration reload failed: {error}");
+            }
         }
-        iax_listeners.clear();
-        registration.stop();
-        eprintln!("rpt-advanced standalone runtime stopped");
-        shutdown_result(fatal, Ok(()))
+        if control.runtime.reload_fatal() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
+    local_control.close(&mut ForegroundControl {
+        runtime: &mut runtime,
+        configuration,
+        secrets_path,
+        listeners: &mut iax_listeners,
+        client: &client,
+        registration: &mut registration,
+    });
+    let fatal = runtime.reload_failure();
+    if let Err(error) = runtime.stop() {
+        // A failed quiescence cannot release listener callbacks underneath the
+        // retained product/provider owners. Process shutdown remains fatal.
+        std::mem::forget(iax_listeners);
+        registration.stop();
+        return Err(ForegroundError::Runtime(error));
+    }
+    iax_listeners.clear();
+    registration.stop();
+    eprintln!("rpt-advanced standalone runtime stopped");
+    shutdown_result(fatal, Ok(()))
 }
 
 #[cfg(unix)]
@@ -1225,12 +1246,93 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn run_fatal_reload_child(
+        configuration: &Path,
+        secrets_path: Option<&Path>,
+    ) -> Result<(), ForegroundError> {
+        use crate::{abi, host_services::HostServicesOwner, runtime::ProductRuntime};
+        use std::{cell::Cell, ffi::c_void, sync::OnceLock};
+
+        type Submit = unsafe extern "C" fn(*mut c_void, abi::rptadv_control_task_v1) -> i32;
+        static SUBMIT: OnceLock<Submit> = OnceLock::new();
+        thread_local! {
+            // Only the foreground caller is armed; the real ticker keeps running.
+            static REJECT_AFTER: Cell<usize> = const { Cell::new(0) };
+        }
+        unsafe extern "C" fn submit(
+            context: *mut c_void,
+            task: abi::rptadv_control_task_v1,
+        ) -> i32 {
+            let reject = REJECT_AFTER.with(|remaining| {
+                let value = remaining.get();
+                remaining.set(value.saturating_sub(1));
+                value == 1
+            });
+            if reject {
+                // Queue-full rejection leaves the payload with its real caller.
+                return 2;
+            }
+            unsafe { SUBMIT.get().unwrap()(context, task) }
+        }
+
+        assert_ne!(unsafe { libc::geteuid() }, 0);
+        // The child retains actual provider code even if a failed assertion leaves owners live.
+        let providers = Box::leak(Box::new(crate::providers::ProviderSet::load().unwrap()));
+        let descriptors = providers.product_runtime_descriptors().unwrap();
+        let mut control = *descriptors.control;
+        SUBMIT.set(control.submit.unwrap()).unwrap();
+        control.submit = Some(submit);
+        let control = Box::leak(Box::new(control));
+        let text = super::read_configuration(configuration).unwrap();
+        let radios = super::resolve_radios(&text).unwrap();
+        assert!(radios.iter().all(|radio| !radio.enabled));
+        let host = HostServicesOwner::new(radios, None, super::read_secrets(secrets_path).unwrap())
+            .unwrap();
+        let runtime = unsafe {
+            ProductRuntime::start(
+                descriptors.product,
+                host,
+                control,
+                descriptors.file,
+                descriptors.speech,
+                &text,
+            )
+        }
+        .unwrap();
+        let client = providers.iax_client().unwrap();
+        let registration = crate::registration::RegistrationWorker::start(Vec::new()).unwrap();
+        // Accept site_basis, then reject the first mutating handoff submission.
+        // Later cleanup submissions continue through the original serialized executor.
+        REJECT_AFTER.set(2);
+        super::run_runtime(
+            configuration,
+            secrets_path,
+            client,
+            Default::default(),
+            runtime,
+            registration,
+        )
+    }
+
+    #[cfg(unix)]
     #[test]
     fn foreground_child_entry() {
         let Some(configuration) = std::env::var_os("RPT_ADVANCED_FOREGROUND_TEST_CONFIG") else {
             return;
         };
         let secrets = std::env::var_os("RPT_ADVANCED_FOREGROUND_TEST_SECRETS").map(PathBuf::from);
+        if std::env::var_os("RPT_ADVANCED_FOREGROUND_EXPECT_FATAL_RELOAD").is_some() {
+            assert!(matches!(
+                run_fatal_reload_child(Path::new(&configuration), secrets.as_deref()),
+                Err(ForegroundError::Runtime(
+                    crate::runtime::RuntimeError::ReloadOutcome(
+                        rptadv_peer_support::reload::ReloadOutcome::Fatal(-3)
+                    )
+                ))
+            ));
+            eprintln!("foreground stopped after fatal reload");
+            return;
+        }
         let result = super::run(Path::new(&configuration), secrets.as_deref());
         if std::env::var_os("RPT_ADVANCED_FOREGROUND_EXPECT_BIND_ERROR").is_some() {
             let error = result.unwrap_err();
@@ -1342,7 +1444,8 @@ mod tests {
         }
         impl Drop for SocketFixture {
             fn drop(&mut self) {
-                if self.collision {
+                // A killed child can leave its socket in this fixture's private directory.
+                if self.collision || self.created_directory {
                     let _ = fs::remove_file(crate::local_control::SOCKET_PATH);
                 }
                 if self.created_directory {
@@ -1538,6 +1641,34 @@ mod tests {
         wait_for_log(&receiver, "runtime stopped");
         assert!(child.0.wait().unwrap().success());
         reader.join().unwrap();
+
+        // A documented control-provider failure during mutating reload must stop
+        // the foreground loop itself, without a signal or a second lifecycle owner.
+        command.env("RPT_ADVANCED_FOREGROUND_EXPECT_FATAL_RELOAD", "1");
+        let (mut fatal, fatal_logs, fatal_reader) = spawn_foreground(&mut command);
+        wait_for_log(&fatal_logs, "standalone runtime started");
+        let mut local =
+            std::os::unix::net::UnixStream::connect(crate::local_control::SOCKET_PATH).unwrap();
+        let request = br#"{"version":1,"operation":"reload","node":"524950"}"#;
+        local
+            .write_all(&(request.len() as u32).to_be_bytes())
+            .unwrap();
+        local.write_all(request).unwrap();
+        // Fatal cleanup can close the session before its queued reply is flushed.
+        wait_for_log(&fatal_logs, "foreground stopped after fatal reload");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while fatal.0.try_wait().unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fatal reload child timed out"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(fatal.0.wait().unwrap().success());
+        fatal_reader.join().unwrap();
+        drop(local);
+        assert!(!Path::new(crate::local_control::SOCKET_PATH).exists());
+        command.env_remove("RPT_ADVANCED_FOREGROUND_EXPECT_FATAL_RELOAD");
 
         // The native fixture's account 99 cannot quiesce. A disabled radio
         // exercises real process shutdown without opening hardware or IAX listeners.
