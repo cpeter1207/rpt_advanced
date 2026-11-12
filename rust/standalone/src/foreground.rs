@@ -1239,6 +1239,29 @@ mod tests {
                 "{error:?}"
             );
             eprintln!("{error}");
+        } else if let Some(path) =
+            std::env::var_os("RPT_ADVANCED_FOREGROUND_EXPECT_ECHO_STOP_ERROR")
+        {
+            assert!(matches!(
+                result,
+                Err(ForegroundError::Runtime(
+                    crate::runtime::RuntimeError::Echo(
+                        rptadv_peer_support::echolink::host::Error::Status(
+                            rptadv_peer_support::echolink::abi::Status::Failed
+                        )
+                    )
+                ))
+            ));
+            let library = unsafe { libloading::Library::new(path) }.unwrap();
+            for symbol in [
+                b"fixture_accounts\0".as_slice(),
+                b"fixture_contexts\0".as_slice(),
+            ] {
+                let retained =
+                    unsafe { library.get::<unsafe extern "C" fn() -> usize>(symbol) }.unwrap();
+                assert_eq!(unsafe { retained() }, 1);
+            }
+            eprintln!("foreground retained failed EchoLink owner");
         } else {
             result.unwrap();
         }
@@ -1515,6 +1538,59 @@ mod tests {
         wait_for_log(&receiver, "runtime stopped");
         assert!(child.0.wait().unwrap().success());
         reader.join().unwrap();
+
+        // The native fixture's account 99 cannot quiesce. A disabled radio
+        // exercises real process shutdown without opening hardware or IAX listeners.
+        let fixture = crate::host_services::echo_tests::support::Fixture::new("network");
+        let directory = fixture.0.parent().unwrap();
+        std::os::unix::fs::symlink(&fixture.0, directory.join("librptadv_echolink.so.1")).unwrap();
+        let echo_secrets = directory.join("echolink-secrets.conf");
+        fs::write(
+            &echo_secrets,
+            "[524950]\ndirectory_password=fixture-value\n",
+        )
+        .unwrap();
+        fs::set_permissions(&echo_secrets, fs::Permissions::from_mode(0o600)).unwrap();
+        let echo_secrets_c =
+            std::ffi::CString::new(echo_secrets.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::chown(echo_secrets_c.as_ptr(), owner, group) },
+            0
+        );
+        let candidate = format!(
+            "[524950]\nnode_enabled=no\n[echolink 524950]\nenabled=yes\ncallsign=K1ABC-R\nnode_number=99\nsecrets_file={}\n",
+            echo_secrets.display()
+        );
+        let radios = super::resolve_radios(&candidate).unwrap();
+        assert!(super::resolve_listener_nodes(&radios).unwrap().is_empty());
+        fs::write(&path, candidate).unwrap();
+        let mut search = vec![directory.to_owned()];
+        search.extend(std::env::split_paths(
+            &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+        ));
+        command
+            .env("LD_LIBRARY_PATH", std::env::join_paths(search).unwrap())
+            .env("RPT_ADVANCED_FOREGROUND_EXPECT_ECHO_STOP_ERROR", &fixture.0);
+        let (mut failed_stop, stop_logs, stop_reader) = spawn_foreground(&mut command);
+        wait_for_log(&stop_logs, "standalone runtime started");
+        assert_eq!(
+            unsafe { libc::kill(failed_stop.0.id() as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        wait_for_log(&stop_logs, "foreground retained failed EchoLink owner");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = failed_stop.0.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shutdown child timed out"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        stop_reader.join().unwrap();
         if std::env::var_os("CARGO_LLVM_COV").is_some() {
             let profiles: Vec<_> = fs::read_dir(std::env::temp_dir())
                 .unwrap()
