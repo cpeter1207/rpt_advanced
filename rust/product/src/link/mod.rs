@@ -2,6 +2,7 @@
 
 pub(crate) mod dispatcher;
 pub mod egress;
+pub(crate) mod input;
 mod outbound;
 pub(crate) mod private_phone;
 mod regeneration;

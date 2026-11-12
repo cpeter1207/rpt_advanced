@@ -401,3 +401,106 @@ fn prepared_phone_media_qualifies_original_age_through_the_actual_processor() {
         assert_eq!(input.render_timed_sample(), None);
     }
 }
+
+#[test]
+fn prepared_phone_media_joins_the_product_mixer_with_an_ordinary_peer() {
+    use crate::link::input::AudioInput;
+    assert_eq!(
+        std::mem::size_of::<AudioInput>(),
+        std::mem::size_of::<Result<ProcessedPeer<InboundConsumer>, PhoneMediaInput>>(),
+        "the mixed owner must not add allocation or storage beyond its native variants",
+    );
+    eprintln!(
+        "input_owner_bytes ordinary={} phone={} enum={}",
+        std::mem::size_of::<ProcessedPeer<InboundConsumer>>(),
+        std::mem::size_of::<PhoneMediaInput>(),
+        std::mem::size_of::<AudioInput>(),
+    );
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode, PeerIdentity, SourcePosition},
+    };
+    let call = reply();
+    let source = call.phone_source().unwrap().clone();
+    let (mut ingress, private, shared) = prepare(call.clone(), 8000, None).unwrap();
+    ingress.adopt(0, reference());
+    for index in 0..12 {
+        assert_eq!(
+            ingress.audio(index * 160, &[0.25; 160], Some(birth(10))),
+            Ok(160)
+        );
+    }
+    let private = AudioInput::Phone(private);
+    assert_eq!(private.source_rate(), 8000);
+    assert_eq!(private.phone_reply(), Some(&call));
+    assert_eq!(private.receive_policy(), ReceivePolicy::Phone);
+    assert!(private.source_timing_available());
+    assert_eq!(private.finite_playout(), None);
+    let (private_out, _) = LinkAudioQueue::new(1920, 480).unwrap().into_endpoints();
+    let phone =
+        AudioPeer::for_phone(&source, &call, Mode::TRANSCEIVE, private, private_out, 480).unwrap();
+
+    let (mut ordinary_writer, ordinary) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+    // Preserve the ordinary 260ms target and the released 4096-sample offer limit.
+    for _ in 0..4 {
+        assert_eq!(ordinary_writer.write(&[0.5; 4096]).unwrap(), 4096);
+    }
+    let ordinary = AudioInput::Peer(ProcessedPeer::new(ordinary, None));
+    assert_eq!(ordinary.source_rate(), 48000);
+    assert_eq!(ordinary.phone_reply(), None);
+    assert_eq!(ordinary.receive_policy(), ReceivePolicy::Peer);
+    let (public_out, mut public_reader) = LinkAudioQueue::new(1920, 480).unwrap().into_endpoints();
+    let public = AudioPeer::new(
+        PeerIdentity::from_operator("2000").unwrap(),
+        Mode::TRANSCEIVE,
+        ordinary,
+        public_out,
+        480,
+        0,
+    )
+    .unwrap();
+    // This is the actual fixed product worker type, not a separate test mixer.
+    let (mut mixer, mut dispatcher): (crate::worker::Audio, _) =
+        LinkAudio::new(vec![phone, public], 480).unwrap();
+    let status = mixer.status();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let (_, allocations) = crate::fixture::allocations(|| {
+        mixer
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0; 480],
+                SourcePosition::default(),
+            )
+            .unwrap();
+        assert_eq!(dispatcher.dispatch(1), 1);
+    });
+    assert_eq!(
+        allocations, 0,
+        "mixed ownership adds no callback allocations"
+    );
+    assert_eq!(status.last_keyed(), Some("2000"));
+    let mut pcm = [0.0; 480];
+    assert_eq!(public_reader.read(&mut pcm), 0);
+    assert!(pcm.iter().any(|sample| *sample != 0.0));
+    mixer
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0; 480],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    shared.retire();
+    assert!(!call.ended());
+    assert_eq!(dispatcher.dispatch(1), 1);
+    assert_eq!(public_reader.read(&mut pcm), 480);
+    assert_eq!(pcm, [0.0; 480]);
+}

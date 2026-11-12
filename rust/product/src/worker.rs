@@ -5,7 +5,7 @@ use crate::{
         InboundConsumer, InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation,
         RingError,
     },
-    services::{PeerIo, ProcessedPeer, Radio},
+    services::{PeerIo, Radio},
 };
 use rpt_advanced_core::{
     link::LinkAudio,
@@ -215,7 +215,7 @@ pub(crate) fn take_test_failure(failure: TestFailure) -> bool {
     })
 }
 /// Unique generation-owned transmit mixer.
-pub type Audio = LinkAudio<ProcessedPeer<InboundConsumer>>;
+pub type Audio = LinkAudio<crate::link::input::AudioInput>;
 /// Fixed registrations transferred once on control.
 pub type AudioOwners = RuntimeAudioOwners<Audio>;
 type ReceiveOwner = OwnedReceiveOwner<DtmfWorker, RuntimeTransmit<Audio>>;

@@ -498,3 +498,16 @@ input therefore uses the same bounded history owner and original receipt bounds
 as the qualified graph contract; exact post-DSP provenance remains unknown.
 Retiring the media generation still revokes its output without ending private
 call control. This joins a prepared path, not production attachment readiness.
+
+## Mixed product mixer input ownership — 2026-11-12
+
+The existing product transmit worker now owns a direct enum of its ordinary
+processed peer input and the exact prepared phone media input. Every PeerInput
+operation forwards to that original owner, including finite drainage, timing,
+provenance, private reply and retirement. The ordinary host and regeneration
+constructors select the ordinary variant without changing their ring policy.
+No second ring, processor, buffer, thread or per-sample reference-count work is
+introduced. The measured amd64 representation is 88 bytes versus the previous
+72-byte ordinary input; the 16-byte ordinary-slot cost avoids another allocation
+or virtual call. The mixed worker remains a preparation prerequisite, not
+permission to attach a phone or publish unqualified RF programme.

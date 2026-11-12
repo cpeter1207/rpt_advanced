@@ -2,6 +2,7 @@
 use crate::{
     link::{
         dispatcher::{MediaWorker, PreparedDispatch},
+        input::AudioInput,
         ring::{InboundPolicy, InboundRing},
         session::{Command as PeerCommand, Event, PeerControl, PeerIoWorker, PeerSession},
         text::{TextDestination, TextPayload, TextRouter},
@@ -295,7 +296,7 @@ fn prepared(
                 MAXIMUM_FRAMES,
             )
             .map_err(|_| RuntimeError::Preparation)?;
-        let input = ProcessedPeer::new(input, processor);
+        let input = AudioInput::Peer(ProcessedPeer::new(input, processor));
         let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
@@ -331,7 +332,7 @@ fn prepared(
     let regeneration = if settings.dtmf_regeneration.enabled {
         let (writer, reader) = InboundRing::open(48000, InboundPolicy::Media)
             .map_err(|_| RuntimeError::Preparation)?;
-        audio = audio.with_regeneration(ProcessedPeer::new(reader, None));
+        audio = audio.with_regeneration(AudioInput::Peer(ProcessedPeer::new(reader, None)));
         Some((settings.dtmf_regeneration, writer, MAXIMUM_FRAMES))
     } else {
         None
