@@ -146,3 +146,67 @@ fn line_grammar_and_stream_truncation_fail_closed() {
         Some(ParseError::Truncated)
     );
 }
+
+#[test]
+fn declared_bounds_are_resource_errors_not_syntax_errors() {
+    assert_eq!(
+        Parser::default()
+            .parse(b"SIP/2.0 200 OK\r\nl:16385\r\n\r\n", Transport::Udp)
+            .err(),
+        Some(ParseError::Limit)
+    );
+    let mut wire = b"SIP/2.0 200 OK\r\nX:".to_vec();
+    wire.resize(16_383, b'a');
+    wire.extend_from_slice(b"\r\n\r\n");
+    assert_eq!(
+        Parser::default().parse(&wire, Transport::Udp).err(),
+        Some(ParseError::Limit)
+    );
+}
+
+fn sized_headers(size: usize, length: usize) -> Vec<u8> {
+    let mut wire = format!("SIP/2.0 200 OK\r\nl:{length}\r\n").into_bytes();
+    while wire.len() + 2 < size {
+        let remaining = size - wire.len() - 2;
+        let part = if remaining > 4000 { 3996 } else { remaining };
+        assert!(part >= 4);
+        wire.extend_from_slice(b"X:");
+        wire.resize(wire.len() + part - 4, b'a');
+        wire.extend_from_slice(b"\r\n");
+    }
+    wire.extend_from_slice(b"\r\n");
+    assert_eq!(wire.len(), size);
+    wire
+}
+
+#[test]
+fn exact_wire_header_and_unfolded_field_boundaries() {
+    let mut wire = sized_headers(16_384, 16_384);
+    wire.resize(32_768, 0xff);
+    let mut parser = Parser::default();
+    assert_eq!(
+        parser.parse(&wire, Transport::Udp).unwrap().body().len(),
+        16_384
+    );
+    wire.push(0);
+    assert_eq!(
+        parser.parse(&wire, Transport::Udp).err(),
+        Some(ParseError::Limit)
+    );
+    assert_eq!(
+        parser
+            .parse(&sized_headers(16_385, 0), Transport::Udp)
+            .err(),
+        Some(ParseError::Limit)
+    );
+    for (tail, valid) in [(2047, true), (2048, false)] {
+        let mut wire = b"SIP/2.0 200 OK\r\nX:".to_vec();
+        wire.extend(std::iter::repeat_n(b'a', 2048));
+        wire.extend_from_slice(b"\r\n\t");
+        wire.extend(std::iter::repeat_n(b'b', tail));
+        wire.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(parser.parse(&wire, Transport::Udp).is_ok(), valid);
+    }
+    assert!(std::mem::size_of::<TcpDecoder>() + 4096 <= 8192);
+    assert!(std::mem::size_of::<Parser>() + 4096 <= 8192);
+}

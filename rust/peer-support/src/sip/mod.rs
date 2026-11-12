@@ -4,6 +4,9 @@
 //! are implementation policy, not protocol maxima. All views borrow the admitted
 //! wire buffer; retained transactions must acquire their own storage reservation.
 
+mod headers;
+pub use headers::{Header, NameAddr, Values};
+
 /// Maximum admitted wire-buffer size, independent of parser workspace.
 pub const MAX_MESSAGE: usize = 32_768;
 /// Maximum start-line and header section, including its empty terminating line.
@@ -308,7 +311,13 @@ fn line_end(wire: &[u8], begin: usize) -> Result<usize, ParseError> {
     while at < wire.len().min(MAX_HEADERS) {
         match wire[at] {
             b'\r' => match wire.get(at + 1) {
-                Some(b'\n') if at + 2 <= MAX_HEADERS => return Ok(at),
+                Some(b'\n') => {
+                    return if at + 2 <= MAX_HEADERS {
+                        Ok(at)
+                    } else {
+                        Err(ParseError::Limit)
+                    };
+                }
                 Some(_) => return Err(ParseError::Syntax),
                 None => break,
             },
@@ -368,12 +377,17 @@ fn decimal(value: impl Iterator<Item = u8>, maximum: usize) -> Result<usize, Par
             result = result
                 .checked_mul(10)
                 .and_then(|n| n.checked_add((byte - b'0') as usize))
-                .filter(|n| *n <= maximum)
                 .ok_or(ParseError::InvalidLength)?;
             started = true;
         }
     }
-    started.then_some(result).ok_or(ParseError::InvalidLength)
+    if !started {
+        return Err(ParseError::InvalidLength);
+    }
+    if result > maximum {
+        return Err(ParseError::Limit);
+    }
+    Ok(result)
 }
 
 /// Incremental single-frame TCP owner, borrowing one admitted buffer generation.
