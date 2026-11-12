@@ -174,3 +174,30 @@ fn phone_account_records_do_not_inherit_node_or_general_options() {
         label
     );
 }
+
+#[test]
+fn single_phone_account_resolution_uses_canonical_defaults_and_validation() {
+    let id = crate::link::PhoneAccountId::new("trunk").unwrap();
+    for extra in [
+        "",
+        "enabled=yes",
+        "enabled=invalid",
+        "protocol=sip",
+        "protocol=invalid",
+        "local_node=missing",
+        "server=invalid",
+        "secrets_file=https://invalid.example",
+    ] {
+        let document = account(extra);
+        let all = resolve_phone_accounts(&document);
+        let single = PhoneAccountSettings::resolve(&document, &id);
+        assert_eq!(single.value.as_ref(), all.value.first(), "{extra}");
+        assert_eq!(single.warnings, all.warnings, "{extra}");
+    }
+    let missing = crate::link::PhoneAccountId::new("absent").unwrap();
+    assert!(
+        PhoneAccountSettings::resolve(&account(""), &missing)
+            .value
+            .is_none()
+    );
+}

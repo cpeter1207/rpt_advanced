@@ -781,9 +781,10 @@ impl Host {
     ) -> Result<(), RuntimeError> {
         let local = io.local().to_owned();
         if io.identity().protocol() == ProtocolId::Phone {
-            self.runtime
-                .settings(&local)
-                .ok_or(RuntimeError::MissingNode)?;
+            self.authorize_phone_account(
+                io.phone_account().expect("validated private account"),
+                &local,
+            )?;
             let source = self
                 .phone_calls
                 .admit(io, clock.now_ms)

@@ -58,8 +58,9 @@ fn engine(
 
 fn configuration() -> String {
     active_configuration(&format!(
-        "link_static_directory_file=fixture\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n{}",
-        include_str!("tests/fixtures/phone_mailbox.conf")
+        "link_static_directory_file=fixture\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n{}{}",
+        include_str!("tests/fixtures/phone_mailbox.conf"),
+        include_str!("tests/fixtures/phone_account.conf"),
     ))
 }
 

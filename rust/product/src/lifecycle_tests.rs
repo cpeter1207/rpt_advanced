@@ -13,6 +13,9 @@ use std::{
 #[path = "lifecycle_phone_tests.rs"]
 mod phone;
 
+#[path = "lifecycle_phone_account_tests.rs"]
+mod phone_account;
+
 fn descriptor() -> &'static abi::rptadv_product_descriptor_v1 {
     unsafe { &*rptadv_product_descriptor_v1() }
 }
@@ -865,7 +868,7 @@ fn public_phone_admission_borrows_real_metadata_then_transfers_only_the_exact_ca
     SKIP_TICKER_THREAD.store(true, Ordering::Release);
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_info = Some(phone_info);
-    let source = active_configuration("");
+    let source = active_configuration(include_str!("tests/fixtures/phone_account.conf"));
     assert_eq!(
         unsafe {
             descriptor().start.unwrap()(

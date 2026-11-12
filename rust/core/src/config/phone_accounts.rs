@@ -41,6 +41,14 @@ pub struct PhoneAccountSettings {
     pub authentication_timeout_ms: u32,
 }
 
+impl PhoneAccountSettings {
+    /// Resolve one exact account using the canonical schema/default rules, without
+    /// copying unrelated records or opening its secrets file.
+    pub fn resolve(document: &ConfigDocument, id: &PhoneAccountId) -> Resolution<Option<Self>> {
+        resolve_section(document, &format!("phone_account {}", id.as_str()))
+    }
+}
+
 impl fmt::Debug for PhoneAccountSettings {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         output

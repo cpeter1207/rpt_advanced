@@ -1306,6 +1306,10 @@ impl PeerMetadata {
     pub fn local(&self) -> &str {
         &self.local
     }
+    /// Borrow the inspected account identity without adopting the pending handle.
+    pub(crate) fn phone_account(&self) -> Option<&PhoneAccountId> {
+        self.provider_account.as_ref()
+    }
 }
 
 /// Unique peer media/control handle operated by one reader.

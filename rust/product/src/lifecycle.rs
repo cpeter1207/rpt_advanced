@@ -1115,10 +1115,10 @@ unsafe extern "C" fn rptadv_product_authorize_incoming(
                 return Err(RuntimeError::Rejected);
             }
             return engine.run(move |host| {
-                host.runtime
-                    .settings(&local)
-                    .map(|_| ())
-                    .ok_or(RuntimeError::MissingNode)
+                host.authorize_phone_account(
+                    metadata.phone_account().expect("validated private account"),
+                    &local,
+                )
             });
         }
         // Echo admission must inspect the live provider QSO. A null/pre-answer

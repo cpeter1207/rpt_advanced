@@ -2,11 +2,29 @@
 use super::*;
 use crate::phone::PhoneLogin;
 use rpt_advanced_core::{
-    config::{PhoneMailbox, resolve_phone_mailboxes},
+    config::{PhoneAccountSettings, PhoneMailbox, resolve_phone_mailboxes},
+    link::PhoneAccountId,
     messages::PhoneAuthenticationPrompt,
 };
 
 impl Host {
+    /// Both borrowed authorization and owned admission must use the current
+    /// configured account. This is private call admission, not attachment policy.
+    pub(crate) fn authorize_phone_account(
+        &self,
+        account: &PhoneAccountId,
+        local: &str,
+    ) -> Result<(), RuntimeError> {
+        self.runtime
+            .settings(local)
+            .ok_or(RuntimeError::MissingNode)?;
+        PhoneAccountSettings::resolve(self.runtime.document(), account)
+            .value
+            .filter(|account| account.enabled && account.local_node.as_str() == local)
+            .map(|_| ())
+            .ok_or(RuntimeError::Rejected)
+    }
+
     /// Verify the currently configured mailbox/PIN against the exact admitted call.
     /// PINs remain borrowed, unlogged and absent from replies, node parsers and grants.
     pub fn authenticate_phone(

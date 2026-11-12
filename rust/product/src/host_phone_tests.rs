@@ -3,9 +3,33 @@ use super::*;
 use crate::phone::PhoneLogin;
 use rpt_advanced_core::command::LinkAction;
 
+fn account_configuration(local: &str) -> String {
+    include_str!("tests/fixtures/phone_account.conf")
+        .replace("local_node=1000", &format!("local_node={local}"))
+}
+
+fn host() -> Host {
+    Host::start(
+        document("usb", &account_configuration("1000")),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap()
+}
+
+fn mailbox_configuration(local: &str) -> String {
+    format!(
+        "{}{}",
+        include_str!("tests/fixtures/phone_mailbox.conf"),
+        account_configuration(local),
+    )
+}
+
 fn mailbox_host() -> Host {
     Host::start(
-        document("usb", include_str!("tests/fixtures/phone_mailbox.conf")),
+        document("usb", &mailbox_configuration("1000")),
         media(),
         services(),
         Instant::now(),
@@ -30,7 +54,7 @@ fn driven_mailbox_host() -> (Host, Arc<crate::media::text::tests::SpeechFixture>
         "usb",
         &format!(
             "[speech]\nvoice=voice.onnx\nlevel_db=-6\n{}",
-            include_str!("tests/fixtures/phone_mailbox.conf")
+            mailbox_configuration("1000")
         ),
     );
     let host = Host::start(
@@ -267,7 +291,7 @@ fn actual_private_digits_select_the_bound_numeric_or_named_local_with_star_four_
             .unwrap_or_else(|error| error.into_inner());
         let configuration = ConfigDocument::parse(&format!(
             "[{local}]\nradio_channel=usb\nduplex=full\n{}",
-            include_str!("tests/fixtures/phone_mailbox.conf")
+            mailbox_configuration(local)
         ))
         .unwrap();
         let mut host =
@@ -308,7 +332,10 @@ fn private_owner_preparation_failure_reclaims_only_the_new_call() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let mut host = Host::start(
-        document("usb", "link_command_status=91\n"),
+        document(
+            "usb",
+            &format!("link_command_status=91\n{}", account_configuration("1000")),
+        ),
         media(),
         services(),
         Instant::now(),
@@ -803,7 +830,7 @@ fn incoming_prompt_backpressure_reclaims_the_provider_call_without_attachment() 
     }
     .unwrap();
     let mut host = Host::start(
-        document("usb", include_str!("tests/fixtures/phone_mailbox.conf")),
+        document("usb", &mailbox_configuration("1000")),
         media,
         services(),
         Instant::now(),
@@ -941,7 +968,10 @@ fn phone_reload_and_unload_retire_the_actual_call_generation() {
     host.incoming_peer(phone, "127.0.0.1", clock()).unwrap();
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
-    let next = document("usb", "ctcss_encode=no\n");
+    let next = document(
+        "usb",
+        &format!("ctcss_encode=no\n{}", account_configuration("1000")),
+    );
     let mut acquisition = Some(
         crate::site::acquisition::Acquisition::prepare_reload(
             &Default::default(),

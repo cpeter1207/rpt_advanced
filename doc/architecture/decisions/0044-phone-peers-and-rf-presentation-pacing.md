@@ -872,3 +872,34 @@ Remote Hangup and terminal source errors latch the private host owner closed.
 Later null-sink queries report the same closure without consuming input; later
 source reads cannot poll again or publish retained media/control. Destruction
 remains the existing unique handle owner's responsibility, exactly once.
+
+
+## Current configured phone account admission
+
+Both borrowed pre-answer authorization and owned incoming admission use one
+private Host validator in the ordinary serialized Engine turn. It resolves only
+the inspected account label through the canonical account resolver, requires
+the current record to be enabled, and requires its configured local_node to
+equal the actual provider-bound local node and remain hosted. The existing
+Call.local string is retained only after that equality check, so the configured
+binding remains the default local target without another stored identity.
+
+Borrowed authorization does not adopt or destroy the pending provider handle
+and creates no call or permission token. Owned admission rechecks the current
+document before creating a private call, prompt or serial owner. A removal,
+disable or rebind between the two calls is therefore a rejection; the existing
+owned error path destroys the transferred handle exactly once. No account map,
+secrets read, native transport or extra worker is created by this check.
+
+The current peer ABI exposes ProtocolId::Phone and nonzero account/call
+generations, but does not expose the native SIP/IAX family or an authoritative
+published provider-generation map. This check does not invent either value or
+compare provider generations with the unrelated Engine revision. Existing
+actual request/metadata identity checks, typed ingress fencing, mailbox/PIN
+authentication and reload admission fencing remain separate and unchanged.
+
+An enabled bound account is permission for private mailbox/control admission,
+not transceive attachment. Two-sided target permission, attachment limits,
+outgoing isolation and source-unlock bypass, queued lifecycle-spanning media
+authority, provider readiness and RF qualification remain required. *3 and
+other unavailable attachment/manual actions remain explicitly unavailable.
