@@ -685,3 +685,24 @@ their independent original paths.
 This adds no RF FIFO, policy, clock qualification, final-fence consumer or ID
 presentation acknowledgment. Those joins and physical qualification remain
 required before production phone RF attachment can become available.
+
+
+## Authoritative collection inspection prerequisite — 2026-11-12
+
+The outer phone grammar and the exact selected-node source collector expose
+read-only pending-collection state. A selected target or retained administrative
+grant is not itself pending collection. Empty action output is also not proof
+of completion: discard expiry may produce no action, and addressed symbols can
+leave the inner node collector active after the outer grammar becomes idle.
+Inspection does not cancel, reconstruct or renew those owners or their grants.
+The node query requires an authenticated matching source token and open node
+admission, but it is not call-registry authorization; control must still validate
+the actual PhoneSource and PeerReply against the live private call.
+
+Actual released-detector tests distinguish a qualified pending digit from
+current audible suppression at both 8 and 48 kHz. Scalar state inferred during
+the existing 8 ms partitions agrees with the provider's explicit end-of-input
+completion through quiet tails, replacement tones and short unqualified tones.
+This proof introduces no production detector state or automatic readmission.
+Versioned control release, lifecycle fencing and fresh-media adoption remain
+separate pending prerequisites. No attachment, RF or provider capability is enabled.

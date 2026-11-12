@@ -474,3 +474,39 @@ fn every_action_and_pending_collection_redacts_payloads_in_debug() {
     input(&mut grammar, "*310001234", 0);
     assert!(!format!("{grammar:?}").contains("10001234"));
 }
+
+#[test]
+fn phone_collection_state_distinguishes_idle_target_quote_and_silent_discard_timeout() {
+    let mut grammar = grammar();
+    assert!(!grammar.collecting());
+    input(&mut grammar, "*41000#", 0);
+    assert_eq!(grammar.selected_target(), Some("1000"));
+    assert!(!grammar.collecting(), "selection is not pending collection");
+    input(&mut grammar, "**", 100);
+    assert!(grammar.collecting(), "unfinished quote is pending");
+    assert_eq!(
+        grammar.digit('#', 102),
+        [Action::NodeDigit {
+            target: "1000".into(),
+            digit: '#'
+        }]
+    );
+    assert!(!grammar.collecting());
+    assert_eq!(grammar.selected_target(), Some("1000"));
+    input(&mut grammar, "*9", 200);
+    assert!(grammar.collecting());
+    grammar.tick(3201);
+    assert!(!grammar.collecting());
+    assert_eq!(grammar.selected_target(), Some("1000"));
+    grammar.digit('!', 4000);
+    assert!(grammar.collecting());
+    assert!(
+        grammar.tick(7000).is_empty(),
+        "discard timeout may emit no action"
+    );
+    assert!(!grammar.collecting());
+    input(&mut grammar, "**", 8000);
+    grammar.cancel();
+    assert!(!grammar.collecting());
+    assert_eq!(grammar.selected_target(), None);
+}

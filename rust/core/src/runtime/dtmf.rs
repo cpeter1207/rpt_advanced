@@ -683,6 +683,12 @@ impl DtmfCommands {
         })
     }
 
+    /// Inspect collection without clearing selection, macros or source grants.
+    /// Peer collectors cannot enter the local-RF-only keypad test.
+    pub(super) fn collecting(&self) -> bool {
+        self.collector.active()
+    }
+
     /// Preserve commands, selected/remembered destinations, and live administrative grants.
     pub(super) fn retains_state(&self, now_ms: u64) -> bool {
         self.collector.active()

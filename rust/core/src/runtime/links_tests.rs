@@ -3136,3 +3136,86 @@ fn connect_commands_distinguish_temporary_links_and_existing_loops() {
         Err(AdmissionError::Loop)
     ));
 }
+
+#[test]
+fn phone_collection_query_is_exact_read_only_and_preserves_unlock() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let mut links = links();
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    links.configure_admin(&digest, &digest, 60_000);
+    let signals: Vec<_> = (1..=3)
+        .map(|ingress| {
+            PeerSignals::for_phone(
+                PhoneSource::new(
+                    PhoneAccountId::new("provider").unwrap(),
+                    1,
+                    "aabbccddeeff00112233445566778899".parse().unwrap(),
+                    2,
+                    ingress,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let first = signals[0].reply_target();
+    let source = first.phone_source().unwrap();
+    assert_eq!(links.phone_collection_pending(source, &first), None);
+    for signal in &signals[..2] {
+        assert!(signal.authenticate_phone());
+        let reply = signal.reply_target();
+        let source = reply.phone_source().unwrap();
+        assert_eq!(links.phone_collection_pending(source, &reply), Some(false));
+        for digit in "*8001234#*7".chars() {
+            links.phone_digit(source, digit, 1, reply.clone());
+        }
+        assert_eq!(links.phone_collection_pending(source, &reply), Some(true));
+    }
+    let other = signals[1].reply_target();
+    assert_eq!(links.phone_collection_pending(source, &other), None);
+    let unauthenticated = signals[2].reply_target();
+    assert_eq!(
+        links.phone_collection_pending(unauthenticated.phone_source().unwrap(), &unauthenticated),
+        None
+    );
+    let before = links.peer_commands.len();
+    for _ in 0..3 {
+        assert_eq!(links.phone_collection_pending(source, &first), Some(true));
+    }
+    assert_eq!(
+        links.peer_commands.len(),
+        before,
+        "inspection creates no collector"
+    );
+    links.clear_source_input(&first);
+    assert_eq!(links.phone_collection_pending(source, &first), Some(false));
+    assert_eq!(
+        links.phone_collection_pending(other.phone_source().unwrap(), &other),
+        Some(true)
+    );
+    assert!(
+        "*804"
+            .chars()
+            .filter_map(|digit| { links.phone_digit(source, digit, 2, first.clone()) })
+            .any(|outcome| matches!(outcome, DigitOutcome::Operation(_))),
+        "inspection and cancellation preserve the exact source's unlock"
+    );
+    assert_eq!(links.phone_collection_pending(source, &first), Some(false));
+    assert!(links.expire_peer_digits(3002).is_empty());
+    assert_eq!(
+        links.phone_collection_pending(other.phone_source().unwrap(), &other),
+        Some(false),
+        "the real node timeout ends collection even without an operation"
+    );
+    signals[0].end();
+    assert_eq!(links.phone_collection_pending(source, &first), None);
+    links.close();
+    assert_eq!(
+        links.phone_collection_pending(other.phone_source().unwrap(), &other),
+        None
+    );
+    assert!(links.manager().snapshot().is_empty());
+}

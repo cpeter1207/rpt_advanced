@@ -636,6 +636,24 @@ impl NodeLinkControl {
         self.source_digit(&source.call_id().to_string(), digit, now_ms, reply)
             .filter(|outcome| !matches!(outcome, DigitOutcome::Regenerate(_)))
     }
+    /// Inspect only this exact reply's collector while node admission is open.
+    /// This is not call-registry admission: the caller must separately validate
+    /// the actual live source. An absent collector is idle, never a new grant.
+    pub fn phone_collection_pending(
+        &self,
+        source: &crate::link::PhoneSource,
+        reply: &PeerReply,
+    ) -> Option<bool> {
+        if !self.admitting || !reply.phone_authenticated() || reply.phone_source() != Some(source) {
+            return None;
+        }
+        Some(
+            self.peer_commands
+                .iter()
+                .any(|(_, actual, commands)| actual == reply && commands.collecting()),
+        )
+    }
+
     /// Retire an actual private ingress before reclaiming its collectors and grants.
     /// Already queued work retains this ended token and fails its dispatch fence.
     pub fn retire_source(&mut self, reply: &PeerReply) {

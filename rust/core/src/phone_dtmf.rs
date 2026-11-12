@@ -267,6 +267,12 @@ impl PhoneDtmfGrammar {
         self.last_ms = 0;
     }
 
+    /// Whether the outer grammar still holds a prefix, quote or discard.
+    /// An idle selected target is not active collection or an admission grant.
+    pub fn collecting(&self) -> bool {
+        !matches!(self.collection, Collection::Idle)
+    }
+
     /// Inspect syntactic command selection; this is never an authorization grant.
     pub fn selected_target(&self) -> Option<&str> {
         self.target.as_deref()
