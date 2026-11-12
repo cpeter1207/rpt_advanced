@@ -3010,3 +3010,30 @@ fn radio_maintenance_rejects_a_quiesced_device_lease() {
     assert!(matches!(host.radio_control("1000", request), Err(-7)));
     assert!(host.stop(20));
 }
+
+#[test]
+fn reload_disposition_distinguishes_idle_rejection_publication_and_restore_failure() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let configuration = host.runtime.document().clone();
+    let rejected =
+        crate::media::text::tests::failing_start(0, || host.reload(configuration.clone(), clock()));
+    assert_eq!(rejected, Err(RuntimeError::Preparation));
+    assert_eq!(host.reload_status(rejected.as_ref().err()), -1);
+    assert_eq!(
+        host.reload_status(None),
+        0,
+        "no pending transaction remains"
+    );
+    assert_eq!(host.reload_status(Some(&RuntimeError::Restore)), -3);
+    host.reload(configuration, clock()).unwrap();
+    assert_eq!(host.reload_status(None), 0);
+    assert_eq!(
+        host.reload_status(Some(&RuntimeError::Preparation)),
+        -2,
+        "operational error must not undo known publication"
+    );
+    assert!(host.stop(20));
+}

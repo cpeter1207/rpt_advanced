@@ -38,3 +38,18 @@ impl ReloadOutcome {
         matches!(self, Self::Committed | Self::CommittedWithError)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ReloadOutcome;
+
+    #[test]
+    fn terminal_status_round_trip_preserves_publication_and_foreign_diagnosis() {
+        assert_eq!(ReloadOutcome::from_status(1), None);
+        for (status, published) in [(0, true), (-1, false), (-2, true), (-3, false), (73, false)] {
+            let outcome = ReloadOutcome::from_status(status).unwrap();
+            assert_eq!(outcome.status(), status);
+            assert_eq!(outcome.published(), published);
+        }
+    }
+}

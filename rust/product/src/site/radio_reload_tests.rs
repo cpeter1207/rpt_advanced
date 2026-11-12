@@ -291,6 +291,12 @@ fn site_radio_sealed_release_survives_poll_fault_without_hiding_health() {
         assert_eq!(owner.state.claimed_mask, 0);
         assert!(site.seal());
         assert!(!site.seal());
+        // A new hardware epoch after confirmed release must not reclaim pins.
+        owner.state.generation += 13;
+        let commands = owner.levels.len();
+        owner.poll(&mut site, 14);
+        assert_eq!(owner.levels.len(), commands);
+        assert_eq!(owner.state.claimed_mask, 0);
         site.poll(6000, |_, _, operation| {
             assert!(matches!(operation, Operation::Snapshot));
             Err(-7)

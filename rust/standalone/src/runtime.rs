@@ -1283,6 +1283,18 @@ mod tests {
             ),
             (RuntimeError::Stop, "standalone product shutdown failed"),
             (
+                RuntimeError::ReloadOutcome(rptadv_peer_support::reload::ReloadOutcome::Fatal(73)),
+                "reload outcome: Fatal(73)",
+            ),
+            (
+                RuntimeError::EchoCommitted(rptadv_peer_support::echolink::host::UpdateOutcome {
+                    product: rptadv_peer_support::reload::ReloadOutcome::CommittedWithError,
+                    failure: Some(rptadv_peer_support::echolink::host::Error::Control),
+                    retirement: None,
+                }),
+                "committed EchoLink update: UpdateOutcome { product: CommittedWithError, failure: Some(Control), retirement: None }",
+            ),
+            (
                 RuntimeError::Echo(rptadv_peer_support::echolink::host::Error::Control),
                 "EchoLink account operation failed: Control",
             ),

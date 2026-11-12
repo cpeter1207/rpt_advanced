@@ -365,3 +365,41 @@ fn site_acquisition_sealed_handoff_keeps_workers_paused_until_commit_or_abort() 
         close(&mut service, &mut host);
     }
 }
+
+#[test]
+fn site_acquisition_seal_allocation_failure_preserves_paused_owners_for_retry() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    for retained in [true, false] {
+        *PROBE.lock().unwrap() = Probe::default();
+        let epoch = Instant::now();
+        let mut host = host("1000");
+        let mut service = Acquisition::prepare(&definitions(RELAY), backends(), epoch).unwrap();
+        until(|| {
+            service.poll(0, |_| host.control().work());
+            service
+                .output_status("1000", "relay")
+                .unwrap()
+                .submitted
+                .is_some()
+        });
+        assert!(begin(&mut service, &BTreeMap::new(), epoch));
+        until(|| service.barrier().is_some());
+        assert!(service.stage());
+        until(|| service.barrier().is_some());
+        assert!(!crate::fixture::fail_allocation_ordinal(
+            if retained { 1 } else { 2 },
+            || service.seal()
+        ));
+        assert!(!service.resume());
+        assert!(
+            service.seal(),
+            "reservation failure must leave candidate retryable"
+        );
+        let retired = service.commit_prepared();
+        assert_eq!(retired.len(), 1);
+        for mut worker in retired {
+            assert!(worker.finish());
+        }
+        assert!(service.output_status("1000", "relay").is_none());
+    }
+}

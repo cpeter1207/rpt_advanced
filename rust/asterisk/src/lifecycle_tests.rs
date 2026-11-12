@@ -9,6 +9,7 @@ use std::{
 };
 
 thread_local! {
+    static RELOAD_OVERRIDE: Cell<Option<i32>> = const { Cell::new(None) };
     static START_RESULT: Cell<i32> = const { Cell::new(0) };
     static STOP_RESULT: Cell<i32> = const { Cell::new(0) };
     static INCOMING_RESULT: Cell<i32> = const { Cell::new(0) };
@@ -74,6 +75,9 @@ unsafe extern "C" fn reload(configuration: *const std::ffi::c_char, length: usiz
     }
     .unwrap();
     RELOAD_DOCUMENTS.with_borrow_mut(|documents| documents.push(text.to_owned()));
+    if let Some(status) = RELOAD_OVERRIDE.get() {
+        return status;
+    }
     match text {
         "pending-candidate" => 1,
         "rejected-candidate" => -1,
@@ -441,6 +445,48 @@ fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
         assert!(STATE.lock().unwrap().is_none());
         std::fs::write(&path, "fixture-echo:7").unwrap();
         assert_eq!(load_selected(), 0);
+        if matches!(
+            mode.to_str(),
+            Some("fatal" | "committed-error" | "activation-error")
+        ) {
+            let fatal = mode == "fatal";
+            let candidate = if mode == "activation-error" {
+                "fixture-echo:42"
+            } else {
+                "fixture-echo:8"
+            };
+            RELOAD_OVERRIDE.set(if fatal {
+                Some(73)
+            } else if mode == "committed-error" {
+                Some(-2)
+            } else {
+                None
+            });
+            RELOAD_DOCUMENTS.with_borrow_mut(Vec::clear);
+            std::fs::write(&path, candidate).unwrap();
+            assert_eq!(super::reload(), -1);
+            {
+                let selected = STATE.lock().unwrap();
+                let state = selected.as_ref().unwrap();
+                assert_eq!(state.reload_fatal, fatal);
+                assert_eq!(
+                    state.configuration,
+                    if fatal { "fixture-echo:7" } else { candidate }
+                );
+            }
+            if fatal {
+                assert_eq!(super::reload(), -1);
+                assert_eq!(
+                    RELOAD_DOCUMENTS.with_borrow(Vec::len),
+                    1,
+                    "fatal gate must not call the product again"
+                );
+            }
+            RELOAD_OVERRIDE.set(None);
+            assert_eq!(unload(), 0);
+            unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
+            return;
+        }
         std::fs::write(&path, "fixture-echo:0").unwrap();
         assert_eq!(super::reload(), 0);
         let library =
@@ -461,7 +507,13 @@ fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
         unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
         return;
     }
-    for mode in ["retirement", "rollback-stop"] {
+    for mode in [
+        "retirement",
+        "rollback-stop",
+        "fatal",
+        "committed-error",
+        "activation-error",
+    ] {
         let fixture = EchoFixture::new("network");
         let directory = fixture.0.parent().unwrap();
         symlink(&fixture.0, directory.join("librptadv_echolink.so.1")).unwrap();

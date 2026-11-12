@@ -684,6 +684,43 @@ fn reload_preparation_lazily_adds_the_first_account_and_reuses_its_owner() {
         },
         ..Default::default()
     };
+    for existing in [false, true] {
+        let owner = if existing {
+            unsafe {
+                preparation().reload(
+                    None,
+                    |visit| visit(&config, None),
+                    || ReloadOutcome::Committed,
+                )
+            }
+            .unwrap()
+            .0
+        } else {
+            None
+        };
+        let (retained, outcome) = unsafe {
+            preparation().reload(
+                owner.clone(),
+                |visit| visit(&config, None),
+                || ReloadOutcome::Fatal(73),
+            )
+        }
+        .unwrap();
+        assert_eq!(outcome.product, ReloadOutcome::Fatal(73));
+        assert_eq!(outcome.failure, None);
+        let retained = retained.unwrap();
+        if let Some(owner) = &owner {
+            assert!(Arc::ptr_eq(owner, &retained));
+        }
+        assert!(
+            retained.account("524950").is_none(),
+            "fatal preparation cannot admit calls"
+        );
+        assert!(retained.observe("524950").unwrap().is_some());
+        retained.stop().unwrap();
+        drop(retained);
+        drop(owner);
+    }
     config.node_number = 42; // The existing provider fixture rejects activation.
     let (retained, outcome) = unsafe {
         preparation().reload(

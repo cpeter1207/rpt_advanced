@@ -1715,7 +1715,10 @@ mod tests {
         assert_eq!(legacy.size as usize, prefix);
         assert_eq!(legacy.guard, 0x1020304050607080);
         unsafe { legacy.destroy.unwrap()(legacy.context) };
-        for capacity in prefix + 1..size_of::<abi::rptadv_pcm_processor_v1>() {
+        for capacity in [0, prefix - 1]
+            .into_iter()
+            .chain(prefix + 1..size_of::<abi::rptadv_pcm_processor_v1>())
+        {
             let mut partial = record();
             partial.struct_size = capacity as u32;
             assert_eq!(invoke(configuration, 4, &mut partial), -1);

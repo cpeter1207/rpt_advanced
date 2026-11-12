@@ -13,6 +13,7 @@ use std::{
     },
 };
 
+thread_local! { static FAIL_ORDINAL: Cell<usize> = const { Cell::new(0) }; }
 thread_local! { static FAIL_BYTES: Cell<usize> = const { Cell::new(0) }; }
 thread_local! { static ALLOCATION_COUNT: Cell<Option<usize>> = const { Cell::new(None) }; }
 
@@ -56,6 +57,16 @@ pub(crate) fn error_log(priority: i32, message: &str) {
 struct Allocator;
 
 fn reject(bytes: usize) -> bool {
+    if FAIL_ORDINAL
+        .try_with(|slot| {
+            let remaining = slot.get();
+            slot.set(remaining.saturating_sub(1));
+            remaining == 1
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
     FAIL_BYTES
         .try_with(|slot| {
             if slot.get() == bytes {
@@ -593,6 +604,22 @@ pub fn control_descriptor() -> *const crate::abi::rptadv_control_descriptor_v1 {
 pub(crate) fn fail_next_allocation(bytes: usize) {
     assert_ne!(bytes, 0);
     assert_eq!(FAIL_BYTES.replace(bytes), 0);
+}
+
+/// Fail a selected fallible reservation without exposing a private allocation layout.
+pub(crate) fn fail_allocation_ordinal<T>(ordinal: usize, operation: impl FnOnce() -> T) -> T {
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            FAIL_ORDINAL.set(0);
+        }
+    }
+    assert_ne!(ordinal, 0);
+    assert_eq!(FAIL_ORDINAL.replace(ordinal), 0);
+    let _clear = Clear;
+    let result = operation();
+    assert_eq!(FAIL_ORDINAL.get(), 0, "selected allocation was not reached");
+    result
 }
 
 pub fn fail_allocation<T>(bytes: usize, operation: impl FnOnce() -> T) -> T {
