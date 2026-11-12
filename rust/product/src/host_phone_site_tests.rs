@@ -76,6 +76,97 @@ fn report(
 }
 
 #[test]
+fn ordinary_site_report_stays_on_requesting_peer() {
+    use crate::link::ring::{InboundPolicy, InboundRing};
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        link::{AudioPeer, LinkAudio, PeerIdentity, SourcePosition},
+    };
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut host, speech) = site_host();
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+    let mut peers = Vec::new();
+    for remote in ["2000", "3000"] {
+        let (input, reader) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+        let (writer, output) = LinkAudioQueue::new(960, 2).unwrap().into_endpoints();
+        peers.push(
+            AudioPeer::new(
+                PeerIdentity::from_operator(remote).unwrap(),
+                Mode::TRANSCEIVE,
+                reader,
+                writer,
+                960,
+                0,
+            )
+            .unwrap(),
+        );
+        inputs.push(input);
+        outputs.push(output);
+    }
+    let domain = host.media_workers[0].1.retirement_domain();
+    let (mut adapter, mut dispatcher) = LinkAudio::new_in_domain(peers, 960, domain).unwrap();
+    let reply = inputs[0].signals().reply_target();
+    assert!(reply.phone_source().is_none());
+    report(&mut host, "1000", "1", &reply, 10).unwrap();
+
+    let lease = Arc::clone(&host.leases[0].1);
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    let source_clock = Arc::clone(&lease.lock().unwrap().status.source_clock);
+    let mut audio = [0.0; 960];
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut heard = false;
+    while !heard {
+        assert!(
+            Instant::now() < deadline,
+            "ordinary site reply did not reach its peer"
+        );
+        audio.fill(0.0);
+        let stamp = source_clock.advance(audio.len());
+        let mut generation = owners.1.acquire().unwrap();
+        let source = SourcePosition {
+            generation: generation.id(),
+            sample: stamp.sample,
+            stream: stamp.stream,
+            born_ns: stamp.born_ns,
+        };
+        assert!(
+            !adapter
+                .process(
+                    &mut generation.state().controller,
+                    false,
+                    &mut audio,
+                    source
+                )
+                .unwrap()
+        );
+        assert!(audio.iter().all(|sample| *sample == 0.0));
+        drop(generation);
+        assert_eq!(dispatcher.dispatch(1), 1);
+        for (index, output) in outputs.iter_mut().enumerate() {
+            let mut samples = [0.0; 960];
+            output.read(&mut samples);
+            if index == 0 {
+                heard |= samples.iter().any(|sample| *sample != 0.0);
+            } else {
+                assert!(samples.iter().all(|sample| *sample == 0.0));
+            }
+        }
+        host.runtime.prepare_messages(clock());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(*speech.opened.lock().unwrap(), ["battery is unavailable."]);
+    assert!(host.phone_calls.is_empty());
+    drop((adapter, dispatcher, inputs, outputs));
+    lease.lock().unwrap().owners = Some(owners);
+    assert!(host.stop(20));
+}
+
+#[test]
 fn private_site_report_uses_existing_reading_quality_and_exact_private_owner() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
