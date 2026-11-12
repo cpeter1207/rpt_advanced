@@ -651,21 +651,51 @@ fn reload_abi_failed_stderr_retains_fatal_owner_until_cleanup() {
         let _serial = crate::fixture::LIFECYCLE
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
-        let revision = engine.run(|host| Ok(host.runtime.revision())).unwrap();
-        let drops = crate::fixture::RADIO_DROPS.load(Ordering::Acquire);
-        if phase == "poll" {
-            // Reject the real publish submission after basis, begin and barrier.
-            REJECT_AFTER.store(4, Ordering::Release);
-            assert!(
-                engine
-                    .reload_configuration(
-                        document("[1000]\nradio_channel=usb\nduplex=full\nhangtime_ms=123\n")
-                            .unwrap()
+        static READY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+        unsafe extern "C" fn ready(_: *mut std::ffi::c_void, _: *mut std::ffi::c_void) -> i32 {
+            let status = READY.load(Ordering::Acquire);
+            if status < 0 {
+                READY.store(0, Ordering::Release);
+            }
+            status
+        }
+        let source = "[1000]\nradio_channel=old\nduplex=full\n";
+        let engine = if phase == "poll" {
+            // Use the existing real deferred activation/rollback fixture contract.
+            let mut table = unsafe { crate::fixture::host_descriptor().read() };
+            table.radio_ready = Some(ready);
+            SKIP_TICKER_THREAD.store(true, Ordering::Release);
+            assert_eq!(
+                unsafe {
+                    rptadv_product_start(
+                        Box::leak(Box::new(table)),
+                        crate::fixture::control_descriptor(),
+                        rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                        rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                        source.as_ptr().cast(),
+                        source.len(),
                     )
-                    .is_err()
+                },
+                0
             );
-            assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
+            let (engine, call) = selected().unwrap();
+            drop(call);
+            engine
+        } else {
+            start(source)
+        };
+        let revision = engine.run(|host| Ok(host.runtime.revision())).unwrap();
+        assert_eq!(engine.reload_status.load(Ordering::Acquire), 0);
+        if phase == "poll" {
+            let candidate = source.replace("old", "new");
+            READY.store(1, Ordering::Release);
+            assert_eq!(
+                unsafe { rptadv_product_reload(candidate.as_ptr().cast(), candidate.len()) },
+                1
+            );
+            assert_eq!(engine.reload_status.load(Ordering::Acquire), 1);
+            // Fail one activation, then allow the existing owner to restore safely.
+            READY.store(-123, Ordering::Release);
             // Invoke once: an uncontained diagnostic panic aborts this child.
             assert_eq!(unsafe { rptadv_product_reload_poll() }, -3);
         } else {
@@ -679,18 +709,12 @@ fn reload_abi_failed_stderr_retains_fatal_owner_until_cleanup() {
         assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
         assert!(engine.reloading.load(Ordering::Acquire));
         assert_eq!(engine.run(|_| Ok(())), Err(RuntimeError::Rejected));
-        assert_eq!(
-            engine
-                .host
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .runtime
-                .revision(),
-            revision
-        );
-        assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Acquire), drops);
+        let retained = engine.host.lock().unwrap();
+        let host = retained.as_ref().unwrap();
+        assert_eq!(host.runtime.revision(), revision);
+        assert_eq!(host.runtime.settings("1000").unwrap().channel, "old");
+        drop(retained);
+        let drops = crate::fixture::RADIO_DROPS.load(Ordering::Acquire);
         assert_eq!(rptadv_product_stop(), 0);
         assert!(engine.host.lock().unwrap().is_none());
         assert_eq!(
