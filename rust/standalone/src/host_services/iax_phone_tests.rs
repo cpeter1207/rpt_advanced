@@ -81,13 +81,15 @@ unsafe extern "C" fn timed_poll(
     text_capacity: usize,
     record: *mut abi::rptadv_iax2_timed_event_v1,
 ) -> i32 {
-    let record = unsafe { &mut *record };
-    let service = if record.abi_version == 2 {
-        if record.struct_size as usize != size_of::<abi::rptadv_iax2_timed_event_v2>() {
+    // Inspect the optional tail from the original complete allocation pointer,
+    // before narrowing a reference to the ABI1 output prefix.
+    let service = if unsafe { ptr::addr_of!((*record).abi_version).read() } == 2 {
+        if unsafe { ptr::addr_of!((*record).struct_size).read() } as usize
+            != size_of::<abi::rptadv_iax2_timed_event_v2>()
+        {
             return -1;
         }
-        let request =
-            unsafe { &*(ptr::from_ref(record).cast::<abi::rptadv_iax2_timed_event_v2>()) };
+        let request = unsafe { &*record.cast::<abi::rptadv_iax2_timed_event_v2>() };
         if request.reserved != 0 || request.request_flags > 1 {
             return -1;
         }
@@ -95,6 +97,7 @@ unsafe extern "C" fn timed_poll(
     } else {
         false
     };
+    let record = unsafe { &mut *record };
     if !(record.struct_size as usize == size_of::<abi::rptadv_iax2_timed_event_v1>()
         && record.abi_version == 1
         || record.struct_size as usize == size_of::<abi::rptadv_iax2_timed_event_v2>()

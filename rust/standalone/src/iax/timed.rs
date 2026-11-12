@@ -117,7 +117,9 @@ impl IaxPeer {
                     text.as_mut_ptr()
                 },
                 text.len(),
-                &mut request.prefix,
+                // Derive the ABI1-typed pointer from the complete ABI2 object:
+                // the provider reads its sized tail, not just the prefix field.
+                ptr::from_mut(&mut request).cast(),
             )
         };
         let record = request.prefix;
