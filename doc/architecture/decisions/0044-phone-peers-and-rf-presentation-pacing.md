@@ -748,3 +748,12 @@ retired media generation nor prepares/adopts another ring or graph. A future
 fresh-media handoff must retain the expected revision and full lifecycle,
 source and RF qualification fences. Production attachment, RF routing,
 provider advertisement and remote capability remain unavailable.
+
+
+Global control-input loss already cancels every node's partial collector and
+clears its expiry deadline. That same Host cancellation marks the bounded
+private-call set dirty once, so an idle call does not depend on a now-impossible
+expiry notification. This does not cancel the outer phone grammar or change
+the existing loss scope. Ordinary reconciliation still checks both grammars
+and the exact source revision after processing any newer queued private input;
+loss notification itself neither clears suppression nor admits media.

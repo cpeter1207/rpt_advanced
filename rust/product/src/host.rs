@@ -582,6 +582,7 @@ impl Host {
     /// Admission/queue loss invalidates every partial collector before subsequent queued digits.
     pub fn lost_digits(&mut self) {
         self.runtime.discard_digits();
+        self.phone_calls.node_collections_discarded();
     }
     /// Resolve and atomically replace configuration; failed preparation retains live leases.
     pub fn reload(

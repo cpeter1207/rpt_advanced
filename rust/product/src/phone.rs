@@ -356,6 +356,14 @@ impl PhoneCalls {
             }
         }
     }
+    /// Global node-input loss has already discarded every inner collector.
+    /// Recheck bounded calls once; outer grammar and source revision still decide
+    /// release, including any newer input processed after that cancellation.
+    pub(crate) fn node_collections_discarded(&mut self) {
+        for call in &mut self.calls {
+            call.collection_dirty = true;
+        }
+    }
     /// Existing node expiry supplies exact dirty tokens, including silent expiry.
     pub(crate) fn collection_expired(&mut self, reply: &PeerReply) {
         let Some(source) = reply.phone_source() else {

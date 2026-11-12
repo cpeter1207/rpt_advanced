@@ -782,3 +782,93 @@ fn private_collection_real_engine_respects_quotes_cancellation_and_actual_timeou
         assert!(released, "completion={completion:?}, expiry={expiry}");
     }
 }
+
+#[test]
+fn private_collection_real_engine_reconciles_loss_without_clearing_new_input() {
+    use crate::link::session::{SerialSession, tests::Input};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for newer in [true, false] {
+        let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+        let engine = engine(configuration(), services, speech());
+        let (calls, mut session, state, source, reply) =
+            crate::phone::tests::controlled_source_session_mode(8000, false);
+        engine
+            .run(move |host| {
+                crate::host::tests::phone::install_controlled_source(host, calls);
+                Ok(())
+            })
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .extend("*4#*7".bytes().map(Input::Digit));
+        session.step(1).unwrap();
+        let clock = RuntimeClock {
+            now_ms: 1,
+            ..engine.clock()
+        };
+        engine.pump(clock, false).unwrap();
+        session.step(2).unwrap();
+        assert!(crate::link::private_phone::tests::collection_suppressed(
+            &session
+        ));
+        // A normal reconciliation already observed the pending inner collector
+        // and cleared this call's dirty bit.
+        engine
+            .pump(
+                RuntimeClock {
+                    now_ms: 100,
+                    ..clock
+                },
+                false,
+            )
+            .unwrap();
+        engine.lost_digits.store(true, Ordering::Release);
+        if newer {
+            state
+                .lock()
+                .unwrap()
+                .input
+                .extend("*7".bytes().map(Input::Digit));
+        }
+        session.step(3).unwrap();
+        engine
+            .pump(
+                RuntimeClock {
+                    now_ms: 200,
+                    ..clock
+                },
+                false,
+            )
+            .unwrap();
+        session.step(4).unwrap();
+        let suppressed = crate::link::private_phone::tests::collection_suppressed(&session);
+        let proof_source = source.clone();
+        let proof_reply = reply.clone();
+        let pending = engine
+            .run(move |host| {
+                Ok(host
+                    .runtime
+                    .node("1000")
+                    .unwrap()
+                    .links()
+                    .phone_collection_pending(&proof_source, &proof_reply))
+            })
+            .unwrap();
+        assert!(!reply.ended());
+        assert!(state.lock().unwrap().bound_radio.is_none());
+        assert!(engine.stop());
+        assert_eq!(
+            pending,
+            Some(newer),
+            "the real cancellation precedes later source input"
+        );
+        assert_eq!(
+            suppressed, newer,
+            "lost input must release only an actually idle collection, without waiting for another digit"
+        );
+    }
+}
