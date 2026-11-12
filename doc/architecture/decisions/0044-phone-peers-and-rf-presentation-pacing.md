@@ -860,9 +860,13 @@ packet loss. Ambiguous PCM reaches neither analysis nor RF and is never assigned
 a fabricated birth or concealment classification. Private legacy reads, ASL
 text and untimed prepared sends fail closed. Ordinary numeric peers are unchanged.
 
-Private executor attachment remains explicitly unavailable. The existing
-ordinary jitter setup does not qualify the phone profile, and alpha12 cannot
-guarantee protocol ACK/expiry progress while an application event is refused.
+Private executor attachment remains explicitly unavailable. Released alpha12
+already selects the 20/40/100 ms phone jitter profile through its existing
+configure callback when the peer retains authenticated provider ownership.
+Both account call constructors restrict codecs to PCMU/PCMA at 8 kHz with
+160-frame packets. Numeric peers retain their ordinary jitter policy.
+Alpha12 cannot guarantee protocol ACK/expiry progress while an application
+event is refused.
 Zero-capacity polling is not a service-only operation. A separate bounded
 provider progress prerequisite and timed egress/source authorization composition
 must be qualified before production admission. This slice changes no host ABI,
@@ -873,6 +877,14 @@ Later null-sink queries report the same closure without consuming input; later
 source reads cannot poll again or publish retained media/control. Destruction
 remains the existing unique handle owner's responsibility, exactly once.
 
+
+The alpha12 profile selection is grounded in released source
+4e7026c5234a7c7fb61907bbe56fbaef3a18963b: client::configure_jitter,
+server::prepare_dial and server_provider's authenticated incoming route.
+Qualification uses genuine loopback incoming/outgoing owned calls and the
+unchanged host configure wrapper, forwarding to the real jitter DSO. Failed
+preparation, retry, duplicate preparation and destruction are checked without
+attaching a private executor. This adds no jitter API, owner or activation.
 
 ## Current configured phone account admission
 

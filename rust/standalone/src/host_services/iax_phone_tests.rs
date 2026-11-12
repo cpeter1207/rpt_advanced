@@ -178,6 +178,10 @@ fn call_with_timing(account: &PreparedAccount, local: SocketAddr, timed: bool) -
 }
 
 fn account() -> Arc<PreparedAccount> {
+    account_at("127.0.0.1:4000".parse().unwrap())
+}
+
+fn account_at(remote: SocketAddr) -> Arc<PreparedAccount> {
     use std::os::unix::fs::PermissionsExt;
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -189,7 +193,7 @@ fn account() -> Arc<PreparedAccount> {
     let secret = path.join("phone.secret");
     std::fs::write(&secret, "fixture-secret").unwrap();
     std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let records = crate::configuration::resolve_phone_accounts("[named-node]\n[phone_account provider]\nenabled=yes\nlocal_node=named-node\nserver=127.0.0.1:4000\nusername=login\nsecrets_file=phone.secret\n").unwrap();
+    let records = crate::configuration::resolve_phone_accounts(&format!("[named-node]\n[phone_account provider]\nenabled=yes\nlocal_node=named-node\nserver={remote}\nusername=login\nsecrets_file=phone.secret\n")).unwrap();
     assert_eq!(records.len(), 1, "fixture account was not resolved");
     let prepared = AccountPreparer::default()
         .prepare(
@@ -712,3 +716,6 @@ fn terminal_provider_error_remains_closed_without_repolling() {
     drop(handle);
     PROVIDER.with_borrow(|state| assert_eq!(state.destroyed, 1));
 }
+
+#[path = "iax_phone_jitter_tests.rs"]
+mod jitter_qualification;

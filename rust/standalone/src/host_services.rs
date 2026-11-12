@@ -624,8 +624,9 @@ unsafe extern "C" fn peer_step_attach(
                 return -1;
             };
             // This inactive slice qualifies only owned metadata/source callbacks.
-            // Ordinary jitter setup and alpha12 ACK polling do not establish the
-            // required phone profile. Do not attach until both are qualified.
+            // The released callback selects phone jitter by provider ownership.
+            // Bounded protocol progress and timed egress remain unqualified;
+            // do not attach a private call until those prerequisites are ready.
             if peer.phone.is_some() {
                 return -1;
             }
