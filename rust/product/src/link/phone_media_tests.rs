@@ -218,7 +218,7 @@ unsafe extern "C" fn processor(
 
 #[test]
 fn prepared_phone_media_keeps_opaque_dsp_unknown_and_rechecks_retirement_after_processing() {
-    for mode in 0..3 {
+    for mode in 0..4 {
         let mut state = Box::new(ProcessorState {
             target: None,
             retire: false,
@@ -258,7 +258,11 @@ fn prepared_phone_media_keeps_opaque_dsp_unknown_and_rechecks_retirement_after_p
             }
             _ => {
                 let mut output = [1.0; 960];
-                assert!(input.render(&mut output).is_none());
+                if mode == 2 {
+                    assert!(input.render(&mut output).is_none());
+                } else {
+                    assert!(input.render_timed_block(&mut output).is_none());
+                }
                 assert_eq!(output, [0.0; 960]);
             }
         }
@@ -613,4 +617,82 @@ fn prepared_phone_media_revision_adds_only_scalar_storage_to_existing_ingress() 
     let actual = std::mem::size_of::<Ingress>();
     eprintln!("prepared_ingress_bytes unstamped={previous} stamped={actual}");
     assert!(actual <= previous + std::mem::align_of::<Ingress>());
+}
+
+#[test]
+fn prepared_phone_media_requires_a_live_authenticated_call_before_allocation() {
+    for authenticated in [false, true] {
+        let source = reply().phone_source().unwrap().clone();
+        let signals = PeerSignals::for_phone(source);
+        let owner = signals.reply_target();
+        if authenticated {
+            assert!(signals.authenticate_phone());
+            owner.retire();
+        }
+        assert!(matches!(prepare(owner, 8000, None), Err(Error::Admission)));
+    }
+}
+
+#[test]
+fn mixed_audio_inputs_delegate_live_timed_and_untimed_output_and_silence() {
+    use crate::link::input::AudioInput;
+    for phone in [false, true] {
+        let (mut ingress, private, shared) = prepare(reply(), 48000, None).unwrap();
+        adopt(&mut ingress, 0, reference());
+        let (mut writer, ordinary) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+        let mut input = if phone {
+            for index in 0..12 {
+                assert_eq!(
+                    ingress.audio(index * 960, &[0.25; 960], Some(birth(10))),
+                    Ok(960)
+                );
+            }
+            AudioInput::Phone(private)
+        } else {
+            for _ in 0..4 {
+                assert_eq!(writer.write(&[0.25; 4096]), Ok(4096));
+            }
+            AudioInput::Peer(ProcessedPeer::new(ordinary, None))
+        };
+        assert!(input.source_timing_available());
+        assert_eq!(input.source_rate(), 48000);
+        assert_eq!(
+            input.receive_policy(),
+            if phone {
+                ReceivePolicy::Phone
+            } else {
+                ReceivePolicy::Peer
+            }
+        );
+        let sample = input.render_timed_sample().unwrap();
+        assert!(sample.provenance.is_some());
+        // Both producers exceed their real reserve. A 10 ms block also drains
+        // the released ring's 3.75 ms PLC lookahead before single-sample checks.
+        let mut pcm = [9.0; 480];
+        assert!(input.render_timed_block(&mut pcm).unwrap().real > 0);
+        assert!(pcm.iter().all(|sample| sample.is_finite()));
+        assert!(pcm.iter().any(|sample| (0.2..0.3).contains(sample)));
+        assert!(input.render(&mut pcm).unwrap() > 0);
+        assert!((0.2..0.3).contains(&input.render_sample().unwrap()));
+        let timed = input.render_timed_sample().unwrap();
+        assert!(timed.provenance.unwrap().real);
+        if phone {
+            assert_eq!(
+                timed.age_bound,
+                Some(SourceTimeBound {
+                    host_clock_epoch: 7,
+                    not_after_ns: 10
+                })
+            );
+        }
+        input.silence(&mut pcm);
+        assert_eq!(pcm, [0.0; 480]);
+        if phone {
+            shared.retire();
+            assert_eq!(input.render_timed_sample(), None);
+            assert_eq!(input.render_sample(), None);
+            assert_eq!(input.render(&mut pcm), None);
+            assert_eq!(pcm, [0.0; 480]);
+        }
+    }
 }

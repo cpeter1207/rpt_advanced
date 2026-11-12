@@ -112,6 +112,9 @@ impl rpt_advanced_core::link::PeerInput for Source {
         100_000
     }
     fn render(&mut self, samples: &mut [f32]) -> Option<usize> {
+        if self.fault_at == Some((self.next + 1, 5)) {
+            return None;
+        }
         self.next += samples.len() as u64;
         samples.fill(0.25);
         Some(samples.len())
@@ -122,6 +125,9 @@ impl rpt_advanced_core::link::PeerInput for Source {
             .fault_at
             .filter(|(at, _)| *at == self.next)
             .map(|(_, kind)| kind);
+        if fault == Some(5) {
+            return None;
+        }
         Some(TimedPeerSample {
             sample: self.next as f32 * 0.25,
             age_bound: (self.known && fault != Some(0)).then_some(SourceTimeBound {
@@ -544,5 +550,34 @@ fn timed_block_history_wrap_keeps_earlier_bound_before_bucket_reuse() {
             }
         }
         assert!(qualified > 0);
+    }
+}
+
+#[test]
+fn timed_block_source_failure_and_current_mute_never_leak_partial_output() {
+    for processed in [false, true] {
+        let (_state, graph) = processor_fixture(1, 1);
+        let mut peer = ProcessedPeer::new(Source::new(true), processed.then_some(graph));
+        let mut pcm = [9.0; 4];
+        peer.render_timed_block(&mut pcm).unwrap();
+        peer.input.signals.set_dtmf_muted(true);
+        peer.render_timed_block(&mut pcm).unwrap();
+        assert_eq!(pcm, [0.0; 4], "current suppression wins after processing");
+        peer.input.signals.set_dtmf_muted(false);
+        peer.input.fault_at = Some((peer.input.next + if processed { 3 } else { 1 }, 5));
+        pcm.fill(9.0);
+        assert_eq!(peer.render_timed_block(&mut pcm), None);
+        assert_eq!(
+            pcm, [0.0; 4],
+            "no earlier partial source PCM survives failure"
+        );
+        peer.input.fault_at = None;
+        if processed {
+            assert_eq!(
+                peer.render_timed_sample().unwrap().age_bound,
+                None,
+                "failed source invalidates the retained DSP receipt"
+            );
+        }
     }
 }

@@ -77,7 +77,7 @@ pub(crate) struct State {
 }
 type Shared = Arc<Mutex<State>>;
 
-pub(super) fn five_tone(count: usize) -> Vec<f32> {
+pub(crate) fn five_tone(count: usize) -> Vec<f32> {
     (0..count)
         .map(|n| {
             let phase = n as f32 * std::f32::consts::TAU / 8000.0;
@@ -3550,4 +3550,26 @@ fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let writes = state.lock().unwrap().writes.clone();
     assert!(!writes.is_empty());
     assert!(writes.iter().all(|count| *count > 0));
+}
+
+#[test]
+fn public_source_retains_reset_without_acknowledging_media_retirement() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    state.lock().unwrap().source_reset = true;
+    session.step(0).unwrap();
+    session.step(1).unwrap();
+    let state = state.lock().unwrap();
+    assert!(state.source_completions.is_empty());
+    assert!(
+        state.source_reset,
+        "no media retirement ticket has completed"
+    );
+    while let Some(event) = control.event() {
+        assert!(!matches!(event, Event::Digit(_)));
+    }
 }

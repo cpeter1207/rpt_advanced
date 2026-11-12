@@ -686,3 +686,32 @@ impl PcmStreamReader for EmptyCollectionPrompt {
         PcmRead::Finished
     }
 }
+
+#[test]
+fn private_collection_reconcile_waits_for_authentication_grammar_and_local_target() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut calls = PhoneCalls::new(1, 1).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    calls.node_collections_discarded();
+    calls
+        .reconcile_collections(|_, _, _| panic!("unauthenticated call has no collector authority"));
+    calls
+        .authenticate(&source, &reply, &records(), "100", "1234", 0)
+        .unwrap();
+    calls.reconcile_collections(|_, _, _| panic!("not-yet-started call has no grammar"));
+    let ordinary = PeerSignals::new().reply_target();
+    calls.collection_expired(&ordinary);
+    calls.reconcile_collections(|_, _, _| panic!("ordinary expiry cannot dirty a phone call"));
+
+    let (mut calls, _session, _state, source, reply) = controlled_source_session(8000);
+    for digit in "*42000#".chars() {
+        calls.actions(&source, &reply, digit, 1).unwrap();
+    }
+    calls.reconcile_collections(|_, _, _| {
+        panic!("a selected remote target cannot release local suppression")
+    });
+    assert!(!reply.ended());
+}

@@ -407,3 +407,39 @@ fn phone_source_digit_rejects_invalid_symbols_and_invalid_acceptance() {
         );
     }
 }
+
+#[test]
+fn source_reset_callback_overcredit_fails_closed() {
+    unsafe extern "C" fn read(
+        _: *mut c_void,
+        _: *mut c_void,
+        _: u32,
+        sink: *const abi::rptadv_peer_source_sink_v1,
+        _: abi::rptadv_peer_source_text_v1,
+        _: *mut c_void,
+        _: *mut abi::rptadv_peer_source_result_v1,
+    ) -> i32 {
+        let sink = unsafe { &*sink };
+        assert_eq!(
+            unsafe { sink.source_discontinuity.unwrap()(sink.context) },
+            -1
+        );
+        0
+    }
+    let (prepared, _) = crate::link::session::tests::source_peer();
+    let services = host_services(|table| {
+        *table = prepared.services.0;
+        table.peer_info = Some(echo_info);
+        table.peer_read_source = Some(read);
+        table.peer_destroy = unsafe { (*crate::fixture::host_descriptor()).peer_destroy };
+    });
+    let mut peer = unsafe { services.peer(crate::fixture::peer()) }.unwrap();
+    assert_eq!(
+        peer.read_source(SourceCompletion::Pending, |input| {
+            assert!(matches!(input, SourceInput::Discontinuity));
+            2
+        })
+        .err(),
+        Some(Error::InvalidFrame)
+    );
+}

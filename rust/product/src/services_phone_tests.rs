@@ -163,6 +163,7 @@ fn private_inband_capability_requires_the_complete_timed_phone_profile() {
         (114, false),
         (119, false),
         (83, false),
+        (179, false),
     ] {
         let services = host_services(|table| {
             *table = source.services.0;

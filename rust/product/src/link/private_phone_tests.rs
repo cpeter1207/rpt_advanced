@@ -538,6 +538,13 @@ fn private_source_owner_reads_digits_once_without_legacy_polling_or_rf() {
     session.step(10).unwrap();
     assert_eq!(control.pending_digits(), 64);
     assert_eq!(state.lock().unwrap().input.len(), 2);
+    session.step(11).unwrap();
+    assert_eq!(control.pending_digits(), 64);
+    assert_eq!(
+        state.lock().unwrap().input.len(),
+        2,
+        "full native queue retains the next event"
+    );
     for symbol in &symbols[..64] {
         assert_eq!(control.digit(), Some((char::from(*symbol), 10)));
     }
@@ -1648,4 +1655,173 @@ fn prepared_phone_media_owner_layout_has_no_second_candidate_or_pcm_buffer() {
     );
     assert_eq!(std::mem::size_of::<PrivateDigit>(), 16);
     assert_eq!(std::mem::size_of::<SourceIngress<4>>(), 264);
+}
+
+#[test]
+fn private_source_empty_audio_never_grants_credit_or_ends_control() {
+    let (mut session, mut control, state, reply) = source_session();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(Vec::new()));
+    session.step(0).unwrap();
+    assert_eq!(state.lock().unwrap().source_credits, [(0, 0)]);
+    assert!(state.lock().unwrap().input.is_empty());
+    assert!(control.digit().is_none());
+    assert!(!reply.ended());
+}
+
+#[test]
+fn private_source_retry_birth_change_fails_closed_before_new_media_credit() {
+    use rpt_advanced_core::link::PeerInput as _;
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    let input = control.prepare_media(None).unwrap();
+    session.step(0).unwrap();
+    let birth = state.lock().unwrap().source_reference.unwrap().1;
+    {
+        let mut state = state.lock().unwrap();
+        state.source_birth = Some(birth);
+        state.input.extend([
+            Input::Audio(vec![0.25; 2399]),
+            Input::Audio(vec![0.25; 160]),
+        ]);
+    }
+    for now in 1..30 {
+        session.step(now).unwrap();
+        if state.lock().unwrap().source_credits.contains(&(2399, 1)) {
+            break;
+        }
+    }
+    assert_eq!(input.available(), 2400);
+    assert!(state.lock().unwrap().source_credits.contains(&(2399, 1)));
+    // The provider changes original receipt metadata on its real retained suffix.
+    // The analyzer must reject that new identity rather than renew source age.
+    state.lock().unwrap().source_birth = Some(birth + 1);
+    assert_eq!(session.step(40), Err(Error::InvalidFrame));
+    assert!(reply.ended());
+    assert!(!input.active());
+    assert_eq!(input.available(), 0);
+    assert_eq!(
+        state.lock().unwrap().source_credits.last(),
+        Some(&(2400, 0))
+    );
+    assert!(control.digit().is_none());
+}
+
+#[test]
+fn private_source_gap_and_finish_complete_only_authoritative_pending_tones() {
+    for inband in [false, true] {
+        for finish in [false, true] {
+            let peer = if inband {
+                crate::link::session::tests::phone_source_peer_inband(8000)
+            } else {
+                crate::link::session::tests::phone_source_peer_at_rate(8000)
+            };
+            let (mut session, mut control, state, reply) = source_session_with_peer(peer, true);
+            session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+            let input = control.prepare_media(None).unwrap();
+            session.step(0).unwrap();
+            assert!(input.active());
+            state
+                .lock()
+                .unwrap()
+                .input
+                .push_back(Input::Audio(crate::link::session::tests::five_tone(640)));
+            for now in 1..=4 {
+                session.step(now).unwrap();
+            }
+            assert!(control.digit().is_none(), "tone completion remains pending");
+            if finish {
+                state.lock().unwrap().source_finish = true;
+            } else {
+                state.lock().unwrap().input.push_back(Input::Gap(160));
+            }
+            session.step(10).unwrap();
+            assert_eq!(control.digit(), inband.then_some(('5', 10)));
+            assert!(control.digit().is_none());
+            assert!(!input.active());
+            assert!(!reply.ended());
+            session.step(11).unwrap();
+            assert!(control.digit().is_none(), "completion is never replayed");
+            assert_eq!(
+                state.lock().unwrap().source_completions,
+                if finish {
+                    vec![SourceCompletion::Cancelled as u32]
+                } else {
+                    vec![]
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn private_source_inband_saturation_backpressures_loss_and_finite_completion() {
+    for finish in [false, true] {
+        let (mut session, mut control, state, reply) = source_session_with_peer(
+            crate::link::session::tests::phone_source_peer_inband(8000),
+            true,
+        );
+        // Reach the actual bound through provider callbacks. Short offers need only
+        // one reserved digit slot; no synthetic queue/revision state is installed.
+        for digit in 0..64 {
+            let chunk = if digit < 61 { 160 } else { 1 };
+            let tone = crate::link::session::tests::five_tone(640);
+            for pcm in tone.chunks(chunk) {
+                state
+                    .lock()
+                    .unwrap()
+                    .input
+                    .push_back(Input::Audio(pcm.to_vec()));
+                session.step(1).unwrap();
+                assert!(state.lock().unwrap().input.is_empty());
+            }
+            for _ in 0..640 {
+                if control.pending_digits() == digit + 1 {
+                    break;
+                }
+                state
+                    .lock()
+                    .unwrap()
+                    .input
+                    .push_back(Input::Audio(vec![0.0]));
+                session.step(1).unwrap();
+            }
+            assert_eq!(control.pending_digits(), digit + 1);
+        }
+        if finish {
+            state.lock().unwrap().source_finish = true;
+        } else {
+            state.lock().unwrap().input.push_back(Input::Gap(160));
+        }
+        for now in 2..=3 {
+            session.step(now).unwrap();
+            assert_eq!(control.pending_digits(), 64);
+            assert!(state.lock().unwrap().source_completions.is_empty());
+            if !finish {
+                assert!(matches!(
+                    state.lock().unwrap().input.front(),
+                    Some(Input::Gap(160))
+                ));
+            }
+        }
+        assert_eq!(control.digit(), Some(('5', 1)));
+        session.step(4).unwrap();
+        assert_eq!(
+            state.lock().unwrap().source_completions,
+            if finish {
+                vec![SourceCompletion::Cancelled as u32]
+            } else {
+                vec![]
+            }
+        );
+        assert!(state.lock().unwrap().input.is_empty());
+        for _ in 0..63 {
+            assert_eq!(control.digit(), Some(('5', 1)));
+        }
+        assert!(control.digit().is_none());
+        assert!(!reply.ended());
+    }
 }

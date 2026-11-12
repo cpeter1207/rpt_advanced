@@ -1053,4 +1053,154 @@ mod tests {
             std::mem::size_of::<SourceIngress<4>>()
         );
     }
+
+    #[test]
+    fn source_profile_and_offer_validation_preserve_unaccepted_retry() {
+        for rate in [8000, 48000] {
+            let partition = rate as usize / 125;
+            for maximum in [0, partition * 4 + 1] {
+                assert!(matches!(
+                    SourceIngress::<4>::at_rate(true, rate, maximum),
+                    Err(Error::InvalidFrame)
+                ));
+            }
+            let mut source = SourceIngress::<4>::at_rate(true, rate, partition * 4).unwrap();
+            let mut scratch = [0.75; 960];
+            for (start, count, capacity) in [(0, 0, 960), (0, 2, 1), (u64::MAX, 1, 960)] {
+                assert_eq!(
+                    source.prepare(
+                        &mut scratch[..capacity],
+                        Decoded {
+                            start,
+                            pcm: &[0.25; 2][..count],
+                            concealed: false,
+                            birth: None
+                        },
+                        |_| panic!("invalid input cannot emit a digit"),
+                        || panic!("invalid input cannot begin suppression"),
+                    ),
+                    Err(Error::InvalidFrame)
+                );
+                assert!(scratch.iter().all(|sample| *sample == 0.75));
+                assert!(source.ready_for_media());
+            }
+            source
+                .prepare(
+                    &mut scratch,
+                    Decoded {
+                        start: 0,
+                        pcm: &[0.25; 2],
+                        concealed: false,
+                        birth: None,
+                    },
+                    |_| panic!("two samples cannot qualify a digit"),
+                    || {},
+                )
+                .unwrap();
+            assert_eq!(source.digit_capacity(2), 0);
+            assert!(!source.ready_for_media());
+            assert!(!source.end_command());
+            assert_eq!(source.discontinuity(|_| {}), Err(Error::InvalidFrame));
+            assert_eq!(source.accepted(3), Err(Error::InvalidFrame));
+            assert_eq!(
+                source.limit(4),
+                2,
+                "over-credit cannot advance the retained prefix"
+            );
+            source.accepted(1).unwrap();
+            assert_eq!(source.limit(4), 1);
+            source.accepted(1).unwrap();
+            assert!(source.ready_for_media());
+            assert!(source.end_command());
+        }
+    }
+
+    #[test]
+    fn explicit_release_holds_discontinuity_completed_pound_without_redecoding() {
+        for muting in [false, true] {
+            let mut source = SourceIngress::new(muting).unwrap();
+            source.require_control_release();
+            let tone: Vec<_> = (0..256)
+                .map(|n| {
+                    let phase = n as f32 * std::f32::consts::TAU / 8000.0;
+                    0.25 * ((phase * 941.0).sin() + (phase * 1477.0).sin())
+                })
+                .collect();
+            let mut scratch = [0.0; 4096];
+            let mut digits = Vec::new();
+            source
+                .prepare(
+                    &mut scratch,
+                    Decoded {
+                        start: 0,
+                        pcm: &tone,
+                        concealed: false,
+                        birth: None,
+                    },
+                    |digit| digits.push(digit),
+                    || {},
+                )
+                .unwrap();
+            source.accepted(tone.len()).unwrap();
+            assert_eq!(
+                source.ready_for_media(),
+                !muting,
+                "disabled detection muting does not create a suppressed span"
+            );
+            source.discontinuity(|digit| digits.push(digit)).unwrap();
+            assert_eq!(digits, ['#']);
+            assert_eq!(source.muted(), muting);
+            assert_eq!(source.ready_for_media(), !muting);
+            assert!(source.end_command());
+            assert!(source.ready_for_media());
+            source.discontinuity(|digit| digits.push(digit)).unwrap();
+            assert_eq!(digits, ['#']);
+        }
+    }
+
+    #[test]
+    fn accepted_muted_prefix_does_not_zero_a_later_unmuted_retry() {
+        let mut source = SourceIngress::new(true).unwrap();
+        let mut raw: Vec<_> = (0..256)
+            .map(|n| {
+                let phase = n as f32 * std::f32::consts::TAU / 8000.0;
+                0.25 * ((phase * 941.0).sin() + (phase * 1477.0).sin())
+            })
+            .collect();
+        raw.extend([0.0; 768]);
+        raw.extend([0.25; 64]);
+        let mut scratch = [0.0; 4096];
+        let mut digits = Vec::new();
+        source
+            .prepare(
+                &mut scratch,
+                Decoded {
+                    start: 0,
+                    pcm: &raw,
+                    concealed: false,
+                    birth: None,
+                },
+                |digit| digits.push(digit),
+                || {},
+            )
+            .unwrap();
+        assert_eq!(digits, ['#']);
+        source.accepted(1024).unwrap();
+        source
+            .prepare(
+                &mut scratch,
+                Decoded {
+                    start: 1024,
+                    pcm: &raw[1024..],
+                    concealed: false,
+                    birth: None,
+                },
+                |_| panic!("a retry cannot decode a second digit"),
+                || panic!("a retry cannot open a new mute"),
+            )
+            .unwrap();
+        assert_eq!(&scratch[..64], &[0.25; 64]);
+        source.accepted(64).unwrap();
+        assert!(source.ready_for_media());
+    }
 }
