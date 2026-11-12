@@ -21,6 +21,8 @@ static FOLLOW_PANIC: Mutex<Option<(Weak<Engine>, Arc<std::sync::atomic::AtomicBo
     Mutex::new(None);
 static FATAL_BEFORE_RUN: Mutex<Option<Weak<Engine>>> = Mutex::new(None);
 static ADVANCE_AFTER_BASIS: Mutex<Option<Weak<Engine>>> = Mutex::new(None);
+static SNAPSHOT_UNAVAILABLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static SUBMISSIONS: AtomicUsize = AtomicUsize::new(0);
 static REJECT_AFTER: AtomicUsize = AtomicUsize::new(0);
 static CLOSE_AFTER: Mutex<Option<(usize, Weak<Engine>)>> = Mutex::new(None);
@@ -39,6 +41,9 @@ unsafe extern "C" fn snapshot(
     _: u32,
     result: *mut abi::UrpAstSiteSnapshot,
 ) -> i32 {
+    if SNAPSHOT_UNAVAILABLE.load(Ordering::Acquire) {
+        return -1;
+    }
     let mut bank = BANK.lock().unwrap();
     if bank.hold != 0 {
         bank.hold -= 1;
@@ -639,4 +644,31 @@ fn reload_abi_without_engine_is_fatal_not_safe_rejection() {
     assert_eq!(rptadv_product_stop(), 0);
     assert_eq!(unsafe { rptadv_product_reload(std::ptr::null(), 0) }, -3);
     assert_eq!(unsafe { rptadv_product_reload_poll() }, -3);
+}
+
+#[test]
+fn reload_known_site_device_failure_is_rejected_without_retiring_configuration() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start(
+        "[1000]\nradio_channel=usb\nduplex=full\n[output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=7\nstartup_state=on\nsafe_state=off\n",
+    );
+    let revision = engine.run(|host| Ok(host.runtime.revision())).unwrap();
+    engine
+        .run(|host| {
+            host.poll_sites(0);
+            host.poll_sites(1);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(BANK.lock().unwrap().high, 0x40);
+    SNAPSHOT_UNAVAILABLE.store(true, Ordering::Release);
+    let result =
+        engine.reload_configuration(document("[1000]\nradio_channel=usb\nduplex=full\n").unwrap());
+    SNAPSHOT_UNAVAILABLE.store(false, Ordering::Release);
+    assert_eq!(result, Err(RuntimeError::Device));
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -1);
+    assert_eq!(engine.run(|host| Ok(host.runtime.revision())), Ok(revision));
+    assert_eq!(rptadv_product_stop(), 0);
 }
