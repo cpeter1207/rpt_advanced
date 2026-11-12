@@ -5016,13 +5016,36 @@ fn private_site_report_requires_live_phone_and_existing_recipe_producer() {
     .unwrap();
     let signals = PeerSignals::for_phone(source);
     let reply = signals.reply_target();
+    let radio_parts = [crate::remote_base_command::RemoteReplyPart {
+        id: "remote-applied",
+        arguments: Default::default(),
+    }];
     for invalid in [PeerSignals::new().reply_target(), reply.clone()] {
         assert!(matches!(
             runtime.prepare_phone_site_report("1000", "1", clock(), &invalid),
             Err(RuntimeError::Rejected)
         ));
+        assert!(matches!(
+            runtime.prepare_phone_remote_reply("1000", &radio_parts, &invalid),
+            Err(RuntimeError::Rejected)
+        ));
     }
     assert!(signals.authenticate_phone());
+    assert!(matches!(
+        runtime.prepare_phone_remote_reply("missing", &radio_parts, &reply),
+        Err(RuntimeError::MissingNode)
+    ));
+    assert!(matches!(
+        runtime.prepare_phone_remote_reply(
+            "1000",
+            &[crate::remote_base_command::RemoteReplyPart {
+                id: "missing-private-radio-form",
+                arguments: Default::default(),
+            }],
+            &reply
+        ),
+        Err(RuntimeError::Preparation)
+    ));
     for selector in ["", "01"] {
         assert!(matches!(
             runtime.prepare_phone_site_report("1000", selector, clock(), &reply),
@@ -5053,12 +5076,29 @@ fn private_site_report_requires_live_phone_and_existing_recipe_producer() {
         ["The requested site reading is unavailable."]
     );
     drop(stream);
+    drop(
+        runtime
+            .prepare_phone_remote_reply("1000", &radio_parts, &reply)
+            .unwrap(),
+    );
+    assert_eq!(
+        messages.lock().unwrap().last().map(String::as_str),
+        Some("Remote radio command completed.")
+    );
     failure.store(true, Ordering::Release);
+    assert!(matches!(
+        runtime.prepare_phone_remote_reply("1000", &radio_parts, &reply),
+        Err(RuntimeError::Preparation)
+    ));
     assert!(matches!(
         runtime.prepare_phone_site_report("1000", "1", clock(), &reply),
         Err(RuntimeError::Preparation)
     ));
     reply.retire();
+    assert!(matches!(
+        runtime.prepare_phone_remote_reply("1000", &radio_parts, &reply),
+        Err(RuntimeError::Rejected)
+    ));
     assert!(matches!(
         runtime.prepare_phone_site_report("1000", "1", clock(), &reply),
         Err(RuntimeError::Rejected)

@@ -1252,7 +1252,14 @@ impl Host {
         }
         let private_reply = match &effect {
             LinkEffect::Message { reply, .. } => reply.as_ref(),
-            LinkEffect::RemoteBase(operation) => operation.reply.as_ref(),
+            LinkEffect::RemoteBase(operation)
+                if !matches!(
+                    operation.remote,
+                    Some(rpt_advanced_core::remote_base_command::RemoteCommand::Status { .. })
+                ) =>
+            {
+                operation.reply.as_ref()
+            }
             _ => None,
         };
         if private_reply.is_some_and(|reply| reply.phone_source().is_some()) {

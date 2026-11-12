@@ -1942,16 +1942,36 @@ impl<A: Send, C: Send> Runtime<A, C> {
             }
         }
     }
-    /// Prepare one source-routed response through the existing streamed telemetry path.
-    /// IDs and arguments are selected by the trusted presenter, never a radio packet.
-    pub fn queue_remote_reply(
+    /// Prepare a trusted radio result for an authenticated caller's private sink.
+    /// Product control revalidates exact call, mailbox, account and command authority
+    /// after native completion; this method never enters controller telemetry.
+    pub fn prepare_phone_remote_reply(
         &mut self,
         local: &str,
         parts: &[crate::remote_base_command::RemoteReplyPart],
-        reply: Option<crate::link::PeerReply>,
-        now_ms: u64,
-    ) -> Result<(), RuntimeError> {
+        reply: &crate::link::PeerReply,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
+        if reply.phone_source().is_none() || !reply.phone_authenticated() {
+            return Err(RuntimeError::Rejected);
+        }
         let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        let (morse, speech) = Self::remote_reply_forms(node, parts)?;
+        prepare::status_stream(
+            node.control
+                .media_session
+                .as_mut()
+                .ok_or(RuntimeError::Preparation)?
+                .as_mut(),
+            &node.status,
+            &morse,
+            &speech,
+        )
+    }
+
+    fn remote_reply_forms(
+        node: &RuntimeNode<A, C>,
+        parts: &[crate::remote_base_command::RemoteReplyPart],
+    ) -> Result<(String, String), RuntimeError> {
         let mut speech = String::new();
         let mut morse = String::new();
         for part in parts {
@@ -1967,6 +1987,20 @@ impl<A: Send, C: Send> Runtime<A, C> {
             speech.push_str(&forms.tts);
             morse.push_str(&forms.morse);
         }
+        Ok((morse, speech))
+    }
+
+    /// Prepare one source-routed response through the existing streamed telemetry path.
+    /// IDs and arguments are selected by the trusted presenter, never a radio packet.
+    pub fn queue_remote_reply(
+        &mut self,
+        local: &str,
+        parts: &[crate::remote_base_command::RemoteReplyPart],
+        reply: Option<crate::link::PeerReply>,
+        now_ms: u64,
+    ) -> Result<(), RuntimeError> {
+        let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        let (morse, speech) = Self::remote_reply_forms(node, parts)?;
         if let Some(reply) = &reply {
             node.echo_telemetry.requested(reply, now_ms);
         }

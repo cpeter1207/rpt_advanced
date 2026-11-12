@@ -559,6 +559,10 @@ impl PhoneCalls {
             })
             .collect()
     }
+    /// Bound retained native status receipts, including ended calls awaiting cleanup.
+    pub(super) fn maximum_calls(&self) -> usize {
+        self.maximum_calls
+    }
     /// No private call consumes a public/radio-peer slot.
     pub fn is_empty(&self) -> bool {
         self.calls.is_empty()

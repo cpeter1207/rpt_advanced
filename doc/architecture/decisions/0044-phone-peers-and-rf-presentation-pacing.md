@@ -1002,3 +1002,31 @@ This prerequisite fixes the same pump-before-dispatch pruning gap for ordinary
 peers and phone callers. It does not enable private RemoteBase responses or
 phone attachment; their existing product authorization and unavailable paths
 remain unchanged.
+
+## Bound-node private radio status — 2026-11-12
+
+Only the existing short/long RemoteCommand::Status query can now use a phone
+caller's private response path. It retains the ordinary node command permission:
+public read-only queries do not require or renew administrative unlock. Other
+read-only radio query variants, mutations, cross-node selection and General
+Message remain unavailable to this path.
+
+The product checks exact live authenticated PhoneSource/PeerReply ownership,
+bound node, mailbox and current enabled account/binding before native submission.
+It rechecks runtime revision and command permission with those private owners
+after source/result callbacks, before registering a producer and queueing output.
+Call retirement, replacement or reload cannot transfer an old result to a new
+caller. No account authorization check was removed.
+
+The existing native ticket queue, parser and localized reply forms are shared.
+Private results use the existing station producer and bounded exact-call reply
+queue; ordinary replies retain their existing audience. Synchronous failures,
+busy and malformed/native failure results use the same trusted presenter.
+Preparation or queue failure does not fall back to public telemetry or RF.
+
+Private pending work is bounded in the existing Host pending vector: at most
+one receipt per exact reply and at most the existing maximum_calls count in
+total. Retired phone identities count until the existing pump/reload/stop owner
+actually drops their receipts. Busy is returned privately before another native
+submission; full reply queues preserve prior queued owners. No extra pending
+queue, permission map, provider capability or radio/media activation is added.

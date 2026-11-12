@@ -18,6 +18,13 @@ pub(crate) struct SpeechFixture {
     active: AtomicUsize,
     maximum: AtomicUsize,
 }
+impl SpeechFixture {
+    /// Permit ordinary speech in fixtures that do not test the intentional A/é stall.
+    pub(crate) fn release(&self) {
+        self.release.store(true, Ordering::Release);
+    }
+}
+
 struct StreamFixture {
     state: Arc<SpeechFixture>,
     text: String,
