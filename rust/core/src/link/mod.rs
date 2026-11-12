@@ -15,8 +15,9 @@ mod topology;
 
 pub use audio::{
     AudioPeer, DispatchProgress, GroupMemberSelection, GroupSelection, LinkAudio, LinkAudioStatus,
-    LinkDispatcher, LocalMedia, LocalTextInput, PeerInput, RenderedPeerBlock, SampleProvenance,
-    SourceCoordinate, SourcePosition, SourceTimeBound, TimedPeerSample,
+    LinkDispatcher, LocalMedia, LocalTextInput, PeerInput, RenderedPeerBlock, RfContributor,
+    RfProgrammeMetadata, SampleProvenance, SourceCoordinate, SourcePosition, SourceTimeBound,
+    TimedPeerSample,
 };
 pub use echo_telemetry::EchoTelemetryPolicy;
 pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};

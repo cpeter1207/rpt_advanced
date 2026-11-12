@@ -251,6 +251,10 @@ impl PeerSignals {
     pub fn reply_target(&self) -> PeerReply {
         self.reply.clone()
     }
+    /// Borrow the original media fence without reference-count work on audio.
+    pub(crate) fn reply(&self) -> &PeerReply {
+        &self.reply
+    }
     /// Match addressed PCM without reference-count work on the audio callback.
     pub fn reply_identity(&self) -> usize {
         self.reply.identity()

@@ -656,3 +656,32 @@ source position. NativeEvents never dispatches the in-band completion; ordinary
 peer reset behavior is unchanged. Media retirement still happens immediately
 and does not wait for command capacity. This is not the pending private-grammar
 collection-ended/re-admission join described above.
+
+## Selected RF programme metadata, 2026-11-12
+
+The existing LinkAudio owner separately records the peer programme selected for
+its controller input. This is neither the broader all-active parrot capture tap
+nor proof of final admission or RF presentation. Real zero-valued PCM and active
+concealment retain contribution; registration, transport key state and discarded
+idle processor output do not. Ordinary keying and source-activity policy remain
+unchanged.
+
+Selection is snapshotted before the existing single render so original age can
+be folded without a per-peer age vector. Desired groups are still adopted only
+at the existing all-inputs-idle boundary. Exact contributor flags are finalized
+where the selected peer planes are mixed, after rechecking retirement. The full
+composite age is unknown if any selected programme is untimed, has a missing or
+different clock, or raced node retirement. No current clock or output counter
+is substituted for original receipt.
+
+One scalar block record retains that original node revision. Borrowed iteration
+exposes the exact media-generation and private-call fences already owned by each
+actual private contributor, without cloning a token or allocating on audio.
+Retirement after rendering remains visible through those fences; getters never
+renew the block snapshot. Empty or rejected callbacks cannot expose a previous
+block as current. Capture metadata, fresh network fanout and mix-minus retain
+their independent original paths.
+
+This adds no RF FIFO, policy, clock qualification, final-fence consumer or ID
+presentation acknowledgment. Those joins and physical qualification remain
+required before production phone RF attachment can become available.

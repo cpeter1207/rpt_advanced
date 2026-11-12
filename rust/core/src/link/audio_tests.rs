@@ -1008,3 +1008,6 @@ pub(super) fn after_validation() {
 
 #[path = "audio_phone_parrot_tests.rs"]
 pub(crate) mod phone_parrot;
+
+#[path = "audio_rf_tests.rs"]
+mod rf;

@@ -168,6 +168,50 @@ pub struct RenderedPeerBlock {
     pub age_bound: Option<SourceTimeBound>,
 }
 
+/// Selected peer programme supplied to the controller in the last callback.
+/// This excludes local RX, capture, telemetry and signaling. It proves neither
+/// final RF admission nor physical presentation, and getters never renew it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RfProgrammeMetadata {
+    /// At least one selected source actually rendered programme, including zero PCM.
+    /// Transport key state or a registered source alone cannot set this field.
+    pub active: bool,
+    /// An actual private source contributed to the selected programme.
+    pub private: bool,
+    /// Oldest conservative receipt across the whole selected composite.
+    /// Any untimed source, mixed clock or concurrent retirement leaves it unknown.
+    pub age_bound: Option<SourceTimeBound>,
+    /// Node revision captured before rendering, not a current liveness assertion.
+    pub retirement_revision: Option<u64>,
+}
+impl RfProgrammeMetadata {
+    fn include_age(&mut self, incoming: Option<SourceTimeBound>) {
+        let incoming = incoming.filter(|bound| bound.host_clock_epoch != 0);
+        self.age_bound = if self.active {
+            self.age_bound.zip(incoming).and_then(|(first, next)| {
+                (first.host_clock_epoch == next.host_clock_epoch).then_some(SourceTimeBound {
+                    host_clock_epoch: first.host_clock_epoch,
+                    not_after_ns: first.not_after_ns.min(next.not_after_ns),
+                })
+            })
+        } else {
+            incoming
+        };
+        self.active = true;
+    }
+}
+
+/// Borrowed exact fences for a private source actually mixed in the last block.
+/// They remain inspectable after retirement; neither borrowing nor enumeration
+/// clones a token, revives a generation or grants permission to present history.
+#[derive(Clone, Copy, Debug)]
+pub struct RfContributor<'a> {
+    /// Original ring/media generation, independently revocable from the call.
+    pub media: &'a PeerReply,
+    /// Exact authenticated private call retained by the prepared mixer slot.
+    pub call: &'a PeerReply,
+}
+
 /// Unique adapter-owned consumer of one released inbound ring.
 pub trait PeerInput: Send {
     /// Exact private-call token, never a numeric node identity or mailbox grant.
@@ -238,6 +282,7 @@ pub struct AudioPeer<P: PeerInput> {
     group: Option<(GroupSelection, std::num::NonZeroUsize)>,
     group_index: Option<usize>,
     reported_active: bool,
+    rf_contributor: bool,
 }
 impl<P: PeerInput> AudioPeer<P> {
     /// Prepare a public protocol peer; private calls require their exact source token.
@@ -309,6 +354,7 @@ impl<P: PeerInput> AudioPeer<P> {
             group: None,
             group_index: None,
             reported_active: false,
+            rf_contributor: false,
         })
     }
     fn ended(&self) -> bool {
@@ -334,6 +380,7 @@ impl<P: PeerInput> AudioPeer<P> {
 pub struct LinkAudio<P: PeerInput> {
     retirement: RetirementDomain,
     peer_source_active: bool,
+    rf_programme: RfProgrammeMetadata,
     text: Option<Box<dyn LocalTextInput>>,
     text_samples: Vec<f32>,
     peers: Vec<AudioPeer<P>>,
@@ -644,6 +691,7 @@ impl<P: PeerInput> LinkAudio<P> {
             Self {
                 retirement,
                 peer_source_active: false,
+                rf_programme: RfProgrammeMetadata::default(),
                 text: None,
                 text_samples: vec![0.0; maximum],
                 routing: vec![Destination::default(); peers.len()],
@@ -686,6 +734,24 @@ impl<P: PeerInput> LinkAudio<P> {
     pub fn peer_source_active(&self) -> bool {
         self.peer_source_active
     }
+    /// Last callback's selected peer programme before controller/RF admission.
+    /// A later retirement does not rewrite the original revision or receipt bound.
+    pub fn rf_programme(&self) -> RfProgrammeMetadata {
+        self.rf_programme
+    }
+    /// Borrow original private fences from actual last-block contributors only.
+    /// A retired fence remains visible until the next callback replaces the block.
+    pub fn rf_contributors(&self) -> impl Iterator<Item = RfContributor<'_>> {
+        self.peers.iter().filter_map(|peer| {
+            peer.phone
+                .as_ref()
+                .filter(|_| self.rf_programme.private && peer.rf_contributor)
+                .map(|call| RfContributor {
+                    media: peer.input.signals().reply(),
+                    call,
+                })
+        })
+    }
     /// Render RF and publish one prepared pre-access-tone peer-audio block for the dispatcher.
     /// Terminal peers contribute neither PCM nor key state, even before reclamation.
     pub fn process(
@@ -695,6 +761,8 @@ impl<P: PeerInput> LinkAudio<P> {
         audio: &mut [f32],
         source: SourcePosition,
     ) -> Result<bool, AdmissionError> {
+        // Even a rejected or empty callback cannot expose a prior block as current.
+        self.rf_programme = RfProgrammeMetadata::default();
         let count = audio.len();
         if count > self.local.len() {
             return Err(AdmissionError::Invalid);
@@ -703,7 +771,13 @@ impl<P: PeerInput> LinkAudio<P> {
             .phone_retirement_matches(&self.retirement)
             .then(|| self.retirement.revision())
             .flatten();
+        self.rf_programme.retirement_revision = retirement_revision;
         let mut capture_phone: Option<ParrotPhoneSource> = None;
+        // Snapshot only. The existing all-inputs-idle boundary below still owns
+        // adoption; an idle block has no rendered programme to misclassify.
+        for (index, group) in self.groups.iter().enumerate() {
+            self.selected_groups[index] = group.callback_slot(false);
+        }
         self.local[..count].copy_from_slice(audio);
         self.mix[..count].fill(0.0);
         for peer in &mut self.peers {
@@ -765,6 +839,15 @@ impl<P: PeerInput> LinkAudio<P> {
             }
             let active = !peer.ended() && (audio_active || peer.input.signals().radio_keyed());
             peer.active = active;
+            peer.rf_contributor = count != 0 && render_attempted && audio_active && active;
+            let selected = peer.group_index.is_none_or(|group| {
+                peer.group
+                    .as_ref()
+                    .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
+            });
+            if peer.rf_contributor && selected {
+                self.rf_programme.include_age(age_bound);
+            }
             // The capture tap includes every active peer, independently of RF group
             // selection. Classify during the sole source render, never by amplitude.
             if private && count != 0 && render_attempted && audio_active && active {
@@ -784,6 +867,7 @@ impl<P: PeerInput> LinkAudio<P> {
             self.selected_groups[index] = group.callback_slot(inputs_idle);
         }
         let selected_groups = &self.selected_groups;
+        self.rf_programme.active = false;
         for (index, peer) in self.peers.iter_mut().enumerate() {
             peer.active &= !peer.ended();
             peer.input.signals().set_active(peer.active);
@@ -794,6 +878,9 @@ impl<P: PeerInput> LinkAudio<P> {
                     .is_some_and(|(_, slot)| selected_groups[group] == slot.get())
             });
             let active = peer.active && selected;
+            peer.rf_contributor &= active;
+            self.rf_programme.active |= peer.rf_contributor;
+            self.rf_programme.private |= peer.rf_contributor && peer.phone.is_some();
             if active {
                 if !peer.reported_active {
                     if let Some(direct) = public {
@@ -825,6 +912,15 @@ impl<P: PeerInput> LinkAudio<P> {
                     *mixed += input;
                 }
             }
+        }
+        // A source may retire after its bound was folded but before mixing.
+        // Keep the original snapshot and withhold the composite age, never
+        // restamp it or retain a bound from a source that no longer contributed.
+        if !self.rf_programme.active
+            || retirement_revision.is_none()
+            || self.retirement.revision() != retirement_revision
+        {
+            self.rf_programme.age_bound = None;
         }
         let linked_active = self.peers.iter().any(|peer| {
             peer.active
