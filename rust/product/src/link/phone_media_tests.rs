@@ -20,6 +20,19 @@ fn reply() -> PeerReply {
     signals.reply_target()
 }
 
+fn prepare(
+    reply: PeerReply,
+    rate: u32,
+    processor: Option<PcmProcessor>,
+) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
+    super::prepare(reply, rate, NonZeroU32::MIN, processor)
+}
+
+fn adopt(ingress: &mut Ingress, minimum_frame: u64, reference: SourceTimeReference) {
+    let owner = ingress.shared.reply.clone();
+    ingress.adopt(&owner, minimum_frame, reference);
+}
+
 fn reference() -> SourceTimeReference {
     SourceTimeReference {
         host_clock_epoch: 7,
@@ -91,7 +104,7 @@ fn prepared_phone_media_bounds_are_earliest_partition_times_and_never_cross_live
 #[test]
 fn prepared_phone_media_sidecar_refuses_before_pcm_and_credit_is_actual_ring_acceptance() {
     let (mut ingress, input, shared) = prepare(reply(), 8000, None).unwrap();
-    ingress.adopt(0, reference());
+    adopt(&mut ingress, 0, reference());
     assert!(shared.record(0, 160, birth(10)));
     assert_eq!(
         ingress.audio(64 * 160, &[0.25; 160], Some(birth(10))),
@@ -119,16 +132,16 @@ fn prepared_phone_media_adoption_cannot_resurrect_retired_or_untimed_generations
             0 => shared.retire(),
             1 => current.retire(),
             2 => {
-                ingress.adopt(0, SourceTimeReference::default());
+                adopt(&mut ingress, 0, SourceTimeReference::default());
             }
             _ => {
                 drop(input);
-                ingress.adopt(0, reference());
+                adopt(&mut ingress, 0, reference());
                 assert!(!shared.active());
                 continue;
             }
         }
-        ingress.adopt(0, reference());
+        adopt(&mut ingress, 0, reference());
         assert!(!input.active());
         assert_eq!(ingress.audio(160, &[0.5; 160], Some(birth(10))), Ok(160));
         assert_eq!(input.render_timed_sample(), None);
@@ -144,7 +157,7 @@ fn prepared_phone_media_adoption_cannot_resurrect_retired_or_untimed_generations
 #[test]
 fn prepared_phone_media_rejects_old_source_prefixes_unknown_age_and_wrong_epoch() {
     let (mut ingress, input, _) = prepare(reply(), 8000, None).unwrap();
-    ingress.adopt(80, reference());
+    adopt(&mut ingress, 80, reference());
     assert_eq!(ingress.audio(0, &[0.25; 160], Some(birth(10))), Ok(80));
     assert_eq!(input.available(), 0);
     assert_eq!(ingress.audio(80, &[0.25; 160], Some(birth(10))), Ok(160));
@@ -163,7 +176,7 @@ fn prepared_phone_media_rejects_old_source_prefixes_unknown_age_and_wrong_epoch(
         }),
     ] {
         let (mut ingress, input, _) = prepare(reply(), 8000, None).unwrap();
-        ingress.adopt(0, reference());
+        adopt(&mut ingress, 0, reference());
         assert_eq!(ingress.audio(0, &[0.25; 160], time), Ok(160));
         assert_eq!(input.available(), 0);
         assert!(!input.active());
@@ -218,7 +231,7 @@ fn prepared_phone_media_keeps_opaque_dsp_unknown_and_rechecks_retirement_after_p
         let graph = services.prepare_peer_processing("", "1000", 960).unwrap();
         let (mut ingress, mut input, shared) = prepare(reply(), 8000, graph).unwrap();
         state.target = Some(shared);
-        ingress.adopt(0, reference());
+        adopt(&mut ingress, 0, reference());
         for index in 0..10 {
             assert_eq!(
                 ingress.audio(index * 160, &[0.25; 160], Some(birth(10))),
@@ -261,7 +274,7 @@ fn prepared_phone_media_retirement_ends_ring_generation_but_not_private_call() {
     for retire in 0..3 {
         let current = reply();
         let (mut ingress, input, shared) = prepare(current.clone(), 8000, None).unwrap();
-        ingress.adopt(0, reference());
+        adopt(&mut ingress, 0, reference());
         let generation = input.signals().reply_target();
         assert!(!generation.ended());
         match retire {
@@ -297,7 +310,7 @@ fn prepared_phone_media_publishes_typed_mixer_and_revokes_live_destination_contr
         assert!(signals.authenticate_phone());
         let call = signals.reply_target();
         let (mut ingress, input, shared) = prepare(call.clone(), 8000, None).unwrap();
-        ingress.adopt(0, reference());
+        adopt(&mut ingress, 0, reference());
         for index in 0..12 {
             assert_eq!(
                 ingress.audio(index * 160, &[0.25; 160], Some(birth(10))),
@@ -372,7 +385,7 @@ fn prepared_phone_media_qualifies_original_age_through_the_actual_processor() {
             input.source_timing_available(),
             "the graph needs the inner exact call token at preparation"
         );
-        ingress.adopt(0, reference());
+        adopt(&mut ingress, 0, reference());
         let count = rate as usize / 50;
         let samples = vec![0.25; count];
         for index in 0..10 {
@@ -424,7 +437,7 @@ fn prepared_phone_media_joins_the_product_mixer_with_an_ordinary_peer() {
     let call = reply();
     let source = call.phone_source().unwrap().clone();
     let (mut ingress, private, shared) = prepare(call.clone(), 8000, None).unwrap();
-    ingress.adopt(0, reference());
+    adopt(&mut ingress, 0, reference());
     for index in 0..12 {
         assert_eq!(
             ingress.audio(index * 160, &[0.25; 160], Some(birth(10))),
@@ -516,7 +529,7 @@ fn prepared_phone_media_timed_blocks_keep_real_receipt_without_callback_allocati
         let (_state, graph) = crate::services::history_tests::processor_fixture(1, 1);
         let call = reply();
         let (mut ingress, mut input, shared) = prepare(call.clone(), rate, Some(graph)).unwrap();
-        ingress.adopt(0, reference());
+        adopt(&mut ingress, 0, reference());
         let count = rate as usize / 50;
         let samples = vec![0.25; count];
         for index in 0..10 {
@@ -549,4 +562,55 @@ fn prepared_phone_media_timed_blocks_keep_real_receipt_without_callback_allocati
         assert_eq!(pcm, [0.0; 480]);
         assert!(!call.ended());
     }
+}
+
+#[test]
+fn prepared_phone_media_adoption_does_not_rewrite_active_or_retired_anchors() {
+    let owner = reply();
+    let (mut ingress, input, _) = prepare(owner.clone(), 8000, None).unwrap();
+    ingress.adopt(&owner, 12, reference());
+    assert!(input.active());
+    ingress.adopt(
+        &owner,
+        500,
+        SourceTimeReference {
+            host_clock_epoch: 7,
+            now_ns: 999,
+        },
+    );
+    assert_eq!(ingress.minimum_frame, 12);
+    assert_eq!(
+        (ingress.admission.host_clock_epoch, ingress.admission.now_ns),
+        (7, 10)
+    );
+    ingress.retire();
+    ingress.adopt(
+        &owner,
+        600,
+        SourceTimeReference {
+            host_clock_epoch: 7,
+            now_ns: 1000,
+        },
+    );
+    assert!(!input.active());
+    assert_eq!(ingress.minimum_frame, 12);
+    assert_eq!(
+        (ingress.admission.host_clock_epoch, ingress.admission.now_ns),
+        (7, 10)
+    );
+}
+
+#[test]
+fn prepared_phone_media_revision_adds_only_scalar_storage_to_existing_ingress() {
+    type Unstamped = (
+        Arc<Shared>,
+        InboundProducer,
+        u64,
+        SourceTimeReference,
+        Option<u64>,
+    );
+    let previous = std::mem::size_of::<Unstamped>();
+    let actual = std::mem::size_of::<Ingress>();
+    eprintln!("prepared_ingress_bytes unstamped={previous} stamped={actual}");
+    assert!(actual <= previous + std::mem::align_of::<Ingress>());
 }

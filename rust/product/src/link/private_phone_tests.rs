@@ -764,8 +764,13 @@ fn prepared_phone_media_reset_retires_the_old_source_range_before_explicit_readm
     session.step(2).unwrap();
     assert!(old.render_timed_sample().is_none());
     assert!(!reply.ended());
-    let fresh = control.prepare_media(None).unwrap();
+    // Reset has no authority to reuse the previous clean source revision.
+    state.lock().unwrap().input.push_back(Input::Digit(b'5'));
     session.step(3).unwrap();
+    assert_eq!(control.digit(), Some(('5', 3)));
+    assert!(control.collection_ended(&reply));
+    let fresh = control.prepare_media(None).unwrap();
+    session.step(4).unwrap();
     let birth = state.lock().unwrap().source_reference.unwrap().1;
     state.lock().unwrap().source_birth = Some(birth);
     state
@@ -773,7 +778,7 @@ fn prepared_phone_media_reset_retires_the_old_source_range_before_explicit_readm
         .unwrap()
         .input
         .push_back(Input::Audio(vec![0.75; 160]));
-    session.step(4).unwrap();
+    session.step(5).unwrap();
     assert_eq!(fresh.available(), 160, "a reset starts a new source range");
     assert!(!old.active());
 }
@@ -1374,4 +1379,273 @@ fn private_collection_control_queue_refusal_preserves_the_same_revision() {
     assert!(!collection_suppressed(&session));
     reply.retire();
     assert!(!control.collection_ended(&reply));
+}
+
+fn assert_fresh_media_rejects_reset_revision(rate: u32) {
+    for reset_after_enqueue in [true, false] {
+        let (mut session, mut control, state, reply) = source_session_at_rate(rate, true);
+        session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+        state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+        session.step(1).unwrap();
+        assert_eq!(control.digit(), Some(('5', 1)));
+        assert!(control.collection_ended(&reply));
+        session.step(2).unwrap();
+        assert!(
+            !collection_suppressed(&session),
+            "real collection release completed"
+        );
+        let prepared = if reset_after_enqueue {
+            Some(control.prepare_media(None).unwrap())
+        } else {
+            None
+        };
+        state.lock().unwrap().source_reset = true;
+        session.step(3).unwrap();
+        assert!(!state.lock().unwrap().source_reset);
+        let candidate = prepared.unwrap_or_else(|| control.prepare_media(None).unwrap());
+        session.step(4).unwrap();
+        assert!(!reply.ended(), "reset preserves this logical call");
+        assert!(state.lock().unwrap().bound_radio.is_none());
+        assert!(
+            !candidate.active(),
+            "an older completed revision cannot authorize media after reset; enqueued_before_reset={reset_after_enqueue}"
+        );
+    }
+}
+
+#[test]
+fn prepared_phone_media_rejects_old_completion_after_reset_8000() {
+    assert_fresh_media_rejects_reset_revision(8000);
+}
+
+#[test]
+fn prepared_phone_media_rejects_old_completion_after_reset_48000() {
+    assert_fresh_media_rejects_reset_revision(48000);
+}
+
+#[test]
+fn prepared_phone_media_initial_revision_cannot_be_recreated_after_reset() {
+    for rate in [8000, 48000] {
+        for reset in [false, true] {
+            let (mut session, mut control, state, reply) = source_session_at_rate(rate, true);
+            session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+            if reset {
+                state.lock().unwrap().source_reset = true;
+                session.step(0).unwrap();
+            }
+            let input = control.prepare_media(None).unwrap();
+            session.step(1).unwrap();
+            assert_eq!(input.active(), !reset);
+            assert!(!reply.ended());
+        }
+    }
+}
+
+fn assert_prepared_media_waits_for_provider_suffix(rate: u32) {
+    let (mut session, mut control, state, reply) = source_session_at_rate(rate, true);
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    let part = rate as usize / 50;
+    let mut raw = vec![0.0; part];
+    raw.extend((0..part * 3).map(|n| {
+        let phase = n as f32 * std::f32::consts::TAU / rate as f32;
+        0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+    }));
+    assert!(
+        raw.len() <= 4096,
+        "provider offer respects the source ABI bound"
+    );
+    let input = control.prepare_media(None).unwrap();
+    control
+        .send(crate::phone::tests::private_prompt(
+            &reply,
+            Box::new(Speech::new(960)),
+        ))
+        .ok()
+        .unwrap();
+    state.lock().unwrap().input.push_back(Input::Audio(raw));
+    session.step(1).unwrap();
+    assert_eq!(state.lock().unwrap().source_credits, [(0, part)]);
+    assert_eq!(session.pcm, [0.25; 960], "prompt replaced analysis scratch");
+    assert!(
+        !input.active(),
+        "unanalysed provider suffix is not a clean boundary"
+    );
+    assert!(matches!(
+        control.prepare_media(None),
+        Err(Error::Reservation)
+    ));
+    // The later qualified tone must invalidate the waiting candidate before it
+    // ever activates, even though the first bounded prefix contained only silence.
+    for now in 2..10 {
+        session.step(now).unwrap();
+        assert!(!input.active());
+    }
+    assert!(state.lock().unwrap().input.is_empty());
+    assert_eq!(
+        session.revision.0.get().unwrap().get(),
+        2,
+        "one actual onset"
+    );
+    assert!(
+        control.digit().is_none(),
+        "native mode never invents an in-band command"
+    );
+    assert!(!reply.ended());
+}
+
+#[test]
+fn prepared_phone_media_waits_for_unanalysed_provider_suffix_8000() {
+    assert_prepared_media_waits_for_provider_suffix(8000);
+}
+
+#[test]
+fn prepared_phone_media_waits_for_unanalysed_provider_suffix_48000() {
+    assert_prepared_media_waits_for_provider_suffix(48000);
+}
+
+#[derive(Clone, Copy)]
+enum TailCompletion {
+    Quiet,
+    NewDigit,
+    Reset,
+}
+
+fn assert_prepared_media_matching_tone_tail(rate: u32, completion: TailCompletion) {
+    use rpt_advanced_core::link::PeerInput as _;
+    let (mut session, mut control, state, reply) = source_session_at_rate(rate, true);
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    let part = rate as usize / 50;
+    let tone: Vec<_> = (0..part * 4)
+        .map(|n| {
+            let phase = n as f32 * std::f32::consts::TAU / rate as f32;
+            0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+        })
+        .collect();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend(tone.chunks(part).map(|pcm| Input::Audio(pcm.to_vec())));
+    state.lock().unwrap().input.extend([
+        Input::Audio(vec![0.0; rate as usize * 1275 / 100_000]),
+        Input::Digit(b'5'),
+    ]);
+    session.step(1).unwrap();
+    assert_eq!(control.digit(), Some(('5', 1)));
+    assert!(control.collection_ended(&reply));
+    let input = control.prepare_media(None).unwrap();
+    session.step(2).unwrap();
+    assert!(!input.active(), "qualified tail still pending");
+    assert!(control.media.as_ref().unwrap().occupied());
+    let expected = session.revision.0.get();
+    match completion {
+        TailCompletion::Quiet => {}
+        TailCompletion::NewDigit => state.lock().unwrap().input.push_back(Input::Digit(b'7')),
+        TailCompletion::Reset => state.lock().unwrap().source_reset = true,
+    }
+    if !matches!(completion, TailCompletion::Quiet) {
+        session.step(3).unwrap();
+        assert_ne!(session.revision.0.get(), expected);
+        assert!(!input.active());
+        assert!(!control.media.as_ref().unwrap().occupied());
+        assert!(!reply.ended());
+        return;
+    }
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.0; part * 3]));
+    session.step(3).unwrap();
+    assert!(!input.active());
+    session.step(4).unwrap();
+    assert!(
+        !input.active(),
+        "provider still retains an unanalysed suffix"
+    );
+    session.step(5).unwrap();
+    assert!(
+        input.active(),
+        "actual matching release and drained source qualify one adoption"
+    );
+    let birth = state.lock().unwrap().source_reference.unwrap().1;
+    state.lock().unwrap().source_birth = Some(birth);
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.75; part]));
+    session.step(6).unwrap();
+    assert_eq!(input.available(), part as u64);
+    assert!(!reply.ended());
+}
+
+#[test]
+fn prepared_phone_media_keeps_matching_tone_tail_candidate_8000() {
+    assert_prepared_media_matching_tone_tail(8000, TailCompletion::Quiet);
+}
+
+#[test]
+fn prepared_phone_media_keeps_matching_tone_tail_candidate_48000() {
+    assert_prepared_media_matching_tone_tail(48000, TailCompletion::Quiet);
+}
+
+#[test]
+fn prepared_phone_media_matching_release_cannot_survive_newer_digit_or_reset() {
+    for rate in [8000, 48000] {
+        for completion in [TailCompletion::NewDigit, TailCompletion::Reset] {
+            assert_prepared_media_matching_tone_tail(rate, completion);
+        }
+    }
+}
+
+#[test]
+fn prepared_phone_media_rejects_equal_revision_from_another_actual_owner() {
+    let (mut session, mut control, _state, reply) = source_session_with_auth(true);
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    let (mut other, mut other_control, _other_state, other_reply) = source_session_with_auth(true);
+    assert_eq!(reply.phone_source(), other_reply.phone_source());
+    assert_ne!(reply, other_reply);
+    let input = other_control.prepare_media(None).unwrap();
+    let command = other.replies.pop().ok().unwrap();
+    assert!(control.replies.push(command).is_ok());
+    session.step(0).unwrap();
+    assert!(!input.active());
+    assert!(!reply.ended());
+    assert!(!other_reply.ended());
+}
+
+#[test]
+fn prepared_phone_media_cancelled_queue_entry_cannot_replace_newer_candidate() {
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    let old = control.prepare_media(None).unwrap();
+    let delayed = session.replies.pop().ok().unwrap();
+    control.retire_media();
+    let fresh = control.prepare_media(None).unwrap();
+    assert!(control.replies.push(delayed).is_ok());
+    {
+        let mut fixture = state.lock().unwrap();
+        fixture.deadlines.reserve(16);
+        fixture.source_completions.reserve(16);
+    }
+    let (result, allocations) = crate::fixture::allocations(|| session.step(0));
+    result.unwrap();
+    assert_eq!(allocations, 0);
+    assert!(fresh.active());
+    assert!(!old.active());
+    assert!(!reply.ended());
+}
+
+#[test]
+fn prepared_phone_media_owner_layout_has_no_second_candidate_or_pcm_buffer() {
+    eprintln!(
+        "prepared_owner_bytes session={} control={} command={} digit={}",
+        std::mem::size_of::<PrivatePhoneSession>(),
+        std::mem::size_of::<PrivatePhoneControl>(),
+        std::mem::size_of::<PrivateCommand>(),
+        std::mem::size_of::<PrivateDigit>(),
+    );
+    assert_eq!(std::mem::size_of::<PrivateDigit>(), 16);
+    assert_eq!(std::mem::size_of::<SourceIngress<4>>(), 264);
 }

@@ -8,6 +8,7 @@ use rpt_advanced_core::link::{
     PeerInput, PeerReply, PeerSignals, PhoneSource, ReceivePolicy, RenderedPeerBlock,
     SourceCoordinate, SourceTimeBound, TimedPeerSample,
 };
+use std::num::NonZeroU32;
 use std::sync::{
     Arc,
     atomic::{AtomicU8, AtomicU64, Ordering},
@@ -123,18 +124,39 @@ impl Shared {
 /// Serial source endpoint; the existing phone I/O owner is its sole writer.
 pub(super) struct Ingress {
     shared: Arc<Shared>,
+    expected_revision: NonZeroU32,
     writer: InboundProducer,
     minimum_frame: u64,
     admission: SourceTimeReference,
     cursor: Option<u64>,
 }
 impl Ingress {
-    pub(super) fn adopt(&mut self, minimum_frame: u64, admission: SourceTimeReference) {
-        self.minimum_frame = minimum_frame;
-        self.admission = admission;
-        if admission.host_clock_epoch == 0 || !self.shared.occupied() {
+    pub(super) fn prepared(&self) -> bool {
+        self.shared.phase.load(Ordering::Acquire) == PREPARED
+    }
+    pub(super) fn occupied(&self) -> bool {
+        self.shared.occupied()
+    }
+    pub(super) fn expected_revision(&self) -> NonZeroU32 {
+        self.expected_revision
+    }
+    /// Publish once, and only to the serial owner of this exact call token.
+    /// Active or retired generations never receive a replacement admission anchor.
+    pub(super) fn adopt(
+        &mut self,
+        reply: &PeerReply,
+        minimum_frame: u64,
+        admission: SourceTimeReference,
+    ) {
+        if !self.prepared() {
+            return;
+        }
+        if admission.host_clock_epoch == 0 || self.shared.reply != *reply || !self.shared.occupied()
+        {
             self.shared.retire();
         } else {
+            self.minimum_frame = minimum_frame;
+            self.admission = admission;
             let _ = self.shared.phase.compare_exchange(
                 PREPARED,
                 ACTIVE,
@@ -368,6 +390,7 @@ impl Drop for PhoneMediaInput {
 pub(super) fn prepare(
     reply: PeerReply,
     rate: u32,
+    expected_revision: NonZeroU32,
     processor: Option<PcmProcessor>,
 ) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
     if !reply.phone_authenticated() {
@@ -405,6 +428,7 @@ pub(super) fn prepare(
     Ok((
         Box::new(Ingress {
             shared: Arc::clone(&shared),
+            expected_revision,
             writer,
             minimum_frame: 0,
             admission: SourceTimeReference::default(),

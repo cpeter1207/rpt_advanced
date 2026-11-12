@@ -786,3 +786,42 @@ Production foreground composition still supplies no provider accounts. Shared
 account preparation, registration/dial execution, typed private IAX metadata,
 timed source reads/egress and complete retirement remain required before actual
 phone admission. This cohort join adds no scheduler, worker or live account use.
+
+## Existing prepared-media source revision fence
+
+The existing private preparation endpoint stamps its own consumed collection
+revision into its one boxed receive Ingress; no public numeric revision or new
+permit API is introduced. Before any authoritative symbol, the only initial
+clean boundary is revision 1. Reset cannot synthesize that boundary again.
+The serial owner records settled revisions only after actual matching command
+release and checks the exact call token before one-time adoption.
+
+Media dequeue stages the same existing box. Cancelled queued boxes cannot
+replace a newer live/prepared generation. The owner first performs its existing
+bounded source read and collection release, then compares expected, current and
+settled revisions. A matching pending release can retain that one box through
+a real qualified tone tail. A mismatch, reset, retirement or unsupported native
+ordering rejects it, and an active/retired generation's admission anchor is
+never rewritten by a later adoption attempt.
+
+An empty cached 20 ms prefix is insufficient: the provider may still own a larger
+unanalysed suffix. Each turn starts without drain evidence, and every actual
+source read replaces it from the existing idle/drained result. Prepared media
+waits until that real boundary and the analyzer's raw/tone state are clear.
+The actual last source-read clock reference and source cursor define adoption.
+Earlier source PCM is discarded, never relabeled or replayed; later accepted
+PCM keeps its original provider birth. No extra read, PCM pass, buffer, graph,
+candidate box or worker is created.
+
+The checked amd64 layout adds one aligned scalar to the existing Ingress
+(56 to 64 bytes). The private session is 11,424 bytes, control and command
+slots are 96 bytes each, and digit slots remain 16 bytes. The shared private
+source profile remains 264 bytes; no per-peer thread or additional retained
+PCM allocation is introduced.
+
+This hardens the existing prepared-media owner only. The Engine ordinary turn
+fences enqueue, but retained call tokens after fatal reload are not a later
+adoption permit. Production attachment still needs the actual two-sided target
+grant, limits, isolation/bypass authority, lifecycle-spanning queued-candidate
+fence, typed publication and RF qualification. No production caller, automatic
+preparation, attachment success or RF route is enabled here.

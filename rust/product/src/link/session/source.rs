@@ -203,6 +203,10 @@ impl<const N: usize> SourceIngress<N> {
     pub(crate) fn muted(&self) -> bool {
         self.command_muted || self.detector.suppressing()
     }
+    /// Prepared receive media cannot reuse a qualified tail or retained raw retry.
+    pub(crate) fn ready_for_media(&self) -> bool {
+        !self.muted() && !self.pending_tone && self.cached.is_none()
+    }
     /// Only a matching control decision may release private command suppression.
     /// Retained raw retries and a qualified quiet tail still belong to this input.
     pub(crate) fn end_command(&mut self) -> bool {

@@ -12,7 +12,7 @@ use crate::{
     phone::PrivatePhoneReply,
     services::{
         PcmProcessor, PeerInput, PeerIo, PhoneDigitMode, SourceCompletion, SourceInput,
-        SourceTimeClock,
+        SourceTimeClock, SourceTimeReference,
     },
 };
 use rpt_advanced_core::{
@@ -117,7 +117,12 @@ impl PrivatePhoneControl {
         if self.replies.slots() == 0 {
             return Err(Error::Allocation);
         }
-        let (ingress, input, shared) = media::prepare(self.reply.clone(), self.rate, processor)?;
+        let (ingress, input, shared) = media::prepare(
+            self.reply.clone(),
+            self.rate,
+            self.consumed_revision.unwrap_or(NonZeroU32::MIN),
+            processor,
+        )?;
         self.replies
             .push(PrivateCommand::Media(ingress))
             .unwrap_or_else(|_| unreachable!("reserved private command slot"));
@@ -184,6 +189,7 @@ pub(crate) struct PrivatePhoneSession {
     replies: Consumer<PrivateCommand>,
     digits: Producer<PrivateDigit>,
     revision: CollectionRevision,
+    settled_revision: NonZeroU32,
     pending_release: Option<NonZeroU32>,
     current: Option<PrivatePhoneReply>,
     media: Option<Box<media::Ingress>>,
@@ -250,6 +256,7 @@ impl PrivatePhoneSession {
                 replies: incoming,
                 digits,
                 revision: CollectionRevision::new(),
+                settled_revision: NonZeroU32::MIN,
                 pending_release: None,
                 current: None,
                 media: None,
@@ -284,11 +291,18 @@ impl PrivatePhoneSession {
         }
         Ok(seen)
     }
-    fn read_source(&mut self, now_ms: u64) -> Result<bool, Error> {
+    fn read_source(
+        &mut self,
+        now_ms: u64,
+        admission: &mut SourceTimeReference,
+    ) -> Result<(bool, bool), Error> {
         let reference = self
             .source_clock
             .map(SourceTimeClock::reference)
             .unwrap_or_default();
+        // Reuse the actual last source-read reference at post-read adoption.
+        // Original receipt birth is never changed or synthesized.
+        *admission = reference;
         let digits = &mut self.digits;
         let revision = &self.revision;
         let media = &mut self.media;
@@ -355,10 +369,15 @@ impl PrivatePhoneSession {
                             },
                         );
                         analyzed.and_then(|()| {
-                            if source.muted() {
-                                if let Some(media) = media.as_ref() {
-                                    media.retire();
-                                }
+                            // A prepared candidate may wait for its matching
+                            // release through the old tone tail. New onset/digit
+                            // callbacks retire it above; only active programme
+                            // needs blanket suppression retirement here.
+                            if let Some(media) = media
+                                .as_ref()
+                                .filter(|media| source.muted() && !media.prepared())
+                            {
+                                media.retire();
                             }
                             let accepted = match media.as_mut() {
                                 Some(media) if concealed => media.gap(start, count)?,
@@ -431,7 +450,7 @@ impl PrivatePhoneSession {
                 media.retire();
             }
             if mode == PhoneDigitMode::InBand && digits.slots() == 0 {
-                return Ok(false);
+                return Ok((false, false));
             }
             source.discontinuity(|digit| {
                 if mode == PhoneDigitMode::InBand {
@@ -447,7 +466,10 @@ impl PrivatePhoneSession {
         } else {
             SourceCompletion::Pending
         };
-        Ok(matches!(result.progress, 1 | 3) || acknowledge)
+        Ok((
+            matches!(result.progress, 1 | 3) || acknowledge,
+            matches!(result.progress, 0 | 3) && !result.finish_pending,
+        ))
     }
     fn step_inner(&mut self, now_ms: u64) -> Result<(), Error> {
         if self.stop.load(Ordering::Acquire) || self.reply.ended() {
@@ -460,17 +482,19 @@ impl PrivatePhoneSession {
                         self.current = Some(reply);
                         break;
                     }
-                    Some(PrivateCommand::Media(mut media)) => {
-                        if self.source.as_ref().is_some_and(SourceIngress::muted) {
+                    Some(PrivateCommand::Media(media)) => {
+                        // Cancelled queued boxes cannot replace a newer live or
+                        // prepared generation. Retain only the existing one slot.
+                        if !media.prepared()
+                            || self
+                                .media
+                                .as_ref()
+                                .is_some_and(|current| current.occupied())
+                        {
                             media.retire();
+                        } else {
+                            self.media = Some(media);
                         }
-                        media.adopt(
-                            self.source_end,
-                            self.source_clock
-                                .map(SourceTimeClock::reference)
-                                .unwrap_or_default(),
-                        );
-                        self.media = Some(media);
                     }
                     Some(PrivateCommand::CollectionEnded(revision)) => {
                         self.pending_release = Some(revision);
@@ -479,6 +503,8 @@ impl PrivatePhoneSession {
                 }
             }
         }
+        let mut admission = SourceTimeReference::default();
+        let mut source_drained = false;
         // One serial provider reader. Source callbacks retain native digits or
         // unanalyzed PCM under backpressure; non-authoritative symbols can drain.
         for _ in 0..64 {
@@ -486,7 +512,9 @@ impl PrivatePhoneSession {
                 break;
             }
             let progressed = if self.io.source_media() {
-                self.read_source(now_ms)?
+                let (progressed, drained) = self.read_source(now_ms, &mut admission)?;
+                source_drained = drained;
+                progressed
             } else {
                 self.read_legacy(now_ms)?
             };
@@ -498,10 +526,30 @@ impl PrivatePhoneSession {
         // event or reset. A matching release waits for stable raw-retry completion
         // and the detector's actual qualified tail, never a private timer.
         if let Some(release) = self.pending_release {
-            if self.revision.0.get() != Some(release)
-                || self.source.as_mut().is_some_and(SourceIngress::end_command)
-            {
+            if self.revision.0.get() != Some(release) {
                 self.pending_release = None;
+            } else if self.source.as_mut().is_some_and(SourceIngress::end_command) {
+                self.settled_revision = release;
+                self.pending_release = None;
+            }
+        }
+        if let Some(media) = self.media.as_mut().filter(|media| media.prepared()) {
+            let expected = media.expected_revision();
+            if self.revision.0.get() != Some(expected) {
+                media.retire();
+            } else if self.settled_revision == expected {
+                // A provider may retain an unanalysed suffix beyond the cached
+                // 20 ms prefix. Only its real idle/drained result closes that cut.
+                if source_drained
+                    && self
+                        .source
+                        .as_ref()
+                        .is_some_and(SourceIngress::ready_for_media)
+                {
+                    media.adopt(&self.reply, self.source_end, admission);
+                }
+            } else if self.pending_release != Some(expected) {
+                media.retire();
             }
         }
         if now_ms >= self.next_audio_ms && self.outbound.ready_for_input() {
