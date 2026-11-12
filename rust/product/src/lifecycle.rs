@@ -1067,13 +1067,15 @@ unsafe extern "C" fn rptadv_product_reload_poll() -> i32 {
     let Ok((engine, _call)) = selected_reload(true) else {
         return -3;
     };
-    match catch_unwind(AssertUnwindSafe(|| engine.poll_reload_configuration())) {
-        Ok(result) => {
-            if let Err(error) = result {
-                eprintln!("rpt-advanced: reload follow-up failed: {error:?}");
-            }
-            engine.reload_status.load(Ordering::Acquire)
+    match catch_unwind(AssertUnwindSafe(|| {
+        let result = engine.poll_reload_configuration();
+        // Diagnostic writes can panic too; keep them inside the public ABI boundary.
+        if let Err(error) = result {
+            eprintln!("rpt-advanced: reload follow-up failed: {error:?}");
         }
+        engine.reload_status.load(Ordering::Acquire)
+    })) {
+        Ok(status) => status,
         Err(_) => {
             engine.reloading.store(true, Ordering::Release);
             engine.record_reload_status(-3);

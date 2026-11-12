@@ -636,6 +636,123 @@ fn reload_finish_reports_operational_error_after_confirmed_publication() {
     assert_eq!(rptadv_product_stop(), 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn reload_abi_failed_stderr_retains_fatal_owner_until_cleanup() {
+    use std::{
+        fs::OpenOptions,
+        io::Write,
+        process::{Command, Stdio},
+    };
+    const CHILD: &str = "RPTADV_RELOAD_STDERR_CHILD";
+    const TEST: &str =
+        "lifecycle::site::tests::reload_abi_failed_stderr_retains_fatal_owner_until_cleanup";
+    if let Ok(phase) = std::env::var(CHILD) {
+        let _serial = crate::fixture::LIFECYCLE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+        let revision = engine.run(|host| Ok(host.runtime.revision())).unwrap();
+        let drops = crate::fixture::RADIO_DROPS.load(Ordering::Acquire);
+        if phase == "poll" {
+            // Reject the real publish submission after basis, begin and barrier.
+            REJECT_AFTER.store(4, Ordering::Release);
+            assert!(
+                engine
+                    .reload_configuration(
+                        document("[1000]\nradio_channel=usb\nduplex=full\nhangtime_ms=123\n")
+                            .unwrap()
+                    )
+                    .is_err()
+            );
+            assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
+            // Invoke once: an uncontained diagnostic panic aborts this child.
+            assert_eq!(unsafe { rptadv_product_reload_poll() }, -3);
+        } else {
+            assert_eq!(phase, "reload");
+            let malformed = b"[general\n";
+            assert_eq!(
+                unsafe { rptadv_product_reload(malformed.as_ptr().cast(), malformed.len()) },
+                -3
+            );
+        }
+        assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
+        assert!(engine.reloading.load(Ordering::Acquire));
+        assert_eq!(engine.run(|_| Ok(())), Err(RuntimeError::Rejected));
+        assert_eq!(
+            engine
+                .host
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .runtime
+                .revision(),
+            revision
+        );
+        assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Acquire), drops);
+        assert_eq!(rptadv_product_stop(), 0);
+        assert!(engine.host.lock().unwrap().is_none());
+        assert_eq!(
+            crate::fixture::RADIO_DROPS.load(Ordering::Acquire),
+            drops + 1
+        );
+        return;
+    }
+    for phase in ["reload", "poll"] {
+        let mut stderr = OpenOptions::new().write(true).open("/dev/full").unwrap();
+        assert_eq!(
+            stderr.write_all(b"probe").unwrap_err().raw_os_error(),
+            Some(libc::ENOSPC)
+        );
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env(CHILD, phase)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(stderr);
+        // Preserve each normally exiting child's counters beside the parent profiles.
+        let profile = std::env::var_os("CARGO_LLVM_COV").map(|_| {
+            let template = std::env::var_os("LLVM_PROFILE_FILE").unwrap();
+            let directory = std::path::Path::new(&template).parent().unwrap().to_owned();
+            let prefix = format!("reload-stderr-{}-{phase}-", std::process::id());
+            command.env(
+                "LLVM_PROFILE_FILE",
+                directory.join(format!("{prefix}%p.profraw")),
+            );
+            (directory, prefix)
+        });
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("{phase} ABI stderr child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{phase} ABI stderr child: {}\n{stdout}",
+            output.status
+        );
+        assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+        if let Some((directory, prefix)) = profile {
+            assert!(
+                std::fs::metadata(directory.join(format!("{prefix}{pid}.profraw")))
+                    .unwrap()
+                    .len()
+                    > 0
+            );
+        }
+    }
+}
+
 #[test]
 fn reload_abi_without_engine_is_fatal_not_safe_rejection() {
     let _serial = crate::fixture::LIFECYCLE
