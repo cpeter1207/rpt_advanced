@@ -4666,3 +4666,191 @@ fn device_reload_rejects_outstanding_work_and_hazards_but_waits_for_quiescence()
         assert!(runtime.stop(0));
     }
 }
+
+#[test]
+fn prepared_reload_commit_hook_runs_once_before_any_publication() {
+    struct GatedDevice {
+        channel: String,
+        ready: Arc<AtomicUsize>,
+    }
+    impl DeviceHandoff for GatedDevice {
+        fn quiesce(&mut self) -> bool {
+            true
+        }
+        fn close(&mut self) {}
+        fn open(&mut self, settings: &GenerationSettings) -> bool {
+            self.channel.clone_from(&settings.device);
+            true
+        }
+        fn activation_ready(&mut self) -> Result<bool, RuntimeError> {
+            if self.channel != "next" {
+                return Ok(true);
+            }
+            match self.ready.load(Ordering::Acquire) {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(RuntimeError::Device),
+            }
+        }
+    }
+    for deferred in [false, true] {
+        let ready = Arc::new(AtomicUsize::new(usize::from(!deferred)));
+        let device = |_: &str, _: &ResolvedNodeSettings| {
+            Ok(Box::new(GatedDevice {
+                channel: String::new(),
+                ready: ready.clone(),
+            }) as Box<dyn DeviceHandoff>)
+        };
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse("[1000]\nradio_channel=old\n[2000]\n").unwrap(),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
+        let old_revision = runtime.revision();
+        let old = runtime.status(0);
+        runtime
+            .prepare_reload(
+                ConfigDocument::parse("[1000]\nradio_channel=next\n[2000]\n").unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        assert_eq!(runtime.revision(), old_revision);
+        let mut commits = 0;
+        let mut commit = |runtime: &mut Runtime<_, _>| {
+            assert_eq!(runtime.revision(), old_revision);
+            for (name, status) in &old {
+                assert_eq!(runtime.node(name).unwrap().status(0).active, status.active);
+            }
+            commits += 1;
+        };
+        if deferred {
+            assert_eq!(
+                runtime.poll_reload_with_commit(clock(), &mut commit),
+                Ok(false)
+            );
+            ready.store(1, Ordering::Release);
+        }
+        assert_eq!(
+            runtime.poll_reload_with_commit(clock(), &mut commit),
+            Ok(true)
+        );
+        assert_eq!(
+            runtime.poll_reload_with_commit(clock(), &mut commit),
+            Ok(true)
+        );
+        assert_eq!(commits, 1);
+        assert_eq!(runtime.revision(), old_revision + 1);
+        assert!(runtime.stop(0));
+    }
+}
+
+#[test]
+fn prepared_reload_does_not_run_commit_hook_after_readiness_or_finalization_failure() {
+    struct FailingDevice {
+        name: String,
+        fail_finish: bool,
+        updated: bool,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+    impl DeviceHandoff for FailingDevice {
+        fn quiesce(&mut self) -> bool {
+            true
+        }
+        fn close(&mut self) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("close:{}", self.name));
+        }
+        fn open(&mut self, _: &GenerationSettings) -> bool {
+            true
+        }
+        fn update(&mut self, _: &GenerationSettings) -> Result<bool, RuntimeError> {
+            self.updated = true;
+            Ok(self.fail_finish)
+        }
+        fn activation_ready(&mut self) -> Result<bool, RuntimeError> {
+            if self.updated && !self.fail_finish && self.name == "2000" {
+                self.updated = false;
+                Err(RuntimeError::Device)
+            } else {
+                Ok(true)
+            }
+        }
+        fn finish_update(&mut self, commit: bool) -> Result<(), RuntimeError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("finish:{}:{commit}", self.name));
+            self.updated = false;
+            if commit && self.fail_finish && self.name == "2000" {
+                Err(RuntimeError::Restore)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    for fail_finish in [false, true] {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let device = |name: &str, _: &ResolvedNodeSettings| {
+            Ok(Box::new(FailingDevice {
+                name: name.into(),
+                fail_finish,
+                updated: false,
+                log: log.clone(),
+            }) as Box<dyn DeviceHandoff>)
+        };
+        let initial = ConfigDocument::parse("[1000]\n[2000]\n").unwrap();
+        let mut runtime =
+            Runtime::start(initial.clone(), &Media, adapter, device, clock()).unwrap();
+        runtime
+            .prepare_reload(
+                ConfigDocument::parse("[1000]\n[2000]\n[radio]\nreceive_output_gain_db=-6\n")
+                    .unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        let mut commits = 0;
+        let result = runtime.poll_reload_with_commit(clock(), |_| commits += 1);
+        assert_eq!(commits, 0);
+        assert_eq!(
+            result,
+            Err(if fail_finish {
+                RuntimeError::Restore
+            } else {
+                RuntimeError::Device
+            })
+        );
+        assert_eq!(runtime.revision(), 1);
+        assert_eq!(runtime.document(), &initial);
+        if fail_finish {
+            let log = log.lock().unwrap();
+            assert!(log.contains(&"finish:1000:true".into()));
+            assert!(log.contains(&"finish:2000:true".into()));
+            assert!(
+                runtime
+                    .status(0)
+                    .iter()
+                    .all(|(_, state)| state.active.is_none()),
+                "fatal finalization failure must not claim the old runtime is still coherent"
+            );
+        } else {
+            assert!(
+                runtime
+                    .status(0)
+                    .iter()
+                    .all(|(_, state)| state.active == Some(1))
+            );
+        }
+        assert!(runtime.stop(0));
+    }
+}

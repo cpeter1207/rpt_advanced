@@ -591,6 +591,9 @@ impl Host {
         self.reload_failure = None;
         let mut text = TextExecutor::prepare(document.nodes().len().max(1), self.media.clone())
             .map_err(|_| RuntimeError::Preparation)?;
+        // Keep the live pair until commit. Only one candidate pair may overlap it;
+        // a failed spawn drops that candidate without stopping live text or calls.
+        text.start().map_err(|_| RuntimeError::Preparation)?;
         let local_delays: Vec<_> = self
             .leases
             .iter()
@@ -610,7 +613,7 @@ impl Host {
         let leases = &mut self.leases;
         let epoch = self.epoch;
         let services = self.services;
-        let result = self.runtime.reload(
+        let result = self.runtime.prepare_reload(
             document,
             &self.media,
             |name, settings| {
@@ -665,7 +668,12 @@ impl Host {
         self.pump(clock)
     }
     fn advance_reload(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
-        if !self.runtime.poll_reload(clock)? {
+        let phone_calls = &mut self.phone_calls;
+        let ready = self
+            .runtime
+            .poll_reload_with_commit(clock, |runtime| Self::retire_phones(runtime, phone_calls))
+            .inspect_err(|_| self.reload_text = None)?;
+        if !ready {
             return Ok(());
         }
         self.prune_leases();
@@ -673,15 +681,13 @@ impl Host {
             self.reload_text = None;
             return Ok(());
         }
-        if let Some(mut text) = self.reload_text.take() {
+        if let Some(text) = self.reload_text.take() {
             self.remote_pending.clear();
             self.text.stop();
-            text.start().map_err(|_| RuntimeError::Preparation)?;
             self.text = text;
             self.commit_sites()?;
         }
         self.activated_revision = self.runtime.revision();
-        self.retire_phones();
         self.activate_dispatchers(clock.now_ms);
         self.configure_status_posts(clock.now_ms);
         self.attach_workers();
@@ -1415,7 +1421,7 @@ impl Host {
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
         for reply in self.phone_calls.expire_authentication(clock.now_ms) {
-            self.retire_phone_source(&reply);
+            Self::retire_phone_source(&mut self.runtime, &reply);
         }
         self.pump_private_phones(clock);
         if let Err(error) = self.advance_reload(clock) {
@@ -1666,7 +1672,7 @@ impl Host {
     }
     /// Gate audio, stop media distribution, quiesce peers, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
-        self.retire_phones();
+        Self::retire_phones(&mut self.runtime, &mut self.phone_calls);
         self.remote_pending.clear();
         if self.site_shutdown(now_ms) != Ok(true) {
             return false;
@@ -1737,19 +1743,19 @@ impl Host {
         let Some(reply) = self.phone_calls.retire(source) else {
             return false;
         };
-        self.retire_phone_source(&reply);
+        Self::retire_phone_source(&mut self.runtime, &reply);
         true
     }
-    fn retire_phone_source(&mut self, reply: &PeerReply) {
-        for (local, _) in self.runtime.status(0) {
-            if let Some(node) = self.runtime.node(&local) {
+    fn retire_phone_source(runtime: &mut Runtime<Audio, GenerationControl>, reply: &PeerReply) {
+        for (local, _) in runtime.status(0) {
+            if let Some(node) = runtime.node(&local) {
                 node.links().retire_source(reply);
             }
         }
     }
-    fn retire_phones(&mut self) {
-        for reply in self.phone_calls.retire_all() {
-            self.retire_phone_source(&reply);
+    fn retire_phones(runtime: &mut Runtime<Audio, GenerationControl>, calls: &mut PhoneCalls) {
+        for reply in calls.retire_all() {
+            Self::retire_phone_source(runtime, &reply);
         }
     }
 }

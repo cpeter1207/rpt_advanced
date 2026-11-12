@@ -1039,3 +1039,47 @@ fn removed_node_reload_retires_its_pending_private_call_before_reclaiming_the_no
     pump_until(&mut host, |host| host.runtime.status(20).is_empty());
     assert!(host.stop(20));
 }
+
+#[test]
+fn rejected_text_start_preserves_live_calls_and_text_executor() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for failed_worker in 0..2 {
+        let (mut host, speech) = driven_mailbox_host();
+        let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+        let (phone, _) = crate::link::session::tests::phone_peer();
+        let call = phone.identity().call_id().unwrap();
+        host.incoming_peer(phone, "127.0.0.1", private_clock(&host))
+            .unwrap();
+        let source = host.phone_source(call).unwrap().clone();
+        let reply = host.phone_reply(&source).unwrap();
+        let revision = host.runtime.revision();
+        let active = host.runtime.status(0)[0].1.active;
+        let configuration = host.runtime.document().clone();
+        let outcome = crate::media::text::tests::failing_start(failed_worker, || {
+            host.reload(configuration.clone(), clock())
+        });
+        assert_eq!(outcome, Err(RuntimeError::Preparation));
+        assert_eq!(host.runtime.revision(), revision);
+        assert_eq!(host.runtime.status(0)[0].1.active, active);
+        assert_eq!(host.runtime.document(), &configuration);
+        assert!(!host.runtime.reload_pending());
+        assert_eq!(host.phone_source(call), Some(&source));
+        assert!(!reply.ended());
+        ingress
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Text(b"M 4000 0 B still live"));
+        pump_until(&mut host, |_| {
+            speech
+                .opened
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|text| text.contains("still live"))
+        });
+        assert!(host.stop(20));
+    }
+}

@@ -553,6 +553,20 @@ impl<A: Send, C: Send> Runtime<A, C> {
         &mut self,
         document: ConfigDocument,
         media: &dyn NativeMediaPreparer,
+        adapter: impl FnMut(&str, &ResolvedNodeSettings) -> Result<PreparedAdapter<A, C>, RuntimeError>,
+        device: impl FnMut(&str, &ResolvedNodeSettings) -> Result<Box<dyn DeviceHandoff>, RuntimeError>,
+        clock: RuntimeClock,
+    ) -> Result<(), RuntimeError> {
+        self.prepare_reload(document, media, adapter, device, clock)?;
+        self.poll_reload(clock).map(|_| ())
+    }
+
+    /// Prepare one retained candidate without opening devices or publishing nodes.
+    /// Call a reload poll operation on the same control owner to advance or roll back.
+    pub fn prepare_reload(
+        &mut self,
+        document: ConfigDocument,
+        media: &dyn NativeMediaPreparer,
         mut adapter: impl FnMut(
             &str,
             &ResolvedNodeSettings,
@@ -735,7 +749,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             scheduler,
             (revision, generation_id),
         ));
-        self.poll_reload(clock).map(|_| ())
+        Ok(())
     }
 
     /// A prepared configuration still owns opening or rolling-back leases.
@@ -746,6 +760,18 @@ impl<A: Send, C: Send> Runtime<A, C> {
     /// Advance every device without waiting for its physical worker. A failed
     /// candidate remains retained until rollback has safely completed.
     pub fn poll_reload(&mut self, clock: RuntimeClock) -> Result<bool, RuntimeError> {
+        self.poll_reload_with_commit(clock, |_| {})
+    }
+
+    /// Advance a retained candidate and invoke the infallible hook exactly once,
+    /// after device finalization succeeds and before any node is published.
+    /// The hook runs only on commit, never while pending, after rejection or on
+    /// fatal restoration failure. It must not perform fallible preparation.
+    pub fn poll_reload_with_commit(
+        &mut self,
+        clock: RuntimeClock,
+        before_publish: impl FnOnce(&mut Self),
+    ) -> Result<bool, RuntimeError> {
         let Some(mut transaction) = self.pending_reload.take() else {
             return Ok(true);
         };
@@ -754,7 +780,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 self.pending_reload = Some(transaction);
                 Ok(false)
             }
-            Ok(true) => self.commit_reload(transaction, clock).map(|()| true),
+            Ok(true) => self
+                .commit_reload(transaction, clock, before_publish)
+                .map(|()| true),
             Err(error) => Err(error),
         }
     }
@@ -763,6 +791,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         &mut self,
         transaction: ReloadTransaction<A, C>,
         clock: RuntimeClock,
+        before_publish: impl FnOnce(&mut Self),
     ) -> Result<(), RuntimeError> {
         let ReloadTransaction {
             document,
@@ -803,6 +832,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         }
         // No fallible preparation remains: external registration is still gated to these stable hosts.
         let mut next = Vec::with_capacity(candidates.len());
+        before_publish(self);
         for mut candidate in candidates {
             let identity = NodeId::new(&candidate.name).expect("configured station");
             let echo = crate::config::EchoLinkSettings::resolve(&document, &identity)
