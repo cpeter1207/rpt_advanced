@@ -211,3 +211,37 @@ fn exhausted_refresh_authentication_fails_pending_removal() {
         assert_eq!(state.status.state, 5);
     }
 }
+
+#[test]
+fn first_refresh_challenge_observes_authentication_once_without_resetting_it() {
+    let mut state = observations();
+    state.observe(1, 200, 4);
+    let previous = state.status.sequence;
+    state.observe(1, 401, 0);
+    assert_eq!(state.status.state, 1);
+    assert_eq!(state.status.sequence, previous + 1);
+    assert_eq!(state.status.accepted_expires, 4);
+    assert_eq!(state.status.registrations, 1);
+    assert!(state.authenticate);
+    state.observe(1, 407, 0);
+    assert_eq!(state.status.state, 5);
+    assert_eq!(state.status.sequence, previous + 2);
+    let mut initial = observations();
+    initial.observe(1, 401, 0);
+    assert_eq!(
+        initial.status.sequence, 0,
+        "initial auth deadline must not restart"
+    );
+}
+
+#[test]
+fn aor_accepts_valid_percent_encoded_utf8_user_only() {
+    assert!(sip_uri("sip:%C3%A9@example.test", true).is_ok());
+    for text in [
+        "sip:%@example.test",
+        "sip:%3@example.test",
+        "sip:%GH@example.test",
+    ] {
+        assert!(sip_uri(text, true).is_err());
+    }
+}

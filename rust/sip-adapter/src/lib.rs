@@ -127,6 +127,10 @@ impl Observations {
         if matches!(code, 401 | 407) && self.challenges == 0 {
             self.challenges = 1;
             self.authenticate = true;
+            if self.status.state == 2 {
+                // Observe actual reauthentication, not an unobservable refresh send.
+                self.publish(1, code, self.status.accepted_expires);
+            }
             return;
         }
         self.authenticate = false;
@@ -175,14 +179,14 @@ fn boundary(f: impl FnOnce() -> Result<i32, i32>) -> i32 {
         .unwrap_or_else(|code| code)
 }
 
-/// Borrow a bounded ASCII field without letting separators inject protocol headers.
+/// Borrow a bounded UTF-8 field; NUL cannot cross the native C-string boundary.
 unsafe fn field<'a>(span: abi::rptadv_sip_span_v1, max: usize) -> Result<&'a str, i32> {
     if span.data.is_null() || span.length == 0 || span.length > max {
         return Err(-1);
     }
     // SAFETY: caller supplies a readable extent for the duration of create.
     let bytes = unsafe { std::slice::from_raw_parts(span.data, span.length) };
-    if bytes.iter().any(|byte| !byte.is_ascii_graphic()) {
+    if bytes.contains(&0) {
         return Err(-1);
     }
     std::str::from_utf8(bytes).map_err(|_| -1)
@@ -193,12 +197,20 @@ fn sip_uri(text: &str, aor: bool) -> Result<CString, i32> {
     let rest = text.strip_prefix("sip:").ok_or(-1)?;
     let authority = if aor {
         let (user, host) = rest.split_once('@').ok_or(-1)?;
-        if user.is_empty()
-            || !user
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b))
-        {
+        if user.is_empty() {
             return Err(-1);
+        }
+        let mut bytes = user.as_bytes();
+        while let Some((&byte, rest)) = bytes.split_first() {
+            bytes = rest;
+            if byte == b'%' {
+                if bytes.len() < 2 || !bytes[..2].iter().all(u8::is_ascii_hexdigit) {
+                    return Err(-1);
+                }
+                bytes = &bytes[2..];
+            } else if !byte.is_ascii_alphanumeric() && !b"-_.+~".contains(&byte) {
+                return Err(-1);
+            }
         }
         host
     } else {
@@ -234,13 +246,15 @@ unsafe fn prepare(config: &Config) -> Result<Box<Account>, i32> {
     {
         return Err(-1);
     }
-    let registrar = sip_uri(unsafe { field(config.registrar, 255)? }, false)?;
-    let aor = sip_uri(unsafe { field(config.aor, 255)? }, true)?;
-    let user = unsafe { field(config.username, 128)? };
-    let password = unsafe { field(config.password, 256)? };
-    if [user, password]
-        .iter()
-        .any(|value| value.contains([':', '"', '\\']))
+    let registrar = sip_uri(unsafe { field(config.registrar, 264)? }, false)?;
+    let aor = sip_uri(unsafe { field(config.aor, 1030)? }, true)?;
+    let user = unsafe { field(config.username, 255)? };
+    let password = unsafe { field(config.password, 4096)? };
+    // Sofia parses a colon-delimited C string and emits the Digest username
+    // inside quotes without escaping. Password bytes are hashed, never emitted.
+    if password.contains(':')
+        || user.contains([':', '"', '\\'])
+        || user.chars().any(|ch| ch.is_control() || ch.is_whitespace())
     {
         return Err(-1);
     }

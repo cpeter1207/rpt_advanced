@@ -1298,15 +1298,25 @@ configuration's 1..65535 seconds, without a new operator realm setting. The futu
 composition owner must enforce its configured authentication deadline; this
 adapter's native transaction timeout is a distinct 32-second resource bound.
 
-This first profile conservatively limits username/password to 128/256 printable
-ASCII bytes and rejects spaces, colon, quotes, backslash and embedded NUL.
-Only the selected native colon-delimited credential interface's colon/NUL
-restriction is established here as a representation limit; the other draft caps
-must be reconciled with existing configuration before production host activation.
-Reject unsupported profiles during preparation, never truncate credentials.
-Status remains REGISTERED while an automatic native refresh is pending; a
-per-refresh host authentication deadline needs an explicit observation in a later
-composition checkpoint. This ABI alone does not provide that deadline signal.
+The credential profile matches existing configuration bounds: UTF-8 username
+255 bytes and literal UTF-8 password 4096 bytes. Sofia's selected
+auc_credentials colon-delimited C-string interface cannot represent colon/NUL;
+its Digest emitter inserts username inside quotes without escaping, so username
+quote/backslash are also rejected. Existing username whitespace/control rejection
+remains. Password spaces, quotes, backslash, semicolon and hash remain literal.
+Unsupported representations fail during preparation with a redacted invalid-input
+code; credentials are never truncated. URI user accepts validated percent escapes.
+Derived registrar/AOR limits are 264/1030 bytes, including the configured server's
+maximum 260 bytes and percent-encoded 255-byte UTF-8 username.
+
+The first observed reauthentication 401/407 publishes REGISTERING once, retaining
+accepted-expiry and successful-registration count. An initial challenge while
+already REGISTERING does not restart the host's absolute authentication deadline;
+neither do repeated challenges. Silent native refresh emits no request-start
+callback, and even peer 100 did not produce one in the focused native probe.
+Its transaction timer remains native-owned. The host independently expires
+binding usability at its monotonic success observation plus accepted_expires,
+even if a later refresh transaction or reauthentication is still pending.
 
 The native account retains generated Contact, Via rport/NAT reflection and one
 15-second OPTIONS keepalive owner. Registration self-validation is disabled

@@ -7,6 +7,7 @@ import re
 import socket
 import sys
 import time
+from urllib.parse import quote
 
 
 class Span(C.Structure):
@@ -70,23 +71,31 @@ class Descriptor(C.Structure):
     ]
 
 
-def config(port):
+IDENTITY = ("synthetic", "synthetic-test-secret")
+
+
+def aor(identity):
+    user = quote(identity[0], safe="-._~")
+    return f"sip:{user}@registrar.invalid"
+
+
+def config(port, identity=IDENTITY):
     result = Config(C.sizeof(Config), 1, 7)
     # The nonresolvable SIP identity must never be confused with routing.
     values = (
         b"127.0.0.1:0",
         f"127.0.0.1:{port}".encode(),
         b"sip:registrar.invalid",
-        b"sip:synthetic@registrar.invalid",
-        b"synthetic",
-        b"synthetic-test-secret",
+        aor(identity).encode(),
+        identity[0].encode(),
+        identity[1].encode(),
     )
     for (name, _), value in zip(Config._fields_[3:], values, strict=True):
         setattr(result, name, Span(value, len(value)))
     return result
 
 
-def digest_ok(header, method):
+def digest_ok(header, method, identity=IDENTITY, realm="fixture"):
     # Match only the synthetic credential; never print an auth header on failure.
     fields = {
         key: quoted or token
@@ -96,16 +105,20 @@ def digest_ok(header, method):
     def md5(text):
         return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
-    first = md5("synthetic:fixture:synthetic-test-secret")
+    first = md5(f"{identity[0]}:{realm}:{identity[1]}")
     last = md5(f"{method}:{fields.get('uri', '')}")
     if fields.get("qop"):
         value = f"{first}:fixture-nonce:{fields['nc']}:{fields['cnonce']}:auth:{last}"
     else:
         value = f"{first}:fixture-nonce:{last}"
-    return fields.get("response") == md5(value)
+    return (
+        fields.get("username") == identity[0]
+        and fields.get("realm") == realm
+        and fields.get("response") == md5(value)
+    )
 
 
-def fixture(api, peer, ctx, mode="success"):
+def fixture(api, peer, ctx, mode="success", identity=IDENTITY):
     """Service one native turn then independently answer any loopback requests."""
     assert api.service(ctx, 7) == 0
     time.sleep(0.002)
@@ -113,7 +126,7 @@ def fixture(api, peer, ctx, mode="success"):
         packet, address = peer.recvfrom(65536)
     except BlockingIOError:
         return None
-    text = packet.decode("ascii")
+    text = packet.decode("utf-8")
     first, *lines = text.split("\r\n")
     headers = {}
     for line in lines:
@@ -125,7 +138,7 @@ def fixture(api, peer, ctx, mode="success"):
             name = {"v": "via", "f": "from", "t": "to", "i": "call-id"}.get(name, name)
             headers[name] = value.strip()
     if first.startswith("OPTIONS "):
-        assert first == "OPTIONS sip:synthetic@registrar.invalid SIP/2.0"
+        assert first == f"OPTIONS {aor(identity)} SIP/2.0"
         reply = ["SIP/2.0 200 OK"]
         reply.extend(
             f"{name}: {headers[name]}"
@@ -135,9 +148,10 @@ def fixture(api, peer, ctx, mode="success"):
         peer.sendto("\r\n".join(reply).encode(), address)
         return headers
     assert first == "REGISTER sip:registrar.invalid SIP/2.0", "SIP authority lost"
-    assert "sip:synthetic@registrar.invalid" in headers["to"]
+    assert aor(identity) in headers["to"]
     auth = headers.get("authorization", "")
-    valid = auth and digest_ok(auth, "REGISTER")
+    realm = "refresh-fixture" if mode in ("reauth", "refresh-reject") else "fixture"
+    valid = auth and digest_ok(auth, "REGISTER", identity, realm)
     if mode == "silent":
         return headers
     code, phrase = (
@@ -149,7 +163,6 @@ def fixture(api, peer, ctx, mode="success"):
     for name in ("via", "from", "to", "call-id", "cseq"):
         reply.append(f"{name}: {headers[name]}")
     if code == 401:
-        realm = "refresh-fixture" if mode == "refresh-reject" else "fixture"
         reply.append(
             f'WWW-Authenticate: Digest realm="{realm}", nonce="fixture-nonce", algorithm=MD5, qop="auth"'
         )
@@ -169,10 +182,10 @@ def snapshot(api, ctx):
     return status
 
 
-def until(api, peer, ctx, predicate, mode="success", seconds=12):
+def until(api, peer, ctx, predicate, mode="success", seconds=12, identity=IDENTITY):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        fixture(api, peer, ctx, mode)
+        fixture(api, peer, ctx, mode, identity)
         status = snapshot(api, ctx)
         if predicate(status):
             return status
@@ -212,6 +225,8 @@ def run(path):
         "PASS independent REGISTER/Digest/accepted-expiry refresh/unregister/shutdown"
     )
 
+    credential_profiles(api)
+    reauthenticated_refresh(api)
     interrupted_refresh(api)
     failure_cases(api)
 
@@ -235,6 +250,49 @@ def failure_cases(api):
             until(api, peer, ctx, lambda status: status.state == 7, mode)
             assert api.destroy(ctx, 7) == 0
         print(f"PASS bounded {mode} registration failure and cleanup")
+
+
+def credential_profiles(api):
+    """Existing configuration byte bounds do not impose new ASCII-only secrets."""
+    password = ' päss " \\ #;'
+    password += "x" * (4096 - len(password.encode()))
+    identity = ("é" * 127 + "x", password)
+    assert len(identity[0].encode()) == 255 and len(identity[1].encode()) == 4096
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
+        peer.bind(("127.0.0.1", 0))
+        peer.setblocking(False)
+        cfg = config(peer.getsockname()[1], identity)
+        ctx = PTR()
+        assert api.create(C.byref(cfg), C.byref(ctx)) == 0, (
+            "existing credential profile rejected"
+        )
+        assert api.register(ctx, 7) == 0
+        until(api, peer, ctx, lambda status: status.state == 2, identity=identity)
+        assert api.shutdown(ctx, 7) == 0
+        until(api, peer, ctx, lambda status: status.state == 7, identity=identity)
+        assert api.destroy(ctx, 7) == 0
+    print("PASS existing UTF-8 username and literal secret bounds")
+
+
+def reauthenticated_refresh(api):
+    """Only an actual changed-realm challenge starts a new authentication deadline."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
+        peer.bind(("127.0.0.1", 0))
+        peer.setblocking(False)
+        cfg = config(peer.getsockname()[1])
+        ctx = PTR()
+        assert api.create(C.byref(cfg), C.byref(ctx)) == 0
+        assert api.register(ctx, 7) == 0
+        prior = until(api, peer, ctx, lambda status: status.state == 2)
+        pending = until(api, peer, ctx, lambda status: status.state == 1, "reauth")
+        assert pending.registrations == prior.registrations
+        assert pending.accepted_expires == prior.accepted_expires == 4
+        assert pending.sip_status == 401
+        until(api, peer, ctx, lambda status: status.registrations == 2, "reauth")
+        assert api.shutdown(ctx, 7) == 0
+        until(api, peer, ctx, lambda status: status.state == 7, "reauth")
+        assert api.destroy(ctx, 7) == 0
+    print("PASS observed reauthentication preserves accepted binding metadata")
 
 
 def interrupted_refresh(api):
@@ -287,6 +345,12 @@ def invalid_inputs(api):
         ("registrar", b"sip:registrar.invalid?Subject=unwanted"),
         ("aor", b"sip:synthetic@registrar.invalid\r\nVia: injected"),
         ("password", b"invalid\0secret"),
+        ("password", b"colon:secret"),
+        ("password", b"x" * 4097),
+        ("username", b"x" * 256),
+        ("username", b'quoted"user'),
+        ("username", b"back\\slash"),
+        ("username", b"colon:user"),
     ):
         candidate = config(9)
         setattr(candidate, name, Span(value, len(value)))

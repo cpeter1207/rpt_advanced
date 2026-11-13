@@ -63,8 +63,9 @@ owned C/header code is analyzed using the actual target, while unmodified instal
 Sofia headers are system includes rather than project source to repair.
 The SIP adapter requires separately qualified dynamic Sofia-SIP 1.13.19 headers
 and library; `RPTADV_SOFIA_PREFIX` selects an isolated local staging prefix.
-`make sip-registration-check` runs only synthetic loopback registration, never
-a provider account. External library publication/license qualification remains
+`make sip-registration-check` runs only synthetic loopback registration and
+private-shim callback probes, never a provider account. The probe checks silent
+refresh and peer-100 observations without timer interception or vendor changes. External library publication/license qualification remains
 a release prerequisite, not a successful check implied by these targets.
 
 ## Test containers

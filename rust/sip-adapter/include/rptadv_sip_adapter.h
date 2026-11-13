@@ -8,10 +8,14 @@
  * No adapter-created threads, media, SDP, incoming calls or implicit answer.
  * Credentials are borrowed at create and copied privately, never reported.
  * Digest realms come only from bounded native challenges, not configuration.
- * The host bounds initial authentication with its configured shutdown deadline.
+ * The host bounds initial authentication and the first observed reauthentication
+ * challenge with its configured deadline. Repeated challenges never restart it.
+ * Silent native refresh has no start event. The host independently expires
+ * binding usability at its last success observation plus accepted_expires.
  * SIP authority and AOR remain distinct from the numeric next-hop endpoint.
- * Input spans are bounded printable ASCII without NULs or header whitespace.
- * Credentials cannot contain colon, quote or backslash delimiters. The host
+ * Endpoint/URI spans use ASCII; URI user permits validated percent escapes.
+ * Credentials use bounded UTF-8 without NUL or colon. Username also excludes
+ * whitespace/control, quote and backslash; password is a literal secret. The host
  * must not enable native protocol debug/dump/capture while accounts are live.
  * 0 succeeds; 1 is pending/empty; -1 invalid input; -2 stale generation;
  * -3 invalid state; -4 native setup failure. Never retry an ambiguous create.
@@ -40,16 +44,16 @@ typedef struct rptadv_sip_config_v1 {
     uint64_t generation;          /**< Nonzero immutable owner generation. */
     rptadv_sip_span_v1 bind;      /**< Numeric SocketAddr; zero port chooses ephemeral. */
     rptadv_sip_span_v1 next_hop;  /**< Numeric SocketAddr, nonzero port. */
-    rptadv_sip_span_v1 registrar; /**< SIP registrar authority URI, <=255 bytes. */
-    rptadv_sip_span_v1 aor;       /**< SIP address of record, <=255 bytes. */
-    rptadv_sip_span_v1 username;  /**< Digest username, <=128 bytes. */
-    rptadv_sip_span_v1 password;  /**< Digest password, <=256 bytes. */
+    rptadv_sip_span_v1 registrar; /**< SIP registrar authority URI, <=264 bytes. */
+    rptadv_sip_span_v1 aor;       /**< SIP address of record, <=1030 bytes. */
+    rptadv_sip_span_v1 username;  /**< Literal UTF-8 Digest username, <=255 bytes. */
+    rptadv_sip_span_v1 password;  /**< Literal UTF-8 Digest password, <=4096 bytes. */
 } rptadv_sip_config_v1;
 /** Registration state. */
 enum rptadv_sip_state_v1 {
-    RPTADV_SIP_PREPARED = 0,       /**< Local setup only; no REGISTER sent. */
-    RPTADV_SIP_REGISTERING = 1,    /**< Initial request/challenge pending. */
-    RPTADV_SIP_REGISTERED = 2,     /**< Last REGISTER succeeded. */
+    RPTADV_SIP_PREPARED = 0,    /**< Local setup only; no REGISTER sent. */
+    RPTADV_SIP_REGISTERING = 1, /**< Initial authentication or observed reauthentication pending. */
+    RPTADV_SIP_REGISTERED = 2,  /**< Last REGISTER succeeded. */
     RPTADV_SIP_UNREGISTERING = 3,  /**< Explicit removal pending. */
     RPTADV_SIP_UNREGISTERED = 4,   /**< Removal succeeded. */
     RPTADV_SIP_FAILED = 5,         /**< Terminal registration failure; no new attempts. */
@@ -59,14 +63,15 @@ enum rptadv_sip_state_v1 {
 };
 /** Authoritative redacted snapshot, also used for bounded state-change events. */
 typedef struct rptadv_sip_status_v1 {
-    uint32_t struct_size;      /**< Complete writable record size. */
-    uint32_t state;            /**< rptadv_sip_state_v1. */
-    uint64_t generation;       /**< Exact account generation. */
-    uint64_t sequence;         /**< Monotonic state observation number. */
-    uint32_t sip_status;       /**< Numeric response only; no reason/header text. */
-    uint32_t accepted_expires; /**< Matching Contact expiry, zero if unavailable. */
-    uint32_t registrations;    /**< Successful initial/refresh responses, saturating. */
-    uint32_t events_dropped;   /**< Oldest events replaced in fixed eight-slot queue. */
+    uint32_t struct_size; /**< Complete writable record size. */
+    uint32_t state;       /**< rptadv_sip_state_v1. */
+    uint64_t generation;  /**< Exact account generation. */
+    uint64_t sequence;    /**< Monotonic state observation number. */
+    uint32_t sip_status;  /**< Numeric response only; no reason/header text. */
+    uint32_t
+        accepted_expires;    /**< Last accepted Contact expiry; retained during reauthentication. */
+    uint32_t registrations;  /**< Successful initial/refresh responses, saturating. */
+    uint32_t events_dropped; /**< Oldest events replaced in fixed eight-slot queue. */
 } rptadv_sip_status_v1;
 /** Sized implementation-neutral ABI 1; every slot is required. */
 typedef struct rptadv_sip_descriptor_v1 {
