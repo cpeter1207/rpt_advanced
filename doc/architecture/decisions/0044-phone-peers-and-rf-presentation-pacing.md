@@ -1391,3 +1391,15 @@ INVITE, calls, provider media, RF attachment or Asterisk SIP activation. Synthet
 loopback evidence is distinct from real-provider/NAT or physical-radio acceptance.
 Public source/artifact publication remains held for the separately recorded
 combined-distribution license review.
+
+The full standalone foreground fixture now calls the real `run()` and product
+with an enabled nonnumeric local node, synthetic private secret and loopback
+registrar. Only physical radio activation, readiness and quiescence callbacks
+are substituted under `cfg(test)`, reusing the existing physical-I/O simulator.
+It checks startup REGISTER/challenge completion, unchanged reload without a new
+REGISTER, disabled-account reload/unregister with Call-ID continuity, and joined
+SIGTERM exit. A reserved IAX port proves this nonnumeric SIP-only node opens no
+IAX listener. The simulator must execute callback turns, emit no keyed/audio
+output and join successfully. Child coverage profiles survive fixture cleanup.
+This is real-process integration with simulated hardware, not physical-node or
+live-provider acceptance; shipped startup and authorization are unchanged.

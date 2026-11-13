@@ -196,6 +196,8 @@ impl ProductRuntime {
             .map_err(RuntimeError::Provider)?;
         let mut host = HostServicesOwner::new(radios, Some(provider_ref), secrets)
             .map_err(RuntimeError::Provider)?;
+        #[cfg(test)]
+        crate::host_services::product_phone_tests::configure_foreground_fixture(&mut host);
         with_echo_preparation(configuration_path, &descriptors, |preparation| {
             unsafe { host.prepare_echo(descriptors.product, configuration, preparation) }
                 .map_err(RuntimeError::Echo)

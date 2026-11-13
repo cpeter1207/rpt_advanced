@@ -261,6 +261,12 @@ merge gates remain separately recorded. No call/media, Asterisk activation,
 real-provider or hardware readiness is claimed, and combined public distribution
 remains held pending the license review.
 
+The next local checkpoint exercises the actual foreground/product subprocess
+with an enabled nonnumeric node and only test-compiled physical-I/O callbacks
+substituted. Startup REGISTER, unchanged/disable reload, unregister and joined
+SIGTERM shutdown pass against a synthetic registrar, with observed unkeyed radio
+callback turns and no IAX listener. This is not live-provider or hardware acceptance.
+
 ### Task 5: RF-only pacing FIFO and receive-opportunity arbiter
 
 **Files:** `rust/core/src/link/audio.rs`, focused RF opportunity module/tests,

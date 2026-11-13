@@ -27,7 +27,10 @@ The local standalone SIP registration checkpoint loads an inert mandatory SIP
 provider and creates one shared reactor only when accounts are enabled. Existing
 account records and secure secrets feed prepare-before-publish, explicit
 REGISTER activation, reload retirement and joined shutdown. It adds no calls or
-media and is not deployed or publicly distributed; see ADRs 0022, 0037 and 0044.
+media. A real foreground/product subprocess now verifies REGISTER, reload and
+shutdown with only physical I/O simulated; no physical-node or live-provider
+acceptance is claimed. It is not deployed or publicly distributed; see ADRs 0022,
+0037 and 0044.
 
 These are initial-version alpha releases. [ADR 0040](decisions/0040-initial-alpha-compatibility-policy.md)
 supersedes backward-compatibility requirements for project-owned interfaces.

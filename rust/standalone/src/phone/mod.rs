@@ -5,3 +5,6 @@ pub mod media;
 
 /// Composition-owned SIP registration, independent of media and radio callbacks.
 pub(crate) mod registration;
+
+#[cfg(test)]
+pub(crate) mod sip_test_registrar;

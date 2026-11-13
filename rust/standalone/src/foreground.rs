@@ -796,6 +796,8 @@ fn install_signal_handlers_with(
 
 #[cfg(test)]
 mod tests {
+    // Parent fixtures share the process-wide fixed local-control socket.
+    pub(super) static FOREGROUND_FIXTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn test_client() -> crate::iax::IaxClient {
         crate::iax::IaxClient::load(std::path::Path::new("librptadviax2.so.2")).unwrap()
     }
@@ -1577,7 +1579,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    struct ChildGuard(Child);
+    pub(super) struct ChildGuard(pub(super) Child);
 
     #[cfg(unix)]
     impl Drop for ChildGuard {
@@ -1590,7 +1592,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn wait_for_log(receiver: &std::sync::mpsc::Receiver<String>, expected: &str) {
+    pub(super) fn wait_for_log(receiver: &std::sync::mpsc::Receiver<String>, expected: &str) {
         let mut observed = Vec::new();
         loop {
             match receiver.recv_timeout(Duration::from_secs(10)) {
@@ -1754,11 +1756,14 @@ mod tests {
             eprintln!("foreground retained failed EchoLink owner");
         } else {
             result.unwrap();
+            if std::env::var_os("RPTADV_TEST_FOREGROUND_SIP_RADIO").is_some() {
+                crate::host_services::product_phone_tests::assert_foreground_stopped();
+            }
         }
     }
 
     #[cfg(unix)]
-    fn spawn_foreground(
+    pub(super) fn spawn_foreground(
         command: &mut Command,
     ) -> (
         ChildGuard,
@@ -1802,6 +1807,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn foreground_reloads_and_shuts_down_without_restarting() {
+        let _fixture = FOREGROUND_FIXTURE.lock().unwrap();
         use std::{os::unix::fs::PermissionsExt, os::unix::process::CommandExt, thread};
 
         let stamp = SystemTime::now()
@@ -2190,3 +2196,7 @@ mod tests {
 #[cfg(all(test, unix))]
 #[path = "foreground_accounts_tests.rs"]
 mod accounts_tests;
+
+#[cfg(all(test, unix))]
+#[path = "foreground_sip_tests.rs"]
+mod sip_tests;

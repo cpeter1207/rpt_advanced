@@ -5,7 +5,7 @@
 pub(crate) mod echo_tests;
 
 #[cfg(test)]
-mod product_phone_tests;
+pub(crate) mod product_phone_tests;
 
 mod iax_phone;
 

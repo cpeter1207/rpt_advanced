@@ -27,6 +27,8 @@ struct RadioPump {
 }
 static RADIO: Mutex<Option<RadioPump>> = Mutex::new(None);
 static PUBLIC_OUTPUT: AtomicUsize = AtomicUsize::new(0);
+static RADIO_TURNS: AtomicUsize = AtomicUsize::new(0);
+static RADIO_JOIN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn activate(
     _: *mut c_void,
@@ -86,6 +88,7 @@ unsafe extern "C" fn activate(
                     + usize::from(keyed != 0),
                 Ordering::Relaxed,
             );
+            RADIO_TURNS.fetch_add(1, Ordering::Relaxed);
             first += 960;
             thread::sleep(Duration::from_millis(20));
         }
@@ -99,9 +102,48 @@ unsafe extern "C" fn ready(_: *mut c_void, _: *mut c_void) -> i32 {
 unsafe extern "C" fn quiesce(_: *mut c_void, _: *mut c_void) -> i32 {
     if let Some(pump) = RADIO.lock().unwrap().take() {
         pump.stop.store(true, Ordering::Release);
-        let _ = pump.worker.join();
+        if pump.worker.join().is_err() {
+            RADIO_JOIN_FAILURES.fetch_add(1, Ordering::Relaxed);
+            return -1;
+        }
     }
     0
+}
+
+/// Reuse only the physical-I/O substitution in an isolated full-foreground child.
+pub(crate) fn configure_foreground_fixture(host: &mut HostServicesOwner) {
+    if std::env::var_os("RPTADV_TEST_FOREGROUND_SIP_RADIO").is_some() {
+        install_simulated_radio(host);
+    }
+}
+
+fn install_simulated_radio(host: &mut HostServicesOwner) {
+    host.descriptor.radio_activate = Some(activate);
+    host.descriptor.radio_ready = Some(ready);
+    host.descriptor.radio_quiesce = Some(quiesce);
+}
+
+/// This assertion runs inside the child after the real foreground has joined owners.
+pub(crate) fn assert_foreground_stopped() {
+    assert!(
+        RADIO_TURNS.load(Ordering::Acquire) > 0,
+        "enabled radio must service actual callback turns"
+    );
+    assert_eq!(
+        RADIO_JOIN_FAILURES.load(Ordering::Acquire),
+        0,
+        "physical fixture callback thread must join successfully"
+    );
+    assert!(
+        RADIO.lock().unwrap().is_none(),
+        "physical fixture callback pump drained"
+    );
+    assert_eq!(
+        PUBLIC_OUTPUT.load(Ordering::Acquire),
+        0,
+        "REGISTER-only fixture must never key or emit radio audio"
+    );
+    eprintln!("foreground SIP fixture stopped with no radio output");
 }
 
 struct Admission<'a> {
@@ -325,9 +367,7 @@ fn real_product_private_call_authenticates_and_returns_status_without_radio_outp
         SecretsFile::parse("").unwrap(),
     )
     .unwrap();
-    host.descriptor.radio_activate = Some(activate);
-    host.descriptor.radio_ready = Some(ready);
-    host.descriptor.radio_quiesce = Some(quiesce);
+    install_simulated_radio(&mut host);
     let mut runtime = unsafe {
         ProductRuntime::start(
             descriptors.product,
