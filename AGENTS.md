@@ -37,6 +37,9 @@ Commit small, coherent changes regularly after their targeted checks so useful
 work is not left only in a working tree. The existing pre-push and pull-request
 quality gates still apply.
 
+Whenever the user asks to update agent rules, commit and push those updates
+after the applicable checks.
+
 Fetch `main` and rebase the active feature branch onto it frequently, including
 between implementation phases and before opening a pull request, to keep
 divergence manageable. Protect uncommitted work first. Coordinate rewrites of
@@ -210,7 +213,7 @@ Never deploy to a node or alter its configuration without explicit approval.
 Do not add features or requirements that the user has not requested.
 
 Reuse existing code and dependencies whenever possible. Do not duplicate
-functionality or overcomplicate the implementation. Do not invent requirements.
+functionality or overcomplicate the implementation.
 
 Before adding a dependency outside this project's control, verify that its
 license is compatible and that it meets the project's memory, CPU, and
