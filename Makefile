@@ -19,6 +19,9 @@ CPPFLAGS += $(addprefix -I,$(dir $(HEADERS)))
 CPPFLAGS += -I$(or $(RPTADV_CODEC_INCLUDE),/usr/include/rptadv-codec)
 HEADERS += rust/gpiod-adapter/include/rptadv_gpiod_adapter.h
 HEADERS += rust/hwmon-adapter/include/rptadv_hwmon_adapter.h
+HEADERS += rust/sip-adapter/include/rptadv_sip_adapter.h
+SOFIA_PREFIX ?= /usr
+SIP_NATIVE_FLAGS := -isystem $(SOFIA_PREFIX)/include/sofia-sip-1.13 -Irust/sip-adapter
 LOADER := module/app_rpt_advanced_loader.c
 ADAPTERS := asterisk control_asterisk file speech
 STANDALONE_ADAPTERS := control_standalone resolver jitter
@@ -27,7 +30,8 @@ LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(ADAPTERS))
 LIBRARIES += build/librptadv_product.so.3
 STANDALONE_LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(STANDALONE_ADAPTERS)))
 SITE_LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(SITE_ADAPTERS)))
-INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES)
+SIP_LIBRARY := build/librptadv_sip_adapter.so.1
+INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES) $(SIP_LIBRARY)
 RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
 TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH" RPT_ADVANCED_LIBDIR="$(CURDIR)/build"
 MANUALS := README.md QUALITY.md AGENTS.md WISHLIST.md COPYING $(wildcard doc/*.md doc/architecture/*.md doc/architecture/decisions/*.md)
@@ -51,7 +55,7 @@ rust-build: | build
 	@set -e; for name in $(ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" "build/librptadv_$${name}_adapter.so.1"; \
 	done
-	@set -e; for name in $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS); do \
+	@set -e; for name in $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS) sip; do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" "build/librptadv_$${name}_adapter.so.1"; \
 	done
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.3"
@@ -59,10 +63,10 @@ rust-build: | build
 
 standalone-build: | build
 	$(CARGO) build --locked --release -p rpt-advanced-standalone -p rptadv-product \
-		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter -p rptadv-jitter-adapter -p rptadv-gpiod-adapter -p rptadv-hwmon-adapter
+		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter -p rptadv-jitter-adapter -p rptadv-gpiod-adapter -p rptadv-hwmon-adapter -p rptadv-sip-adapter
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.3"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
-	@set -e; for name in file speech $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS); do \
+	@set -e; for name in file speech $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS) sip; do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" \
 			"build/librptadv_$${name}_adapter.so.1"; \
 		done
@@ -73,7 +77,7 @@ standalone-check: standalone-build
 	python3 tests/test_standalone_service.py
 	python3 tests/test_package_combinations.py
 
-$(LIBRARIES) $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES): rust-build
+$(LIBRARIES) $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES) $(SIP_LIBRARY): rust-build
 	@test -f $@
 
 build/app_rpt_advanced.so: $(LOADER) $(HEADERS) $(LIBRARIES)
@@ -97,10 +101,16 @@ lint:
 	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c tests/test_radio_interlock.c
 	clang-format --dry-run --Werror tests/test_site_gpio_abi.c tests/test_site_hwmon_abi.c
 	clang-format --dry-run --Werror rust/standalone/tests/fixtures/phone_codec.c
+	clang-format --dry-run --Werror rust/sip-adapter/native.c rust/sip-adapter/native.h
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
 static-analysis: dependency-boundary product-surface
+	install -d build
+	clang -MJ build/sip-native-command.json -c -Wall -Wextra -Werror -std=c11 $(SIP_NATIVE_FLAGS) rust/sip-adapter/native.c -o build/sip-native-check.o
+	python3 -c 'from pathlib import Path; p = Path("build/sip-native-command.json"); Path("build/sip-native-commands.json").write_text("[" + p.read_text().rstrip().removesuffix(",") + "]")'
+	cppcheck --project=build/sip-native-commands.json --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1
+	clang-tidy rust/sip-adapter/native.c --warnings-as-errors='*' -- $(SIP_NATIVE_FLAGS) -std=c11
 	# AST_MODULE_INFO is external declaration machinery, not a callable API.
 	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) '-DAST_MODULE_INFO(key,flags,description,...)=;' $(LOADER)
 	clang-tidy $(LOADER) --warnings-as-errors='*' -- $(CPPFLAGS) $(MODULE_FLAGS) -fblocks
@@ -120,7 +130,7 @@ docs: | build
 
 quality: lint static-analysis docs
 
-check: rust-build loader-check jitter-ring-check radio-interlock-check site-gpio-check site-hwmon-check
+check: rust-build loader-check jitter-ring-check radio-interlock-check site-gpio-check site-hwmon-check sip-registration-check
 	$(TEST_ENV) $(CARGO) test --locked --workspace
 
 rust-check: rust-quality check
@@ -212,7 +222,7 @@ install-site-development:
 			"$(DESTDIR)$(prefix)/include/rpt_advanced/$$name/rptadv_$${name}_adapter.h"; \
 	done
 
-install: all install-jitter-development install-site-development
+install: all install-jitter-development install-site-development install-sip-development
 	install -d $(DESTDIR)$(asteriskmoddir) $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -D -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
 	install -m 0755 build/app_rpt_advanced.so $(DESTDIR)$(asteriskmoddir)/
@@ -237,11 +247,11 @@ install: all install-jitter-development install-site-development
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/asterisk/rpt_advanced/messages/en-US.ftl
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/rpt-advanced/messages/en-US.ftl
 
-standalone-install: standalone-build install-jitter-development install-site-development
+standalone-install: standalone-build install-jitter-development install-site-development install-sip-development
 	install -d $(DESTDIR)$(prefix)/bin $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
 	install -m 0755 build/librptadv_product.so.3 build/librptadv_file_adapter.so.1 \
-		build/librptadv_speech_adapter.so.1 $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES) \
+		build/librptadv_speech_adapter.so.1 $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES) $(SIP_LIBRARY) \
 		$(DESTDIR)$(libdir)/
 	ln -sfn librptadv_resolver_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_resolver_adapter.so
 	install -D -m 0644 rust/resolver-adapter/include/rptadv_resolver_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/resolver/rptadv_resolver_adapter.h
@@ -302,3 +312,12 @@ ci: quality platform-verify
 clean:
 	rm -rf -- $(CURDIR)/build
 	$(CARGO) clean
+
+.PHONY: install-sip-development sip-registration-check
+install-sip-development:
+	install -d $(DESTDIR)$(libdir)
+	ln -sfn librptadv_sip_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_sip_adapter.so
+	install -D -m 0644 rust/sip-adapter/include/rptadv_sip_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/sip/rptadv_sip_adapter.h
+
+sip-registration-check: $(SIP_LIBRARY)
+	$(TEST_ENV) python3 tests/test_sip_registration.py "$(CURDIR)/$(SIP_LIBRARY)"

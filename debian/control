@@ -3,7 +3,7 @@ Section: hamradio
 Priority: optional
 Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13), cargo (>= 1.88), rustc (>= 1.88),
- libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, pkg-config, dh-sequence-asterisk <!standalone>,
+ libclang-dev, libsofia-sip-ua-dev (>= 1.13.19), libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, pkg-config, dh-sequence-asterisk <!standalone>,
  librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha3),
  librptadv-codec-dev (>= 0.1.0~alpha1),
@@ -212,3 +212,18 @@ Multi-Arch: same
 Depends: ${misc:Depends}, librptadv-hwmon-adapter1 (= ${binary:Version})
 Description: development files for the rpt_advanced Linux sensor adapter
  Public C header and unversioned linker name for the Linux sensor adapter.
+
+Package: librptadv-sip-adapter1
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, ${shlibs:Depends}, libsofia-sip-ua0 (>= 1.13.19)
+Description: SIP registration adapter for rpt_advanced
+ Versioned Rust C-ABI capability for account registration and lifecycle,
+ dynamically using Sofia-SIP. Host SIP call composition is not yet enabled.
+
+Package: librptadv-sip-adapter-dev
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, librptadv-sip-adapter1 (= ${binary:Version})
+Description: development files for the rpt_advanced SIP adapter
+ Public neutral C header and unversioned linker name for the SIP adapter.

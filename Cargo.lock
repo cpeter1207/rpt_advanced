@@ -838,6 +838,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rptadv-sip-adapter"
+version = "0.1.0-alpha25"
+dependencies = [
+ "bindgen",
+ "cc",
+]
+
+[[package]]
 name = "rptadv-speech-adapter"
 version = "0.1.0-alpha25"
 dependencies = [

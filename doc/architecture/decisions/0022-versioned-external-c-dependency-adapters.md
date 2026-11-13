@@ -251,3 +251,30 @@ preserves original packet age and advances wire timestamps by decoded packet
 frames, including finite padding. A blocked send retries the same prepared
 bytes without another encode. Both hosts use the same conversion owner; the
 Asterisk PCM path retains its existing 20 ms pacing.
+
+## SIP registration capability checkpoint (2026-11-13)
+
+The workspace's optional `rust/sip-adapter` provides
+`librptadv_sip_adapter.so.1`, capability `rptadv.sip` and a complete sized ABI-1
+descriptor, with separate runtime/development package manifests. Only its minimal
+C tag/callback translation includes Sofia types. Rust owns input validation,
+account activation, generation checks, redacted state, fixed event retention and
+shutdown leases. Neither controller host imports Sofia or starts using SIP yet.
+
+Create prepares one account/socket without REGISTER; explicit activation occurs
+only after host configuration commit. Borrowed validated numeric transport spans
+are distinct from registrar authority and AOR. Ephemeral binding uses native
+prepared Contact discovery, not an operator-selected extra port or a reserve/
+close/rebind race. One context is not one thread. All calls use the same host-owned
+serialized thread, whose lifetime ends before library release. The adapter never
+spawns a Rust thread: that initializes caller-thread TLS and can pin unloadable
+DSOs. The existing Asterisk host must use its proven C/pthread bootstrap.
+
+Sofia-SIP v1.13.19 is unmodified, selected at upstream commit
+`6dce59d35535e6dd3945c7b0f76dbf1ba884202d`, archive SHA-256
+`99389b574dfcff5775b260dd9ef1bdd2bcb5a42e655bd229d477e488e658064f`.
+The proof links its dynamic `libsofia-sip-ua.so.0` rather than vendoring or
+statically copying it. Package manifests declare that external dependency, but
+publication remains blocked on full transitive license/package qualification:
+the initial full-default artifact also links OpenSSL 3. No release or licensing
+compatibility is asserted by this internal implementation checkpoint.

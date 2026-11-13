@@ -27,6 +27,7 @@ RESOLVER = "librptadv_resolver_adapter.so.1"
 JITTER = "librptadv_jitter_adapter.so.1"
 GPIOD = "librptadv_gpiod_adapter.so.1"
 HWMON = "librptadv_hwmon_adapter.so.1"
+SIP = "librptadv_sip_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
 PRODUCT = "librptadv_product.so.3"
 RING_MINIMUM_VERSION = "3.0.0~alpha6"
@@ -58,6 +59,7 @@ ELF_DEPENDENCIES = {
     JITTER: {"libspeexdsp.so.1"},
     GPIOD: {"libgpiod.so.3"},
     HWMON: {"libsensors.so.5"},
+    SIP: {"libsofia-sip-ua.so.0"},
 }
 EXPORTS = {
     "librptadv_asterisk_adapter.so.1": "rptadv_asterisk_descriptor_v1",
@@ -70,6 +72,7 @@ EXPORTS = {
     JITTER: "rptadv_jitter_adapter_descriptor_v1",
     GPIOD: "rptadv_gpiod_adapter_descriptor_v1",
     HWMON: "rptadv_hwmon_adapter_descriptor_v1",
+    SIP: "rptadv_sip_adapter_descriptor_v1",
 }
 MANUALS = (
     "README.md",
@@ -184,8 +187,9 @@ def staged(
         library / JITTER,
         library / GPIOD,
         library / HWMON,
+        library / SIP,
     }
-    for name, soname in (("gpiod", GPIOD), ("hwmon", HWMON)):
+    for name, soname in (("gpiod", GPIOD), ("hwmon", HWMON), ("sip", SIP)):
         link = library / f"librptadv_{name}_adapter.so"
         expected.add(link)
         assert (stage / link).is_symlink()
@@ -1097,7 +1101,7 @@ def verify_stage_policy() -> None:
         write(root, "rust/jitter-adapter/include/rptadv_jitter_adapter.h")
         write(stage, "usr/include/rpt_advanced/jitter/rptadv_jitter_adapter.h")
         (stage / library / "librptadv_jitter_adapter.so").symlink_to(JITTER)
-        for name, soname in (("gpiod", GPIOD), ("hwmon", HWMON)):
+        for name, soname in (("gpiod", GPIOD), ("hwmon", HWMON), ("sip", SIP)):
             write(root, f"rust/{name}-adapter/include/rptadv_{name}_adapter.h")
             write(stage, f"usr/include/rpt_advanced/{name}/rptadv_{name}_adapter.h")
             (stage / library / f"librptadv_{name}_adapter.so").symlink_to(soname)
@@ -1230,6 +1234,7 @@ def main() -> None:
             "rptadv_jitter_adapter",
             "rptadv_gpiod_adapter",
             "rptadv_hwmon_adapter",
+            "rptadv_sip_adapter",
         ):
             assert (args.rustdoc / crate / "index.html").is_file(), (
                 f"missing Rustdoc: {crate}"

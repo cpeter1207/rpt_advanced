@@ -1283,3 +1283,58 @@ initial RTP timestamp from bind. It is an internal initial-alpha Rust API
 change with no C ABI, SONAME or package change. Focused framing and loopback
 tests establish source-gap, immutable-retry, expiry and retirement behavior,
 not active SIP signaling, product admission or hardware acceptance.
+
+## Native SIP account checkpoint (2026-11-13)
+
+The optional versioned SIP adapter implements only prepared account activation,
+Digest REGISTER (native-parsed quoted realm, bounded to 256 bytes), native
+accepted-expiry refresh, bounded failure, unregister and
+checked shutdown. Incoming requests are refused statelessly in this slice.
+Native media, auto-answer and auto-ACK are disabled; SDP/RTP/codecs and future
+explicit call answering remain project-owned. Neither controller host is yet a
+working SIP client. No provider account, hardware, RF or node deployment has been
+used to qualify this checkpoint. The requested lifetime accepts the existing
+configuration's 1..65535 seconds, without a new operator realm setting. The future
+composition owner must enforce its configured authentication deadline; this
+adapter's native transaction timeout is a distinct 32-second resource bound.
+
+This first profile conservatively limits username/password to 128/256 printable
+ASCII bytes and rejects spaces, colon, quotes, backslash and embedded NUL.
+Only the selected native colon-delimited credential interface's colon/NUL
+restriction is established here as a representation limit; the other draft caps
+must be reconciled with existing configuration before production host activation.
+Reject unsupported profiles during preparation, never truncate credentials.
+Status remains REGISTERED while an automatic native refresh is pending; a
+per-refresh host authentication deadline needs an explicit observation in a later
+composition checkpoint. This ABI alone does not provide that deadline signal.
+
+The native account retains generated Contact, Via rport/NAT reflection and one
+15-second OPTIONS keepalive owner. Registration self-validation is disabled
+because this registration-only slice refuses new incoming requests statelessly.
+The next call-composition milestone must qualify actual provider/NAT behavior;
+loopback registration does not establish Callcentric or other provider acceptance.
+No ICE, STUN service, transport proxy or alternate DNS stack is introduced.
+
+Resource bounds are source-reviewed against the selected unmodified release:
+NTA's `nta_msg_create_for_transport` sets the 8192-byte `msg_maxsize` limit;
+`tport_recv_iovec` refuses/truncates oversized UDP input before normal delivery.
+`NTATAG_STATELESS(1)` makes new inbound requests take NTA's stateless refusal
+path, rather than accumulating server transactions. One activated handle owns one
+registration request, at most two native recoverable retries, and one keepalive.
+Automatic refresh is no faster than the native one-second minimum; completed
+non-INVITE transactions retire through the fixed five-second Timer K. The native
+transport send queue is four entries. These limits, not
+`NTATAG_MAX_RECV_REQUESTS_PER_SECOND` (a lagged estimate), bound retained work.
+An in-flight refresh cannot overwrite pending removal. It may receive one
+credential continuation to let queued unregister proceed; a repeated challenge
+fails and cancels the native handle, rather than leaving an unbounded credential
+wait. Failure does not claim the remote binding was removed; it can persist until
+expiry. The owner still drives shutdown and checked destruction.
+The eight-slot adapter event queue drops/counts oldest observations on overflow;
+the status snapshot remains authoritative and terminal status remains available.
+
+Independent synthetic fixtures target registration challenge/success/shortened
+expiry refresh and unregister, refused setup/generations and timer-only failure/
+shutdown. The upstream shutdown may need 30 seconds; only final status 200 allows
+destruction. Full native-platform gates, complete coverage, host composition,
+incoming SIP calls/media, live provider and physical-radio milestones remain open.

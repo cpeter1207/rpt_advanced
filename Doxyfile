@@ -1,6 +1,9 @@
 PROJECT_NAME = rpt_advanced
 OUTPUT_DIRECTORY = build/docs
 INPUT = module/app_rpt_advanced_loader.c \
+        rust/sip-adapter/include/rptadv_sip_adapter.h \
+        rust/sip-adapter/native.h \
+        rust/sip-adapter/native.c \
         rust/resolver-adapter/include/rptadv_resolver_adapter.h \
         rust/jitter-adapter/include/rptadv_jitter_adapter.h \
         rust/gpiod-adapter/include/rptadv_gpiod_adapter.h \

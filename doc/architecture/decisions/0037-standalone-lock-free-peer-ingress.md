@@ -215,3 +215,14 @@ document the selected non-real-time primitives.
 [SpeexDSP's generic jitter API](https://github.com/xiph/speexdsp/blob/SpeexDSP-1.2.1/include/speex/speex_jitter.h)
 is private to the jitter adapter. The per-peer ownership and timeline handoff
 above are this project's integration contract.
+
+## SIP account servicing checkpoint (2026-11-13)
+
+The optional SIP registration adapter supplies a nonblocking native service turn,
+not a runtime, scheduler or per-account thread. Future host composition must join
+it to one SIP-wide owner without moving its thread-affine context across Tokio
+workers. This checkpoint does not create that composition or alter existing
+serial per-call media tasks. Audio remains entirely outside native signaling.
+Explicit shutdown continues servicing native progress until final success.
+A pending or failed shutdown retains the context and dynamic-library lease;
+neither an elapsed timeout nor a full notification queue authorizes destruction.

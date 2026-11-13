@@ -55,9 +55,17 @@ Both compilers pass an optimized atomic trait-object regression required by
 the SIP signaling dependency. Other shared providers retain their own MSRVs.
 The dependency-free `rptadv-jitter-client` wrapper explicitly retains Rust 1.85
 so separately released protocol providers can continue to reuse it.
-The only production C checks cover the
-metadata shim and C-compatible public adapter headers; no C controller archive
-or legacy controller headers are packaged.
+Production C checks cover the metadata shim, public adapter headers and the
+minimal private Sofia tag/callback shim. Account policy remains Rust. No C
+controller archive, vendor source or legacy controller header is packaged.
+The SIP shim's Cppcheck run imports a compiler-generated compilation database:
+owned C/header code is analyzed using the actual target, while unmodified installed
+Sofia headers are system includes rather than project source to repair.
+The SIP adapter requires separately qualified dynamic Sofia-SIP 1.13.19 headers
+and library; `RPTADV_SOFIA_PREFIX` selects an isolated local staging prefix.
+`make sip-registration-check` runs only synthetic loopback registration, never
+a provider account. External library publication/license qualification remains
+a release prerequisite, not a successful check implied by these targets.
 
 ## Test containers
 
