@@ -209,6 +209,15 @@ not depend on production tests passing.
 Never deploy to a node or alter its configuration without explicit approval.
 Do not add features or requirements that the user has not requested.
 
+Reuse existing code and dependencies whenever possible. Do not duplicate
+functionality or overcomplicate the implementation. Do not invent requirements.
+
+Before adding a dependency outside this project's control, verify that its
+license is compatible and that it meets the project's memory, CPU, and
+real-time performance requirements. If no suitable dependency meets those
+requirements, implement the required functionality within this project instead.
+Do not fix bugs in dependencies outside this project's control.
+
 Configuration reload and module unload/load must work without restarting
 Asterisk. Preserve this requirement until a concrete technical limitation makes
 it impractical; discuss that limitation with the user before relaxing it. Test
