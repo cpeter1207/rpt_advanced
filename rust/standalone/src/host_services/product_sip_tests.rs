@@ -40,11 +40,10 @@ impl Caller {
             response.push_str(&format!("{name}: {}\r\n", fields[name]));
         }
         if let Some(contact) = fields.get("contact") {
-            let expiry = if fields.get("expires").is_some_and(|value| value == "0") {
-                0
-            } else {
-                600
-            };
+            let expiry = fields
+                .get("expires")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(600);
             response.push_str(&format!("Contact: {contact};expires={expiry}\r\n"));
         }
         response.push_str("Content-Length: 0\r\n\r\n");

@@ -1469,3 +1469,14 @@ output. No account or PIN provisioning is required for that limited milestone.
 A released-codec/jitter source test verifies exact refused PCM and gap prefixes,
 unchanged original birth time, RTP timestamp wrap, and a refused RFC 4733 digit
 with redundant event ends delivered exactly once.
+
+A host close latch also schedules the terminal product step before ACK, even
+when native hangup fails and emits no terminal call event. Callback stop remains
+monotonic, so subsequent service turns cannot invoke the released worker again.
+
+Receive birth currently records first userspace RTP dequeue/jitter admission.
+Already-retained PCM keeps that age under refused credit, but datagrams waiting
+in the UDP socket during a refusal have not been qualified for original arrival
+age. This remains an explicit receive/RF freshness qualification item before
+enabling radio attachment; the private prompt/DTMF hardware checkpoint does not
+claim that stronger guarantee.

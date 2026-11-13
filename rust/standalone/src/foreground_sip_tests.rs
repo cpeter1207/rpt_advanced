@@ -175,7 +175,26 @@ fn full_foreground_registers_reloads_and_stops_without_radio_output() {
     registrar
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
-    let (removal, remote) = receive_register(&registrar, &mut bytes).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let (removal, remote) = loop {
+        let (packet, remote) = receive_register(&registrar, &mut bytes).unwrap();
+        if header(&packet, "Expires") == "0" {
+            break (packet, remote);
+        }
+        // A refresh may already be on the wire when the foreground commits removal.
+        // Acknowledge it, but still require the explicit unregister below.
+        assert_eq!(
+            header(&packet, "Call-ID"),
+            header(&authenticated, "Call-ID")
+        );
+        registrar
+            .send_to(response(&packet, 200, false).as_bytes(), remote)
+            .unwrap();
+        assert!(
+            Instant::now() < deadline,
+            "account removal did not unregister"
+        );
+    };
     assert_eq!(header(&removal, "Expires"), "0");
     assert_eq!(
         header(&removal, "Call-ID"),

@@ -122,7 +122,7 @@ fn controller_registers_only_after_commit_and_unregisters_on_removal() {
     fs::remove_dir_all(directory).unwrap();
 }
 
-fn native_fixture(failing: bool, id: &str) -> (Entry, std::path::PathBuf) {
+pub(super) fn native_fixture(failing: bool, id: &str) -> (Entry, std::path::PathBuf) {
     let directory = std::env::temp_dir().join(format!("rpt-sip-owner-{}-{id}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     let source = directory.join("provider.c");

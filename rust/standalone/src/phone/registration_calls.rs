@@ -278,7 +278,11 @@ impl Reactor {
                     if let (Some(shared), Some(step)) = (&slot.shared, &slot.step) {
                         if shared.stopped.load(Ordering::Acquire) {
                             slot.step = None;
-                        } else if slot.observation.state >= 3 {
+                        } else if slot.observation.state >= 3
+                            || shared.close.load(Ordering::Acquire)
+                        {
+                            // A host close must retire the product even before ACK
+                            // or when native signaling cannot emit its terminal event.
                             callbacks[index] =
                                 Some((Arc::clone(shared), step.callback, step.context));
                         }
@@ -402,3 +406,7 @@ impl Reactor {
 pub(super) fn empty() -> BTreeMap<u64, Slot> {
     BTreeMap::new()
 }
+
+#[cfg(test)]
+#[path = "registration_call_tests.rs"]
+mod tests;
