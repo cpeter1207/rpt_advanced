@@ -348,17 +348,36 @@ impl RtpEndpoint {
     }
     /// Receive a source-filtered packet without reordering it before jitter.
     pub async fn receive(&mut self, output: &mut [u8; 160]) -> Result<RtpEvent, MediaError> {
-        use webrtc_util::marshal::Unmarshal;
         let mut wire = [0; 2048];
         let length = self
             .socket
             .recv(&mut wire)
             .await
             .map_err(|_| MediaError::Network)?;
-        if length == wire.len() {
+        self.receive_wire(&wire[..length], output)
+    }
+    /// Poll on the existing SIP owner without blocking signaling or retained source credit.
+    pub(crate) fn try_receive(
+        &mut self,
+        output: &mut [u8; 160],
+    ) -> Result<Option<RtpEvent>, MediaError> {
+        let mut wire = [0; 2048];
+        match self.socket.try_recv(&mut wire) {
+            Ok(length) => self.receive_wire(&wire[..length], output).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(_) => Err(MediaError::Network),
+        }
+    }
+    fn receive_wire(
+        &mut self,
+        wire: &[u8],
+        output: &mut [u8; 160],
+    ) -> Result<RtpEvent, MediaError> {
+        use webrtc_util::marshal::Unmarshal;
+        if wire.len() == 2048 {
             return Err(MediaError::InvalidPacket);
         }
-        let mut payload = &wire[..length];
+        let mut payload = wire;
         let header =
             rtp::header::Header::unmarshal(&mut payload).map_err(|_| MediaError::InvalidPacket)?;
         if header.version != 2 || self.source.is_some_and(|source| source != header.ssrc) {

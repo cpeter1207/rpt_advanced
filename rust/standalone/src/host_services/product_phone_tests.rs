@@ -441,3 +441,6 @@ fn real_product_private_call_authenticates_and_returns_status_without_radio_outp
     assert!(admitted, "real product must adopt its private executor");
     caller_result.unwrap();
 }
+
+#[path = "product_sip_tests.rs"]
+pub(crate) mod sip;

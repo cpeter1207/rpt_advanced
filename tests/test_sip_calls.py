@@ -17,6 +17,9 @@ class Call(C.Structure):
         ("sip_status", C.c_uint32),
         ("offer_length", C.c_uint32),
         ("offer", C.c_ubyte * 4096),
+        ("source_family", C.c_uint16),
+        ("source_port", C.c_uint16),
+        ("source", C.c_ubyte * 16),
     ]
 
 
@@ -309,6 +312,8 @@ def run(path):
         f.until(lambda f=f: bool(f.calls))
         call_id, call = next(iter(f.calls.items()))
         assert call.state == 1 and bytes(call.offer[: call.offer_length]) == OFFER
+        assert call.source_family == 4 and call.source_port == peer.getsockname()[1]
+        assert bytes(call.source[:4]) == socket.inet_aton("127.0.0.1")
         assert f.response(1, "INVITE", 200) is None, "implicit answer"
         answer = registration.Span(ANSWER, len(ANSWER))
         assert api.respond_call(f.ctx, 8, call_id, 200, answer) == -2

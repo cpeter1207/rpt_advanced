@@ -1113,10 +1113,12 @@ fn private_adoption_rejects_unavailable_host_wrong_protocol_and_nonphone_rate() 
 #[test]
 fn numeric_iax_handle_cannot_enter_the_private_source_callback() {
     let owner = owner();
-    let raw = Box::into_raw(Box::new(super::PeerHandle::Iax(super::IaxHandle::new(
-        tests::peer_for_host_callback(0, false, false),
-        "1000",
-        "2000",
+    let raw = Box::into_raw(Box::new(super::PeerHandle::Iax(Box::new(
+        super::IaxHandle::new(
+            tests::peer_for_host_callback(0, false, false),
+            "1000",
+            "2000",
+        ),
     ))))
     .cast();
     let handle = Handle { owner: &owner, raw };

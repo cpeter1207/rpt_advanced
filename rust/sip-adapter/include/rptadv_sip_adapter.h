@@ -83,13 +83,16 @@ typedef struct rptadv_sip_status_v1 {
 } rptadv_sip_status_v1;
 /** Authoritative coalesced call observation; no raw signaling headers or caller identity. */
 typedef struct rptadv_sip_call_v1 {
-    uint32_t struct_size;  /**< Complete writable record size. */
-    uint32_t state;        /**< 1 invited, 2 answered, 3 established, 4 closing, 5 terminated. */
-    uint64_t generation;   /**< Immutable account generation. */
-    uint64_t call;         /**< Nonzero call token, never reused in this account. */
-    uint32_t sip_status;   /**< Numeric status only. */
-    uint32_t offer_length; /**< Valid initial SDP bytes; unchanged for this call. */
-    uint8_t offer[4096];   /**< Initial SDP, not NUL terminated. */
+    uint32_t struct_size;   /**< Complete writable record size. */
+    uint32_t state;         /**< 1 invited, 2 answered, 3 established, 4 closing, 5 terminated. */
+    uint64_t generation;    /**< Immutable account generation. */
+    uint64_t call;          /**< Nonzero call token, never reused in this account. */
+    uint32_t sip_status;    /**< Numeric status only. */
+    uint32_t offer_length;  /**< Valid initial SDP bytes; unchanged for this call. */
+    uint8_t offer[4096];    /**< Initial SDP, not NUL terminated. */
+    uint16_t source_family; /**< Actual transport source: 4 or 6, never a SIP header. */
+    uint16_t source_port;   /**< Actual source UDP port in host order. */
+    uint8_t source[16];     /**< IPv4 first four octets or all IPv6 octets. */
 } rptadv_sip_call_v1;
 /** Sized implementation-neutral ABI 1; registration prefix and optional call tail. */
 typedef struct rptadv_sip_descriptor_v1 {

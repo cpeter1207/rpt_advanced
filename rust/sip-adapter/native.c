@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sofia-sip/bnf.h>
+#include <sofia-sip/msg_addr.h>
 #include <sofia-sip/nta_tag.h>
 #include <sofia-sip/nua.h>
 #include <sofia-sip/nua_tag.h>
@@ -161,6 +162,29 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
             nua_respond(handle, refusal, "Call Unavailable", TAG_END());
             nua_handle_destroy(handle);
             return;
+        }
+        msg_t *request = nua_current_request(state->nua);
+        su_sockaddr_t *source = request ? msg_addr(request) : NULL;
+        if (!source || (source->su_family != AF_INET && source->su_family != AF_INET6)) {
+            nua_respond(handle, 488, "Call Unavailable", TAG_END());
+            nua_handle_destroy(handle);
+            return;
+        }
+        const uint8_t *bytes;
+        size_t length;
+        if (source->su_family == AF_INET) {
+            call->observed.source_family = 4;
+            call->observed.source_port = ntohs(source->su_sin.sin_port);
+            bytes = (const uint8_t *)&source->su_sin.sin_addr;
+            length = 4;
+        } else {
+            call->observed.source_family = 6;
+            call->observed.source_port = ntohs(source->su_sin6.sin6_port);
+            bytes = (const uint8_t *)&source->su_sin6.sin6_addr;
+            length = 16;
+        }
+        for (size_t i = 0; i < length; ++i) {
+            call->observed.source[i] = bytes[i];
         }
         call->handle = handle;
         call->observed.struct_size = sizeof(call->observed);

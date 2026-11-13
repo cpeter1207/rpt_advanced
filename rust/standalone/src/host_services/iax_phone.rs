@@ -23,7 +23,7 @@ use std::{
 /// Owned by the standalone host artifact, not by a separately linked support or
 /// provider DSO. Every native private-call creator in this host uses this one
 /// allocator. HostServicesOwner/listener replacement cannot reset its history.
-static HOST_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+pub(super) static HOST_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Private metadata and one bounded accepted-prefix source owner.
 pub(super) struct Phone {
@@ -137,13 +137,13 @@ impl HostServicesOwner {
             egress_epoch: None,
             closed: false,
         });
-        Ok(Box::into_raw(Box::new(PeerHandle::Iax(IaxHandle {
+        Ok(Box::into_raw(Box::new(PeerHandle::Iax(Box::new(IaxHandle {
             peer: call.peer,
             samples: vec![0.0; 160],
             local: account.settings().local_node.clone(),
             remote,
             phone: Some(phone),
-        })))
+        }))))
         .cast())
     }
 }

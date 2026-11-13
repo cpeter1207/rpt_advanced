@@ -381,6 +381,20 @@ impl ProductRuntime {
             .incoming_provider(self.product, call, account, listener)
     }
 
+    /// Consume a SIP receipt through the same private product admission contract.
+    pub(crate) fn incoming_sip(
+        &self,
+        receipt: crate::phone::registration::calls::Receipt,
+    ) -> Result<(), crate::phone::registration::Error> {
+        if self.reload_fatal() {
+            return Err(crate::phone::registration::Error::Call);
+        }
+        self.host
+            .as_ref()
+            .ok_or(crate::phone::registration::Error::Call)?
+            .incoming_sip(self.product, receipt)
+    }
+
     /// Stop product workers before releasing host state and provider libraries.
     pub fn stop(&mut self) -> Result<(), RuntimeError> {
         if let Some(host) = &self.host {

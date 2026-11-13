@@ -170,9 +170,20 @@ static int destroy(void *opaque, uint64_t generation) {
     if (((Context *)opaque)->status.state != 7) return 1;
     free(opaque); return 0;
 }
+static int call(void *opaque, uint64_t generation, rptadv_sip_call_v1 *out) {
+    (void)opaque; (void)generation; (void)out; return 1;
+}
+static int respond(void *opaque, uint64_t generation, uint64_t token,
+                   uint32_t code, rptadv_sip_span_v1 sdp) {
+    (void)opaque; (void)generation; (void)token;
+    (void)code; (void)sdp; return -1;
+}
+static int end(void *opaque, uint64_t generation, uint64_t token) {
+    (void)opaque; (void)generation; (void)token; return -1;
+}
 static const rptadv_sip_descriptor_v1 api = {
     sizeof(api), 1, "rptadv.sip", create, service, event, status,
-    activate, stop, stop, destroy
+    activate, stop, stop, destroy, call, respond, end, end
 };
 const rptadv_sip_descriptor_v1 *rptadv_sip_adapter_descriptor_v1(void) { return &api; }
 "#,

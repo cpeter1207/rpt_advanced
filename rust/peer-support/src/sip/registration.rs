@@ -123,6 +123,9 @@ pub struct Call {
     pub sip_status: u32,
     offer_length: u32,
     offer: [u8; 4096],
+    source_family: u16,
+    source_port: u16,
+    source: [u8; 16],
 }
 impl Default for Call {
     fn default() -> Self {
@@ -134,6 +137,9 @@ impl Default for Call {
             sip_status: 0,
             offer_length: 0,
             offer: [0; 4096],
+            source_family: 0,
+            source_port: 0,
+            source: [0; 16],
         }
     }
 }
@@ -143,11 +149,27 @@ impl Call {
         &self.offer[..self.offer_length as usize]
     }
 
+    /// Actual source socket address copied from the native transport, never Via or Caller-ID.
+    pub fn source(&self) -> Result<std::net::SocketAddr, Error> {
+        let ip = match self.source_family {
+            4 => std::net::IpAddr::V4(std::net::Ipv4Addr::from(
+                <[u8; 4]>::try_from(&self.source[..4]).expect("fixed address extent"),
+            )),
+            6 => std::net::IpAddr::V6(std::net::Ipv6Addr::from(self.source)),
+            _ => return Err(Error::Contract),
+        };
+        if self.source_port == 0 {
+            return Err(Error::Contract);
+        }
+        Ok(std::net::SocketAddr::new(ip, self.source_port))
+    }
+
     fn validate(&self, generation: u64) -> Result<(), Error> {
         if self.struct_size != size_of::<Self>() as u32
             || self.generation != generation
             || self.call == 0
             || !(1..=5).contains(&self.state)
+            || self.source().is_err()
             || self.offer_length == 0
             || self.offer_length as usize > self.offer.len()
         {

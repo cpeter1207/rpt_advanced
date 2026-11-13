@@ -735,6 +735,7 @@ dependencies = [
  "libc",
  "libloading",
  "rptadv-control-standalone-adapter",
+ "rptadv-jitter-client",
  "rptadv-peer-support",
  "rtp",
  "sdp",

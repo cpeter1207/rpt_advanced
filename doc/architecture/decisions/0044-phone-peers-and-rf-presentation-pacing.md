@@ -1435,3 +1435,30 @@ while in-dialog OPTIONS preserves its call; and delayed ACK cannot move a
 locally closing call back to established. Call lifecycle observations are
 monotonic. A test-only shim observer counts actual native handle destruction
 without changing the selected third-party library or the production ABI.
+
+## Private controller incoming-call checkpoint — 2026-11-13
+
+The existing SIP reactor now owns native call decisions and retained product
+steps. A bounded foreground receipt reuses authorize_incoming and the product's
+consumed-handle contract. The private SIP handle reports protocol 3, account and
+call generations, an opaque host identity, and the actual native transport
+source address. Caller headers supply no mailbox or radio authority. Tracked
+terminal native slots stay leased until their product callback is quiescent.
+
+SIP uses the same private PeerIoWorker source and prepared/timed-send callbacks
+as IAX. Only RTP/G.711/jitter translation is new: the released G.711 descriptor
+handles partial input and flush, the existing packet-jitter capability handles
+receive ordering, and the existing product handles PCM conversion, private
+prompts, PIN commands, pacing, retry payloads and transmit age. No new shared
+ring, resampler, prompt engine, executor thread or product-host ABI is added.
+All native operations and callback attachment/detachment remain serialized on
+the existing current-thread reactor; no SIP handle enters the IAX executor.
+A refused source prefix or digit is retained without blocking native signaling.
+
+Independent literal SIP/RTP now drives mailbox/PIN login and status through both
+the actual product and the unprivileged full foreground process. The latter also
+retains unchanged registration across reload, removes the account, and joins
+SIGTERM shutdown. Both assert no radio audio/PTT. This controlled private-call
+checkpoint does not authorize RF attachment or establish real-provider/NAT
+media reachability. Public combined source/artifacts remain held for the
+separate distribution review; hardware acceptance remains a separate milestone.

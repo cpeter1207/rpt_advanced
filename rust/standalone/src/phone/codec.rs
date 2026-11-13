@@ -39,6 +39,7 @@ impl G711Codec {
             || api.encode.is_none()
             || api.decode.is_none()
             || api.destroy.is_none()
+            || api.reset.is_none()
         {
             return Err(MediaError::Codec);
         }
@@ -95,6 +96,35 @@ impl G711Codec {
             return Err(MediaError::Codec);
         }
         Ok(())
+    }
+    /// Forward partial input and finite flush to the released packetizer unchanged.
+    pub(crate) fn prepare(
+        &mut self,
+        pcm: &[f32],
+        packet: &mut [u8],
+        flush: u32,
+        result: &mut abi::rptadv_codec_encode_result_v1,
+    ) -> i32 {
+        // SAFETY: uniquely owned encoder; borrowed extents and result live synchronously.
+        unsafe {
+            self.api.encode.unwrap()(
+                self.encoder,
+                pcm.as_ptr(),
+                pcm.len(),
+                packet.as_mut_ptr(),
+                packet.len(),
+                flush,
+                result,
+            )
+        }
+    }
+    /// Retire only transmit codec history; the existing product owns source timing.
+    pub(crate) fn reset_encoder(&mut self) -> Result<(), MediaError> {
+        if unsafe { self.api.reset.unwrap()(self.encoder) } == 0 {
+            Ok(())
+        } else {
+            Err(MediaError::Codec)
+        }
     }
     /// Decode one complete 20 ms G.711 payload.
     pub fn decode(&mut self, packet: &[u8; 160], pcm: &mut [f32; 160]) -> Result<(), MediaError> {

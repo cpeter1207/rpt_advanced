@@ -1,4 +1,4 @@
-//! Full foreground/product REGISTER lifecycle; only physical radio I/O is simulated.
+//! Full foreground/private SIP lifecycle; only physical radio I/O is simulated.
 use super::tests::{FOREGROUND_FIXTURE, spawn_foreground, wait_for_log};
 use crate::phone::sip_test_registrar::{header, receive_register, response};
 use std::{
@@ -85,9 +85,11 @@ fn full_foreground_registers_reloads_and_stops_without_radio_output() {
         "[general]\nnode_enabled=yes\niax_local_port={}\n[desk]\nradio_channel=fixture\nduplex=full\n\
          [phone_account office]\nlocal_node=desk\nprotocol=sip\nenabled=yes\n\
          server={}\nusername=synthetic\nsecrets_file=phone.secret\nregister=yes\n\
-         registration_interval_s=60\nauthentication_timeout_ms=3000\n",
+         registration_interval_s=60\nauthentication_timeout_ms=3000\n\
+         [morse]\nspeed_wpm=40\nfrequency_hz=800\nlevel_db=-6\n{}",
         iax.local_addr().unwrap().port(),
-        registrar.local_addr().unwrap()
+        registrar.local_addr().unwrap(),
+        include_str!("../../product/src/tests/fixtures/phone_mailbox.conf")
     );
     let config = fixture.directory.join("rpt_advanced.conf");
     fs::write(&config, &text).unwrap();
@@ -150,6 +152,15 @@ fn full_foreground_registers_reloads_and_stops_without_radio_output() {
         receive_register(&registrar, &mut bytes).is_err(),
         "unchanged reload must retain registration"
     );
+
+    // Same literal caller and private-prompt assertions as the actual-product test,
+    // now entering through the real foreground loop and account owner.
+    crate::host_services::product_phone_tests::sip::caller(
+        registrar.try_clone().unwrap(),
+        Some(remote),
+    );
+    // Cloned UDP descriptors share O_NONBLOCK; restore the registrar's blocking mode.
+    registrar.set_nonblocking(false).unwrap();
 
     fs::write(
         &config,

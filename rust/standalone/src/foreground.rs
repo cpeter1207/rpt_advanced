@@ -143,6 +143,13 @@ fn run_runtime(
     eprintln!("rpt-advanced standalone runtime started");
     while !STOP.load(Ordering::Acquire) {
         poll_iax_listeners(&mut iax_listeners, &runtime, &client, &accounts.active);
+        if let Some(sip) = &accounts.sip {
+            while let Some(receipt) = sip.incoming() {
+                if let Err(error) = runtime.incoming_sip(receipt) {
+                    eprintln!("phone SIP admission: {error}");
+                }
+            }
+        }
         let mut control = ForegroundControl {
             runtime: &mut runtime,
             configuration,

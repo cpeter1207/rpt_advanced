@@ -8,6 +8,7 @@ pub(crate) mod echo_tests;
 pub(crate) mod product_phone_tests;
 
 mod iax_phone;
+mod sip_phone;
 
 use crate::{
     abi, directory,
@@ -220,9 +221,9 @@ impl HostServicesOwner {
 
     /// Put one peer handle into the representation used by the host-services callbacks.
     pub fn peer_handle(&self, peer: IaxPeer, local: &str, remote: &str) -> *mut c_void {
-        Box::into_raw(Box::new(PeerHandle::Iax(IaxHandle::new(
+        Box::into_raw(Box::new(PeerHandle::Iax(Box::new(IaxHandle::new(
             peer, local, remote,
-        ))))
+        )))))
         .cast()
     }
 
@@ -455,12 +456,17 @@ pub(crate) unsafe fn incoming_echo(
     }
 }
 
-type PeerHandle = HostPeer<IaxHandle>;
+enum PeerHandle {
+    Iax(Box<IaxHandle>),
+    Echo(Arc<rptadv_peer_support::echolink::host::Peer>),
+    Sip(crate::phone::registration::calls::Handle),
+}
 // Native tokens belong to the existing IAX executor; Echo tokens retain their
 // shared provider/QSO owner. Never pass one protocol's token to another runtime.
 enum PeerRegistration {
     Iax(*mut c_void),
     Echo(Registration),
+    Sip(crate::phone::registration::calls::Registration),
 }
 struct IaxHandle {
     peer: IaxPeer,
@@ -485,14 +491,14 @@ impl IaxHandle {
 // are never cast to IAX state, including legacy-only operations called in error.
 unsafe fn iax_peer_mut<'a>(peer: *mut c_void) -> Option<&'a mut IaxHandle> {
     match unsafe { peer.cast::<PeerHandle>().as_mut() }? {
-        HostPeer::Iax(peer) => Some(peer),
-        HostPeer::Echo(_) => None,
+        PeerHandle::Iax(peer) => Some(peer),
+        PeerHandle::Echo(_) | PeerHandle::Sip(_) => None,
     }
 }
 unsafe fn iax_peer_ref<'a>(peer: *const c_void) -> Option<&'a IaxHandle> {
     match unsafe { peer.cast::<PeerHandle>().as_ref() }? {
-        HostPeer::Iax(peer) => Some(peer),
-        HostPeer::Echo(_) => None,
+        PeerHandle::Iax(peer) => Some(peer),
+        PeerHandle::Echo(_) | PeerHandle::Sip(_) => None,
     }
 }
 
@@ -519,7 +525,7 @@ unsafe extern "C" fn peer_info(
         }
         let (protocol, capabilities, account_generation, qso_generation, remote, local, callsign) =
             match peer {
-                HostPeer::Iax(peer) => match &peer.phone {
+                PeerHandle::Iax(peer) => match &peer.phone {
                     Some(phone) => (
                         3,
                         51,
@@ -539,7 +545,20 @@ unsafe extern "C" fn peer_info(
                         "",
                     ),
                 },
-                HostPeer::Echo(peer) => {
+                PeerHandle::Sip(handle) => {
+                    let call = &handle.shared;
+                    let (account, generation) = call.generations();
+                    (
+                        3,
+                        51 | if call.inband { 64 } else { 0 },
+                        account,
+                        generation,
+                        call.remote.as_str(),
+                        call.local.as_str(),
+                        "",
+                    )
+                }
+                PeerHandle::Echo(peer) => {
                     let identity = peer.identity();
                     (
                         2,
@@ -572,11 +591,12 @@ unsafe extern "C" fn peer_info(
             callsign: bytes(callsign),
             local: bytes(local),
             provider_account: bytes(match peer {
-                HostPeer::Iax(peer) => peer
+                PeerHandle::Iax(peer) => peer
                     .phone
                     .as_ref()
                     .map_or("", |phone| phone.account.as_str()),
-                HostPeer::Echo(_) => "",
+                PeerHandle::Echo(_) => "",
+                PeerHandle::Sip(handle) => handle.shared.account.as_str(),
             }),
         };
         unsafe {
@@ -602,7 +622,19 @@ unsafe extern "C" fn peer_step_attach(
             return -1;
         };
         *output = ptr::null_mut();
-        if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+        if let Some(PeerHandle::Sip(handle)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+            let Some(step) = step else {
+                return -1;
+            };
+            return match handle.attach(step, step_context) {
+                Ok(token) => {
+                    *output = Box::into_raw(Box::new(PeerRegistration::Sip(token))).cast();
+                    0
+                }
+                Err(_) => -1,
+            };
+        }
+        if let Some(PeerHandle::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
             // Copy retention before attach, which may immediately reenter this handle.
             let peer = std::sync::Arc::clone(peer);
             return match unsafe { peer.attach(step, step_context) } {
@@ -656,6 +688,7 @@ unsafe extern "C" fn peer_step_attach(
 unsafe extern "C" fn peer_step_stop(context: *mut c_void, token: *mut c_void) {
     match unsafe { token.cast::<PeerRegistration>().as_ref() } {
         Some(PeerRegistration::Echo(token)) => token.stop(),
+        Some(PeerRegistration::Sip(token)) => token.0.stop(),
         Some(PeerRegistration::Iax(token)) => {
             if let Some(ingress) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
                 .and_then(|context| context.ingress.as_ref())
@@ -680,7 +713,7 @@ unsafe extern "C" fn peer_observe(
         {
             return -1;
         }
-        if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+        if let Some(PeerHandle::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
             let raw = match unsafe { peer.observe() } {
                 Ok(raw) => raw,
                 Err(_) => return -1,
@@ -780,6 +813,7 @@ unsafe extern "C" fn peer_step_detach(context: *mut c_void, token: *mut c_void) 
     let token = unsafe { Box::from_raw(token.cast::<PeerRegistration>()) };
     match *token {
         PeerRegistration::Echo(token) => drop(token),
+        PeerRegistration::Sip(token) => drop(token),
         PeerRegistration::Iax(token) => {
             if let Some(ingress) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
                 .and_then(|context| context.ingress.as_ref())
@@ -1017,9 +1051,9 @@ unsafe extern "C" fn peer_dial(
             drop(peer);
             return -1;
         }
-        *output = Box::into_raw(Box::new(PeerHandle::Iax(IaxHandle::new(
+        *output = Box::into_raw(Box::new(PeerHandle::Iax(Box::new(IaxHandle::new(
             peer, local, &remote,
-        ))))
+        )))))
         .cast();
         0
     })
@@ -1064,13 +1098,16 @@ fn parse_destination(
 
 unsafe extern "C" fn peer_rate(_: *mut c_void, peer: *const c_void) -> u32 {
     match unsafe { peer.cast::<PeerHandle>().as_ref() } {
-        Some(HostPeer::Echo(_)) => 8000,
-        Some(HostPeer::Iax(peer)) => peer.peer.sample_rate_hz(),
+        Some(PeerHandle::Echo(_) | PeerHandle::Sip(_)) => 8000,
+        Some(PeerHandle::Iax(peer)) => peer.peer.sample_rate_hz(),
         None => 0,
     }
 }
 
 unsafe extern "C" fn peer_ready(_: *mut c_void, peer: *mut c_void) -> i32 {
+    if let Some(shared) = unsafe { sip_phone::shared(peer) } {
+        return if shared.live() { 1 } else { -1 };
+    }
     if unsafe { iax_peer_ref(peer) }.is_none() {
         return -1;
     }
@@ -1209,11 +1246,20 @@ unsafe extern "C" fn peer_prepare_audio(
             unsafe { std::slice::from_raw_parts_mut(output, capacity) }
         };
         match unsafe { peer.cast::<PeerHandle>().as_ref() } {
-            Some(HostPeer::Echo(peer)) => {
+            Some(PeerHandle::Echo(peer)) => {
                 unsafe { peer.prepare_audio(pcm, output, flush, result.cast()) }
                     .map_or(-1, |()| unsafe { (*result).status as i32 })
             }
-            Some(HostPeer::Iax(_)) => {
+            Some(PeerHandle::Sip(handle)) => sip_phone::media(&handle.shared, |media| {
+                let code = media.prepare(pcm, output, flush, unsafe { &mut *result });
+                if code < 0 {
+                    Err(crate::phone::media::MediaError::Codec)
+                } else {
+                    Ok(code)
+                }
+            })
+            .unwrap_or(-1),
+            Some(PeerHandle::Iax(_)) => {
                 let peer = unsafe { iax_peer_mut(peer) }.unwrap();
                 if peer
                     .phone
@@ -1231,7 +1277,10 @@ unsafe extern "C" fn peer_prepare_audio(
 }
 unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
     boundary(-1, || {
-        if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+        if let Some(shared) = unsafe { sip_phone::shared(peer) } {
+            return sip_phone::media(shared, |media| media.reset()).map_or(-1, |()| 0);
+        }
+        if let Some(PeerHandle::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
             return unsafe { peer.reset_encoder() }.map_or(-1, |()| 0);
         }
         unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| match &mut peer.phone {
@@ -1258,11 +1307,12 @@ unsafe extern "C" fn peer_send_prepared(
             unsafe { std::slice::from_raw_parts(bytes, count) }
         };
         let result = match unsafe { peer.cast::<PeerHandle>().as_ref() } {
-            Some(HostPeer::Echo(peer)) => {
+            Some(PeerHandle::Echo(peer)) => {
                 unsafe { peer.send_prepared(bytes, frames, timestamp) }.map_err(|_| ())
             }
-            Some(HostPeer::Iax(peer)) if peer.phone.is_some() => return -1,
-            Some(HostPeer::Iax(_)) => unsafe { iax_peer_mut(peer) }
+            Some(PeerHandle::Sip(_)) => return -1,
+            Some(PeerHandle::Iax(peer)) if peer.phone.is_some() => return -1,
+            Some(PeerHandle::Iax(_)) => unsafe { iax_peer_mut(peer) }
                 .unwrap()
                 .peer
                 .send_prepared(bytes, frames, timestamp)
@@ -1291,6 +1341,11 @@ unsafe extern "C" fn peer_send_prepared_timed(
         if count != 160 || frames != 160 || bytes.is_null() {
             return -1;
         }
+        if let Some(shared) = unsafe { sip_phone::shared(peer) } {
+            let bytes: &[u8; 160] = unsafe { &*bytes.cast() };
+            return sip_phone::media(shared, |media| media.send(bytes, timestamp, deadline))
+                .unwrap_or(-1);
+        }
         let Some(peer) = (unsafe { iax_peer_mut(peer) }) else {
             return -1;
         };
@@ -1305,7 +1360,13 @@ unsafe extern "C" fn peer_send_prepared_timed(
 }
 
 unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
-    if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+    if let Some(shared) = unsafe { sip_phone::shared(peer) } {
+        return shared
+            .media
+            .lock()
+            .map_or(u32::MAX, |media| media.elapsed_ms());
+    }
+    if let Some(PeerHandle::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
         return peer
             .elapsed_ms()
             .map_or(0, |value| value.min(u64::from(u32::MAX)) as u32);
@@ -1315,6 +1376,7 @@ unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
 unsafe extern "C" fn peer_step_wake(context: *mut c_void, registration: *mut c_void) {
     match unsafe { registration.cast::<PeerRegistration>().as_ref() } {
         Some(PeerRegistration::Echo(token)) => token.wake(),
+        Some(PeerRegistration::Sip(token)) => token.0.wake(),
         Some(PeerRegistration::Iax(token)) => {
             if let Some(ingress) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
                 .and_then(|context| context.ingress.as_ref())
@@ -1326,7 +1388,14 @@ unsafe extern "C" fn peer_step_wake(context: *mut c_void, registration: *mut c_v
     }
 }
 unsafe extern "C" fn peer_set_deadline(context: *mut c_void, peer: *mut c_void, after: u64) -> i32 {
-    if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+    if let Some(shared) = unsafe { sip_phone::shared(peer) } {
+        // The existing reactor services every call at most 10 ms apart.
+        if after == 0 {
+            shared.wake();
+        }
+        return 0;
+    }
+    if let Some(PeerHandle::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
         return unsafe { peer.set_deadline(after) }.map_or(-1, |()| 0);
     }
     let (Some(context), Some(peer)) = (
@@ -1357,7 +1426,10 @@ unsafe extern "C" fn peer_read_source(
         {
             return -1;
         }
-        if let Some(HostPeer::Iax(peer)) = unsafe { peer.cast::<PeerHandle>().as_mut() } {
+        if let Some(shared) = unsafe { sip_phone::shared(peer) } {
+            return unsafe { sip_phone::read(shared, completion, sink, &mut *output) };
+        }
+        if let Some(PeerHandle::Iax(peer)) = unsafe { peer.cast::<PeerHandle>().as_mut() } {
             let Some(phone) = &mut peer.phone else {
                 return -1;
             };
@@ -1372,7 +1444,7 @@ unsafe extern "C" fn peer_read_source(
             }
             .map_or(-1, |()| 0);
         }
-        let Some(HostPeer::Echo(peer)) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
+        let Some(PeerHandle::Echo(peer)) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
             return -1;
         };
         let output = unsafe { &mut *output };
@@ -1469,7 +1541,11 @@ unsafe extern "C" fn peer_send_human_text(
             data: value.data,
             length: value.length,
         };
-        unsafe { peer.send_human_text(span(sender), span(body)) }.map_or(-1, |()| 0)
+        let PeerHandle::Echo(peer) = peer else {
+            return -1;
+        };
+        unsafe { HostPeer::<()>::Echo(Arc::clone(peer)).send_human_text(span(sender), span(body)) }
+            .map_or(-1, |()| 0)
     })
 }
 

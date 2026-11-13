@@ -8,3 +8,5 @@ pub(crate) mod registration;
 
 #[cfg(test)]
 pub(crate) mod sip_test_registrar;
+
+pub(crate) mod call_media;

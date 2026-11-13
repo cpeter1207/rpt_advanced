@@ -19,6 +19,9 @@ use std::{
 };
 use tokio::sync::mpsc as mailbox;
 
+#[path = "registration_calls.rs"]
+pub(crate) mod calls;
+
 const SERVICE_INTERVAL: Duration = Duration::from_millis(10);
 // Native shutdown has a documented 30-second bound; allow scheduling headroom.
 const SHUTDOWN_LIMIT: Duration = Duration::from_secs(35);
@@ -32,11 +35,13 @@ pub(crate) enum Error {
     Owner,
     Shutdown,
     Preparation,
+    Call,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Provider(error) => error.fmt(f),
+            Self::Call => f.write_str("SIP call is unavailable"),
             Self::Owner => f.write_str("SIP registration owner is unavailable"),
             Self::Preparation => {
                 f.write_str("phone account preparation is still running; resolver lease retained")
@@ -57,6 +62,7 @@ enum Command {
     #[cfg(test)]
     Observe(Reply<Vec<(String, Status)>>),
     Stop,
+    Call(calls::Command),
 }
 
 /// Composition-owned reactor; no account owns an OS thread or a runtime.
@@ -68,6 +74,7 @@ pub(crate) struct Worker {
     resolver: Arc<crate::providers::ResolverLibrary>,
     runtime: tokio::runtime::Handle,
     preparation: Option<tokio::task::JoinHandle<()>>,
+    incoming: mpsc::Receiver<calls::Receipt>,
 }
 impl Worker {
     #[cfg(test)]
@@ -78,13 +85,16 @@ impl Worker {
         let resolver =
             Arc::new(crate::providers::ResolverLibrary::load().map_err(|_| Error::Owner)?);
         let (sender, receiver) = mailbox::channel(1);
+        let calls = calls::Client::new(sender.clone());
+        let (incoming, receipts) = mpsc::sync_channel(8);
         let owned = Arc::clone(&provider);
         let (ready, started) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("rpt-sip-accounts".into())
             .spawn(move || {
+                let _ = calls.owner.set(std::thread::current().id());
                 let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
+                    .enable_all()
                     .max_blocking_threads(1)
                     .build()
                     .map_err(|_| Error::Owner);
@@ -95,7 +105,7 @@ impl Worker {
                         .map_err(|error| *error),
                 );
                 let runtime = runtime?;
-                let result = runtime.block_on(Reactor::new(owned).run(receiver));
+                let result = runtime.block_on(Reactor::new(owned, calls, incoming).run(receiver));
                 // A timed-out system lookup cannot be canceled. Its actual job owns
                 // the resolver lease and allocator until it finishes; never block SIP teardown.
                 runtime.shutdown_background();
@@ -110,6 +120,7 @@ impl Worker {
                 resolver,
                 runtime,
                 preparation: None,
+                incoming: receipts,
             }),
             Err(error) => {
                 let _ = thread.join();
@@ -154,6 +165,10 @@ impl Worker {
         result
     }
 
+    /// Drain bounded signaling receipts on foreground, outside the callback owner.
+    pub(crate) fn incoming(&self) -> Option<calls::Receipt> {
+        self.incoming.try_recv().ok()
+    }
     fn request<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, Error> {
         let (reply, result) = mpsc::sync_channel(1);
         self.sender
@@ -238,15 +253,23 @@ struct Reactor {
     candidate: Option<Candidate>,
     retiring: Vec<Owner>,
     failed: bool,
+    calls: calls::Client,
+    incoming: mpsc::SyncSender<calls::Receipt>,
 }
 impl Reactor {
-    fn new(provider: Arc<Provider>) -> Self {
+    fn new(
+        provider: Arc<Provider>,
+        calls: calls::Client,
+        incoming: mpsc::SyncSender<calls::Receipt>,
+    ) -> Self {
         Self {
             provider,
             active: BTreeMap::new(),
             candidate: None,
             retiring: Vec::new(),
             failed: false,
+            calls,
+            incoming,
         }
     }
     fn prepare(&mut self, accounts: Vec<Arc<PreparedAccount>>) -> Result<(), Error> {
@@ -323,6 +346,7 @@ impl Reactor {
         for entry in self.active.values().chain(self.retiring.iter()) {
             entry.borrow_mut().service(now);
         }
+        self.service_calls();
         self.retiring.retain(|entry| {
             let entry = entry.borrow();
             self.failed |= entry.abandoned;
@@ -333,15 +357,19 @@ impl Reactor {
         let mut ticker = tokio::time::interval(SERVICE_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut stopping = false;
+        let wake = Arc::clone(&self.calls.wake);
         loop {
             tokio::select! {
                 _ = ticker.tick() => self.service(),
+                _ = wake.notified() => self.service(),
                 command = receiver.recv(), if !stopping => match command {
                     Some(Command::Prepare(accounts, reply)) => { let _ = reply.send(self.prepare(accounts)); }
                     Some(Command::Publish(committed, reply)) => { let _ = reply.send(self.publish(committed)); }
                     #[cfg(test)]
                     Some(Command::Observe(reply)) => { let _ = reply.send(Ok(self.active.iter().map(|(id, owner)| (id.clone(), owner.borrow().last)).collect())); }
+                    Some(Command::Call(command)) => self.call_command(command).await,
                     Some(Command::Stop) | None => {
+                        for entry in self.active.values().chain(&self.retiring) { entry.borrow_mut().stop_callbacks(); }
                         stopping = true;
                         receiver.close();
                         if self.candidate.is_some() { let _ = self.publish(false); }
@@ -371,6 +399,7 @@ struct Entry {
     retiring: bool,
     done: bool,
     abandoned: bool,
+    calls: BTreeMap<u64, calls::Slot>,
 }
 impl Entry {
     fn new(provider: &Arc<Provider>, settings: Arc<PreparedAccount>) -> Result<Self, Error> {
@@ -413,6 +442,7 @@ impl Entry {
             retiring: false,
             done: false,
             abandoned: false,
+            calls: calls::empty(),
         })
     }
     fn auth_deadline(&self, now: Instant) -> Instant {
@@ -435,6 +465,7 @@ impl Entry {
         if self.shutdown.is_some() || self.done {
             return;
         }
+        self.retire_calls();
         self.authentication = None;
         self.binding = None;
         if self.account.shutdown().is_err() {
@@ -456,6 +487,7 @@ impl Entry {
             return;
         }
         self.retiring = true;
+        self.retire_calls();
         if matches!(self.last.state, 1 | 2) && self.account.unregister().is_ok() {
             self.authentication = Some(self.auth_deadline(now));
         } else {
@@ -518,6 +550,10 @@ impl Entry {
             self.binding = Some(now + Duration::from_secs(u64::from(status.accepted_expires)));
         }
         self.last = status;
+        if let Err(error) = self.collect_calls() {
+            eprintln!("phone account {}: {error}", self.settings.settings().id);
+            self.begin_shutdown(now);
+        }
         match status.state {
             7 => {
                 if self.account.destroy().is_ok() {
