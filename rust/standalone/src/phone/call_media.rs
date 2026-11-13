@@ -313,3 +313,7 @@ impl Media {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "call_media_tests.rs"]
+mod tests;

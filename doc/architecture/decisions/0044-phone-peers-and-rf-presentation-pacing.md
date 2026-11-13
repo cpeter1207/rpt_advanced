@@ -1462,3 +1462,10 @@ SIGTERM shutdown. Both assert no radio audio/PTT. This controlled private-call
 checkpoint does not authorize RF attachment or establish real-provider/NAT
 media reachability. Public combined source/artifacts remain held for the
 separate distribution review; hardware acceptance remains a separate milestone.
+
+The focused private-call fixture also omits every mailbox record and verifies
+that the initial login prompt and acknowledged BYE still work without radio
+output. No account or PIN provisioning is required for that limited milestone.
+A released-codec/jitter source test verifies exact refused PCM and gap prefixes,
+unchanged original birth time, RTP timestamp wrap, and a refused RFC 4733 digit
+with redundant event ends delivered exactly once.

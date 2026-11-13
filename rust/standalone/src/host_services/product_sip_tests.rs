@@ -199,18 +199,23 @@ impl Caller {
     }
 }
 pub(crate) fn caller(sip: UdpSocket, registered: Option<SocketAddr>) {
+    call_flow(sip, registered, false);
+}
+fn call_flow(sip: UdpSocket, registered: Option<SocketAddr>, login_only: bool) {
     let mut caller = Caller::establish(sip, registered);
     let mut codec = G711Codec::load(G711::Mulaw).unwrap();
     let login = caller.prompt(&mut codec, "login");
-    caller.digits(b"100#1234#");
-    let authenticated = caller.prompt(&mut codec, "authenticated");
-    caller.digits(b"*4#*70");
-    let status = caller.prompt(&mut codec, "status");
-    assert_prompt(&status, "-. ---/.-.. .. -. -.- ...");
-    assert_prompt(
-        &authenticated,
-        ".-.. --- --. .. -./--- -.-/..- -. .-.. --- -.-. -.-/... . .--. .- .-. .- - .",
-    );
+    if !login_only {
+        caller.digits(b"100#1234#");
+        let authenticated = caller.prompt(&mut codec, "authenticated");
+        caller.digits(b"*4#*70");
+        let status = caller.prompt(&mut codec, "status");
+        assert_prompt(&status, "-. ---/.-.. .. -. -.- ...");
+        assert_prompt(
+            &authenticated,
+            ".-.. --- --. .. -./--- -.-/..- -. .-.. --- -.-. -.-/... . .--. .- .-. .- - .",
+        );
+    }
     assert_prompt(
         &login,
         "-- .- .. .-.. -... --- -..-/.--. --- ..- -. -../.--. .. -./.--. --- ..- -. -..",
@@ -238,11 +243,25 @@ pub(crate) fn caller(sip: UdpSocket, registered: Option<SocketAddr>) {
 
 #[test]
 fn real_product_private_sip_call_authenticates_and_returns_status_without_radio_output() {
+    product_call(false);
+}
+#[test]
+fn real_product_zero_mailbox_sip_call_prompts_and_hangs_up_without_radio_output() {
+    product_call(true);
+}
+fn product_call(no_mailbox: bool) {
     const CHILD: &str = "RPTADV_TEST_REAL_SIP_PHONE_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
+        let test = if no_mailbox {
+            "host_services::product_phone_tests::sip::real_product_zero_mailbox_sip_call_prompts_and_hangs_up_without_radio_output"
+        } else {
+            "host_services::product_phone_tests::sip::real_product_private_sip_call_authenticates_and_returns_status_without_radio_output"
+        };
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "host_services::product_phone_tests::sip::real_product_private_sip_call_authenticates_and_returns_status_without_radio_output", "--nocapture"])
-            .env(CHILD, "1").output().unwrap();
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "real SIP product child failed:\n{}\n{}",
@@ -260,7 +279,11 @@ fn real_product_private_sip_call_authenticates_and_returns_status_without_radio_
     let configuration = format!(
         "[general]\nnode_enabled=yes\n[desk]\nradio_channel=fixture\nduplex=full\n[morse]\nspeed_wpm=40\nfrequency_hz=800\nlevel_db=-6\n[phone_account office]\nlocal_node=desk\nenabled=yes\nprotocol=sip\nserver={}\nusername=fixture-user\nsecrets_file=phone.secret\nregister=yes\n{}",
         sip.local_addr().unwrap(),
-        include_str!("../../../product/src/tests/fixtures/phone_mailbox.conf")
+        if no_mailbox {
+            ""
+        } else {
+            include_str!("../../../product/src/tests/fixtures/phone_mailbox.conf")
+        }
     );
     let accounts = AccountPreparer::default()
         .prepare(
@@ -295,7 +318,7 @@ fn real_product_private_sip_call_authenticates_and_returns_status_without_radio_
         crate::phone::registration::Worker::from_provider(provider_ref.sip_provider().unwrap())
             .unwrap();
     worker.prepare(&accounts).unwrap().commit().unwrap();
-    let caller = thread::spawn(move || caller(sip, None));
+    let caller = thread::spawn(move || call_flow(sip, None, no_mailbox));
     let deadline = Instant::now() + Duration::from_secs(50);
     while !caller.is_finished() && Instant::now() < deadline {
         while let Some(receipt) = worker.incoming() {
