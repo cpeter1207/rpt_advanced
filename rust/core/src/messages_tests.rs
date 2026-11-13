@@ -23,9 +23,12 @@ fn private_phone_authentication_forms_have_no_credential_arguments() {
     use super::messages::PhoneAuthenticationPrompt as Prompt;
     let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
     for (prompt, expected) in [
-        (Prompt::Login, "MAILBOX AND PIN"),
+        (Prompt::Login, "MAILBOX POUND PIN POUND"),
         (Prompt::Retry, "LOGIN FAILED RETRY"),
         (Prompt::Authenticated, "LOGIN OK UNLOCK SEPARATE"),
+        (Prompt::Unavailable, "OPERATION UNAVAILABLE"),
+        (Prompt::Completed, "COMMAND COMPLETED"),
+        (Prompt::Failed, "COMMAND FAILED"),
     ] {
         let forms = catalog
             .format(&Message::PhoneAuthentication { prompt })

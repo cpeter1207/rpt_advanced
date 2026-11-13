@@ -18,6 +18,10 @@ pub mod iax;
 mod local_control;
 #[cfg(unix)]
 mod local_radio;
+/// Native SIP signaling and packet-media boundaries.
+pub mod phone;
+/// Protocol-neutral preparation of owned phone account snapshots.
+pub mod phone_accounts;
 pub(crate) mod processing;
 /// Runtime provider loading and version validation.
 pub mod providers;
@@ -36,4 +40,7 @@ pub mod secrets;
 pub mod configuration;
 /// Owned native station requests copied from the product's synchronous visitor.
 pub mod native_configuration;
-pub use configuration::{ConfigError, ResolvedRadioNode, check_config, resolve_radio_nodes};
+pub use configuration::{
+    ConfigError, PhoneAccountProtocol, ResolvedPhoneAccount, ResolvedRadioNode, check_config,
+    resolve_phone_accounts, resolve_radio_nodes,
+};

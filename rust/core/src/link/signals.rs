@@ -1,14 +1,49 @@
 //! Bounded lock-free snapshots between one audio consumer and one channel owner.
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
+
+/// One configured node's retained programme invalidation domain. The node owner
+/// reuses this small allocation across prepared mixer generations; unrelated nodes
+/// never invalidate it. Saturation is permanently unavailable rather than wrapping.
+#[derive(Clone, Debug, Default)]
+pub struct RetirementDomain(Arc<AtomicU64>);
+impl RetirementDomain {
+    /// Whether two prepared owners share the same configured-node domain.
+    pub fn same_domain(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    /// Snapshot only; this is not evidence that a source contributed to RF.
+    pub fn revision(&self) -> Option<u64> {
+        let revision = self.0.load(Ordering::Acquire);
+        (revision != u64::MAX).then_some(revision)
+    }
+    fn invalidate(&self) {
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |revision| {
+                revision.checked_add(1)
+            });
+    }
+}
+
+#[derive(Debug)]
+struct RetirementLink {
+    domain: RetirementDomain,
+    next: OnceLock<Box<RetirementLink>>,
+}
+
+const LIVE: u8 = 0;
+const RETIRING: u8 = 1;
+const RETIRED: u8 = 2;
 
 #[derive(Debug)]
 struct ReplyState {
     phone: Option<super::PhoneSource>,
     phone_authenticated: AtomicBool,
-    ended: AtomicBool,
+    phase: AtomicU8,
+    domains: OnceLock<Box<RetirementLink>>,
     radio_keyed: AtomicBool,
     edge: AtomicU64,
     telemetry_allowed: AtomicBool,
@@ -35,7 +70,50 @@ impl PeerReply {
     }
     /// Revoke queued commands and replies before their owner reclaims the connection.
     pub fn retire(&self) {
-        self.0.ended.store(true, Ordering::Release);
+        // Retirement is off hardware/audio callbacks. Concurrent retiring owners
+        // help publish the bounded notification walk rather than waiting for one
+        // another. Once RETIRED is visible, all existing domains were notified.
+        if self
+            .0
+            .phase
+            .compare_exchange(LIVE, RETIRING, Ordering::AcqRel, Ordering::Acquire)
+            == Err(RETIRED)
+        {
+            return;
+        }
+        let mut link = self.0.domains.get();
+        while let Some(current) = link {
+            current.domain.invalidate();
+            link = current.next.get();
+        }
+        self.0.phase.store(RETIRED, Ordering::Release);
+    }
+    /// Register a configured node off audio before publishing its prepared mixer.
+    /// The same node domain is reused across refreshes. Each connection retains at
+    /// most one entry per configured node, not one per attachment or generation.
+    /// Reload retires private calls before node ownership can be replaced.
+    pub fn bind_retirement_domain(&self, domain: &RetirementDomain) {
+        let mut slot = &self.0.domains;
+        loop {
+            let mut inserted = false;
+            let link = slot.get_or_init(|| {
+                inserted = true;
+                Box::new(RetirementLink {
+                    domain: domain.clone(),
+                    next: OnceLock::new(),
+                })
+            });
+            if Arc::ptr_eq(&link.domain.0, &domain.0) {
+                // This RMW joins retirement's release sequence: if it still
+                // observes LIVE, a later retirement acquires this published link.
+                // Otherwise registration publishes its own notification.
+                if inserted && self.0.phase.fetch_or(0, Ordering::AcqRel) != LIVE {
+                    domain.invalidate();
+                }
+                return;
+            }
+            slot = &link.next;
+        }
     }
     /// Stable identity while the prepared response retains this connection.
     pub fn identity(&self) -> usize {
@@ -47,7 +125,7 @@ impl PeerReply {
     }
     /// Ended connections cannot receive a delayed response.
     pub fn ended(&self) -> bool {
-        self.0.ended.load(Ordering::Acquire)
+        self.0.phase.load(Ordering::Acquire) != LIVE
     }
     pub(crate) fn set_telemetry_window(&self, until_ms: u64) {
         self.0.telemetry_until_ms.store(until_ms, Ordering::Release);
@@ -88,7 +166,8 @@ impl PeerSignals {
             reply: PeerReply(Arc::new(ReplyState {
                 phone,
                 phone_authenticated: AtomicBool::new(false),
-                ended: AtomicBool::new(false),
+                phase: AtomicU8::new(LIVE),
+                domains: OnceLock::new(),
                 radio_keyed: AtomicBool::new(false),
                 edge: AtomicU64::new(0),
                 telemetry_allowed: AtomicBool::new(true),
@@ -172,6 +251,10 @@ impl PeerSignals {
     pub fn reply_target(&self) -> PeerReply {
         self.reply.clone()
     }
+    /// Borrow the original media fence without reference-count work on audio.
+    pub(crate) fn reply(&self) -> &PeerReply {
+        &self.reply
+    }
     /// Match addressed PCM without reference-count work on the audio callback.
     pub fn reply_identity(&self) -> usize {
         self.reply.identity()
@@ -209,3 +292,7 @@ impl PeerSignals {
         std::str::from_utf8(&storage[..len]).ok()
     }
 }
+
+#[cfg(test)]
+#[path = "signals_domain_tests.rs"]
+mod domain_tests;

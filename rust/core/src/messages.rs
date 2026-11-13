@@ -209,6 +209,12 @@ pub enum PhoneAuthenticationPrompt {
     Retry,
     /// Confirm ordinary private access; this never promises node unlock.
     Authenticated,
+    /// The requested private route or media operation is not currently supported.
+    Unavailable,
+    /// Credential-free completion of the exact caller's requested operation.
+    Completed,
+    /// Credential-free failure of the exact caller's requested operation.
+    Failed,
 }
 
 /// Ordered units used by localized compound durations.
@@ -809,6 +815,9 @@ impl Message<'_> {
                         PhoneAuthenticationPrompt::Login => "login",
                         PhoneAuthenticationPrompt::Retry => "retry",
                         PhoneAuthenticationPrompt::Authenticated => "authenticated",
+                        PhoneAuthenticationPrompt::Unavailable => "unavailable",
+                        PhoneAuthenticationPrompt::Completed => "completed",
+                        PhoneAuthenticationPrompt::Failed => "failed",
                     },
                 );
             }

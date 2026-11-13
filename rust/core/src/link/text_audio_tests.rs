@@ -12,7 +12,7 @@ fn active_peer(name: &str, value: f32) -> (AudioPeer<FiniteInput>, LinkAudioCons
     signals.publish_pcm();
     let (output, input) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new(
-        name,
+        crate::link::PeerIdentity::from_operator(name).unwrap(),
         Mode::TRANSCEIVE,
         FiniteInput {
             signals,

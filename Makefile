@@ -10,7 +10,7 @@ libdir := $(prefix)/lib/$(multiarch)/rpt_advanced
 LOADER_RUNPATH = $$ORIGIN/$(shell realpath -m --relative-to="$(asteriskmoddir)" "$(libdir)")
 docdir := $(prefix)/share/doc/rpt-advanced
 DESTDIR ?=
-VERSION ?= 0.1.0-alpha24
+VERSION ?= 0.1.0-alpha25
 DIST_NAME := rpt_advanced-$(VERSION)
 CFLAGS ?= -O2 -g
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE=\"app_rpt_advanced\" -DAST_MODULE_SELF_SYM=__internal_app_rpt_advanced_self -Wall -Wextra -Werror
@@ -24,7 +24,7 @@ ADAPTERS := asterisk control_asterisk file speech
 STANDALONE_ADAPTERS := control_standalone resolver jitter
 SITE_ADAPTERS := gpiod hwmon
 LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(ADAPTERS)))
-LIBRARIES += build/librptadv_product.so.2
+LIBRARIES += build/librptadv_product.so.3
 STANDALONE_LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(STANDALONE_ADAPTERS)))
 SITE_LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(SITE_ADAPTERS)))
 INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES)
@@ -54,13 +54,13 @@ rust-build: | build
 	@set -e; for name in $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" "build/librptadv_$${name}_adapter.so.1"; \
 	done
-	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.2"
+	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.3"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
 
 standalone-build: | build
 	$(CARGO) build --locked --release -p rpt-advanced-standalone -p rptadv-product \
 		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter -p rptadv-jitter-adapter -p rptadv-gpiod-adapter -p rptadv-hwmon-adapter
-	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.2"
+	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.3"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
 	@set -e; for name in file speech $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" \
@@ -96,6 +96,7 @@ lint:
 	$(CARGO) fmt --all -- --check
 	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c tests/test_radio_interlock.c
 	clang-format --dry-run --Werror tests/test_site_gpio_abi.c tests/test_site_hwmon_abi.c
+	clang-format --dry-run --Werror rust/standalone/tests/fixtures/phone_codec.c
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
@@ -104,6 +105,7 @@ static-analysis: dependency-boundary product-surface
 	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) '-DAST_MODULE_INFO(key,flags,description,...)=;' $(LOADER)
 	clang-tidy $(LOADER) --warnings-as-errors='*' -- $(CPPFLAGS) $(MODULE_FLAGS) -fblocks
 	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 tests/test_radio_interlock.c tests/test_site_gpio_abi.c tests/test_site_hwmon_abi.c
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) rust/standalone/tests/fixtures/phone_codec.c
 	$(TEST_ENV) $(CARGO) clippy --locked --workspace --all-targets -- -D warnings
 
 rust-quality:
@@ -155,8 +157,8 @@ build/test_loader: build/test_loader.o build/loader-coverage.o
 build/test_product_abi: tests/test_product_abi.c rust/product/include/rptadv_product.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -std=gnu11 -Wall -Wextra -Werror $< -ldl -o $@
 
-product-abi-check: build/test_product_abi build/librptadv_product.so.2
-	./build/test_product_abi "$(CURDIR)/build/librptadv_product.so.2"
+product-abi-check: build/test_product_abi build/librptadv_product.so.3
+	./build/test_product_abi "$(CURDIR)/build/librptadv_product.so.3"
 
 build/test_jitter_ring: tests/test_jitter_ring.c $(HEADERS) build/librptadv_jitter_adapter.so.1 | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -UNDEBUG $< \
@@ -217,7 +219,7 @@ install: all install-jitter-development install-site-development
 	install -m 0755 $(INSTALL_LIBRARIES) $(DESTDIR)$(libdir)/
 	ln -sfn librptadv_resolver_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_resolver_adapter.so
 	install -D -m 0644 rust/resolver-adapter/include/rptadv_resolver_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/resolver/rptadv_resolver_adapter.h
-	ln -sfn librptadv_product.so.2 $(DESTDIR)$(libdir)/librptadv_product.so
+	ln -sfn librptadv_product.so.3 $(DESTDIR)$(libdir)/librptadv_product.so
 	ln -sfn librptadv_file_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_file_adapter.so
 	ln -sfn librptadv_speech_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_speech_adapter.so
 	ln -sfn librptadv_control_asterisk_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_control_asterisk_adapter.so
@@ -238,12 +240,12 @@ install: all install-jitter-development install-site-development
 standalone-install: standalone-build install-jitter-development install-site-development
 	install -d $(DESTDIR)$(prefix)/bin $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
-	install -m 0755 build/librptadv_product.so.2 build/librptadv_file_adapter.so.1 \
+	install -m 0755 build/librptadv_product.so.3 build/librptadv_file_adapter.so.1 \
 		build/librptadv_speech_adapter.so.1 $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES) \
 		$(DESTDIR)$(libdir)/
 	ln -sfn librptadv_resolver_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_resolver_adapter.so
 	install -D -m 0644 rust/resolver-adapter/include/rptadv_resolver_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/resolver/rptadv_resolver_adapter.h
-	ln -sfn librptadv_product.so.2 $(DESTDIR)$(libdir)/librptadv_product.so
+	ln -sfn librptadv_product.so.3 $(DESTDIR)$(libdir)/librptadv_product.so
 	ln -sfn librptadv_file_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_file_adapter.so
 	ln -sfn librptadv_speech_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_speech_adapter.so
 	ln -sfn librptadv_control_standalone_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_control_standalone_adapter.so

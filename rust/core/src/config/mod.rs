@@ -5,6 +5,8 @@ mod dtmf_macros;
 mod echolink;
 mod messages;
 mod parse;
+mod phone_accounts;
+mod phone_attachment;
 mod phone_mailboxes;
 mod schema;
 mod scope;
@@ -34,6 +36,7 @@ pub(crate) use dtmf_macros::{compile_macros, macro_limits};
 pub use echolink::{EchoLinkAnnouncement, EchoLinkSettings, EchoLinkTelemetry, EchoLinkTransport};
 pub(crate) use messages::selector_valid as message_selector_valid;
 pub use messages::{BindingSource, ResolvedMessageSettings};
+pub use phone_accounts::{PhoneAccountProtocol, PhoneAccountSettings, resolve_phone_accounts};
 pub use phone_mailboxes::{PhoneMailbox, resolve_phone_mailboxes};
 pub use schema::Schema;
 pub use settings::{
@@ -77,7 +80,8 @@ impl ConfigWarning {
             // URLs may carry private query parameters; never echo them in diagnostics.
             value: if key == "commands" && section.starts_with("dtmf_macro ") {
                 "<redacted command stream>".to_owned()
-            } else if section.starts_with("mailbox ")
+            } else if section.starts_with("phone_account ")
+                || section.starts_with("mailbox ")
                 || matches!(key, "directory_password" | "proxy_password")
             {
                 "<redacted secret>".to_owned()
@@ -153,3 +157,6 @@ impl std::fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+#[cfg(test)]
+mod phone_accounts_tests;

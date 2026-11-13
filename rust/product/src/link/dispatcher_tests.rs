@@ -29,7 +29,8 @@ fn fixture(count: usize) -> (LinkAudio<Silent>, LinkDispatcher, Vec<LinkAudioCon
             let (producer, consumer) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
             outputs.push(consumer);
             AudioPeer::new(
-                &(index + 1000).to_string(),
+                rpt_advanced_core::link::PeerIdentity::from_operator(&(index + 1000).to_string())
+                    .unwrap(),
                 Mode::TRANSCEIVE,
                 Silent(PeerSignals::new()),
                 producer,

@@ -15,8 +15,9 @@ mod topology;
 
 pub use audio::{
     AudioPeer, DispatchProgress, GroupMemberSelection, GroupSelection, LinkAudio, LinkAudioStatus,
-    LinkDispatcher, LocalMedia, LocalTextInput, PeerInput, SampleProvenance, SourceCoordinate,
-    SourcePosition, TimedPeerSample,
+    LinkDispatcher, LocalMedia, LocalTextInput, PeerInput, RenderedPeerBlock, RfContributor,
+    RfProgrammeMetadata, SampleProvenance, SourceCoordinate, SourcePosition, SourceTimeBound,
+    TimedPeerSample,
 };
 pub use echo_telemetry::EchoTelemetryPolicy;
 pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};
@@ -24,7 +25,7 @@ pub use identity::{EchoAlias, IdentityError, PeerAddress, PeerIdentity, Protocol
 pub use peer::{Peer, ReceivePolicy, ReceiveState};
 pub use phone::{MailboxId, PhoneAccountId, PhoneCallId, PhoneSource};
 pub use protocol::{Protocol, Route};
-pub use signals::{PeerReply, PeerSignals};
+pub use signals::{PeerReply, PeerSignals, RetirementDomain};
 pub use text::{ClassifiedText, HumanMessage, TextAudience, TextOrigin, classify_asl};
 pub use topology::TopologyManager;
 

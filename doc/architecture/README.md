@@ -10,9 +10,18 @@ and the affected configuration and test documentation in the same change.
 2026-11-09 approved phone-patch, source-private control/macro and RF presentation
 pacing extension. Typed private call identities, sized metadata and bounded
 call-private reply ownership, mailbox verification and timed audio consumption
-form an unreleased foundation; provider-backed
-phone control/media and RF pacing remain pending. The existing deployed ownership
-described below is unchanged.
+form an unreleased foundation. Standalone numeric IAX accounts with registration
+disabled use prepared startup/reload listener profiles. Incoming IAX calls join
+actual typed private handles and product authorization, then reuse the serial
+executor and released timed egress. Actual-product private call integration and
+RF pacing remain pending. The existing deployed ownership
+described below is unchanged. The experimental shared `rptadv-peer-support::sip`
+parser is a bounded borrowed-wire prerequisite only, reusable by both hosts; it
+does not activate signaling, move provider ownership or change the media path.
+Its limits and verification are recorded in ADR 0044. The existing native
+RTP owner also has a prepared timed send seam with immutable retries and
+retirement epochs; it does not activate SIP or replace product source-age
+ownership.
 
 These are initial-version alpha releases. [ADR 0040](decisions/0040-initial-alpha-compatibility-policy.md)
 supersedes backward-compatibility requirements for project-owned interfaces.
@@ -75,7 +84,7 @@ The nine existing-function components are released runtime dependencies. Direct
 dynamic links are `librptadvradio.so.5` to `librptadvsquelch.so.2`,
 `librptadvctcss.so.2`, `librptadvdcs.so.1`, and the released samplerate ABI 2;
 `librptadv_gpio_adapter.so.1` to `librptadvsignaling.so.1`;
-`librptadv_product.so.2` to `librptadvtone.so.1`, `librptadvmorse.so.1`,
+`librptadv_product.so.3` to `librptadvtone.so.1`, `librptadvmorse.so.1`,
 `librptadvdtmf.so.1`, `librptadvtemplate.so.1`, and
 `librptadvschedule.so.1`; and `librptadvmorse.so.1` to
 `librptadvtone.so.1`. DTMF detection and PCM generation share
@@ -175,7 +184,7 @@ Rust's private ABI.
 
 | Artifact | Ownership |
 | --- | --- |
-| `librptadv_product.so.2` | Product lifecycle, configuration, controller policy, workers, and descriptor clients; embeds `rust/core` once |
+| `librptadv_product.so.3` | Product lifecycle, configuration, controller policy, workers, and descriptor clients; embeds `rust/core` once |
 | `rpt-advanced` | Standalone service executable; loads the product and standalone providers without loading Asterisk |
 | `librptadv_control_standalone_adapter.so.1` | Lock-free standalone control-task executor |
 | `librptadv_portaudio_alsa_adapter.so.2` | Native 48 kHz PortAudio audio callbacks over ALSA |

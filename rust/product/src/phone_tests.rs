@@ -66,6 +66,141 @@ fn records() -> Vec<PhoneMailbox> {
     .value
 }
 
+#[test]
+fn login_collection_bounds_digits_and_time_without_replaying_credentials() {
+    for (input, expected_mailbox, expected_pin) in [
+        ("100#1234#".to_owned(), "100", "1234"),
+        ("#".to_owned(), "", ""),
+        ("*41000#".to_owned(), "", ""),
+        (format!("{}#", "1".repeat(33)), "", ""),
+        (format!("100#{}#", "1".repeat(33)), "", ""),
+        ("100#A#".to_owned(), "", ""),
+        (
+            format!("{}#{}#", "1".repeat(32), "2".repeat(32)),
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+        ),
+    ] {
+        let mut collector = LoginCollector::default();
+        let result = input
+            .chars()
+            .filter_map(|digit| collector.digit(digit, 1))
+            .last()
+            .unwrap();
+        let LoginInput::Credentials { mailbox, pin } = result else {
+            panic!("completed credentials")
+        };
+        assert_eq!(
+            (mailbox.as_str(), pin.as_str()),
+            (expected_mailbox, expected_pin)
+        );
+        assert!(collector.mailbox.is_empty() && collector.pin.is_empty());
+        assert!(!collector.pin_phase && !collector.invalid && collector.last_ms.is_none());
+    }
+    let mut collector = LoginCollector::default();
+    assert!(collector.tick(u64::MAX).is_none());
+    collector.digit('1', 1);
+    assert!(collector.tick(3000).is_none());
+    assert!(matches!(collector.tick(3001), Some(LoginInput::Retry)));
+    assert!(collector.mailbox.is_empty());
+    collector.digit('1', 10);
+    assert!(
+        collector.tick(0).is_none(),
+        "clock rollback cannot finish credentials"
+    );
+}
+
+#[test]
+fn private_input_helpers_preserve_bounds_and_retire_authenticated_ended_owners() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    assert!(calls.event().is_none());
+    assert!(calls.actions(&source, &reply, '*', 0).is_err());
+    calls.cancel_grammar(&source, &reply);
+    calls.transfer_replies();
+    assert!(calls.grammar_timeouts(3000).is_empty());
+    assert!(
+        calls
+            .login_digit(&source, &reply, '1', 0)
+            .unwrap()
+            .is_none()
+    );
+    assert!(calls.login_timeouts(2999).is_empty());
+    assert_eq!(
+        calls.login_timeouts(3000),
+        [(source.clone(), reply.clone())]
+    );
+    calls.login_digit(&source, &reply, '1', 0).unwrap();
+    assert!(matches!(
+        calls.login_digit(&source, &reply, '2', 3000).unwrap(),
+        Some(LoginInput::Retry)
+    ));
+    calls
+        .authenticate(&source, &reply, &records(), "100", "1234", 3000)
+        .unwrap();
+    assert!(calls.grammar_timeouts(6000).is_empty());
+    assert!(calls.login_timeouts(6000).is_empty());
+    reply.retire();
+    calls.cancel_grammar(&source, &reply);
+    assert_eq!(calls.expire_authentication(6000), [reply.clone()]);
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn pending_private_handoff_keeps_the_control_queue_when_the_owner_is_full() {
+    let (mut calls, mut session, control, _state, source, reply) = private_session(false, false);
+    calls.calls[0].owner = Some(control);
+    for _ in 0..16 {
+        calls.queue_reply(&source, &reply, media()).unwrap();
+    }
+    calls.transfer_replies();
+    assert!(calls.calls[0].replies.is_empty());
+    calls.queue_reply(&source, &reply, media()).unwrap();
+    calls.transfer_replies();
+    assert_eq!(calls.calls[0].replies.len(), 1);
+    use crate::link::session::SerialSession;
+    session.step(0).unwrap();
+    calls.transfer_replies();
+    assert!(calls.calls[0].replies.is_empty());
+}
+
+pub(crate) fn private_session(
+    async_enabled: bool,
+    prepared: bool,
+) -> (
+    PhoneCalls,
+    crate::link::private_phone::PrivatePhoneSession,
+    crate::link::private_phone::PrivatePhoneControl,
+    std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+    PhoneSource,
+    PeerReply,
+) {
+    let (io, state) = crate::link::session::tests::phone_with_egress(async_enabled, prepared);
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let source = calls.admit(io, 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let io = calls.calls[0].io.take().unwrap();
+    let (session, control) =
+        crate::link::private_phone::PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    (calls, session, control, state, source, reply)
+}
+
+pub(crate) fn pending_digits(calls: &PhoneCalls, source: &PhoneSource) -> usize {
+    calls
+        .calls
+        .iter()
+        .find(|call| &call.source == source)
+        .unwrap()
+        .owner
+        .as_ref()
+        .unwrap()
+        .pending_digits()
+}
+
 fn peer(second: bool) -> PeerIo {
     unsafe extern "C" fn info(
         context: *mut c_void,
@@ -349,4 +484,234 @@ fn retirement_during_private_render_revokes_the_copied_pcm_before_delivery() {
     assert_eq!(prepared.outcome(), PlaybackOutcome::Cancelled);
     assert!(calls.queue_reply(&source, &reply, media()).is_err());
     assert!(calls.take_reply(&source, &reply).is_err());
+}
+
+#[test]
+fn prepared_phone_media_api_requires_current_mailbox_and_serial_owner_identity() {
+    use crate::link::{private_phone::PrivatePhoneSession, session::SerialSession};
+    let (io, _state) = crate::link::session::tests::phone_source_peer();
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let source = calls.admit(io, 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    assert!(matches!(
+        calls.prepare_media(&source, &reply, None),
+        Err(Error::Admission)
+    ));
+    calls
+        .authenticate(&source, &reply, &records(), "100", "1234", 0)
+        .unwrap();
+    assert!(matches!(
+        calls.prepare_media(&source, &reply, None),
+        Err(Error::Admission)
+    ));
+    assert_eq!(calls.retire_media(&source, &reply), Err(Error::Admission));
+    let io = calls.calls[0].io.take().unwrap();
+    let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    calls.calls[0].owner = Some(control);
+    session.set_source_clock(
+        crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
+    );
+    let foreign = PeerSignals::for_phone(source.clone()).reply_target();
+    assert!(matches!(
+        calls.prepare_media(&source, &foreign, None),
+        Err(Error::Admission)
+    ));
+    assert_eq!(calls.retire_media(&source, &foreign), Err(Error::Admission));
+    let input = calls.prepare_media(&source, &reply, None).unwrap();
+    assert!(!input.active());
+    session.step(0).unwrap();
+    assert!(input.active());
+    assert_eq!(calls.retire_media(&source, &reply), Ok(()));
+    assert!(!input.active());
+    assert!(!reply.ended());
+    let replacement = calls.prepare_media(&source, &reply, None).unwrap();
+    session.step(1).unwrap();
+    assert!(replacement.active());
+    calls.retire(&source).unwrap();
+    assert!(!replacement.active());
+    assert!(matches!(
+        calls.prepare_media(&source, &reply, None),
+        Err(Error::Admission)
+    ));
+    let (io, _) = crate::link::session::tests::phone_source_peer();
+    let newer = calls.admit(io, 2).unwrap();
+    assert_ne!(source, newer);
+    let current = calls.reply(&newer).unwrap();
+    assert!(matches!(
+        calls.prepare_media(&source, &current, None),
+        Err(Error::Admission)
+    ));
+}
+
+/// Prepare real private playback against the supplied exact test call token.
+pub(crate) fn private_prompt(
+    reply: &PeerReply,
+    stream: Box<dyn PcmStreamReader>,
+) -> PrivatePhoneReply {
+    PrivatePhoneReply {
+        source: reply.phone_source().unwrap().clone(),
+        reply: reply.clone(),
+        playback: Playback::new_stream(stream),
+    }
+}
+
+pub(crate) type ControlledSourceFixture = (
+    PhoneCalls,
+    crate::link::private_phone::PrivatePhoneSession,
+    std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+    PhoneSource,
+    PeerReply,
+);
+
+/// Keep the real unique source owner under deterministic test stepping while
+/// station control retains the actual mailbox, grammar and private command queue.
+pub(crate) fn controlled_source_session(rate: u32) -> ControlledSourceFixture {
+    controlled_source_session_mode(rate, true)
+}
+
+pub(crate) fn controlled_source_session_mode(rate: u32, inband: bool) -> ControlledSourceFixture {
+    let (io, state) = if inband {
+        crate::link::session::tests::phone_source_peer_inband(rate)
+    } else {
+        crate::link::session::tests::phone_source_peer_at_rate(rate)
+    };
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let source = calls.admit(io, 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    calls
+        .authenticate(&source, &reply, &records(), "100", "1234", 0)
+        .unwrap();
+    let io = calls.calls[0].io.take().unwrap();
+    let (session, control) =
+        crate::link::private_phone::PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    calls.calls[0].owner = Some(control);
+    calls.calls[0].grammar = Some(
+        rpt_advanced_core::phone_dtmf::PhoneDtmfGrammar::new(
+            &rpt_advanced_core::command::DtmfCommandMap::standard(),
+            rpt_advanced_core::phone_dtmf::PhoneDtmfOptions {
+                default_command_target: Some("1000".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    (calls, session, state, source, reply)
+}
+
+#[test]
+fn private_collection_dirty_tracking_uses_actual_grammar_transitions() {
+    let (mut calls, _session, _state, source, reply) = controlled_source_session(8000);
+    // Authentication is one dirty boundary. Repeated idle control turns do not
+    // repeatedly scan the node's collectors.
+    let mut checks = 0;
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(false)
+    });
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(false)
+    });
+    assert_eq!(checks, 1);
+    calls.actions(&source, &reply, '!', 1).unwrap();
+    calls.reconcile_collections(|_, _, _| panic!("outer discard is still collecting"));
+    assert!(
+        calls.grammar_timeouts(3001).is_empty(),
+        "silent discard expiry"
+    );
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(false)
+    });
+    assert_eq!(checks, 2);
+    let foreign = PeerSignals::for_phone(source.clone()).reply_target();
+    calls.collection_expired(&foreign);
+    calls.reconcile_collections(|_, _, _| panic!("foreign actual ingress cannot dirty this call"));
+    calls.collection_expired(&reply);
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(true)
+    });
+    calls.reconcile_collections(|_, _, _| panic!("unchanged inner collection is not rescanned"));
+    assert_eq!(checks, 3);
+    calls.collection_expired(&reply);
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(false)
+    });
+    assert_eq!(checks, 4);
+}
+
+#[test]
+fn private_collection_dirty_retry_survives_full_existing_prompt_queue() {
+    use crate::link::session::{SerialSession, tests::Input};
+    let (mut calls, mut session, state, source, reply) =
+        controlled_source_session_mode(8000, false);
+    state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+    session.step(1).unwrap();
+    let (_, _, digit, received_ms) = calls.event().unwrap();
+    calls.actions(&source, &reply, digit, received_ms).unwrap();
+    for _ in 0..16 {
+        calls
+            .queue_reply(&source, &reply, Box::new(EmptyCollectionPrompt))
+            .unwrap();
+    }
+    calls.transfer_replies();
+    let mut checks = 0;
+    for _ in 0..2 {
+        calls.reconcile_collections(|_, _, _| {
+            checks += 1;
+            Some(false)
+        });
+    }
+    assert_eq!(checks, 2, "queue refusal retains one dirty intent");
+    session.step(2).unwrap();
+    calls.reconcile_collections(|_, _, _| {
+        checks += 1;
+        Some(false)
+    });
+    calls.reconcile_collections(|_, _, _| panic!("accepted release consumes the intent"));
+    for now in 3..23 {
+        session.step(now).unwrap();
+    }
+    assert!(!crate::link::private_phone::tests::collection_suppressed(
+        &session
+    ));
+    assert!(!reply.ended());
+}
+
+struct EmptyCollectionPrompt;
+impl PcmStreamReader for EmptyCollectionPrompt {
+    fn render(&mut self, _output: &mut [f32]) -> PcmRead {
+        PcmRead::Finished
+    }
+}
+
+#[test]
+fn private_collection_reconcile_waits_for_authentication_grammar_and_local_target() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut calls = PhoneCalls::new(1, 1).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    calls.node_collections_discarded();
+    calls
+        .reconcile_collections(|_, _, _| panic!("unauthenticated call has no collector authority"));
+    calls
+        .authenticate(&source, &reply, &records(), "100", "1234", 0)
+        .unwrap();
+    calls.reconcile_collections(|_, _, _| panic!("not-yet-started call has no grammar"));
+    let ordinary = PeerSignals::new().reply_target();
+    calls.collection_expired(&ordinary);
+    calls.reconcile_collections(|_, _, _| panic!("ordinary expiry cannot dirty a phone call"));
+
+    let (mut calls, _session, _state, source, reply) = controlled_source_session(8000);
+    for digit in "*42000#".chars() {
+        calls.actions(&source, &reply, digit, 1).unwrap();
+    }
+    calls.reconcile_collections(|_, _, _| {
+        panic!("a selected remote target cannot release local suppression")
+    });
+    assert!(!reply.ended());
 }

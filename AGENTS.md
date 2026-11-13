@@ -33,6 +33,19 @@ does not repeat the full gate.
 
 Local recovery commits may follow affected targeted checks, but must not be
 represented as fully verified until the pull-request gate passes.
+Commit small, coherent changes regularly after their targeted checks so useful
+work is not left only in a working tree. The existing pre-push and pull-request
+quality gates still apply.
+
+Whenever the user asks to update agent rules, commit and push those updates
+after the applicable checks.
+
+Fetch `main` and rebase the active feature branch onto it frequently, including
+between implementation phases and before opening a pull request, to keep
+divergence manageable. Protect uncommitted work first. Coordinate rewrites of
+published or shared history, never bypass branch protections, and recheck affected
+behavior after a rebase.
+
 Treat compiler warnings as errors and fail applicable formatting, Ruff,
 ShellCheck, Cppcheck, Clang-Tidy, Doxygen, tests, installation checks, and 100%
 line and branch coverage of production code on Debian 13 amd64. Remove
@@ -87,11 +100,28 @@ base image changes, rebuild and verify every derived quality image before its
 consumer gate uses it. Hosted jobs must likewise consume a freshly published,
 verified native multi-architecture manifest rather than a known stale image.
 
+Satisfy every functional, safety, and quality requirement while keeping peak
+and retained memory usage to a minimum. Avoid unnecessary allocations,
+oversized workspaces, duplicate buffers, and warmed contexts that the selected
+path never uses. Measure realistic workloads; do not drop requirements or
+weaken tests to claim a memory improvement.
+
+Minimize parallelism while satisfying every requirement, including performance.
+Support large numbers of connected peers on one or more CPU cores, and scale
+with available CPU, memory, and network resources. Prefer bounded shared workers
+and measured concurrency over unnecessary per-peer threads or tasks. Keep
+constrained test serialization separate from production scheduling and capacity;
+do not impose the test runner's single-core limit on the production design.
+
 Prefer simple, linear control flow and minimize branches, especially in error
-handling. Share validation and error paths when their observable behavior is
-the same; introduce a branch only for a genuine behavioral, safety, or
-diagnostic distinction. Do not weaken validation or hide useful errors merely
-to reduce coverage surface.
+handling. Consolidate edge-case handling, validation, and error paths when
+their observable behavior is the same to minimize code size; introduce a
+branch only for a genuine behavioral, safety, or diagnostic distinction.
+Handle foreseeable and unforeseen failures consistently at the appropriate
+shared boundary, preserving error propagation and logging useful, redacted
+warnings or errors for troubleshooting. Do not add sweeping catch-all handlers,
+suppress errors, weaken validation, or hide useful errors merely to reduce code
+size or coverage surface.
 
 Treat test-surface size as an implementation cost. Prefer one shared,
 data-driven test over duplicated cases for equivalent behavior, and design
@@ -123,13 +153,20 @@ When an explicitly approved patch targets an arm64 node, use a native build in
 the target user's home-directory workspace rather than `/tmp`. Keep the source
 revision and installed artifacts synchronized with the local worktree.
 
-When a new requirement benefits from live-node validation, first implement the
-simplest core behavior that satisfies it with the fewest edge cases. Preserve
-required automated quality checks and never deploy without explicit approval.
-After approved live testing, obtain user confirmation that the core behavior is
-correct before adding noncritical edge-case handling. Safety, data integrity,
-configuration validity, and required compatibility are core behavior and must
-not be deferred.
+When implementing any new feature, plan meaningful periodic milestones and
+stop at each for manual testing on real hardware unless that hardware is
+unavailable. Use these checkpoints to catch misunderstood requirements early.
+Implement and test the simplest happy path first; after manual testing, obtain
+user confirmation that the core behavior is correct before adding comprehensive
+noncritical edge-case and error handling. Keep later increments small enough
+for further manual feedback before completing the feature. If hardware is
+unavailable, report that limitation and continue with available automated and
+simulated checks; do not claim hardware validation. Safety, security, privacy,
+data integrity, configuration validity, and required compatibility are core
+behavior and must not be deferred. Preserve required automated checks and the
+full before-merge gate. Hardware availability does not authorize deployment,
+node configuration changes, or RF operation; obtain explicit approval for those
+actions.
 
 Treat every published ABI as stable. Reuse existing ABI functions, opaque
 objects, callbacks, fields, and extension points before adding a new contract.
@@ -174,6 +211,15 @@ not depend on production tests passing.
 
 Never deploy to a node or alter its configuration without explicit approval.
 Do not add features or requirements that the user has not requested.
+
+Reuse existing code and dependencies whenever possible. Do not duplicate
+functionality or overcomplicate the implementation.
+
+Before adding a dependency outside this project's control, verify that its
+license is compatible and that it meets the project's memory, CPU, and
+real-time performance requirements. If no suitable dependency meets those
+requirements, implement the required functionality within this project instead.
+Do not fix bugs in dependencies outside this project's control.
 
 Configuration reload and module unload/load must work without restarting
 Asterisk. Preserve this requirement until a concrete technical limitation makes

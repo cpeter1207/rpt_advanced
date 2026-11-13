@@ -107,7 +107,15 @@ fn finite_echo_peer_drains_a_subtarget_burst_without_changing_ordinary_peer_poli
     assert_eq!(producer.finish_status(token), Ok(FinishState::Pending));
     assert_eq!(producer.write(&[0.5]), Ok(0));
     let (outbound, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
-    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, consumer, outbound, 960, 0).unwrap();
+    let peer = AudioPeer::new(
+        rpt_advanced_core::link::PeerIdentity::from_operator("200").unwrap(),
+        Mode::TRANSCEIVE,
+        consumer,
+        outbound,
+        960,
+        0,
+    )
+    .unwrap();
     let (mut links, _) = LinkAudio::new(vec![peer], 960).unwrap();
     let (mut controller, _control) = NodeController::new(
         ControllerSettings {
@@ -534,7 +542,7 @@ fn phone_policy_survives_processing_into_the_common_link_audio_gate() {
     }
     let (outbound, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new(
-        "200",
+        rpt_advanced_core::link::PeerIdentity::from_operator("200").unwrap(),
         Mode::TRANSCEIVE,
         ProcessedPeer::new(consumer, None),
         outbound,
@@ -687,7 +695,15 @@ fn peer_tail_drains_before_courtesy_instead_of_replaying_on_next_burst() {
     }
     let (mut producer, consumer) = InboundRing::open(8000, InboundPolicy::Peer).unwrap();
     let (outbound, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
-    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, consumer, outbound, 960, 0).unwrap();
+    let peer = AudioPeer::new(
+        rpt_advanced_core::link::PeerIdentity::from_operator("200").unwrap(),
+        Mode::TRANSCEIVE,
+        consumer,
+        outbound,
+        960,
+        0,
+    )
+    .unwrap();
     let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
     let courtesy = CourtesySettings {
         link: Some(PreparedMedia::new_stream(Box::new(Courtesy)).unwrap()),

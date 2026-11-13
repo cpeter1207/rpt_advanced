@@ -13,7 +13,38 @@ use std::{
     },
 };
 
+thread_local! { static FAIL_ORDINAL: Cell<usize> = const { Cell::new(0) }; }
 thread_local! { static FAIL_BYTES: Cell<usize> = const { Cell::new(0) }; }
+thread_local! { static ALLOCATION_COUNT: Cell<Option<usize>> = const { Cell::new(None) }; }
+
+/// Count allocations on this test thread only; nested measurements are rejected.
+pub(crate) fn allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ALLOCATION_COUNT.with(|count| count.set(None));
+        }
+    }
+    ALLOCATION_COUNT.with(|count| {
+        assert!(
+            count.get().is_none(),
+            "allocation measurement already active"
+        );
+        count.set(Some(0));
+    });
+    let _reset = Reset;
+    let result = operation();
+    (result, ALLOCATION_COUNT.with(|count| count.get().unwrap()))
+}
+
+fn count_allocation() {
+    let _ = ALLOCATION_COUNT.try_with(|count| {
+        if let Some(previous) = count.get() {
+            count.set(Some(previous + 1));
+        }
+    });
+}
+
 thread_local! {
     pub(crate) static ERROR_LOGS: std::cell::RefCell<Vec<(i32, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -26,6 +57,16 @@ pub(crate) fn error_log(priority: i32, message: &str) {
 struct Allocator;
 
 fn reject(bytes: usize) -> bool {
+    if FAIL_ORDINAL
+        .try_with(|slot| {
+            let remaining = slot.get();
+            slot.set(remaining.saturating_sub(1));
+            remaining == 1
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
     FAIL_BYTES
         .try_with(|slot| {
             if slot.get() == bytes {
@@ -42,6 +83,7 @@ fn reject(bytes: usize) -> bool {
 // for one selected allocation is explicitly permitted by GlobalAlloc.
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count_allocation();
         if reject(layout.size()) {
             ptr::null_mut()
         } else {
@@ -52,6 +94,7 @@ unsafe impl GlobalAlloc for Allocator {
         unsafe { System.dealloc(pointer, layout) };
     }
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, bytes: usize) -> *mut u8 {
+        count_allocation();
         if reject(bytes) {
             ptr::null_mut()
         } else {
@@ -492,6 +535,8 @@ static mut HOST: crate::abi::rptadv_host_services_v10 = crate::abi::rptadv_host_
     radio_quiesce: None,
     radio_remote_submit: None,
     radio_ready: None,
+    radio_feedback_bind: None,
+    peer_send_prepared_timed: None,
 };
 
 pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v10 {
@@ -560,6 +605,22 @@ pub fn control_descriptor() -> *const crate::abi::rptadv_control_descriptor_v1 {
 pub(crate) fn fail_next_allocation(bytes: usize) {
     assert_ne!(bytes, 0);
     assert_eq!(FAIL_BYTES.replace(bytes), 0);
+}
+
+/// Fail a selected fallible reservation without exposing a private allocation layout.
+pub(crate) fn fail_allocation_ordinal<T>(ordinal: usize, operation: impl FnOnce() -> T) -> T {
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            FAIL_ORDINAL.set(0);
+        }
+    }
+    assert_ne!(ordinal, 0);
+    assert_eq!(FAIL_ORDINAL.replace(ordinal), 0);
+    let _clear = Clear;
+    let result = operation();
+    assert_eq!(FAIL_ORDINAL.get(), 0, "selected allocation was not reached");
+    result
 }
 
 pub fn fail_allocation<T>(bytes: usize, operation: impl FnOnce() -> T) -> T {

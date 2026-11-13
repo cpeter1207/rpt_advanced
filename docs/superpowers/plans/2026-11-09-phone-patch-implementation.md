@@ -203,8 +203,9 @@ Operations preserve actual ingress and generation through dispatch and replies.
 
 ### Task 4: Native SIP/IAX provider sessions
 
-**Files:** add a focused phone transport module in `rust/standalone`; extend the
-existing released IAX provider for general account/registration only where needed;
+**Files:** keep the owned parser and shared provider prerequisites in
+`rust/peer-support`, with host composition in the existing standalone/Asterisk
+boundaries; extend the existing released IAX provider for general account/registration only where needed;
 reuse product codec, jitter, async-owner and egress interfaces; dependency manifests,
 test-only provider fixtures and transport ADR.
 
@@ -212,18 +213,25 @@ test-only provider fixtures and transport ADR.
 canonical source PCM to Task 3. Existing per-call ingress/egress own packet
 order, jitter, codec state, prepared packets and bounded deadlines.
 
-- [x] Resolve and build a disposable native dependency probe before selection:
-  candidate `rsipstack 0.8.2` signaling plus `sdp/rtp/rtcp/webrtc-srtp 0.17.3`
-  leaf crates. Inspect actual licenses/MSRV/transitives; preserve Rust 1.85 claims
-  until the graph proves them. Choose a supported compatible graph or a separately
-  verified toolchain/image prerequisite, never an untested manifest assumption.
+- [x] Historical only: resolve and build the disposable native dependency probe
+  for the former `rsipstack 0.8.2` signaling candidate and media leaf crates.
+  Preserve its recorded compatibility evidence below, not candidate selection or
+  production readiness. The current choice is owned in-house SIP signaling,
+  beginning with the bounded parser prerequisite; vendor repairs are out of scope.
 
-  Probe result: the Rust 1.85-compatible graph uses `rsipstack 0.8.2`,
-  `sdp 0.8.0`, `rtp/rtcp 0.13.0`, `webrtc-srtp 0.15.0` and
-  `webrtc-util 0.11.0`. Newer leaf crates failed native compilation and were
-  rejected. Independent SIPp scenarios prove the probe's outgoing setup,
-  digest registration, cancellation and rejection/cleanup; production provider
-  composition, incoming calls, media and security profiles remain pending.
+  Historical probe: `rsipstack 0.8.2`, `sdp 0.8.0`, `rtp/rtcp 0.13.0`,
+  `webrtc-srtp 0.15.0` and `webrtc-util 0.11.0` compiled in the earlier
+  compatibility probe. Newer leaf crates were rejected. SIPp scenarios covered
+  only the disposable probe, not production readiness. Current workspace builds
+  require Rust 1.88; the independent jitter-client wrapper retains Rust 1.85.
+  No Rust 1.91 upgrade or unverified 1.85 production-graph claim is made.
+- [x] Implement the experimental [owned bounded parser prerequisite](2026-11-12-bounded-sip-parser.md)
+  in shared `rptadv-peer-support`, with RFC-derived framing/header/URI tests,
+  independent torture fixtures and measured memory/allocation bounds. The
+  2026-11-12 selection rejects rsipstack's unbounded state, RVoIP's runtime/
+  resolver/toolchain ownership, and unmodified oSIP's allocation-failure cleanup.
+  No vendor patching or third-party signaling stack is selected. This leaf
+  alone does not supply a transaction engine or a usable SIP provider.
 - [ ] Write failing independent-provider REGISTER/digest, INVITE/ACK, answer,
   CANCEL/BYE, reject/timeout and resource-cleanup scenarios. Implement signaling
   outside callbacks, retaining separate transport/media/control boundaries.

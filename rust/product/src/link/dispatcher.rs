@@ -3,7 +3,7 @@
 use super::{regeneration::RegenerationProducer, ring::InboundProducer};
 use crate::Error;
 use rpt_advanced_core::config::ResolvedDtmfRegenerationSettings;
-use rpt_advanced_core::link::LinkDispatcher;
+use rpt_advanced_core::link::{LinkDispatcher, RetirementDomain};
 use rtrb::{Producer, RingBuffer};
 use std::{
     ffi::c_void,
@@ -170,6 +170,7 @@ impl Drop for PreparedDispatch {
 
 /// One node-lifetime OS thread; never performs codec, protocol, or network work.
 pub(crate) struct MediaWorker {
+    retirement: RetirementDomain,
     pending: Producer<Dispatch>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -235,10 +236,15 @@ impl MediaWorker {
                 while incoming.pop().is_ok() {}
             })?;
         Ok(Self {
+            retirement: RetirementDomain::default(),
             pending,
             stop,
             thread: Some(thread),
         })
+    }
+    /// Reuse this configured node's domain across all prepared mixer generations.
+    pub(crate) fn retirement_domain(&self) -> RetirementDomain {
+        self.retirement.clone()
     }
     /// Transfer prepared endpoints before generation publication; failure owns no registration.
     pub(crate) fn prepare(

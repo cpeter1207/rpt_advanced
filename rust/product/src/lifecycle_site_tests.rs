@@ -17,6 +17,13 @@ static BANK: Mutex<Bank> = Mutex::new(Bank {
     hold: 0,
     pending: None,
 });
+static FOLLOW_PANIC: Mutex<Option<(Weak<Engine>, Arc<std::sync::atomic::AtomicBool>)>> =
+    Mutex::new(None);
+static FATAL_BEFORE_RUN: Mutex<Option<Weak<Engine>>> = Mutex::new(None);
+static ADVANCE_AFTER_BASIS: Mutex<Option<Weak<Engine>>> = Mutex::new(None);
+static SNAPSHOT_UNAVAILABLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static SUBMISSIONS: AtomicUsize = AtomicUsize::new(0);
 static REJECT_AFTER: AtomicUsize = AtomicUsize::new(0);
 static CLOSE_AFTER: Mutex<Option<(usize, Weak<Engine>)>> = Mutex::new(None);
 
@@ -34,6 +41,9 @@ unsafe extern "C" fn snapshot(
     _: u32,
     result: *mut abi::UrpAstSiteSnapshot,
 ) -> i32 {
+    if SNAPSHOT_UNAVAILABLE.load(Ordering::Acquire) {
+        return -1;
+    }
     let mut bank = BANK.lock().unwrap();
     if bank.hold != 0 {
         bank.hold -= 1;
@@ -91,6 +101,7 @@ unsafe extern "C" fn publish(
 }
 
 unsafe extern "C" fn submit(context: *mut c_void, task: abi::rptadv_control_task_v1) -> i32 {
+    SUBMISSIONS.fetch_add(1, Ordering::AcqRel);
     if REJECT_AFTER.fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
         remaining.checked_sub(1)
     }) == Ok(1)
@@ -111,7 +122,35 @@ unsafe extern "C" fn submit(context: *mut c_void, task: abi::rptadv_control_task
             None
         }
     };
+    if let Some(engine) = FATAL_BEFORE_RUN
+        .lock()
+        .unwrap()
+        .take()
+        .and_then(|value| value.upgrade())
+    {
+        engine.reloading.store(true, Ordering::Release);
+        engine.reload_status.store(-3, Ordering::Release);
+    }
+    let interleave = ADVANCE_AFTER_BASIS.lock().unwrap().take();
     let result = unsafe { (*crate::fixture::control_descriptor()).submit.unwrap()(context, task) };
+    if let Some(engine) = interleave.and_then(|engine| engine.upgrade()) {
+        engine
+            .reload_configuration(
+                document("[1000]\nradio_channel=usb\nduplex=full\ntransmit_hang_ms=77\n").unwrap(),
+            )
+            .unwrap();
+    }
+
+    let follower = FOLLOW_PANIC.lock().unwrap().take();
+    if let Some((engine, executed)) = follower {
+        if let Some(engine) = engine.upgrade() {
+            let _ = engine.run_inner(true, move |_| {
+                executed.store(true, Ordering::Release);
+                Ok(())
+            });
+        }
+    }
+
     if let Some(engine) = close {
         engine.accepting.store(false, Ordering::Release);
     }
@@ -226,7 +265,11 @@ fn site_reload_publication_survives_concurrent_admission_close() {
     let before = engine.revision.load(Ordering::Acquire);
     // Basis, begin, barrier and publication are separate serialized tasks.
     *CLOSE_AFTER.lock().unwrap() = Some((4, Arc::downgrade(&engine)));
-    assert_eq!(engine.reload_configuration(candidate), Ok(()));
+    assert_eq!(
+        engine.reload_configuration(candidate),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -2);
     assert!(!engine.accepting.load(Ordering::Acquire));
     assert_eq!(engine.revision.load(Ordering::Acquire), before + 1);
     assert_eq!(rptadv_product_stop(), 0);
@@ -262,5 +305,511 @@ fn rejected_final_host_stop_retains_host_after_site_cleanup() {
     REJECT_AFTER.store(2, Ordering::Release);
     assert!(!engine.stop());
     assert!(engine.host.lock().unwrap().is_some());
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_terminal_cleanup_failure_preserves_published_candidate_and_diagnosis() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    let next = "[1000]\nradio_channel=usb\nduplex=full\nhangtime_ms=123\n";
+    let before = engine.run(|host| Ok(host.runtime.revision())).unwrap();
+    // Basis, begin, barrier, publish, then rejected retirement collection.
+    REJECT_AFTER.store(5, Ordering::Release);
+    assert_eq!(
+        engine.reload_configuration(document(next).unwrap()),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -2);
+    assert_eq!(
+        engine.run(|host| Ok(host.runtime.revision())).unwrap(),
+        before + 1
+    );
+    assert_eq!(unsafe { rptadv_product_reload_poll() }, -2);
+    assert_eq!(unsafe { rptadv_product_reload_poll() }, -2);
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_terminal_unconfirmed_control_reply_is_fatal_and_keeps_admission_closed() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    REJECT_AFTER.store(4, Ordering::Release);
+    assert!(
+        engine
+            .reload_configuration(
+                document("[1000]\nradio_channel=usb\nduplex=full\nhangtime_ms=123\n").unwrap()
+            )
+            .is_err()
+    );
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
+    assert!(engine.reloading.load(Ordering::Acquire));
+    assert_eq!(engine.run(|_| Ok(())), Err(RuntimeError::Rejected));
+    assert_eq!(unsafe { rptadv_product_reload_poll() }, -3);
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_rejected_parse_latches_the_new_terminal_status() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    engine.reload_status.store(-2, Ordering::Release);
+    assert_eq!(unsafe { rptadv_product_reload(std::ptr::null(), 1) }, -1);
+    assert_eq!(unsafe { rptadv_product_reload_poll() }, -1);
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_early_mutating_handoff_uncertainty_never_claims_rejection() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    REJECT_AFTER.store(2, Ordering::Release);
+    assert!(
+        engine
+            .reload_configuration(
+                document("[1000]\nradio_channel=usb\nduplex=full\nhangtime_ms=123\n").unwrap()
+            )
+            .is_err()
+    );
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
+    assert!(engine.reloading.load(Ordering::Acquire));
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_fatal_cleanup_never_resumes_or_reopens_admission() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    engine.reload_status.store(-1, Ordering::Release);
+    engine.reloading.store(true, Ordering::Release);
+    let before = SUBMISSIONS.load(Ordering::Acquire);
+    REJECT_AFTER.store(1, Ordering::Release);
+    assert!(
+        engine
+            .finish_reload(Err(RuntimeError::Preparation))
+            .is_err()
+    );
+    assert_eq!(SUBMISSIONS.load(Ordering::Acquire), before + 1);
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
+    assert!(engine.reloading.load(Ordering::Acquire));
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_fatal_ticker_turn_does_not_pump_retained_candidate() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    engine.reloading.store(true, Ordering::Release);
+    engine.reload_status.store(-3, Ordering::Release);
+    let before = SUBMISSIONS.load(Ordering::Acquire);
+    let turns = TICKER_TURNS.load(Ordering::Acquire);
+    SKIP_TICKER_THREAD.store(false, Ordering::Release);
+    engine.start_ticker().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while TICKER_TURNS.load(Ordering::Acquire) == turns {
+        assert!(Instant::now() < deadline, "ticker did not execute its turn");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let submissions = SUBMISSIONS.load(Ordering::Acquire);
+    assert_eq!(rptadv_product_stop(), 0);
+    assert_eq!(
+        submissions, before,
+        "fatal ticker must not service retained runtime state"
+    );
+}
+
+#[test]
+fn reload_queued_operation_checks_fatal_fence_before_execution() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let target = Arc::clone(&executed);
+    // Inject the fatal disposition after enqueue but before the real executor
+    // invokes the task callback, not before run_inner captures its admission.
+    *FATAL_BEFORE_RUN.lock().unwrap() = Some(Arc::downgrade(&engine));
+    let result = engine.run_inner(true, move |_| {
+        target.store(true, Ordering::Release);
+        Ok(())
+    });
+    let shutdown = rptadv_product_stop();
+    assert_eq!(result, Err(RuntimeError::Rejected));
+    assert!(!executed.load(Ordering::Acquire));
+    assert_eq!(shutdown, 0, "dedicated site shutdown remains admissible");
+}
+
+#[test]
+fn reload_panicking_mutation_fences_executor_before_waiter_observes_reply() {
+    assert_panic_fences_executor(false);
+}
+
+#[test]
+fn reload_panicking_mutation_cleanup_fences_executor_before_waiter_observes_reply() {
+    assert_panic_fences_executor(true);
+}
+
+fn assert_panic_fences_executor(cleanup: bool) {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    {
+        let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+        engine.reloading.store(true, Ordering::Release);
+        engine.reload_status.store(1, Ordering::Release);
+        let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *FOLLOW_PANIC.lock().unwrap() = Some((Arc::downgrade(&engine), Arc::clone(&executed)));
+        // The fixture dispatches a follower before submit returns, so the waiting
+        // caller cannot latch a fatal disposition in time to protect it.
+        let result: Result<(), RuntimeError> = if cleanup {
+            engine.site_control(|_| panic!("injected mutating cleanup panic"))
+        } else {
+            engine.run_inner(true, |_| panic!("injected reload mutation panic"))
+        };
+        let status = engine.reload_status.load(Ordering::Acquire);
+        let stopped = rptadv_product_stop();
+        assert!(result.is_err());
+        assert!(
+            !executed.load(Ordering::Acquire),
+            "queued follower ran after mutation panic"
+        );
+        assert_eq!(status, -3);
+        assert_eq!(stopped, 0);
+    }
+}
+
+#[test]
+fn reload_barrier_panic_remains_fatal_through_caller_classification() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    PANIC_CONTROL_AFTER.store(3, Ordering::Release);
+    let result = engine.reload_configuration(
+        document("[1000]\nradio_channel=usb\nduplex=full\nhangtime_ms=123\n").unwrap(),
+    );
+    let status = engine.reload_status.load(Ordering::Acquire);
+    let fenced = engine.reloading.load(Ordering::Acquire);
+    let stopped = rptadv_product_stop();
+    assert!(result.is_err());
+    assert_eq!(status, -3);
+    assert!(fenced);
+    assert_eq!(stopped, 0);
+}
+
+#[test]
+fn reload_finish_panic_remains_fatal_after_committed_cleanup() {
+    assert_finish_panic_is_fatal(1);
+}
+#[test]
+fn reload_finish_panic_remains_fatal_after_committed_resume() {
+    assert_finish_panic_is_fatal(2);
+}
+#[test]
+fn reload_finish_panic_remains_fatal_after_committed_notification() {
+    assert_finish_panic_is_fatal(3);
+}
+fn assert_finish_panic_is_fatal(turn: u64) {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    engine.reloading.store(true, Ordering::Release);
+    engine.reload_status.store(0, Ordering::Release);
+    let before = SUBMISSIONS.load(Ordering::Acquire);
+    PANIC_CONTROL_AFTER.store(turn, Ordering::Release);
+    let result = engine.finish_reload(Ok(()));
+    let submitted = SUBMISSIONS.load(Ordering::Acquire) - before;
+    let status = engine.reload_status.load(Ordering::Acquire);
+    let fenced = engine.reloading.load(Ordering::Acquire);
+    let stopped = rptadv_product_stop();
+    assert!(result.is_err());
+    assert_eq!(status, -3);
+    assert!(fenced);
+    assert_eq!(
+        submitted, turn as usize,
+        "no continuation after fatal mutation"
+    );
+    assert_eq!(stopped, 0);
+}
+
+#[test]
+fn reload_final_clear_race_keeps_authoritative_fatal_admission_closed() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    engine.reloading.store(true, Ordering::Release);
+    engine.reload_status.store(0, Ordering::Release);
+    FATAL_BEFORE_FINISH_CLEAR.store(true, Ordering::Release);
+    let _ = engine.finish_reload(Ok(()));
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
+    let admitted = engine.enter().is_ok();
+    let current = engine.current(engine.revision.load(Ordering::Acquire));
+    let before = SUBMISSIONS.load(Ordering::Acquire);
+    let turns = TICKER_TURNS.load(Ordering::Acquire);
+    SKIP_TICKER_THREAD.store(false, Ordering::Release);
+    engine.start_ticker().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while TICKER_TURNS.load(Ordering::Acquire) == turns {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let submissions = SUBMISSIONS.load(Ordering::Acquire);
+    let stopped = rptadv_product_stop();
+    assert!(
+        !admitted,
+        "stale boolean must not reopen external admission"
+    );
+    assert!(!current, "fatal epoch must never be current");
+    assert_eq!(
+        submissions, before,
+        "fatal ticker must not schedule ordinary work"
+    );
+    assert_eq!(stopped, 0);
+}
+
+#[test]
+fn reload_stale_site_basis_rejects_without_replaying_the_newer_document() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    *ADVANCE_AFTER_BASIS.lock().unwrap() = Some(Arc::downgrade(&engine));
+    let result = engine.reload_configuration(
+        document("[1000]\nradio_channel=usb\nduplex=full\ntransmit_hang_ms=123\n").unwrap(),
+    );
+    assert_eq!(result, Err(RuntimeError::Rejected));
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -1);
+    assert!(!engine.reload_fenced());
+    assert_eq!(
+        engine.run(|host| Ok(host.runtime.settings("1000").unwrap().hang_ms)),
+        Ok(77)
+    );
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_finish_preserves_prior_error_when_resume_fails() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    engine.reloading.store(true, Ordering::Release);
+    engine.record_reload_status(-1);
+    REJECT_AFTER.store(2, Ordering::Release);
+    assert_eq!(
+        engine.finish_reload(Err(RuntimeError::Device)),
+        Err(RuntimeError::Device)
+    );
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
+    assert!(engine.reload_fenced());
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[test]
+fn reload_finish_reports_operational_error_after_confirmed_publication() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    engine.reloading.store(true, Ordering::Release);
+    engine.record_reload_status(0);
+    assert_eq!(
+        engine.finish_reload(Err(RuntimeError::Preparation)),
+        Err(RuntimeError::Preparation)
+    );
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -2);
+    assert!(!engine.reload_fenced());
+    assert_eq!(rptadv_product_stop(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn reload_abi_failed_stderr_retains_fatal_owner_until_cleanup() {
+    use std::{
+        fs::OpenOptions,
+        io::Write,
+        process::{Command, Stdio},
+    };
+    const CHILD: &str = "RPTADV_RELOAD_STDERR_CHILD";
+    const TEST: &str =
+        "lifecycle::site::tests::reload_abi_failed_stderr_retains_fatal_owner_until_cleanup";
+    if let Ok(phase) = std::env::var(CHILD) {
+        let _serial = crate::fixture::LIFECYCLE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        static READY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+        unsafe extern "C" fn ready(_: *mut std::ffi::c_void, _: *mut std::ffi::c_void) -> i32 {
+            let status = READY.load(Ordering::Acquire);
+            if status < 0 {
+                READY.store(0, Ordering::Release);
+            }
+            status
+        }
+        let source = "[1000]\nradio_channel=old\nduplex=full\n";
+        let engine = if phase == "poll" {
+            // Use the existing real deferred activation/rollback fixture contract.
+            let mut table = unsafe { crate::fixture::host_descriptor().read() };
+            table.radio_ready = Some(ready);
+            SKIP_TICKER_THREAD.store(true, Ordering::Release);
+            assert_eq!(
+                unsafe {
+                    rptadv_product_start(
+                        Box::leak(Box::new(table)),
+                        crate::fixture::control_descriptor(),
+                        rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                        rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                        source.as_ptr().cast(),
+                        source.len(),
+                    )
+                },
+                0
+            );
+            let (engine, call) = selected().unwrap();
+            drop(call);
+            engine
+        } else {
+            start(source)
+        };
+        let revision = engine.run(|host| Ok(host.runtime.revision())).unwrap();
+        assert_eq!(engine.reload_status.load(Ordering::Acquire), 0);
+        if phase == "poll" {
+            let candidate = source.replace("old", "new");
+            READY.store(1, Ordering::Release);
+            assert_eq!(
+                unsafe { rptadv_product_reload(candidate.as_ptr().cast(), candidate.len()) },
+                1
+            );
+            assert_eq!(engine.reload_status.load(Ordering::Acquire), 1);
+            // Fail one activation, then allow the existing owner to restore safely.
+            READY.store(-123, Ordering::Release);
+            // Invoke once: an uncontained diagnostic panic aborts this child.
+            assert_eq!(unsafe { rptadv_product_reload_poll() }, -3);
+        } else {
+            assert_eq!(phase, "reload");
+            let malformed = b"[general\n";
+            assert_eq!(
+                unsafe { rptadv_product_reload(malformed.as_ptr().cast(), malformed.len()) },
+                -3
+            );
+        }
+        assert_eq!(engine.reload_status.load(Ordering::Acquire), -3);
+        assert!(engine.reloading.load(Ordering::Acquire));
+        assert_eq!(engine.run(|_| Ok(())), Err(RuntimeError::Rejected));
+        let retained = engine.host.lock().unwrap();
+        let host = retained.as_ref().unwrap();
+        assert_eq!(host.runtime.revision(), revision);
+        assert_eq!(host.runtime.settings("1000").unwrap().channel, "old");
+        drop(retained);
+        let drops = crate::fixture::RADIO_DROPS.load(Ordering::Acquire);
+        assert_eq!(rptadv_product_stop(), 0);
+        assert!(engine.host.lock().unwrap().is_none());
+        assert_eq!(
+            crate::fixture::RADIO_DROPS.load(Ordering::Acquire),
+            drops + 1
+        );
+        return;
+    }
+    for phase in ["reload", "poll"] {
+        let mut stderr = OpenOptions::new().write(true).open("/dev/full").unwrap();
+        assert_eq!(
+            stderr.write_all(b"probe").unwrap_err().raw_os_error(),
+            Some(libc::ENOSPC)
+        );
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env(CHILD, phase)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(stderr);
+        // Preserve each normally exiting child's counters beside the parent profiles.
+        let profile = std::env::var_os("CARGO_LLVM_COV").map(|_| {
+            let template = std::env::var_os("LLVM_PROFILE_FILE").unwrap();
+            let directory = std::path::Path::new(&template).parent().unwrap().to_owned();
+            let prefix = format!("reload-stderr-{}-{phase}-", std::process::id());
+            command.env(
+                "LLVM_PROFILE_FILE",
+                directory.join(format!("{prefix}%p.profraw")),
+            );
+            (directory, prefix)
+        });
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("{phase} ABI stderr child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{phase} ABI stderr child: {}\n{stdout}",
+            output.status
+        );
+        assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+        if let Some((directory, prefix)) = profile {
+            assert!(
+                std::fs::metadata(directory.join(format!("{prefix}{pid}.profraw")))
+                    .unwrap()
+                    .len()
+                    > 0
+            );
+        }
+    }
+}
+
+#[test]
+fn reload_abi_without_engine_is_fatal_not_safe_rejection() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(rptadv_product_stop(), 0);
+    assert_eq!(unsafe { rptadv_product_reload(std::ptr::null(), 0) }, -3);
+    assert_eq!(unsafe { rptadv_product_reload_poll() }, -3);
+}
+
+#[test]
+fn reload_known_site_device_failure_is_rejected_without_retiring_configuration() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let engine = start(
+        "[1000]\nradio_channel=usb\nduplex=full\n[output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=7\nstartup_state=on\nsafe_state=off\n",
+    );
+    let revision = engine.run(|host| Ok(host.runtime.revision())).unwrap();
+    engine
+        .run(|host| {
+            host.poll_sites(0);
+            host.poll_sites(1);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(BANK.lock().unwrap().high, 0x40);
+    SNAPSHOT_UNAVAILABLE.store(true, Ordering::Release);
+    let result =
+        engine.reload_configuration(document("[1000]\nradio_channel=usb\nduplex=full\n").unwrap());
+    SNAPSHOT_UNAVAILABLE.store(false, Ordering::Release);
+    assert_eq!(result, Err(RuntimeError::Device));
+    assert_eq!(engine.reload_status.load(Ordering::Acquire), -1);
+    assert_eq!(engine.run(|host| Ok(host.runtime.revision())), Ok(revision));
     assert_eq!(rptadv_product_stop(), 0);
 }

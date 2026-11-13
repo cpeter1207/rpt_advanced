@@ -28,6 +28,8 @@ pub mod worker;
 
 #[cfg(test)]
 mod fixture;
+#[cfg(test)]
+mod resource_tests;
 
 #[cfg(all(test, unix))]
 mod civil_time_tests;

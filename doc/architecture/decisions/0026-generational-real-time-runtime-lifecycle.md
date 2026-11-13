@@ -326,3 +326,60 @@ missing receive input cannot keep PTT asserted indefinitely. They
 must prove that no radio-port-audio-engine path can take a compatibility ingress mutex, wait for
 the station-control event dispatcher, access a reclaimed generation, or write directly
 to a link egress queue.
+
+
+### Prepared host retirement boundary
+
+The core retains its existing reload transaction but exposes preparation separately
+from polling. Ordinary reload callers retain their previous wrapper behavior.
+A host pre-publication action runs exactly once, only after all device readiness
+and finalization succeeds and before the first replacement node is published.
+Rejected preparation never invokes it. A finalization contract failure remains a
+distinct fatal restoration failure with affected devices safely stopped, not a
+claim that the old coherent configuration survived.
+
+The product uses this boundary to revoke private calls and their source-owned
+grants on accepted reloads. Replacement text queues and their existing two-worker
+pair are started before touching the active runtime. At most one candidate pair
+overlaps the current pair while preparation or physical activation is pending;
+abort joins only the candidate, and commit joins the previous pair. This bounded
+overlap avoids destroying the current executor before a fallible thread spawn.
+No second runtime or persistent worker pool is added.
+
+This phase does not complete the outer product/provider transaction. Site
+ownership commitment and post-publication operational error reporting still
+require explicit integration before phone-account activation.
+
+### Sealed site handoff
+
+The site barrier seals acknowledged acquisition preparation and radio pin release
+before core reload preparation. Acquisition commit storage is reserved at that
+barrier. Existing replacement state retains the seal until abort or the shared
+prepublication hook, after every device finalization succeeds. That hook retires
+phone calls first, then adopts site bindings, and only then permits node
+publication, without a fallible site readiness check.
+
+A sealed radio barrier records completed safe release, not continuing hardware
+health. Subsequent snapshots still report unavailable or stale hardware, but
+cannot rebind released pins or revoke that completed handoff. Unchanged banks
+continue normal observations and service. Rejected core preparation aborts the
+sealed candidate and restores old demand using existing owners. This does not
+resolve outer post-publication notification, cleanup, or host outcome reporting.
+
+### Explicit publication outcome cohort
+
+Product ABI8 (`rptadv.prod8`, `librptadv_product.so.3`) distinguishes committed
+(0), pending (1), confirmed rejected (-1), committed with operational error (-2),
+and fatal/indeterminate (-3). Unknown statuses are fatal and retain the original
+status for diagnosis. Both hosts reject ABI7 before startup; there is no legacy
+fallback. A failed preparation does not require replaying the old document.
+
+Terminal publication survives ordinary control-pump completion and subsequent
+polling. Fatal device restoration, caught panic, or an unconfirmed control reply
+must not assert that the old runtime was coherently restored. Site cleanup,
+resumption, notification, account activation, and retirement failures remain
+observable independently of publication. Committed errors adopt candidate host
+configuration; fatal outcomes fence admission and retain owners through shutdown.
+The reserved IAX batch is still a separate integration step: both committed
+outcomes require commit, while fatal shutdown may abort only an uncommitted
+reservation without retiring old listener/account ownership or reopening service.

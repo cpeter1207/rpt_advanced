@@ -1,6 +1,12 @@
 //! Retained provider catalog and generated ABI boundary to standalone IAX2.
 
+/// General provider account operations, separate from numeric ASL identities.
+pub mod accounts;
+/// Reserved whole-listener transactions from released alpha12.
+pub mod configuration;
 pub(crate) mod executor;
+pub(crate) mod listeners;
+pub(crate) mod timed;
 
 use crate::{abi, secrets::SecretsFile};
 use std::{
@@ -270,15 +276,7 @@ impl IaxServer {
         address: SocketAddr,
         local_nodes: &[String],
     ) -> Result<Self, IaxError> {
-        let library = client.0.library.as_ref().ok_or(IaxError::MissingSymbol)?;
-        let descriptor = unsafe {
-            let symbol: libloading::Symbol<unsafe extern "C" fn() -> *const ServerDescriptor> =
-                library
-                    .get(b"rptadv_iax2_server_descriptor_v2\0")
-                    .map_err(|_| IaxError::MissingSymbol)?;
-            symbol()
-        };
-        let api = checked_server_descriptor(descriptor)?;
+        let api = load_server_descriptor(client)?;
         let address = address.to_string();
         let nodes = local_nodes.join(",");
         let handle = server_handle(&api, client.0.catalog.as_ptr(), &address, &nodes)?;
@@ -339,6 +337,18 @@ impl Drop for IaxServer {
     }
 }
 
+/// Borrow and validate the listener table while its retained client keeps code loaded.
+fn load_server_descriptor(client: &IaxClient) -> Result<ServerDescriptor, IaxError> {
+    let library = client.0.library.as_ref().ok_or(IaxError::MissingSymbol)?;
+    let descriptor = unsafe {
+        let symbol: libloading::Symbol<unsafe extern "C" fn() -> *const ServerDescriptor> = library
+            .get(b"rptadv_iax2_server_descriptor_v2\0")
+            .map_err(|_| IaxError::MissingSymbol)?;
+        symbol()
+    };
+    checked_server_descriptor(descriptor)
+}
+
 fn valid_server_descriptor(pointer: *const ServerDescriptor) -> bool {
     if pointer.is_null() {
         return false;
@@ -383,6 +393,8 @@ fn server_handle(
         local_nodes: nodes.as_ptr(),
         local_nodes_length: nodes.len(),
         catalog,
+        accounts: std::ptr::null(),
+        account_count: 0,
     };
     let mut handle = std::ptr::null_mut();
     if unsafe { api.bind.unwrap()(&options, &mut handle) } != 0 {
@@ -648,6 +660,15 @@ pub(crate) mod tests {
         }
     }
 
+    /// External table fixture for actual host ownership/source callbacks.
+    pub(crate) fn host_fixture_peer(api: ClientDescriptor) -> IaxPeer {
+        IaxPeer {
+            _owner: fixture_client(api),
+            api,
+            handle: NonNull::dangling(),
+        }
+    }
+
     thread_local! {
         static EVENT: Cell<u32> = const { Cell::new(0) };
         static EVENT_LENGTH: Cell<usize> = const { Cell::new(1) };
@@ -753,9 +774,14 @@ pub(crate) mod tests {
         0
     }
     unsafe extern "C" fn successful_server_bind(
-        _: *const ServerOptions,
+        options: *const ServerOptions,
         output: *mut *mut c_void,
     ) -> i32 {
+        // SAFETY: server_handle lends its complete options for this call.
+        let options = unsafe { &*options };
+        assert_eq!(options.struct_size as usize, size_of::<ServerOptions>());
+        assert!(options.accounts.is_null());
+        assert_eq!(options.account_count, 0);
         unsafe { output.write(std::ptr::dangling_mut::<c_void>()) };
         0
     }
@@ -776,7 +802,7 @@ pub(crate) mod tests {
     }
     unsafe extern "C" fn server_destroy(_: *mut c_void) {}
 
-    fn descriptor() -> ClientDescriptor {
+    pub(crate) fn descriptor() -> ClientDescriptor {
         ClientDescriptor {
             struct_size: size_of::<ClientDescriptor>() as u32,
             abi_version: ABI_VERSION,
@@ -794,6 +820,10 @@ pub(crate) mod tests {
             reset_encoder: Some(hangup),
             send_prepared_audio: Some(send_prepared),
             elapsed_ms: Some(elapsed),
+            dial_account: None,
+            poll_timed: None,
+            send_prepared_audio_timed: None,
+            retire_egress: None,
         }
     }
 
@@ -806,7 +836,7 @@ pub(crate) mod tests {
         0
     }
     unsafe extern "C" fn test_close_catalog(_: *mut c_void) {}
-    fn fixture_client(api: ClientDescriptor) -> IaxClient {
+    pub(super) fn fixture_client(api: ClientDescriptor) -> IaxClient {
         IaxClient(Arc::new(IaxOwner {
             library: None,
             api,
@@ -928,7 +958,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn server_descriptor() -> ServerDescriptor {
+    pub(super) fn server_descriptor() -> ServerDescriptor {
         ServerDescriptor {
             struct_size: size_of::<ServerDescriptor>() as u32,
             abi_version: ABI_VERSION,
@@ -937,6 +967,13 @@ pub(crate) mod tests {
             poll: Some(server_poll),
             set_local_nodes: Some(server_set_nodes),
             destroy: Some(server_destroy),
+            configure_accounts: None,
+            register_account: None,
+            poll_accounts: None,
+            dial_provider_account: None,
+            prepare_configuration_batch: None,
+            commit_configuration_batch: None,
+            destroy_configuration_batch: None,
         }
     }
 

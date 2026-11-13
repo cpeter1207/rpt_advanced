@@ -27,12 +27,12 @@
   },
   {
     "repository": "librptadviax2",
-    "sha": "c9a6b67b7cba73d39916b68fa7da2a718f274f75",
+    "sha": "ce9fe2da0d8480c1503f5eb80c3c95d8ac2e5360",
     "packages": ["librptadv-iax2-client2", "librptadv-iax2-client-dev"]
   },
   {
     "repository": "rptadv-portaudio-alsa-adapter",
-    "sha": "af2fc704e316fd2d58b52de146b8a97d1a2a302d",
+    "sha": "cc63a779d9619c9b3c1f9096d33f81cad4ea720d",
     "packages": [
       "librptadv-portaudio-alsa-adapter2",
       "librptadv-portaudio-alsa-adapter-dev"
@@ -50,7 +50,7 @@
   },
   {
     "repository": "rate_adjusting_pcm_ring",
-    "sha": "c8f32d5eb98f20f1be67230a43a76966ef8aa930",
+    "sha": "360e7312a4a367418ddac04bd81b8996d8a0ae80",
     "packages": ["librate-adjusting-pcm-ring3", "librate-adjusting-pcm-ring3-dev"]
   },
   {

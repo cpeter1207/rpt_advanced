@@ -1,5 +1,6 @@
 //! Exercise each host's actual account visitor, stable context and outbound dispatch.
 use super::*;
+use rptadv_peer_support::reload::ReloadOutcome;
 
 unsafe extern "C" fn inspect_accounts(
     configuration: *const c_char,
@@ -170,8 +171,12 @@ pub fn check(mut host: HostServicesOwner) {
         )
     };
     assert!(
-        unsafe { host.reload_echo(&product, "inspection-failure", failed, || true, || true) }
-            .is_err()
+        unsafe {
+            host.reload_echo(&product, "inspection-failure", failed, || {
+                ReloadOutcome::Committed
+            })
+        }
+        .is_err()
     );
     unsafe extern "C" fn current(context: *mut c_void) -> u32 {
         if context.is_null() {
@@ -255,7 +260,9 @@ pub fn check(mut host: HostServicesOwner) {
             )
         };
         let outcome = unsafe {
-            host.reload_echo(&product, configuration_text, preparation, || true, || true)
+            host.reload_echo(&product, configuration_text, preparation, || {
+                ReloadOutcome::Committed
+            })
         }
         .unwrap();
         assert!(outcome.retirement.is_none());

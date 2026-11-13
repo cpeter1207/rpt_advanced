@@ -149,6 +149,8 @@ struct ReservedRadio {
     radio: Option<Radio>,
     name: CString,
     metadata: ffi::rptadv_radio_metadata_v1,
+    feedback: Option<ffi::UrpRadioFeedbackPort>,
+    callbacks_bound: bool,
 }
 unsafe extern "C" fn radio_open(
     _context: *mut c_void,
@@ -181,6 +183,8 @@ unsafe extern "C" fn radio_open(
                     radio: Some(radio),
                     name: channel,
                     metadata: None,
+                    feedback: None,
+                    callbacks_bound: false,
                 }))
                 .cast();
                 0
@@ -202,15 +206,38 @@ unsafe extern "C" fn radio_control(
         }
         // SAFETY: this control ABI supplies a readable size/version prefix.
         let header = unsafe { request.cast::<[u32; 2]>().read_unaligned() };
-        if header[0] as usize != size_of::<ffi::rptadv_radio_control_v1>() || header[1] != 1 {
+        if (header[0] as usize) < size_of::<ffi::rptadv_radio_control_v1>() || header[1] != 1 {
             return -1;
         }
+        let pointer = request;
         let (reserved,request)=
             // SAFETY: the caller retains the complete writable request and unique radio.
             unsafe {(radio.cast::<ReservedRadio>().as_mut(),request.as_mut())};
         let (Some(reserved), Some(request)) = (reserved, request) else {
             return -1;
         };
+        if request.operation == 8 {
+            if (header[0] as usize) < size_of::<ffi::rptadv_radio_programme_control_v1>() {
+                return -1;
+            }
+            // SAFETY: the complete writable extension was validated before borrowing it.
+            let retirement = unsafe {
+                &mut (*pointer.cast::<ffi::rptadv_radio_programme_control_v1>()).retirement
+            };
+            retirement.accepted_abi_version = 0;
+            retirement.result = -7;
+            if retirement.struct_size as usize != size_of_val(retirement)
+                || retirement.abi_version != ffi::URP_AST_PROGRAMME_RETIRE_OPTION_ABI_VERSION
+                || retirement.expected_radio_generation == 0
+                || retirement.request_id == 0
+            {
+                return -1;
+            }
+            return reserved
+                .radio
+                .as_mut()
+                .map_or(-7, |radio| radio.retire_programme(retirement));
+        }
         if request.operation != 7 {
             return -7;
         }
@@ -240,12 +267,21 @@ unsafe extern "C" fn radio_activate(
         let Some(reserved) = (unsafe { radio.cast::<ReservedRadio>().as_mut() }) else {
             return -1;
         };
+        if reserved.callbacks_bound {
+            return -1;
+        }
         let Some(radio) = reserved.radio.as_mut() else {
             return -1;
         };
         if receive.is_none() || transmit.is_none() {
             drop(reserved.radio.take());
             return -1;
+        }
+        reserved.callbacks_bound = true;
+        if let Some(port) = reserved.feedback {
+            if radio.bind_feedback(port) != 0 {
+                return -1;
+            }
         }
         let mut direct = ffi::UrpAstDirectCallbacks {
             struct_size: size_of::<ffi::UrpAstDirectCallbacks>() as u32,
@@ -281,6 +317,31 @@ unsafe extern "C" fn radio_metadata_bind(
             return -1;
         }
         reserved.metadata = metadata;
+        0
+    })
+}
+unsafe extern "C" fn radio_feedback_bind(
+    _: *mut c_void,
+    radio: *mut c_void,
+    port: *const ffi::UrpRadioFeedbackPort,
+) -> i32 {
+    boundary(-1, || {
+        // SAFETY: serialized control retains this unique reservation.
+        let Some(reserved) = (unsafe { radio.cast::<ReservedRadio>().as_mut() }) else {
+            return -1;
+        };
+        if reserved.callbacks_bound
+            || reserved.radio.is_none()
+            || port.is_null()
+            || (unsafe { ptr::addr_of!((*port).struct_size).read() } as usize)
+                < size_of::<ffi::UrpRadioFeedbackPort>()
+            || unsafe { ptr::addr_of!((*port).abi_version).read() } != 1
+        {
+            return -1;
+        }
+        // SAFETY: the complete sized port is readable; only its value is retained.
+        let port = unsafe { port.read() };
+        reserved.feedback = port.publish.map(|_| port);
         0
     })
 }
@@ -853,14 +914,28 @@ unsafe extern "C" fn peer_read_source(
             return -1;
         };
         let output = unsafe { &mut *output };
-        let sink = unsafe { sink.as_ref() };
-        if sink.is_some_and(|sink| {
-            sink.struct_size < size_of::<ffi::rptadv_peer_source_sink_v1>() as u32
-                || sink.abi_version != 1
-        }) {
-            return -1;
-        }
-        let sink = sink.map(|sink| echo::PcmSink {
+        // Copy only the old controller's readable source-sink prefix. This
+        // provider does not use or qualify the optional original-age tail.
+        let sink = if sink.is_null() {
+            None
+        } else {
+            let prefix = std::mem::offset_of!(ffi::rptadv_peer_source_sink_v1, host_clock_epoch);
+            if unsafe { ptr::addr_of!((*sink).struct_size).read() } < prefix as u32
+                || unsafe { ptr::addr_of!((*sink).abi_version).read() } != 1
+            {
+                return -1;
+            }
+            let mut copied: ffi::rptadv_peer_source_sink_v1 = unsafe { std::mem::zeroed() };
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    sink.cast::<u8>(),
+                    ptr::from_mut(&mut copied).cast(),
+                    prefix,
+                );
+            }
+            Some(copied)
+        };
+        let sink = sink.as_ref().map(|sink| echo::PcmSink {
             struct_size: size_of::<echo::PcmSink>() as u32,
             abi_version: 1,
             context: sink.context,
@@ -1037,15 +1112,13 @@ impl HostServicesOwner {
         product: &ffi::rptadv_product_descriptor_v1,
         configuration: &str,
         preparation: Preparation<'_>,
-        apply: impl FnOnce() -> bool,
-        restore: impl FnOnce() -> bool,
+        apply: impl FnOnce() -> rptadv_peer_support::reload::ReloadOutcome,
     ) -> Result<UpdateOutcome, UpdateError> {
         let (accounts, outcome) = unsafe {
             preparation.reload(
                 self.context.echo_accounts(),
                 |visit| visit_accounts(product, configuration, visit),
                 apply,
-                restore,
             )
         }?;
         *self
@@ -1213,6 +1286,8 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v10 {
     radio_service: Some(radio_service),
     radio_quiesce: Some(radio_quiesce),
     radio_ready: Some(radio_ready),
+    radio_feedback_bind: Some(radio_feedback_bind),
+    peer_send_prepared_timed: None,
     radio_remote_submit: Some(radio_remote_submit),
 });
 

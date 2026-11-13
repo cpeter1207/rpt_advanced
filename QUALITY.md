@@ -125,3 +125,25 @@ between tested components and the remaining module, container, release, and
 documentation-publication work. Version-tag releases invoke the reusable release
 workflow, which verifies release images and artifacts without repeating the
 complete pull-request gate before publishing the source archive and checksum.
+
+## Performance and memory observations
+
+The reusable full PR gate produces performance/memory Markdown and JSON
+artifacts for the unchanged native platform, package and coverage commands.
+Its summaries rank existing Rust-suite durations and sampled process memory;
+build/fixture cost is explicitly separate from production audio throughput.
+See the workflow repository's automated performance and memory reporting guide.
+
+Set `RPTADV_RESOURCE_SNAPSHOT_DIR` to an artifact directory to collect test-only
+lifecycle observations from `egress_admission_above_1024` and the existing
+opt-in `egress_full_path_load` experiment. The workflow reporter sets it
+automatically. Each emits baseline, admission/measurement, stopped and
+fixture-dropped RSS/thread/glibc aggregate snapshots without trimming or changing
+the allocator. Run serially for meaningful attribution. The unchanged 2000-peer,
+48 kHz admission regression is not a 2000-active-audio-stream benchmark.
+`tests/peer_egress_load.py` remains the opt-in real loopback throughput/latency
+experiment and retains its original JSON and workload controls.
+
+Retained RSS alone does not diagnose a leak. Compare arena-in-use, arena-free
+retained and mmap totals after teardown, and preserve exact source/dependency,
+build/coverage, architecture, CPU/memory-limit and allocator identities.

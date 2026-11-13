@@ -12,6 +12,21 @@ struct Collected {
     diagnostics: Vec<String>,
     radios: Vec<CapturedRadio>,
     echoes: Vec<CapturedEcho>,
+    phones: Vec<CapturedPhone>,
+}
+
+#[derive(Debug, PartialEq)]
+struct CapturedPhone {
+    local: String,
+    id: String,
+    protocol: u32,
+    enabled: u32,
+    server: String,
+    username: String,
+    secrets_file: String,
+    register: u32,
+    interval: u16,
+    timeout: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -58,6 +73,27 @@ unsafe extern "C" fn node(
         size_of::<abi::rptadv_node_host_configuration>()
     );
     let output = unsafe { &mut *context.cast::<Collected>() };
+    for index in 0..record.phone_account_count {
+        let phone = unsafe { &*record.phone_accounts.add(index) };
+        assert_eq!(
+            phone.struct_size as usize,
+            size_of::<abi::rptadv_phone_account_configuration_v1>()
+        );
+        output.phones.push(CapturedPhone {
+            local: unsafe { text(record.node, record.node_length) },
+            id: unsafe { text(phone.id.data.cast(), phone.id.length) },
+            protocol: phone.protocol,
+            enabled: phone.enabled,
+            server: unsafe { text(phone.server.data.cast(), phone.server.length) },
+            username: unsafe { text(phone.username.data.cast(), phone.username.length) },
+            secrets_file: unsafe {
+                text(phone.secrets_file.data.cast(), phone.secrets_file.length)
+            },
+            register: phone.register_account,
+            interval: phone.registration_interval_s,
+            timeout: phone.authentication_timeout_ms,
+        });
+    }
     let echo = unsafe { &*record.echolink.cast::<echo::AccountConfig>() };
     let servers = if echo.transport.directory_servers.count == 0 {
         &[]
@@ -162,7 +198,7 @@ unsafe extern "C" fn diagnostic(context: *mut c_void, pointer: *const c_char, le
 
 fn inspect(source: &str, secrets: bool) -> (i32, Collected) {
     let table = unsafe { &*rptadv_product_descriptor_v1() };
-    assert_eq!(table.abi_version, 7);
+    assert_eq!(table.abi_version, 8);
     let mut output = Collected::default();
     let context = (&mut output as *mut Collected).cast();
     let result = unsafe {
@@ -654,4 +690,41 @@ fn inspection_contains_internal_panics_without_exposing_their_payload() {
     );
     assert_eq!(status, -1);
     assert_eq!(output.diagnostics, ["configuration inspection failed"]);
+}
+
+#[test]
+fn phone_accounts_are_grouped_by_explicit_node_and_include_disabled_records() {
+    let source = "[2000]\n[1000]\n[phone_account office]\nlocal_node=1000\nprotocol=sip\nenabled=yes\nserver=sip.example:5060\nusername=alice\nsecrets_file=private/office.conf\nregister=yes\nregistration_interval_s=42\nauthentication_timeout_ms=1234\n[phone_account home]\nlocal_node=2000\nserver=iax.example:4569\nusername=bob\nsecrets_file=private/home.conf\n";
+    let (result, output) = inspect(source, false);
+    assert_eq!(result, 0, "{output:?}");
+    assert!(output.diagnostics.is_empty(), "{output:?}");
+    assert_eq!(
+        output.phones,
+        [
+            CapturedPhone {
+                local: "2000".into(),
+                id: "home".into(),
+                protocol: abi::RPTADV_PHONE_ACCOUNT_IAX,
+                enabled: 0,
+                server: "iax.example:4569".into(),
+                username: "bob".into(),
+                secrets_file: "private/home.conf".into(),
+                register: 0,
+                interval: 300,
+                timeout: 30000,
+            },
+            CapturedPhone {
+                local: "1000".into(),
+                id: "office".into(),
+                protocol: abi::RPTADV_PHONE_ACCOUNT_SIP,
+                enabled: 1,
+                server: "sip.example:5060".into(),
+                username: "alice".into(),
+                secrets_file: "private/office.conf".into(),
+                register: 1,
+                interval: 42,
+                timeout: 1234,
+            },
+        ]
+    );
 }

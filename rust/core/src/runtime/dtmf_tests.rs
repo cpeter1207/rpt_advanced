@@ -707,3 +707,46 @@ fn enter(commands: &mut DtmfCommands, input: &str, now_ms: u64) -> Option<DigitO
         _ => panic!("operation"),
     })
 }
+
+#[test]
+fn remote_operation_custody_is_lazy_and_never_an_authority() {
+    fn complete(commands: &mut DtmfCommands, text: &str) -> DigitOperation {
+        text.chars()
+            .filter_map(|digit| commands.feed(DigitEvent::Digit { digit, now_ms: 1 }))
+            .find_map(|outcome| match outcome {
+                DigitOutcome::Operation(operation) => Some(operation),
+                _ => None,
+            })
+            .unwrap()
+    }
+    let mut local = DtmfCommands::new(DtmfCommandMap::standard());
+    local
+        .configure_remote("6", RemoteDtmfAccess::Disabled)
+        .unwrap();
+    assert!(complete(&mut local, "*652#").source_custody.is_none());
+    let mut peer = local.for_source();
+    assert!(complete(&mut peer, "*70#").source_custody.is_none());
+    let first = complete(&mut peer, "*652#");
+    let second = complete(&mut peer, "*651#");
+    assert!(Arc::ptr_eq(
+        first.source_custody.as_ref().unwrap(),
+        second.source_custody.as_ref().unwrap()
+    ));
+    assert!(
+        local.pending_remote.upgrade().is_none(),
+        "for_source never inherits another collector's ownership"
+    );
+    let observer = peer.pending_remote.clone();
+    drop((first, second));
+    assert!(
+        observer.upgrade().is_none(),
+        "collector observer cannot keep command custody alive"
+    );
+    let next = complete(&mut peer, "*652#");
+    assert!(
+        !Weak::ptr_eq(&observer, &peer.pending_remote),
+        "new pending batch has its own custody"
+    );
+    assert!(!next.admin_authorized);
+    assert!(next.macro_permit.is_none());
+}

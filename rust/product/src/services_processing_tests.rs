@@ -77,6 +77,10 @@ unsafe extern "C" fn prepare(
         5 => output.process = None,
         6 => output.context = ptr::null_mut(),
         9 => output.destroy = None,
+        11 => {
+            output.struct_size =
+                offset_of!(abi::rptadv_pcm_processor_v1, programme_buffering) as u32
+        }
         _ => {}
     }
     0
@@ -125,6 +129,10 @@ impl Input for Source {
         self.renders += 1;
         Some(TimedPeerSample {
             sample: self.renders as f32 * 0.25,
+            age_bound: Some(rpt_advanced_core::link::SourceTimeBound {
+                host_clock_epoch: 7,
+                not_after_ns: 11,
+            }),
             provenance: Some(SampleProvenance {
                 position: Some(SourceCoordinate {
                     generation: 7,
@@ -160,6 +168,7 @@ fn source_timing_survives_bypass_but_opaque_delayed_dsp_stays_unknown() {
     assert!(bypass.source_timing_available());
     let first = bypass.render_timed_sample().unwrap();
     assert_eq!(first.sample, 0.25);
+    assert_eq!(first.age_bound.unwrap().not_after_ns, 11);
     assert_eq!(first.provenance.unwrap().position.unwrap().frame, 1);
     bypass.input.signals.set_dtmf_muted(true);
     let muted = bypass.render_timed_sample().unwrap();
@@ -181,6 +190,10 @@ fn source_timing_survives_bypass_but_opaque_delayed_dsp_stays_unknown() {
     assert_eq!(
         second.provenance, None,
         "opaque DSP cannot relabel old PCM as current source"
+    );
+    assert_eq!(
+        second.age_bound, None,
+        "opaque DSP cannot invent a history bound"
     );
     delayed.input.signals.set_dtmf_muted(true);
     let muted = delayed.render_timed_sample().unwrap();
@@ -346,4 +359,19 @@ fn peer_processor_mutes_final_output_using_current_dtmf_state() {
         assert_eq!(input.render_sample(), Some(expected));
     }
     assert_eq!(state.processed.load(Ordering::Relaxed), 4);
+}
+
+#[test]
+fn legacy_processor_ownership_prefix_remains_supported() {
+    let (state, services) = fixture(11);
+    let mut processor = services
+        .prepare_peer_processing(CONFIGURATION, "1000", 4)
+        .unwrap()
+        .unwrap();
+    assert!(processor.api.programme_buffering.is_none());
+    let mut sample = [0.5];
+    assert!(processor.process(&mut sample));
+    assert_eq!(sample, [0.25]);
+    drop(processor);
+    assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
 }

@@ -20,7 +20,7 @@ use rpt_advanced_core::{
     command::LinkAction,
     runtime::{
         RuntimeDispatch,
-        dtmf::DigitOperation,
+        dtmf::{DigitOperation, DigitOutcome},
         links::{ConnectAttempt, LinkEffect, RetryWork},
     },
 };
@@ -32,7 +32,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
         mpsc,
     },
     thread::JoinHandle,
@@ -46,6 +46,22 @@ type HostOperation = Box<dyn FnOnce(&mut Host) -> Result<ErasedResult, RuntimeEr
 static FAIL_DIAL_THREAD: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 pub(crate) static SKIP_TICKER_THREAD: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static TICKER_TURNS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static PANIC_CONTROL_AFTER: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static FATAL_BEFORE_FINISH_CLEAR: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+fn inject_control_panic() {
+    if PANIC_CONTROL_AFTER.fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+        left.checked_sub(1)
+    }) == Ok(1)
+    {
+        panic!("injected serialized operation panic");
+    }
+}
+
 #[cfg(test)]
 static FAIL_TICKER_THREAD: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
@@ -76,6 +92,7 @@ pub(crate) struct Engine {
     health: SchedulerHealth,
     accepting: AtomicBool,
     reloading: AtomicBool,
+    reload_status: AtomicI32,
     revision: AtomicU64,
     lost_digits: AtomicBool,
     event_busy: AtomicU64,
@@ -98,6 +115,12 @@ struct DialJob {
     report: bool,
 }
 impl Dial {
+    fn private_reply(&self) -> Option<&rpt_advanced_core::link::PeerReply> {
+        match self {
+            Self::Connect(work) => work.private_reply(),
+            Self::Retry(work) => work.private_reply(),
+        }
+    }
     fn remote(&self) -> &str {
         match self {
             Self::Connect(work) => work.remote(),
@@ -149,14 +172,34 @@ impl Engine {
         local: &str,
         outcome: rpt_advanced_core::runtime::dtmf::DigitOutcome,
     ) -> Result<LinkEffect, RuntimeError> {
-        use rpt_advanced_core::runtime::dtmf::DigitOutcome;
         match outcome {
             DigitOutcome::MacroStopped { reply } => {
+                if let Some(reply) = reply
+                    .as_ref()
+                    .filter(|reply| reply.phone_source().is_some())
+                {
+                    let reply = reply.clone();
+                    self.run(move |host| host.private_phone_result(&reply, false))?;
+                    return Ok(LinkEffect::None);
+                }
                 let local = local.to_owned();
                 self.run(move |host| host.runtime.queue_macro_stopped(&local, reply))?;
                 Ok(LinkEffect::None)
             }
-            DigitOutcome::Operation(operation) => self.operation(local, operation),
+            DigitOutcome::Operation(operation) => {
+                let private = operation
+                    .reply
+                    .as_ref()
+                    .filter(|reply| reply.phone_source().is_some())
+                    .cloned();
+                let result = self.operation(local, operation);
+                if let (Err(_), Some(reply)) = (&result, private) {
+                    let _ = self.run(move |host| host.private_phone_result(&reply, false));
+                    Ok(LinkEffect::None)
+                } else {
+                    result
+                }
+            }
             DigitOutcome::RemoteCandidate(operation) => {
                 self.operation(local, operation).or(Ok(LinkEffect::None))
             }
@@ -183,6 +226,15 @@ impl Engine {
         let reply = operation.reply.clone();
         match self.operation(&local, operation) {
             Ok(effect) => self.effect(local, effect, revision),
+            Err(error)
+                if reply
+                    .as_ref()
+                    .is_some_and(|reply| reply.phone_source().is_some()) =>
+            {
+                let reply = reply.expect("matched private command source");
+                let _ = self.run(move |host| host.private_phone_result(&reply, false));
+                Err(error)
+            }
             Err(RuntimeError::Link(rpt_advanced_core::link::AdmissionError::Loop))
                 if dtmf_source =>
             {
@@ -254,6 +306,8 @@ impl Engine {
     ) -> Result<(), RuntimeError> {
         let name = local.clone();
         let remote = attempt.remote().to_owned();
+        let private_reply = attempt.private_reply().cloned();
+        let private_attach = private_reply.clone();
         let destination_remote = remote.clone();
         let destination = if self.current(revision) && attempt.current(self.elapsed_ms()) {
             self.run(move |host| host.lookup(&name, &destination_remote, None))
@@ -271,7 +325,7 @@ impl Engine {
                     .ok()
             });
         let engine = Arc::clone(self);
-        self.run_inner(true, move |host| {
+        let result = self.run_inner(true, move |host| {
             let clock = engine.clock();
             let mode = attempt.mode();
             let current = engine.current(revision);
@@ -295,13 +349,12 @@ impl Engine {
                     .map_err(RuntimeError::Link)?,
             };
             if attached {
-                let result = host.attach_peer(
-                    &local,
-                    &remote,
-                    mode,
-                    io.ok_or(RuntimeError::Rejected)?,
-                    clock,
-                );
+                let io = io.ok_or(RuntimeError::Rejected)?;
+                let result = if let Some(reply) = &private_attach {
+                    host.attach_peer_private(&local, &remote, mode, io, clock, reply)
+                } else {
+                    host.attach_peer(&local, &remote, mode, io, clock)
+                };
                 if result.is_err() {
                     host.reject_peer(&local, &remote, clock.now_ms);
                 }
@@ -309,7 +362,14 @@ impl Engine {
             } else {
                 Err(RuntimeError::Rejected)
             }
-        })
+        });
+        if let Some(reply) = private_reply {
+            let completed = result.is_ok();
+            let _ = self.run_inner(true, move |host| {
+                host.private_phone_result(&reply, completed)
+            });
+        }
+        result
     }
     fn background(
         self: &Arc<Self>,
@@ -391,14 +451,17 @@ impl Engine {
         }
         result
     }
+    /// Fatal status remains authoritative even if a concurrent finish clears the
+    /// advisory pending flag. Only a new Engine lifecycle can clear that status.
+    pub(super) fn reload_fenced(&self) -> bool {
+        self.reloading.load(Ordering::Acquire) || self.reload_status.load(Ordering::Acquire) == -3
+    }
     fn enter(self: &Arc<Self>) -> Result<Call, RuntimeError> {
         self.enter_reload(false)
     }
     fn enter_reload(self: &Arc<Self>, reload: bool) -> Result<Call, RuntimeError> {
         let mut count = self.calls.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.accepting.load(Ordering::Acquire)
-            || !reload && self.reloading.load(Ordering::Acquire)
-        {
+        if !self.accepting.load(Ordering::Acquire) || !reload && self.reload_fenced() {
             return Err(RuntimeError::Rejected);
         }
         *count += 1;
@@ -431,15 +494,27 @@ impl Engine {
         let (send, receive) = mpsc::sync_channel(1);
         self.enqueue(move || {
             let result = if !engine.accepting.load(Ordering::Acquire)
+                || engine.reload_status.load(Ordering::Acquire) == -3
                 || (!reload && engine.reloading.load(Ordering::Acquire))
                 || engine.revision.load(Ordering::Acquire) != revision
             {
                 Err(RuntimeError::Rejected)
             } else {
                 let mut host = engine.host.lock().unwrap_or_else(|e| e.into_inner());
-                host.as_mut()
-                    .ok_or(RuntimeError::Rejected)
-                    .and_then(operation)
+                catch_unwind(AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    inject_control_panic();
+                    host.as_mut()
+                        .ok_or(RuntimeError::Rejected)
+                        .and_then(operation)
+                }))
+                .unwrap_or_else(|_| {
+                    // Latch before the executor can run its next queued task.
+                    // The panic hook retains the original diagnostic.
+                    engine.record_reload_status(-3);
+                    engine.reloading.store(true, Ordering::Release);
+                    Err(RuntimeError::Restore)
+                })
             };
             let _ = send.send(result);
         })
@@ -488,7 +563,7 @@ impl Engine {
     }
     pub(crate) fn current(&self, revision: u64) -> bool {
         self.accepting.load(Ordering::Acquire)
-            && !self.reloading.load(Ordering::Acquire)
+            && !self.reload_fenced()
             && self.revision.load(Ordering::Acquire) == revision
     }
     fn pump(self: &Arc<Self>, clock: RuntimeClock, schedule: bool) -> Result<(), RuntimeError> {
@@ -512,16 +587,28 @@ impl Engine {
             if schedule {
                 host.runtime.tick_links(clock);
             }
+            host.reconcile_private_collections();
             Ok((host.take_operations(), host.take_site_links()))
         })?;
         for (local, effect) in site_links {
             self.background(local, effect, revision, false)?;
         }
         for (local, operation) in operations {
+            // A private caller's rejected operation/preparation is call-local;
+            // it is not loss of every node's RF/peer input collection.
+            let private_source = match &operation {
+                DigitOutcome::Operation(operation) | DigitOutcome::RemoteCandidate(operation) => {
+                    operation.reply.as_ref()
+                }
+                DigitOutcome::MacroStopped { reply } => reply.as_ref(),
+                _ => None,
+            }
+            .is_some_and(|reply| reply.phone_source().is_some());
             if self
                 .digit_effect(&local, operation)
                 .and_then(|effect| self.background(local, effect, revision, true))
                 .is_err()
+                && !private_source
             {
                 self.lost_digits.store(true, Ordering::Release);
             }
@@ -627,13 +714,15 @@ impl Engine {
                     if schedule {
                         last_second = Some(clock.wall_seconds);
                     }
-                    if !engine.reloading.load(Ordering::Acquire) {
+                    if !engine.reload_fenced() {
                         engine.pump_observed(clock, schedule);
-                    } else {
+                    } else if engine.reload_status.load(Ordering::Acquire) != -3 {
                         // Hardware readiness cannot suspend existing peers or other
                         // radios. Only configuration/scheduled-action publication waits.
                         let _ = engine.run_inner(true, move |host| host.pump(clock));
                     }
+                    #[cfg(test)]
+                    TICKER_TURNS.fetch_add(1, Ordering::AcqRel);
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
             })
@@ -884,6 +973,7 @@ unsafe extern "C" fn rptadv_product_start(
             health: SchedulerHealth::default(),
             accepting: AtomicBool::new(true),
             reloading: AtomicBool::new(false),
+            reload_status: AtomicI32::new(0),
             revision: AtomicU64::new(1),
             lost_digits: AtomicBool::new(false),
             event_busy: AtomicU64::new(0),
@@ -945,25 +1035,53 @@ unsafe extern "C" fn rptadv_product_reload(
     configuration: *const std::ffi::c_char,
     configuration_length: usize,
 ) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| -> Result<i32, RuntimeError> {
-        let document = document(unsafe { input(configuration, configuration_length) }?)?;
-        let (engine, _call) = selected()?;
-        engine.reload_configuration(document)?;
-        Ok(i32::from(engine.reloading.load(Ordering::Acquire)))
-    }))
-    .ok()
-    .and_then(Result::ok)
-    .unwrap_or(-1)
+    let Ok((engine, _call)) = selected() else {
+        return -3;
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let document =
+            match unsafe { input(configuration, configuration_length) }.and_then(document) {
+                Ok(document) => document,
+                Err(error) => {
+                    eprintln!("rpt-advanced: reload preparation rejected: {error:?}");
+                    engine.record_reload_status(-1);
+                    return -1;
+                }
+            };
+        let result = engine.reload_configuration(document);
+        if let Err(error) = result {
+            eprintln!("rpt-advanced: reload failed: {error:?}");
+        }
+        engine.reload_status.load(Ordering::Acquire)
+    })) {
+        Ok(status) => status,
+        Err(_) => {
+            engine.reloading.store(true, Ordering::Release);
+            engine.record_reload_status(-3);
+            -3
+        }
+    }
 }
-/// Poll the existing control owner; a pending call retains both generations.
+/// Poll the existing control owner and retain its terminal publication disposition.
 unsafe extern "C" fn rptadv_product_reload_poll() -> i32 {
-    catch_unwind(AssertUnwindSafe(|| {
-        let (engine, _call) = selected_reload(true)?;
-        engine.poll_reload_configuration()
-    }))
-    .ok()
-    .and_then(Result::ok)
-    .map_or(-1, |ready| i32::from(!ready))
+    let Ok((engine, _call)) = selected_reload(true) else {
+        return -3;
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let result = engine.poll_reload_configuration();
+        // Diagnostic writes can panic too; keep them inside the public ABI boundary.
+        if let Err(error) = result {
+            eprintln!("rpt-advanced: reload follow-up failed: {error:?}");
+        }
+        engine.reload_status.load(Ordering::Acquire)
+    })) {
+        Ok(status) => status,
+        Err(_) => {
+            engine.reloading.store(true, Ordering::Release);
+            engine.record_reload_status(-3);
+            -3
+        }
+    }
 }
 /// Gate admission, stop/join owners, and drain accepted tasks before releasing registrations.
 extern "C" fn rptadv_product_stop() -> i32 {
@@ -999,10 +1117,10 @@ unsafe extern "C" fn rptadv_product_authorize_incoming(
                 return Err(RuntimeError::Rejected);
             }
             return engine.run(move |host| {
-                host.runtime
-                    .settings(&local)
-                    .map(|_| ())
-                    .ok_or(RuntimeError::MissingNode)
+                host.authorize_phone_account(
+                    metadata.phone_account().expect("validated private account"),
+                    &local,
+                )
             });
         }
         // Echo admission must inspect the live provider QSO. A null/pre-answer
@@ -1140,8 +1258,8 @@ unsafe extern "C" fn rptadv_product_digit(
 
 static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 7,
-    capability: *b"rptadv.prod7\0\0\0\0",
+    abi_version: 8,
+    capability: *b"rptadv.prod8\0\0\0\0",
     start: Some(rptadv_product_start),
     reload: Some(rptadv_product_reload),
     stop: Some(rptadv_product_stop),

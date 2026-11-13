@@ -11,6 +11,10 @@ name = "rpt-advanced"
 path = "src/main.rs"
 
 [dependencies]
+sdp = "=0.8.0"
+rtp = "=0.13.0"
+webrtc-util = { version = "=0.11.0", default-features = false, features = ["marshal"] }
+tokio = { version = "1.50", features = ["net", "rt", "macros", "time", "sync"] }
 crossbeam-queue = "0.3.12"
 libc = "0.2"
 libloading = "0.8"

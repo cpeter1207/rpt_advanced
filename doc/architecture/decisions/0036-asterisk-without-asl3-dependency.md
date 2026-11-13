@@ -203,7 +203,7 @@ or package dependency check.
 
 ### Codec host cutover (introduced 2026-10-27; released in alpha22)
 
-Product ABI 7 (`rptadv.prod7`) requires host-services ABI 10 (`rptadv.hst10`).
+Product ABI 7 (`rptadv.prod8`) requires host-services ABI 10 (`rptadv.hst10`).
 The Earshot receive cutover adds sized source/burst metadata through the shared
 SDK's direct-callback ABI 6 and a pre-activation receive-policy query through
 the existing host radio-control operation. Earlier ABI 9 references below
@@ -234,7 +234,7 @@ The standalone application still has no Asterisk dependency.
 
 At acceptance, the C module directly used Asterisk's taskprocessor and thread
 helper. The Rust migration has replaced that implementation: the metadata-only
-C loader selects versioned descriptors; `librptadv_product.so.2` owns lifecycle,
+C loader selects versioned descriptors; `librptadv_product.so.3` owns lifecycle,
 workers, and the single embedded controller core. It has no Asterisk imports.
 `librptadv_asterisk_adapter.so.1` supplies public host services through a C table,
 and `librptadv_control_asterisk_adapter.so.1` alone owns taskprocessor resources.

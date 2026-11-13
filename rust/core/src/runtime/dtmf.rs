@@ -8,7 +8,7 @@ use crate::{
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
-    Arc,
+    Arc, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -184,6 +184,9 @@ pub struct DigitOperation {
     pub origin: Option<String>,
     pub(crate) admin_authorized: bool,
     pub(super) macro_permit: Option<MacroPermit>,
+    // Custody only: keep the original peer collector discoverable while copied
+    // remote work is owned. Dispatch still checks its exact source and live grant.
+    source_custody: Option<Arc<()>>,
 }
 
 /// Shared cancellation follows copied operations into ordinary dispatch queues.
@@ -252,6 +255,7 @@ impl DigitOperation {
             origin: None,
             admin_authorized: false,
             macro_permit: None,
+            source_custody: None,
         }
     }
 }
@@ -275,6 +279,7 @@ pub struct DtmfCommands {
     active_macro: Option<ActiveDtmfMacro>,
     macro_permit: Option<MacroPermit>,
     macro_stopped: bool,
+    pending_remote: Weak<()>,
 }
 impl DtmfCommands {
     /// Create independent collection and authorization state with the same resolved policy.
@@ -312,6 +317,7 @@ impl DtmfCommands {
             active_macro: None,
             macro_permit: None,
             macro_stopped: false,
+            pending_remote: Weak::new(),
         }
     }
     /// Borrow the final remapped command namespace during candidate preparation.
@@ -538,6 +544,7 @@ impl DtmfCommands {
                     origin: None,
                     admin_authorized: false,
                     macro_permit: None,
+                    source_custody: None,
                 })
             });
         }
@@ -609,6 +616,14 @@ impl DtmfCommands {
             );
             operation.remote = Some(remote);
             operation.admin_authorized = authorized;
+            if self.peer_source {
+                operation.source_custody =
+                    Some(self.pending_remote.upgrade().unwrap_or_else(|| {
+                        let custody = Arc::new(());
+                        self.pending_remote = Arc::downgrade(&custody);
+                        custody
+                    }));
+            }
             return Some(operation);
         }
         let mut command = self.map.parse(text)?;
@@ -680,12 +695,20 @@ impl DtmfCommands {
             origin: None,
             admin_authorized,
             macro_permit: None,
+            source_custody: None,
         })
     }
 
-    /// Preserve commands, selected/remembered destinations, and live administrative grants.
+    /// Inspect collection without clearing selection, macros or source grants.
+    /// Peer collectors cannot enter the local-RF-only keypad test.
+    pub(super) fn collecting(&self) -> bool {
+        self.collector.active()
+    }
+
+    /// Preserve owned remote work, commands, selected/remembered destinations and live grants.
     pub(super) fn retains_state(&self, now_ms: u64) -> bool {
         self.collector.active()
+            || self.pending_remote.strong_count() != 0
             || self.active_macro.is_some()
             || self
                 .macro_permit

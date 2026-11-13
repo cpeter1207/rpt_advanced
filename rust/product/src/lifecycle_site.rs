@@ -22,7 +22,14 @@ impl Engine {
     fn stop_sites_until(self: &Arc<Self>, deadline: Instant) -> bool {
         loop {
             let now = self.clock().now_ms;
-            match self.site_control(move |host| host.site_shutdown(now)) {
+            let fatal = self.reload_status.load(Ordering::Acquire) == -3;
+            match self.site_control(move |host| {
+                if fatal {
+                    host.site_fatal_shutdown(now)
+                } else {
+                    host.site_shutdown(now)
+                }
+            }) {
                 Ok(Ok(true)) => return true,
                 Ok(Ok(false)) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(5));
@@ -41,7 +48,16 @@ impl Engine {
         let (send, receive) = mpsc::sync_channel(1);
         self.enqueue(move || {
             let mut host = engine.host.lock().unwrap_or_else(|e| e.into_inner());
-            let result = host.as_mut().map(operation).ok_or(RuntimeError::Rejected);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                #[cfg(test)]
+                inject_control_panic();
+                host.as_mut().map(operation).ok_or(RuntimeError::Rejected)
+            }))
+            .unwrap_or_else(|_| {
+                engine.record_reload_status(-3);
+                engine.reloading.store(true, Ordering::Release);
+                Err(RuntimeError::Restore)
+            });
             let _ = send.send(result);
         })?;
         receive.recv().map_err(|_| RuntimeError::Rejected)?
@@ -58,7 +74,7 @@ impl Engine {
     ) -> Result<(), RuntimeError> {
         loop {
             let now = self.clock().now_ms;
-            let ready = self.run(move |host| {
+            let ready = self.run_inner(true, move |host| {
                 if resume {
                     Ok(host.resume_sites())
                 } else {
@@ -80,9 +96,10 @@ impl Engine {
         self: &Arc<Self>,
         document: ConfigDocument,
     ) -> Result<(), RuntimeError> {
-        if self.reloading.load(Ordering::Acquire) {
+        if self.reload_fenced() {
             return Err(RuntimeError::Busy);
         }
+        self.record_reload_status(-1);
         self.site_backends.validate(&document)?;
         let settings = crate::site::configured(&document)?;
         let definition = document.clone();
@@ -99,20 +116,43 @@ impl Engine {
         // so dormant workers are never joined on the control executor.
         let prepared = Arc::new(Mutex::new((Some(acquisition), Some(radio))));
         let target = Arc::clone(&prepared);
-        self.run(move |host| {
-            let mut pair = target.lock().unwrap_or_else(|e| e.into_inner());
-            let (acquisition, radio) = &mut *pair;
-            host.begin_site_reload(basis.revision, acquisition, radio, &basis.replaced)
-        })?;
-        let result = self.wait_sites(false).and_then(|()| {
-            self.reloading.store(true, Ordering::Release);
-            self.revision.fetch_add(1, Ordering::AcqRel);
-            self.lost_digits.store(true, Ordering::Release);
+        // From the first mutating handoff onward, an absent reply cannot prove
+        // rejection. Keep admission fenced until a terminal disposition is known.
+        self.reloading.store(true, Ordering::Release);
+        self.record_reload_status(1);
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        self.lost_digits.store(true, Ordering::Release);
+        let handoff = catch_unwind(AssertUnwindSafe(|| {
+            self.run_inner(true, move |host| {
+                let mut pair = target.lock().unwrap_or_else(|e| e.into_inner());
+                let (acquisition, radio) = &mut *pair;
+                Ok(host.begin_site_reload(basis.revision, acquisition, radio, &basis.replaced))
+            })
+        }))
+        .unwrap_or(Err(RuntimeError::Restore));
+        match handoff {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.record_reload_status(-1);
+                return self.finish_reload(Err(error));
+            }
+            Err(error) => return self.finish_reload(Err(error)),
+        }
+        let barrier = self.wait_sites(false);
+        if barrier.is_err()
+            && !matches!(barrier, Err(RuntimeError::Rejected | RuntimeError::Restore))
+        {
+            self.record_reload_status(-1);
+        }
+        let result = barrier.and_then(|()| {
             let clock = self.clock();
+            self.record_reload_status(1);
+            let engine = Arc::clone(self);
             catch_unwind(AssertUnwindSafe(|| {
                 self.run_inner(true, move |host| {
-                    host.reload(document, clock)?;
-                    Ok(host.runtime.reload_pending())
+                    let result = host.reload(document, clock);
+                    engine.record_reload_status(host.reload_status(result.as_ref().err()));
+                    result.map(|()| host.runtime.reload_pending())
                 })
             }))
             .unwrap_or(Err(RuntimeError::Preparation))
@@ -124,32 +164,103 @@ impl Engine {
     }
 
     pub(super) fn poll_reload_configuration(self: &Arc<Self>) -> Result<bool, RuntimeError> {
-        if !self.reloading.load(Ordering::Acquire) {
+        if !self.reload_fenced() {
             return Ok(true);
         }
+        if self.reload_status.load(Ordering::Acquire) == -3 {
+            return Err(RuntimeError::Restore);
+        }
         let clock = self.clock();
-        let result = self.run_inner(true, move |host| host.poll_reload(clock));
+        let engine = Arc::clone(self);
+        let result = self.run_inner(true, move |host| {
+            let result = host.poll_reload(clock);
+            engine.record_reload_status(host.reload_status(result.as_ref().err()));
+            result
+        });
         if result == Ok(false) {
             return Ok(false);
         }
         self.finish_reload(result.map(|_| ())).map(|()| true)
     }
 
+    /// Fatal uncertainty is absorbing until this entire Engine is shut down.
+    pub(super) fn record_reload_status(&self, status: i32) -> i32 {
+        let previous = self
+            .reload_status
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(if current == -3 { -3 } else { status })
+            })
+            .expect("terminal update always succeeds");
+        if previous == -3 { -3 } else { status }
+    }
+
     fn finish_reload(
         self: &Arc<Self>,
         result: Result<(), RuntimeError>,
     ) -> Result<(), RuntimeError> {
-        self.reloading.store(false, Ordering::Release);
-        // Host has already cleared the candidate when Runtime published it. A later
-        // notification error must not roll back physical ownership to old settings.
-        let retired = self.site_control(Host::abort_sites)?;
-        drop(retired);
+        let mut status = self.reload_status.load(Ordering::Acquire);
+        if result.is_err() && status == 1 {
+            // A lost reply or panic did not confirm either publication or rollback.
+            status = -3;
+        }
+        status = self.record_reload_status(status);
+        if status == -3 {
+            self.record_reload_status(-3);
+            self.reloading.store(true, Ordering::Release);
+            return result.and(Err(RuntimeError::Restore));
+        }
+        let mut result = result;
+        // Cleared candidates are already committed. Return retired workers for
+        // off-control destruction; never restore an old product document.
+        match self.site_control(Host::abort_sites) {
+            Ok(retired) => drop(retired),
+            Err(error) => {
+                eprintln!("rpt-advanced: reload site cleanup failed: {error:?}");
+                if result.is_ok() {
+                    result = Err(error);
+                }
+                status = if matches!(status, 0 | -2) { -2 } else { -3 };
+            }
+        }
+        status = self.record_reload_status(status);
+        if status == -3 {
+            self.record_reload_status(-3);
+            self.reloading.store(true, Ordering::Release);
+            return result.and(Err(RuntimeError::Restore));
+        }
         if self.accepting.load(Ordering::Acquire) {
-            self.wait_sites(true)?;
+            if let Err(error) = self.wait_sites(true) {
+                eprintln!("rpt-advanced: reload site resume failed: {error:?}");
+                if result.is_ok() {
+                    result = Err(error);
+                }
+                status = if matches!(status, 0 | -2) { -2 } else { -3 };
+            }
         }
+        status = self.record_reload_status(status);
+        if status == -3 {
+            self.record_reload_status(-3);
+            self.reloading.store(true, Ordering::Release);
+            return result.and(Err(RuntimeError::Restore));
+        }
+        self.reloading.store(false, Ordering::Release);
         if result.is_ok() {
-            let _ = self.pump(self.clock(), true);
+            if let Err(error) = self.pump(self.clock(), true) {
+                eprintln!("rpt-advanced: reload notification failed: {error:?}");
+                result = Err(error);
+                status = -2;
+            }
         }
+        if result.is_err() && status == 0 {
+            status = -2;
+        }
+        status = self.record_reload_status(status);
+        #[cfg(test)]
+        if FATAL_BEFORE_FINISH_CLEAR.swap(false, Ordering::AcqRel) {
+            self.record_reload_status(-3);
+            self.reloading.store(true, Ordering::Release);
+        }
+        self.reloading.store(status == -3, Ordering::Release);
         result
     }
 }
