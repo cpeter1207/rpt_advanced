@@ -1480,3 +1480,16 @@ in the UDP socket during a refusal have not been qualified for original arrival
 age. This remains an explicit receive/RF freshness qualification item before
 enabling radio attachment; the private prompt/DTMF hardware checkpoint does not
 claim that stronger guarantee.
+
+### Incoming RTP offset correction — 2026-11-13
+
+A live-call failure exposed unqualified receive translation. The owned jitter
+ABI permits signed packet offsets: a positive value is an exact missing prefix;
+a negative value trims already-released samples. The SIP adapter now follows
+the existing IAX playout semantics, looking up birth by the actual packet
+timestamp, retaining prefix plus decoded suffix under refused source credit,
+and committing the jitter decision exactly once after all output is accepted.
+Delay insertion advances only playout time and emits no fictitious source gap.
+Literal RTP/released-provider tests reproduce both signed offsets, insertion,
+and the former premature decision commit. This fixes proven owned-adapter
+defects; it does not retrospectively prove the cause of a particular live call.

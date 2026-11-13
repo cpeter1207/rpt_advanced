@@ -7,8 +7,16 @@ use rptadv_jitter_client::{Admission, Jitter, Kind};
 use std::{mem::size_of, net::SocketAddr};
 
 enum Pending {
-    Audio { start: u64, count: usize, born: u64 },
-    Gap { start: u64, count: u32 },
+    Audio {
+        start: u64,
+        count: usize,
+        born: u64,
+        prefix: u32,
+    },
+    Gap {
+        start: u64,
+        count: u32,
+    },
     Digit(u8),
 }
 
@@ -23,6 +31,7 @@ pub(crate) struct Media {
     pcm: [f32; 160],
     pending: Option<Pending>,
     offset: usize,
+    decision_pending: bool,
     host_epoch: Option<u64>,
     discontinuity: bool,
     epoch: Option<u64>,
@@ -62,6 +71,7 @@ impl Media {
             pcm: [0.0; 160],
             pending: None,
             offset: 0,
+            decision_pending: false,
             host_epoch: None,
             discontinuity: true,
             epoch: None,
@@ -166,45 +176,61 @@ impl Media {
         match decision.kind {
             Kind::NotDue => return Ok(()),
             Kind::Packet => {
-                let offset = usize::try_from(-i64::from(decision.start_offset))
-                    .map_err(|_| MediaError::InvalidPacket)?;
-                let count =
-                    usize::try_from(decision.span).map_err(|_| MediaError::InvalidPacket)?;
-                if decision.length != 160 || offset.checked_add(count).is_none_or(|end| end > 160) {
+                // The neutral ABI returns the packet timestamp, not the requested
+                // cursor. Positive offsets are missing prefixes; negative ones
+                // trim samples that have already been released (as in IAX playout).
+                let skip = decision.start_offset.saturating_neg().max(0) as usize;
+                let span = decision.span as usize;
+                if decision.length != 160 || span != 160 || skip >= span {
                     return Err(MediaError::InvalidPacket);
                 }
-                self.codec.decode(&packet, &mut self.pcm)?;
-                self.pcm.copy_within(offset..offset + count, 0);
+                let count = span - skip;
+                let prefix = decision.start_offset.max(0) as u32;
                 let start = decision
                     .timestamp
-                    .checked_add_signed(i64::from(decision.start_offset))
+                    .checked_add(skip as u64)
                     .ok_or(MediaError::InvalidPacket)?;
+                self.codec.decode(&packet, &mut self.pcm)?;
+                self.pcm.copy_within(skip..span, 0);
                 if let Some((_, born)) = self
                     .births
                     .iter()
                     .flatten()
-                    .find(|(timestamp, _)| *timestamp == start)
+                    .find(|(timestamp, _)| *timestamp == decision.timestamp)
                 {
                     self.pending = Some(Pending::Audio {
-                        start: decision.timestamp,
+                        start,
                         count,
                         born: *born,
+                        prefix,
                     });
                 } else {
                     self.pending = Some(Pending::Gap {
-                        start: decision.timestamp,
-                        count: decision.span,
+                        start: start
+                            .checked_sub(u64::from(prefix))
+                            .ok_or(MediaError::InvalidPacket)?,
+                        count: (count as u32)
+                            .checked_add(prefix)
+                            .ok_or(MediaError::InvalidPacket)?,
                     });
                 }
             }
-            Kind::Missing | Kind::Insertion => {
+            Kind::Missing => {
                 self.pending = Some(Pending::Gap {
                     start: decision.timestamp,
                     count: decision.span,
                 });
             }
+            Kind::Insertion => {
+                // Only playout time advances. The existing source/ring must not
+                // see fictitious missing media or have its source cursor moved.
+                return self.jitter.advance(now, 0).map_err(|_| MediaError::Codec);
+            }
         }
-        self.jitter.advance(now, 0).map_err(|_| MediaError::Codec)
+        // Keep one provider decision leased until all exact source credit lands.
+        // No new RTP put/get occurs while its prefix or decoded suffix is retained.
+        self.decision_pending = true;
+        Ok(())
     }
     /// Preserve one refused PCM/digit/gap while the reactor independently services SIP.
     pub(crate) unsafe fn read(
@@ -256,6 +282,19 @@ impl Media {
             self.offset = 0;
             self.poll(sink.reference_now_ns)?;
         }
+        if let Some(Pending::Audio { start, prefix, .. }) = &mut self.pending {
+            if *prefix != 0 {
+                let accepted = unsafe {
+                    sink.gap.unwrap()(sink.context, *start - u64::from(*prefix), *prefix)
+                };
+                if accepted > *prefix {
+                    return Err(MediaError::InvalidPacket);
+                }
+                *prefix -= accepted;
+                output.progress = if *prefix == 0 { 1 } else { 2 };
+                return Ok(());
+            }
+        }
         let Some(pending) = &self.pending else {
             return Ok(());
         };
@@ -267,7 +306,9 @@ impl Media {
                     _ => return Err(MediaError::InvalidPacket),
                 }
             }
-            Pending::Audio { start, count, born } => {
+            Pending::Audio {
+                start, count, born, ..
+            } => {
                 if born > sink.reference_now_ns {
                     return Err(MediaError::InvalidPacket);
                 }
@@ -308,6 +349,12 @@ impl Media {
         };
         output.progress = if accepted { 1 } else { 2 };
         if accepted {
+            if self.decision_pending {
+                self.jitter
+                    .advance(sink.reference_now_ns, 0)
+                    .map_err(|_| MediaError::Codec)?;
+                self.decision_pending = false;
+            }
             self.pending = None;
         }
         Ok(())

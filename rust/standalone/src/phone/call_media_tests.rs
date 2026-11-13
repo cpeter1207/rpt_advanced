@@ -8,6 +8,7 @@ struct Sink {
     credit: usize,
     refuse_digit: bool,
     audio: Vec<(u64, usize, u64)>,
+    pcm: Vec<f32>,
     gaps: Vec<(u64, u32)>,
     digits: Vec<u32>,
     discontinuities: usize,
@@ -29,6 +30,8 @@ unsafe extern "C" fn audio(
     );
     sink.audio
         .push((start, accepted, unsafe { (*birth).born_ns }));
+    sink.pcm
+        .extend_from_slice(unsafe { std::slice::from_raw_parts(samples, accepted) });
     accepted
 }
 unsafe extern "C" fn gap(context: *mut c_void, start: u64, count: u32) -> u32 {
@@ -78,17 +81,24 @@ fn packet(sequence: u16, timestamp: u32, payload_type: u8, payload: &[u8]) -> Ve
     packet
 }
 
+async fn fixture_media(
+    sender: &UdpSocket,
+    jitter: &'static abi::rptadv_jitter_descriptor_v1,
+) -> Media {
+    let offer = format!(
+        "v=0\r\no=fixture 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=sendrecv\r\n",
+        sender.local_addr().unwrap().port()
+    );
+    Media::new(offer.as_bytes(), 1, jitter).await.unwrap()
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn source_retains_refused_prefix_birth_digits_and_gaps() {
     let providers = ProviderSet::load().unwrap();
     // The descriptor remains loaded until media has been dropped below.
     let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let offer = format!(
-        "v=0\r\no=fixture 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=sendrecv\r\n",
-        sender.local_addr().unwrap().port()
-    );
-    let mut media = Media::new(offer.as_bytes(), 1, jitter).await.unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
     let target = media.endpoint.local_addr().unwrap();
     let timestamp = u32::MAX - 79;
     sender
@@ -99,6 +109,16 @@ async fn source_retains_refused_prefix_birth_digits_and_gaps() {
     let born = 1_000_000_000;
     assert_eq!(read(&mut media, &mut sink, born), 0);
     assert_eq!(read(&mut media, &mut sink, born + 40_000_000), 2);
+    assert_eq!(
+        media.jitter.put(
+            ((1u64 << 32) + u64::from(timestamp)) + 160,
+            160,
+            born + 41_000_000,
+            &[0xa5; 160]
+        ),
+        Err(rptadv_jitter_client::Error::OperationFailed),
+        "a refused decoded decision must remain uncommitted"
+    );
     sink.credit = 60;
     assert_eq!(read(&mut media, &mut sink, born + 80_000_000), 2);
     sink.credit = 160;
@@ -142,4 +162,124 @@ async fn source_retains_refused_prefix_birth_digits_and_gaps() {
         [(start + 160, 0), (start + 160, 80), (start + 240, 80)]
     );
     drop(media);
+}
+
+async fn signed_offset(offset: i32) {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    let target = media.endpoint.local_addr().unwrap();
+    let born = 1_000_000_000;
+    let start = (1u64 << 32) + 1000;
+    let mut sink = Sink {
+        credit: 160,
+        ..Sink::default()
+    };
+    sender
+        .send_to(&packet(1, 1000, 0, &[0xa5; 160]), target)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    assert_eq!(read(&mut media, &mut sink, born), 0);
+    let second = (1160i32 + offset) as u32;
+    let mut payload = [0xb5; 160];
+    payload[..40].fill(0xa5);
+    sender
+        .send_to(&packet(2, second, 0, &payload), target)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    assert_eq!(read(&mut media, &mut sink, born + 10_000_000), 0);
+    assert_eq!(read(&mut media, &mut sink, born + 40_000_000), 1);
+    assert_eq!(sink.audio, [(start, 160, born)]);
+    sink.audio.clear();
+    sink.pcm.clear();
+    sink.credit = 0;
+    assert_eq!(read(&mut media, &mut sink, born + 60_000_000), 2);
+    if offset > 0 {
+        sink.credit = 20;
+        assert_eq!(read(&mut media, &mut sink, born + 70_000_000), 2);
+        assert_eq!(read(&mut media, &mut sink, born + 80_000_000), 1);
+        assert_eq!(
+            sink.gaps,
+            [(start + 160, 0), (start + 160, 20), (start + 180, 20)]
+        );
+        assert!(
+            sink.audio.is_empty(),
+            "missing prefix precedes the retained PCM"
+        );
+        sink.credit = 50;
+        assert_eq!(read(&mut media, &mut sink, born + 90_000_000), 2);
+        sink.credit = 160;
+        assert_eq!(read(&mut media, &mut sink, born + 100_000_000), 1);
+        assert_eq!(
+            sink.audio,
+            [
+                (start + 200, 50, born + 10_000_000),
+                (start + 250, 110, born + 10_000_000)
+            ]
+        );
+    } else {
+        sink.credit = 50;
+        assert_eq!(read(&mut media, &mut sink, born + 70_000_000), 2);
+        sink.credit = 160;
+        assert_eq!(read(&mut media, &mut sink, born + 80_000_000), 1);
+        assert!(
+            sink.gaps.is_empty(),
+            "already released samples are trimmed, not republished"
+        );
+        assert_eq!(
+            sink.audio,
+            [
+                (start + 160, 0, born + 10_000_000),
+                (start + 160, 50, born + 10_000_000),
+                (start + 210, 70, born + 10_000_000)
+            ]
+        );
+    }
+    let mut reference = [0.0; 160];
+    let mut codec = G711Codec::load(super::super::media::G711::Mulaw).unwrap();
+    codec.decode(&payload, &mut reference).unwrap();
+    assert_eq!(sink.pcm, reference[if offset < 0 { 40 } else { 0 }..]);
+}
+#[tokio::test(flavor = "current_thread")]
+async fn positive_jitter_offset_preserves_missing_prefix_and_packet_birth() {
+    signed_offset(40).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn negative_jitter_offset_trims_overlap_without_losing_the_tail() {
+    signed_offset(-40).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn jitter_delay_insertion_does_not_publish_a_source_gap() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    let target = media.endpoint.local_addr().unwrap();
+    let born = 1_000_000_000;
+    let mut sink = Sink {
+        credit: 160,
+        ..Sink::default()
+    };
+    sender
+        .send_to(&packet(1, 1000, 0, &[0xa5; 160]), target)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    read(&mut media, &mut sink, born);
+    read(&mut media, &mut sink, born + 40_000_000);
+    sender
+        .send_to(&packet(2, 1160, 0, &[0xa5; 160]), target)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    read(&mut media, &mut sink, born + 95_000_000);
+    read(&mut media, &mut sink, born + 95_000_000);
+    assert!(
+        media.jitter.observe().unwrap().insertion_span > 0,
+        "exercise an actual owned-provider insertion"
+    );
+    assert!(
+        sink.gaps.is_empty(),
+        "insertion delays playout but must not advance source coordinates"
+    );
 }
