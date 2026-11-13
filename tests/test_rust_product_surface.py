@@ -386,6 +386,9 @@ def package(control: Path) -> None:
     )
     assert "${asterisk:Depends}" in adapter, "Asterisk adapter lost its dependency"
     assert "libusbradioplus-product1" in standalone, "missing dynamic radio product"
+    assert "librptadv-sip-adapter1 (= ${binary:Version})" in standalone, (
+        "standalone fixed SIP capability must have its exact runtime dependency"
+    )
     assert f"librptadvtone1 (>= {TONE_MINIMUM_VERSION})" in product, (
         "product must depend directly on the released tone runtime"
     )

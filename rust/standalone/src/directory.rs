@@ -10,14 +10,14 @@ use std::{
 };
 
 /// Retains one resolver context until the product has stopped every host callback.
-pub(crate) struct Resolver {
-    api: &'static abi::rptadv_resolver_descriptor_v1,
+pub(crate) struct Resolver<'provider> {
+    api: &'provider abi::rptadv_resolver_descriptor_v1,
     context: std::ptr::NonNull<c_void>,
 }
 
-impl Resolver {
+impl<'provider> Resolver<'provider> {
     pub(crate) fn new(
-        api: &'static abi::rptadv_resolver_descriptor_v1,
+        api: &'provider abi::rptadv_resolver_descriptor_v1,
     ) -> Result<Self, crate::providers::ProviderError> {
         let mut context = std::ptr::null_mut();
         let status = unsafe { api.create.expect("validated resolver")(&mut context) };
@@ -59,14 +59,14 @@ impl Resolver {
     }
 }
 
-impl Drop for Resolver {
+impl Drop for Resolver<'_> {
     fn drop(&mut self) {
         // Product shutdown joins users before the host drops; the provider DSO is still retained.
         unsafe { self.api.destroy.expect("validated resolver")(self.context.as_ptr()) };
     }
 }
 
-unsafe fn resolver<'a>(context: *mut c_void) -> Option<&'a Resolver> {
+unsafe fn resolver<'a>(context: *mut c_void) -> Option<&'a Resolver<'static>> {
     // Borrow only this immutable field: radio staging in other host callbacks is independent.
     if context.is_null() {
         return None;

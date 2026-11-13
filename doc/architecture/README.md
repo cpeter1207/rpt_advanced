@@ -23,6 +23,12 @@ RTP owner also has a prepared timed send seam with immutable retries and
 retirement epochs; it does not activate SIP or replace product source-age
 ownership.
 
+The local standalone SIP registration checkpoint loads an inert mandatory SIP
+provider and creates one shared reactor only when accounts are enabled. Existing
+account records and secure secrets feed prepare-before-publish, explicit
+REGISTER activation, reload retirement and joined shutdown. It adds no calls or
+media and is not deployed or publicly distributed; see ADRs 0022, 0037 and 0044.
+
 These are initial-version alpha releases. [ADR 0040](decisions/0040-initial-alpha-compatibility-policy.md)
 supersedes backward-compatibility requirements for project-owned interfaces.
 Do not retain compatibility-only code; preserve required current behavior and

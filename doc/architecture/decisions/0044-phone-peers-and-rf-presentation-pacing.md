@@ -1352,3 +1352,42 @@ expiry refresh and unregister, refused setup/generations and timer-only failure/
 shutdown. The upstream shutdown may need 30 seconds; only final status 200 allows
 destruction. Full native-platform gates, complete coverage, host composition,
 incoming SIP calls/media, live provider and physical-radio milestones remain open.
+
+
+## Actual standalone REGISTER composition — 2026-11-13 local checkpoint
+
+The existing `[phone_account]` records now reach a standalone SIP registration
+owner. Configuration and secure literal secret loading stay with their existing
+owners. The existing generation allocator preserves unchanged settings,
+credentials and resolved endpoints; failed preparation never republishes or
+reuses a generation. SIP authority uses the configured server, while transport
+uses its separately resolved numeric endpoint. The AOR percent-encodes the UTF-8
+username's non-unreserved bytes; Digest receives the unchanged literal username
+and secret. There are no new operator configuration keys. IAX registration and
+hostname activation remain outside this increment.
+
+All candidate SIP contexts and account maps are prepared before the existing
+product/IAX cohort publication. Preparation sends no REGISTER. Both committed
+product outcomes adopt the exact candidate and explicitly activate its newly
+added registrations. Rejection aborts additions; changed/removed old owners
+unregister and retire only after publication. Post-publication activation errors
+are reported without claiming rollback. Unchanged generations retain their
+existing native owner. SIP-disabled records neither read their secret nor start
+a reactor, and enable-on-reload uses the inert startup-retained provider.
+
+The reactor enforces the configured absolute authentication deadline for initial
+registration and observed reauthentication. The first refresh challenge starts
+that deadline once; subsequent challenges cannot extend it. Silent automatic
+refresh uses the native transaction timer, while the host separately fences the
+last accepted registration lifetime from its monotonic successful observation
+plus `accepted_expires`. Preexisting deadlines are checked before native service
+and before adopting a later success. Removal has a bounded deadline and shutdown
+has a 35-second host guard around the provider's documented 30-second behavior.
+Persistent service failures cannot bypass the guard. Failure retains live native
+contexts/code and reports incomplete shutdown.
+
+This is a private, registration-only controller milestone. It does not implement
+INVITE, calls, provider media, RF attachment or Asterisk SIP activation. Synthetic
+loopback evidence is distinct from real-provider/NAT or physical-radio acceptance.
+Public source/artifact publication remains held for the separately recorded
+combined-distribution license review.

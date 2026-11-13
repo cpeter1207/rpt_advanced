@@ -37,7 +37,7 @@ use std::{
 /// Context retained while the product uses the standalone host table.
 pub struct StandaloneHostContext {
     radio: RadioHostContext,
-    pub(crate) resolver: Option<directory::Resolver>,
+    pub(crate) resolver: Option<directory::Resolver<'static>>,
     secrets: SecretsFile,
     ingress: Option<PeerIngress>,
     echo: Mutex<Option<Arc<Accounts>>>,

@@ -9,7 +9,7 @@ use std::{
     sync::OnceLock,
 };
 
-const PROVIDERS: [ProviderSpec; 13] = [
+const PROVIDERS: [ProviderSpec; 14] = [
     inline(
         "librptadv_product.so.3",
         "rptadv_product_descriptor_v1",
@@ -94,6 +94,12 @@ const PROVIDERS: [ProviderSpec; 13] = [
         1,
         b"rptadv.rnnoise",
         DescriptorLayout::Named,
+    ),
+    inline(
+        "librptadv_sip_adapter.so.1",
+        "rptadv_sip_adapter_descriptor_v1",
+        1,
+        b"rptadv.sip",
     ),
 ];
 
@@ -260,11 +266,58 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+/// Independent lease for bounded account preparation, including canceled lookups.
+/// Uses the existing selected resolver contract, not a second DNS implementation.
+pub(crate) struct ResolverLibrary {
+    _library: ProviderLibrary,
+    api: crate::abi::rptadv_resolver_descriptor_v1,
+}
+impl ResolverLibrary {
+    pub(crate) fn load() -> Result<Self, ProviderError> {
+        let spec = PROVIDERS[4];
+        let library = ProviderLibrary::open(spec, None)?;
+        let pointer = library
+            .descriptor(spec.symbol)
+            .ok_or(ProviderError::MissingDescriptor(spec.library))?;
+        if !valid_descriptor(pointer, spec)
+            || descriptor_size(pointer, spec.layout)
+                < std::mem::size_of::<crate::abi::rptadv_resolver_descriptor_v1>()
+        {
+            return Err(ProviderError::IncompatibleDescriptor(spec.library));
+        }
+        let api = unsafe {
+            pointer
+                .cast::<crate::abi::rptadv_resolver_descriptor_v1>()
+                .read()
+        };
+        if api.create.is_none()
+            || api.destroy.is_none()
+            || api.resolve_addresses.is_none()
+            || api.resolve_srv.is_none()
+        {
+            return Err(ProviderError::IncompleteDescriptor(spec.library));
+        }
+        Ok(Self {
+            _library: library,
+            api,
+        })
+    }
+    pub(crate) fn api(&self) -> &crate::abi::rptadv_resolver_descriptor_v1 {
+        &self.api
+    }
+}
+
 /// All standalone runtime libraries, kept loaded for the product's full lifetime.
 pub struct ProviderSet {
     _libraries: Vec<Library>,
     descriptors: Vec<LoadedProvider>,
     iax: OnceLock<Result<crate::iax::IaxClient, crate::iax::IaxError>>,
+    sip: OnceLock<
+        Result<
+            std::sync::Arc<rptadv_peer_support::sip::registration::Provider>,
+            rptadv_peer_support::sip::registration::Error,
+        >,
+    >,
 }
 
 /// Native provider descriptors needed to activate one standalone radio.
@@ -356,6 +409,7 @@ impl ProviderSet {
             _libraries: libraries,
             descriptors,
             iax: OnceLock::new(),
+            sip: OnceLock::new(),
         })
     }
 
@@ -365,6 +419,22 @@ impl ProviderSet {
             .get_or_init(|| crate::iax::IaxClient::load(Path::new("librptadviax2.so.2")))
             .clone()
             .map_err(|_| ProviderError::IncompleteDescriptor("librptadviax2.so.2"))
+    }
+
+    /// Retain the inert SIP capability at startup, without native contexts or threads.
+    /// Enabling accounts later reuses this exact code lease rather than loading new code.
+    pub(crate) fn sip_provider(
+        &self,
+    ) -> Result<std::sync::Arc<rptadv_peer_support::sip::registration::Provider>, ProviderError>
+    {
+        self.sip
+            .get_or_init(|| unsafe {
+                rptadv_peer_support::sip::registration::Provider::load(
+                    &Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_sip_adapter.so.1"),
+                )
+            })
+            .clone()
+            .map_err(|_| ProviderError::IncompleteDescriptor("librptadv_sip_adapter.so.1"))
     }
 
     /// Return a validated descriptor whose access is bounded by this provider set.
@@ -452,6 +522,7 @@ impl ProviderSet {
         // Startup prepares the immutable selection; reload reuses that catalog,
         // never loading provider code from newly replaced files.
         self.iax_client()?;
+        self.sip_provider()?;
         Ok(())
     }
 
@@ -818,6 +889,7 @@ pub(crate) mod tests {
             _libraries: Vec::new(),
             descriptors: Vec::new(),
             iax: std::sync::OnceLock::new(),
+            sip: std::sync::OnceLock::new(),
         }
     }
 
@@ -1176,6 +1248,7 @@ pub(crate) mod tests {
         let providers = Box::leak(Box::new(super::ProviderSet {
             _libraries: Vec::new(),
             iax: std::sync::OnceLock::new(),
+            sip: std::sync::OnceLock::new(),
             descriptors: vec![loaded_provider(
                 "libusbradioplus_product.so.1",
                 Box::leak(Box::new(incomplete)),
@@ -1217,6 +1290,7 @@ pub(crate) mod tests {
             let providers = super::ProviderSet {
                 _libraries: Vec::new(),
                 iax: std::sync::OnceLock::new(),
+                sip: std::sync::OnceLock::new(),
                 descriptors: vec![super::LoadedProvider {
                     library: NAME,
                     size: bytes,
@@ -1897,6 +1971,7 @@ pub(crate) mod tests {
             INLINE(speech, rptadv_speech_adapter_descriptor, 2, "rptadv.speech")
             INLINE(resolver, rptadv_resolver_adapter_descriptor_v1, 1, "rptadv.resolver")
             INLINE(jitter, rptadv_jitter_adapter_descriptor_v1, 1, "rptadv.jitter")
+            INLINE(sip, rptadv_sip_adapter_descriptor_v1, 1, "rptadv.sip")
             INLINE(iax2, rptadv_iax2_client_descriptor_v2, 2, "rptadv.iax2.v2")
             #ifndef NATIVE_VERSION
             #define NATIVE_VERSION 1

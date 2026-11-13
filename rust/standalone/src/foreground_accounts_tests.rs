@@ -124,7 +124,6 @@ fn preparation_rejects_unsupported_profiles_without_replacing_active_accounts() 
     owner.active = owner.prepare(&fixture.path(), &text, &radios).unwrap();
     let original = std::sync::Arc::clone(&owner.active.as_slice()[0]);
     for (candidate, diagnostic) in [
-        (text.replace("protocol=iax", "protocol=sip"), "requires IAX"),
         (text.replace("register=no", "register=yes"), "registration"),
         (
             text.replace("127.0.0.1:4569", "provider.invalid:4569"),
@@ -170,3 +169,112 @@ fn preparation_rejects_unsupported_profiles_without_replacing_active_accounts() 
 
 #[path = "foreground_incoming_tests.rs"]
 mod incoming;
+
+#[test]
+fn configured_sip_account_prepares_without_registering_or_changing_active_generation() {
+    let fixture = Fixture::new();
+    let text = fixture
+        .text(4569)
+        .replace("protocol=iax", "protocol=sip")
+        .replace("register=no", "register=yes");
+    let radios = resolve_radio_nodes(&text).unwrap();
+    let path = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_sip_adapter.so.1");
+    let mut owner = ForegroundAccounts {
+        sip_provider: Some(
+            unsafe { rptadv_peer_support::sip::registration::Provider::load(&path) }.unwrap(),
+        ),
+        ..ForegroundAccounts::default()
+    };
+    let prepared = owner.prepare(&fixture.path(), &text, &radios);
+    assert!(
+        prepared.is_ok(),
+        "valid SIP settings must reach prepared ownership"
+    );
+    assert!(owner.active.as_slice().is_empty());
+    assert_eq!(prepared.unwrap().as_slice()[0].generation(), 1);
+}
+
+#[test]
+fn disabled_sip_account_keeps_inert_capability_without_worker_or_secret_read() {
+    let fixture = Fixture::new();
+    let text = fixture
+        .text(4569)
+        .replace("protocol=iax", "protocol=sip")
+        .replace("\nenabled=yes\n", "\nenabled=no\n");
+    let radios = resolve_radio_nodes(&text).unwrap();
+    fs::remove_file(fixture.directory.join("phone.secret")).unwrap();
+    let path = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_sip_adapter.so.1");
+    let mut owner = ForegroundAccounts {
+        sip_provider: Some(
+            unsafe { rptadv_peer_support::sip::registration::Provider::load(&path) }.unwrap(),
+        ),
+        ..ForegroundAccounts::default()
+    };
+    assert!(
+        owner
+            .prepare(&fixture.path(), &text, &radios)
+            .unwrap()
+            .as_slice()
+            .is_empty()
+    );
+    assert!(owner.sip.is_none());
+}
+
+#[test]
+fn sip_hostname_uses_system_resolver_without_changing_configured_authority() {
+    let fixture = Fixture::new();
+    let text = fixture
+        .text(4569)
+        .replace("protocol=iax", "protocol=sip")
+        .replace("127.0.0.1:4569", "localhost:4569");
+    let radios = resolve_radio_nodes(&text).unwrap();
+    let path = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_sip_adapter.so.1");
+    let mut owner = ForegroundAccounts {
+        sip_provider: Some(
+            unsafe { rptadv_peer_support::sip::registration::Provider::load(&path) }.unwrap(),
+        ),
+        ..ForegroundAccounts::default()
+    };
+    let accounts = owner.prepare(&fixture.path(), &text, &radios).unwrap();
+    assert!(accounts.as_slice()[0].remote().ip().is_loopback());
+    assert_eq!(accounts.as_slice()[0].settings().server, "localhost:4569");
+    assert_eq!(accounts.as_slice()[0].generation(), 1);
+}
+
+#[test]
+fn preparation_wait_services_foreground_and_keeps_canceled_job_custody() {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let mut owner = ForegroundAccounts {
+        pending: Some(receiver),
+        ..ForegroundAccounts::default()
+    };
+    let mut sender = Some(sender);
+    let mut serviced = 0;
+    owner
+        .wait_preparation(Duration::from_millis(100), || {
+            serviced += 1;
+            sender
+                .take()
+                .unwrap()
+                .send((
+                    crate::phone_accounts::AccountPreparer::default(),
+                    Ok(crate::phone_accounts::PreparedAccounts::default()),
+                ))
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(serviced, 1);
+    assert!(owner.pending.is_none() && owner.preparer.is_some());
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    owner.pending = Some(receiver);
+    let canceled = owner.wait_preparation(Duration::from_millis(100), || {
+        Err(ForegroundError::Configuration("fixture shutdown".into()))
+    });
+    assert!(canceled.is_err());
+    assert!(
+        owner.pending.is_some(),
+        "cancellation cannot admit another preparation job"
+    );
+    drop(sender);
+}

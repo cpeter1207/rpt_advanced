@@ -248,6 +248,19 @@ order, jitter, codec state, prepared packets and bounded deadlines.
   commit selected locks and documented supported profiles. Real provider/NAT/
   account-policy acceptance remains an explicit later gate.
 
+#### Local controller REGISTER checkpoint — 2026-11-13
+
+The selected replaceable registration provider is now the unmodified Sofia
+adapter described in ADR 0044, rather than a new owned transaction engine. The
+borrowed parser remains a separate prerequisite; it does not imply provider
+activation. The controller checkpoint joins the neutral descriptor to actual
+standalone account preparation/publication, one lazy reactor, secure existing
+secrets, system hostname lookup, immutable generations, authentication/binding
+expiry, unregister and joined cleanup. Focused validation and the full before-
+merge gates remain separately recorded. No call/media, Asterisk activation,
+real-provider or hardware readiness is claimed, and combined public distribution
+remains held pending the license review.
+
 ### Task 5: RF-only pacing FIFO and receive-opportunity arbiter
 
 **Files:** `rust/core/src/link/audio.rs`, focused RF opportunity module/tests,

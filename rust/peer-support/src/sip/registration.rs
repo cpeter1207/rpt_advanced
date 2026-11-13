@@ -1,0 +1,338 @@
+//! Thread-confined SIP registration contexts and retained neutral descriptor leases.
+//! The composition owns the servicing thread and must join it before dropping its provider.
+use libloading::Library;
+use std::{cell::Cell, ffi::c_void, fmt, mem::size_of, path::Path, ptr::NonNull, sync::Arc};
+
+/// Redacted provider failure; no native reason, endpoint or credential is retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The selected shared object could not be opened.
+    Load,
+    /// The descriptor or returned record violates the neutral contract.
+    Contract,
+    /// The provider rejected an operation with its numeric ABI status.
+    Status(i32),
+}
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Load => f.write_str("cannot load SIP registration provider"),
+            Self::Contract => f.write_str("invalid SIP registration provider contract"),
+            Self::Status(code) => write!(f, "SIP registration provider returned {code}"),
+        }
+    }
+}
+impl std::error::Error for Error {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Span {
+    data: *const u8,
+    length: usize,
+}
+impl From<&str> for Span {
+    fn from(s: &str) -> Self {
+        Self {
+            data: s.as_ptr(),
+            length: s.len(),
+        }
+    }
+}
+#[repr(C)]
+struct Config {
+    struct_size: u32,
+    expires: u32,
+    generation: u64,
+    bind: Span,
+    next_hop: Span,
+    registrar: Span,
+    aor: Span,
+    username: Span,
+    password: Span,
+}
+
+/// Borrowed preparation input; create copies every retained value without sending REGISTER.
+pub struct Settings<'a> {
+    /// Nonzero immutable account generation.
+    pub generation: u64,
+    /// Requested registration lifetime, in seconds.
+    pub expires: u16,
+    /// Numeric local SocketAddr; port zero selects an ephemeral port.
+    pub bind: &'a str,
+    /// Prepared numeric remote SocketAddr.
+    pub next_hop: &'a str,
+    /// SIP registrar authority, distinct from its resolved transport endpoint.
+    pub registrar: &'a str,
+    /// SIP address of record, with any username URI escaping already applied.
+    pub aor: &'a str,
+    /// Literal Digest username.
+    pub username: &'a str,
+    /// Literal private credential, never formatted in diagnostics.
+    pub password: &'a str,
+}
+
+/// Authoritative numeric snapshot. State values follow the versioned provider header.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Status {
+    /// Complete writable record size.
+    pub struct_size: u32,
+    /// Prepared=0, registering=1, registered=2, removing=3, removed=4,
+    /// failed=5, stopping=6, stopped=7, shutdown-failed=8.
+    pub state: u32,
+    /// Immutable account generation.
+    pub generation: u64,
+    /// Monotonic provider observation sequence.
+    pub sequence: u64,
+    /// Numeric SIP response, never untrusted reason text.
+    pub sip_status: u32,
+    /// Last accepted matching Contact expiry, in seconds.
+    pub accepted_expires: u32,
+    /// Saturating successful initial/refresh response count.
+    pub registrations: u32,
+    /// Saturating count of replaced events in the provider's bounded queue.
+    pub events_dropped: u32,
+}
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            state: 0,
+            generation: 0,
+            sequence: 0,
+            sip_status: 0,
+            accepted_expires: 0,
+            registrations: 0,
+            events_dropped: 0,
+        }
+    }
+}
+
+type Action = unsafe extern "C" fn(*mut c_void, u64) -> i32;
+type Read = unsafe extern "C" fn(*mut c_void, u64, *mut Status) -> i32;
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Descriptor {
+    struct_size: u32,
+    abi_version: u32,
+    capability: [u8; 16],
+    create: Option<unsafe extern "C" fn(*const Config, *mut *mut c_void) -> i32>,
+    service: Option<Action>,
+    next_event: Option<Read>,
+    status: Option<Read>,
+    register_account: Option<Action>,
+    unregister_account: Option<Action>,
+    shutdown: Option<Action>,
+    destroy: Option<Action>,
+}
+impl Descriptor {
+    unsafe fn read(pointer: *const Self) -> Result<Self, Error> {
+        if pointer.is_null()
+            || unsafe { std::ptr::addr_of!((*pointer).struct_size).read_unaligned() }
+                < size_of::<Self>() as u32
+        {
+            return Err(Error::Contract);
+        }
+        let api = unsafe { pointer.read_unaligned() };
+        if api.abi_version != 1
+            || api.capability != *b"rptadv.sip\0\0\0\0\0\0"
+            || ![
+                api.create.is_some(),
+                api.service.is_some(),
+                api.next_event.is_some(),
+                api.status.is_some(),
+                api.register_account.is_some(),
+                api.unregister_account.is_some(),
+                api.shutdown.is_some(),
+                api.destroy.is_some(),
+            ]
+            .into_iter()
+            .all(|present| present)
+        {
+            return Err(Error::Contract);
+        }
+        Ok(api)
+    }
+}
+
+/// Immutable operations and their code lease, shareable before any context is created.
+pub struct Provider {
+    api: Descriptor,
+    _library: Library,
+}
+impl Provider {
+    /// Load the complete neutral ABI without creating a socket, context or thread.
+    /// # Safety
+    /// `path` identifies trusted native code. Keep this lease until all servicing
+    /// threads are joined, including after the last successful context destruction.
+    pub unsafe fn load(path: &Path) -> Result<Arc<Self>, Error> {
+        let library = unsafe { Library::new(path) }.map_err(|_| Error::Load)?;
+        let get = unsafe {
+            library.get::<unsafe extern "C" fn() -> *const Descriptor>(
+                b"rptadv_sip_adapter_descriptor_v1\0",
+            )
+        }
+        .map_err(|_| Error::Contract)?;
+        let api = unsafe { Descriptor::read(get()) }?;
+        Ok(Arc::new(Self {
+            api,
+            _library: library,
+        }))
+    }
+    /// Prepare one account on its sole future servicing thread; no REGISTER is sent.
+    pub fn prepare(self: &Arc<Self>, settings: &Settings<'_>) -> Result<Account, Error> {
+        let config = Config {
+            struct_size: size_of::<Config>() as u32,
+            expires: u32::from(settings.expires),
+            generation: settings.generation,
+            bind: settings.bind.into(),
+            next_hop: settings.next_hop.into(),
+            registrar: settings.registrar.into(),
+            aor: settings.aor.into(),
+            username: settings.username.into(),
+            password: settings.password.into(),
+        };
+        let mut context = std::ptr::null_mut();
+        let code = unsafe { self.api.create.unwrap()(&config, &mut context) };
+        if code != 0 {
+            if !context.is_null() {
+                std::mem::forget(Arc::clone(self));
+            }
+            return Err(Error::Status(code));
+        }
+        Ok(Account {
+            context: Cell::new(Some(NonNull::new(context).ok_or(Error::Contract)?)),
+            provider: Arc::clone(self),
+            generation: settings.generation,
+        })
+    }
+}
+
+/// One non-Send/non-Sync account. Every operation runs on its creating thread.
+/// Explicit shutdown/service/destroy is required; a nonquiescent drop retains its code.
+pub struct Account {
+    context: Cell<Option<NonNull<c_void>>>,
+    provider: Arc<Provider>,
+    generation: u64,
+}
+impl Account {
+    fn action(&self, action: Action) -> Result<(), Error> {
+        let context = self.context.get().ok_or(Error::Contract)?;
+        let code = unsafe { action(context.as_ptr(), self.generation) };
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(Error::Status(code))
+        }
+    }
+    /// Execute a bounded nonblocking native turn.
+    pub fn service(&self) -> Result<(), Error> {
+        self.action(self.provider.api.service.unwrap())
+    }
+    /// Send the first REGISTER only after committed product publication.
+    pub fn activate(&self) -> Result<(), Error> {
+        self.action(self.provider.api.register_account.unwrap())
+    }
+    /// Request removal of the current registration.
+    pub fn unregister(&self) -> Result<(), Error> {
+        self.action(self.provider.api.unregister_account.unwrap())
+    }
+    /// Begin asynchronous shutdown; continue servicing until state 7.
+    pub fn shutdown(&self) -> Result<(), Error> {
+        self.action(self.provider.api.shutdown.unwrap())
+    }
+    /// Return a checked, credential-free snapshot.
+    pub fn status(&self) -> Result<Status, Error> {
+        let mut status = Status::default();
+        let context = self.context.get().ok_or(Error::Contract)?;
+        let code = unsafe {
+            self.provider.api.status.unwrap()(context.as_ptr(), self.generation, &mut status)
+        };
+        if code != 0 {
+            return Err(Error::Status(code));
+        }
+        if status.struct_size != size_of::<Status>() as u32
+            || status.generation != self.generation
+            || status.state > 8
+        {
+            return Err(Error::Contract);
+        }
+        Ok(status)
+    }
+    /// Destroy only a fully stopped context; pending/failed destruction retains ownership.
+    pub fn destroy(&self) -> Result<(), Error> {
+        self.action(self.provider.api.destroy.unwrap())?;
+        self.context.set(None);
+        Ok(())
+    }
+}
+impl Drop for Account {
+    fn drop(&mut self) {
+        if self.context.get().is_some() && self.destroy().is_err() {
+            // Native callbacks/storage remain live. Never dlclose underneath them.
+            std::mem::forget(Arc::clone(&self.provider));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    unsafe extern "C" fn create(_: *const Config, _: *mut *mut c_void) -> i32 {
+        -1
+    }
+    unsafe extern "C" fn action(_: *mut c_void, _: u64) -> i32 {
+        0
+    }
+    unsafe extern "C" fn read(_: *mut c_void, _: u64, _: *mut Status) -> i32 {
+        0
+    }
+    fn descriptor() -> Descriptor {
+        Descriptor {
+            struct_size: size_of::<Descriptor>() as u32,
+            abi_version: 1,
+            capability: *b"rptadv.sip\0\0\0\0\0\0",
+            create: Some(create),
+            service: Some(action),
+            next_event: Some(read),
+            status: Some(read),
+            register_account: Some(action),
+            unregister_account: Some(action),
+            shutdown: Some(action),
+            destroy: Some(action),
+        }
+    }
+    #[test]
+    fn descriptor_requires_complete_identity_and_lifecycle_before_use() {
+        let mut table = descriptor();
+        assert!(unsafe { Descriptor::read(&table) }.is_ok());
+        table.struct_size -= 1;
+        assert!(unsafe { Descriptor::read(&table) }.is_err());
+        table = descriptor();
+        table.abi_version = 2;
+        assert!(unsafe { Descriptor::read(&table) }.is_err());
+        table = descriptor();
+        table.capability[0] = 0;
+        assert!(unsafe { Descriptor::read(&table) }.is_err());
+        for absent in 0..8 {
+            table = descriptor();
+            match absent {
+                0 => table.create = None,
+                1 => table.service = None,
+                2 => table.next_event = None,
+                3 => table.status = None,
+                4 => table.register_account = None,
+                5 => table.unregister_account = None,
+                6 => table.shutdown = None,
+                _ => table.destroy = None,
+            }
+            assert!(unsafe { Descriptor::read(&table) }.is_err());
+        }
+        assert!(unsafe { Descriptor::read(std::ptr::null()) }.is_err());
+        let prefix = 4_u32;
+        assert!(unsafe { Descriptor::read(std::ptr::from_ref(&prefix).cast()) }.is_err());
+        assert_eq!(size_of::<Status>(), 40);
+        assert_eq!(size_of::<Config>(), 16 + 12 * size_of::<usize>());
+        assert_eq!(size_of::<Descriptor>(), 24 + size_of::<[usize; 8]>());
+    }
+}

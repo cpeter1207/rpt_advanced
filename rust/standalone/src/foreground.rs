@@ -21,12 +21,16 @@ pub enum ForegroundError {
     RootUser,
     /// Configuration or secure IAX credential loading failed.
     Configuration(String),
+    /// The bounded preparation wait expired; actual job custody remains retained.
+    PreparationPending,
     /// Required standalone shared libraries are unavailable or incompatible.
     Provider(crate::providers::ProviderError),
     /// The portable product could not start or stop cleanly.
     Runtime(crate::runtime::RuntimeError),
     /// The standalone HTTPS registration worker could not start.
     Registration(std::io::Error),
+    /// The selected SIP registration owner could not prepare, activate or stop.
+    Sip(String),
     /// The standalone IAX2 listener could not bind or operate.
     Iax(crate::iax::IaxError),
     /// The service-only local maintenance socket could not bind.
@@ -40,12 +44,16 @@ impl std::fmt::Display for ForegroundError {
         match self {
             Self::RootUser => formatter.write_str("rpt-advanced must run as an unprivileged user"),
             Self::Configuration(error) => formatter.write_str(error),
+            Self::PreparationPending => {
+                formatter.write_str("phone account preparation is still pending")
+            }
             Self::Provider(error) => error.fmt(formatter),
             Self::Runtime(error) => error.fmt(formatter),
             Self::Registration(error) => {
                 write!(formatter, "cannot start registration worker: {error}")
             }
             Self::Iax(error) => error.fmt(formatter),
+            Self::Sip(error) => formatter.write_str(error),
             Self::LocalControl(error) => {
                 write!(formatter, "cannot start local radio control: {error}")
             }
@@ -76,11 +84,19 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         let secrets = read_secrets(secrets_path)?;
         let registrations = crate::registration::targets(&text, &secrets)
             .map_err(|error| ForegroundError::Configuration(error.to_string()))?;
-        let mut accounts = ForegroundAccounts::default();
-        accounts.active = accounts.prepare(configuration, &text, &radios)?;
         let providers = crate::providers::ProviderSet::load().map_err(ForegroundError::Provider)?;
+        let mut accounts = ForegroundAccounts {
+            sip_provider: Some(
+                providers
+                    .sip_provider()
+                    .map_err(ForegroundError::Provider)?,
+            ),
+            ..ForegroundAccounts::default()
+        };
+        let candidate = accounts.prepare(configuration, &text, &radios)?;
+        let sip_update = prepare_sip_accounts(&mut accounts.sip, &candidate)?;
         let client = providers.iax_client().map_err(ForegroundError::Provider)?;
-        let mut iax_listeners = bind_iax_listeners(&client, &radios, &accounts.active)?;
+        let mut iax_listeners = bind_iax_listeners(&client, &radios, &candidate)?;
         let runtime = crate::runtime::ProductRuntime::start_with_providers(
             configuration,
             &text,
@@ -90,6 +106,10 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         )
         .map_err(ForegroundError::Runtime)?;
         enable_iax_listeners(&mut iax_listeners, &runtime)?;
+        accounts.active = candidate;
+        sip_update
+            .map_or(Ok(()), |update| update.commit())
+            .map_err(sip_error)?;
         let registration = crate::registration::RegistrationWorker::start(registrations)
             .map_err(ForegroundError::Registration)?;
         run_runtime(
@@ -153,6 +173,11 @@ fn run_runtime(
         registration: &mut registration,
         accounts: &mut accounts,
     });
+    let sip_result = accounts
+        .sip
+        .as_mut()
+        .map_or(Ok(()), |owner| owner.stop())
+        .map_err(sip_error);
     let fatal = runtime.reload_failure();
     if let Err(error) = runtime.stop() {
         // A failed quiescence cannot release listener callbacks underneath the
@@ -164,7 +189,7 @@ fn run_runtime(
     iax_listeners.clear();
     registration.stop();
     eprintln!("rpt-advanced standalone runtime stopped");
-    shutdown_result(fatal, Ok(()))
+    sip_result.and(shutdown_result(fatal, Ok(())))
 }
 
 #[cfg(unix)]
@@ -177,13 +202,22 @@ fn shutdown_result(
         .map_err(ForegroundError::Runtime)
 }
 
+type AccountPreparation = std::sync::mpsc::Receiver<(
+    crate::phone_accounts::AccountPreparer,
+    Result<crate::phone_accounts::PreparedAccounts, crate::phone_accounts::PreparationError>,
+)>;
+
 /// One generation allocator and its published configuration snapshot.
-/// Preparation is synchronous and numeric-only: it performs no name service,
-/// registration or admission while the foreground owns the listener cohort.
+/// SIP preparation owns one bounded blocking job. Foreground may service existing
+/// listeners while waiting; no candidate registers or admits calls before commit.
 #[derive(Default)]
 struct ForegroundAccounts {
-    preparer: crate::phone_accounts::AccountPreparer,
+    preparer: Option<crate::phone_accounts::AccountPreparer>,
+    pending: Option<AccountPreparation>,
+    preparation_failed: bool,
     active: crate::phone_accounts::PreparedAccounts,
+    sip_provider: Option<std::sync::Arc<rptadv_peer_support::sip::registration::Provider>>,
+    sip: Option<crate::phone::registration::Worker>,
 }
 
 impl ForegroundAccounts {
@@ -192,6 +226,16 @@ impl ForegroundAccounts {
         configuration: &Path,
         text: &str,
         radios: &[crate::ResolvedRadioNode],
+    ) -> Result<crate::phone_accounts::PreparedAccounts, ForegroundError> {
+        self.prepare_with_progress(configuration, text, radios, || Ok(()))
+    }
+
+    fn prepare_with_progress(
+        &mut self,
+        configuration: &Path,
+        text: &str,
+        radios: &[crate::ResolvedRadioNode],
+        progress: impl FnMut() -> Result<(), ForegroundError>,
     ) -> Result<crate::phone_accounts::PreparedAccounts, ForegroundError> {
         use crate::configuration::PhoneAccountProtocol;
         let mut records = crate::configuration::resolve_phone_accounts(text)
@@ -203,13 +247,13 @@ impl ForegroundAccounts {
                     .any(|node| node.enabled && node.node == record.local_node)
         });
         for record in &records {
-            let unsupported = if record.protocol != PhoneAccountProtocol::Iax {
-                Some("standalone phone account activation currently requires IAX")
-            } else if record.register {
+            let unsupported = if record.protocol == PhoneAccountProtocol::Iax && record.register {
                 Some(
                     "standalone phone account registration is not yet available; configure register=no",
                 )
-            } else if record.server.parse::<SocketAddr>().is_err() {
+            } else if record.protocol == PhoneAccountProtocol::Iax
+                && record.server.parse::<SocketAddr>().is_err()
+            {
                 Some("standalone phone account activation currently requires a numeric endpoint")
             } else {
                 None
@@ -218,12 +262,107 @@ impl ForegroundAccounts {
                 return Err(ForegroundError::Configuration(reason.into()));
             }
         }
-        self.preparer
-            .prepare(configuration, records, &self.active, |_| {
+        // A timed-out job retains exclusive allocator custody. Its stale candidate
+        // is discarded when it finishes, but consumed generations are never reused.
+        if self.pending.is_some() {
+            self.finish_preparation(Duration::ZERO)?;
+        }
+        if self.preparation_failed {
+            return Err(ForegroundError::Configuration(
+                "phone account preparation owner failed".into(),
+            ));
+        }
+        let selected = records
+            .iter()
+            .any(|record| record.protocol == PhoneAccountProtocol::Sip);
+        if selected && self.sip.is_none() {
+            let provider = self
+                .sip_provider
+                .clone()
+                .ok_or_else(|| sip_error(crate::phone::registration::Error::Owner))?;
+            self.sip = Some(
+                crate::phone::registration::Worker::from_provider(provider).map_err(sip_error)?,
+            );
+        }
+        let mut preparer = self.preparer.take().unwrap_or_default();
+        if let Some(worker) = &mut self.sip {
+            self.pending = Some(worker.prepare_accounts(
+                preparer,
+                configuration.to_owned(),
+                records,
+                self.active.clone(),
+            ));
+            self.wait_preparation(Duration::from_secs(30), progress)
+        } else {
+            let result = preparer.prepare(configuration, records, &self.active, |_| {
                 Err(std::io::Error::other("numeric phone endpoint required"))
-            })
-            .map_err(|error| ForegroundError::Configuration(error.to_string()))
+            });
+            self.preparer = Some(preparer);
+            result.map_err(|error| ForegroundError::Configuration(error.to_string()))
+        }
     }
+
+    fn wait_preparation(
+        &mut self,
+        budget: Duration,
+        mut progress: impl FnMut() -> Result<(), ForegroundError>,
+    ) -> Result<crate::phone_accounts::PreparedAccounts, ForegroundError> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            progress()?;
+            let wait = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .min(Duration::from_millis(10));
+            match self.finish_preparation(wait) {
+                Err(ForegroundError::PreparationPending)
+                    if std::time::Instant::now() < deadline => {}
+                result => return result,
+            }
+        }
+    }
+
+    fn finish_preparation(
+        &mut self,
+        wait: Duration,
+    ) -> Result<crate::phone_accounts::PreparedAccounts, ForegroundError> {
+        let result = self
+            .pending
+            .as_ref()
+            .expect("preparation receiver retained")
+            .recv_timeout(wait);
+        match result {
+            Ok((preparer, result)) => {
+                self.pending = None;
+                self.preparer = Some(preparer);
+                result.map_err(|error| ForegroundError::Configuration(error.to_string()))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err(ForegroundError::PreparationPending)
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.pending = None;
+                self.preparation_failed = true;
+                Err(ForegroundError::Configuration(
+                    "phone account preparation owner failed".into(),
+                ))
+            }
+        }
+    }
+}
+
+fn sip_error(error: crate::phone::registration::Error) -> ForegroundError {
+    ForegroundError::Sip(error.to_string())
+}
+
+/// Prepare account resources using the startup-retained capability, without REGISTER.
+fn prepare_sip_accounts<'a>(
+    owner: &'a mut Option<crate::phone::registration::Worker>,
+    accounts: &crate::phone_accounts::PreparedAccounts,
+) -> Result<Option<crate::phone::registration::Update<'a>>, ForegroundError> {
+    owner
+        .as_mut()
+        .map(|worker| worker.prepare(accounts).map_err(sip_error))
+        .transpose()
 }
 
 #[cfg(unix)]
@@ -244,9 +383,25 @@ impl ForegroundControl<'_> {
         let updated = read_configuration(self.configuration)?;
         validate_configuration(&updated)?;
         let radios = resolve_radios(&updated)?;
-        let candidate = self
-            .accounts
-            .prepare(self.configuration, &updated, &radios)?;
+        let active_accounts = self.accounts.active.clone();
+        let runtime = &*self.runtime;
+        let listeners = &mut *self.listeners;
+        let client = self.client;
+        let candidate =
+            self.accounts
+                .prepare_with_progress(self.configuration, &updated, &radios, || {
+                    if STOP.load(Ordering::Acquire) {
+                        return Err(ForegroundError::Configuration(
+                            "configuration reload canceled by shutdown".into(),
+                        ));
+                    }
+                    if let Some(error) = runtime.reload_failure() {
+                        return Err(ForegroundError::Runtime(error));
+                    }
+                    poll_iax_listeners(listeners, runtime, client, &active_accounts);
+                    Ok(())
+                })?;
+        let sip_update = prepare_sip_accounts(&mut self.accounts.sip, &candidate)?;
         let profiles = crate::iax::listeners::resolve_profiles(&radios, &candidate)
             .map_err(ForegroundError::Iax)?;
         let result = update_iax_listeners(
@@ -266,12 +421,16 @@ impl ForegroundControl<'_> {
         // The provider batch and product now expose this exact generation,
         // including a published product outcome that reports a later error.
         self.accounts.active = candidate;
+        let sip_result = sip_update
+            .map_or(Ok(()), |update| update.commit())
+            .map_err(sip_error);
         match read_secrets(self.secrets_path)
             .and_then(|secrets| registration_targets(&updated, &secrets))
         {
             Ok(targets) => self.registration.replace(targets),
             Err(error) => eprintln!("registration configuration reload rejected: {error}"),
         }
+        let result = result.and(sip_result);
         if result.is_ok() {
             eprintln!("rpt-advanced configuration reloaded");
         }

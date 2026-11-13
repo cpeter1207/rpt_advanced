@@ -4,6 +4,9 @@
 //! are implementation policy, not protocol maxima. All views borrow the admitted
 //! wire buffer; retained transactions must acquire their own storage reservation.
 
+/// Neutral registration provider ownership, without controller or runtime policy.
+pub mod registration;
+
 mod headers;
 mod uri;
 pub use headers::{Header, NameAddr, Values};

@@ -226,3 +226,27 @@ serial per-call media tasks. Audio remains entirely outside native signaling.
 Explicit shutdown continues servicing native progress until final success.
 A pending or failed shutdown retains the context and dynamic-library lease;
 neither an elapsed timeout nor a full notification queue authorizes destruction.
+
+
+## SIP registration control owner — 2026-11-13 local checkpoint
+
+SIP registration uses one lazily started standalone current-thread Tokio reactor,
+not a runtime or OS thread per account. Native contexts are serialized on that
+thread. The present neutral provider exposes a nonblocking service turn but no
+readiness descriptor; the control owner services its bounded operations at 10 ms
+intervals. This is registration control, not a new media polling path. SIP media,
+INVITE and product call admission remain unimplemented by this slice.
+
+The same runtime permits at most one blocking preparation worker. Foreground
+retains one pending result before admitting another job. It retains allocator
+custody after cancellation/timeout and discards stale prepared snapshots when
+reclaiming the allocator. During a reload wait, the foreground services existing
+IAX listeners under the old immutable account snapshot and checks STOP/fatal state
+in at most 10 ms wait slices. The existing reload API remains serialized; there
+is no nested local-control dispatch or new foreground scheduler.
+
+Stop removes registrations and services native shutdown before joining the SIP
+reactor. An uncompleted native resolver job is detached only with its own resolver
+lease and allocator still retained; shutdown reports that unfinished preparation
+rather than claiming complete cleanup. The selected SIP lease outlives reactor
+join. No audio callback, radio owner or shared PCM path changes.

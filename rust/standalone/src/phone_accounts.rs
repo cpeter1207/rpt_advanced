@@ -45,7 +45,7 @@ impl fmt::Debug for PreparedAccount {
 }
 
 /// Sorted immutable candidate or active accounts, sharing unchanged owners.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PreparedAccounts {
     accounts: Vec<Arc<PreparedAccount>>,
 }

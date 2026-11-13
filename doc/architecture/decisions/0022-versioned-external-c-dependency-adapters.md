@@ -278,3 +278,30 @@ statically copying it. Package manifests declare that external dependency, but
 publication remains blocked on full transitive license/package qualification:
 the initial full-default artifact also links OpenSSL 3. No release or licensing
 compatibility is asserted by this internal implementation checkpoint.
+
+
+## Inert SIP registration capability — 2026-11-13 local checkpoint
+
+Standalone's fixed provider manifest now includes the neutral ABI-1
+`librptadv_sip_adapter.so.1` descriptor. The standalone package has an exact-version
+runtime dependency. Loading/validating this capability creates no native context,
+socket, account or reactor. The code lease is retained even when all SIP accounts
+are disabled, so an ordinary configuration reload can enable them. Load-only
+memory cost has not been measured; this is not a capacity claim.
+
+The shared `rptadv-peer-support::sip::registration` client copies and validates the
+complete descriptor and retains its DSO. Each native account is neither Send nor
+Sync and stays on its creating host thread. The standalone composition retains a
+separate provider lease until that thread has joined, including thread-local
+cleanup. Destroy is accepted only after the provider reports stopped; failed
+quiescence retains the native context and code rather than attempting dlclose.
+Provider replacement still requires controlled process or module reload. The
+Asterisk composition is not activated by this checkpoint; an unloadable host must
+supply its qualified C/pthread bootstrap rather than borrow standalone's Rust
+thread creation.
+
+Account preparation reuses the existing system resolver descriptor, including
+normal configured host:port lookup, without a custom DNS stack. A blocking lookup
+retains its descriptor lease and generation allocator until its actual completion.
+The public combined-distribution license review remains a separate hold; this
+local implementation does not authorize publication.
