@@ -227,6 +227,7 @@ def run(path):
 
     credential_profiles(api)
     reauthenticated_refresh(api)
+    reauthenticated_refresh(api, remove=True)
     interrupted_refresh(api)
     failure_cases(api)
 
@@ -274,7 +275,7 @@ def credential_profiles(api):
     print("PASS existing UTF-8 username and literal secret bounds")
 
 
-def reauthenticated_refresh(api):
+def reauthenticated_refresh(api, remove=False):
     """Only an actual changed-realm challenge starts a new authentication deadline."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
         peer.bind(("127.0.0.1", 0))
@@ -283,16 +284,29 @@ def reauthenticated_refresh(api):
         ctx = PTR()
         assert api.create(C.byref(cfg), C.byref(ctx)) == 0
         assert api.register(ctx, 7) == 0
+        assert api.unregister(ctx, 7) == -3, (
+            "never-registered authentication cannot remove"
+        )
         prior = until(api, peer, ctx, lambda status: status.state == 2)
         pending = until(api, peer, ctx, lambda status: status.state == 1, "reauth")
         assert pending.registrations == prior.registrations
         assert pending.accepted_expires == prior.accepted_expires == 4
         assert pending.sip_status == 401
-        until(api, peer, ctx, lambda status: status.registrations == 2, "reauth")
+        if remove:
+            assert api.unregister(ctx, 7) == 0, (
+                "observed reauthentication rejected removal"
+            )
+            until(api, peer, ctx, lambda status: status.state == 4, "reauth")
+        else:
+            until(api, peer, ctx, lambda status: status.registrations == 2, "reauth")
         assert api.shutdown(ctx, 7) == 0
         until(api, peer, ctx, lambda status: status.state == 7, "reauth")
         assert api.destroy(ctx, 7) == 0
-    print("PASS observed reauthentication preserves accepted binding metadata")
+    print(
+        "PASS removal after observed reauthentication"
+        if remove
+        else "PASS observed reauthentication preserves accepted binding metadata"
+    )
 
 
 def interrupted_refresh(api):

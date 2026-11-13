@@ -1317,6 +1317,10 @@ callback, and even peer 100 did not produce one in the focused native probe.
 Its transaction timer remains native-owned. The host independently expires
 binding usability at its monotonic success observation plus accepted_expires,
 even if a later refresh transaction or reauthentication is still pending.
+Explicit unregister remains available after an observed reauthentication challenge
+when a prior successful registration exists. Initial never-registered
+authentication still cannot unregister; this distinction is exercised against the
+independent registrar after the challenge callback is delivered.
 
 The native account retains generated Contact, Via rport/NAT reflection and one
 15-second OPTIONS keepalive owner. Registration self-validation is disabled

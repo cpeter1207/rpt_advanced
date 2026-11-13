@@ -457,7 +457,8 @@ unsafe extern "C" fn unregister(context: *mut c_void, generation: u64) -> i32 {
     boundary(|| {
         let native = {
             let account = unsafe { &mut *checked(context, generation)? };
-            if account.observed().status.state != 2 {
+            let status = account.observed().status;
+            if status.state != 2 && (status.state != 1 || status.registrations == 0) {
                 return Err(-3);
             }
             account.observed_mut().publish(3, 0, 0);

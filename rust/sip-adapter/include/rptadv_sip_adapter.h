@@ -12,6 +12,8 @@
  * challenge with its configured deadline. Repeated challenges never restart it.
  * Silent native refresh has no start event. The host independently expires
  * binding usability at its last success observation plus accepted_expires.
+ * Explicit removal accepts an existing registration during reauthentication;
+ * initial authentication without a prior successful registration cannot remove.
  * SIP authority and AOR remain distinct from the numeric next-hop endpoint.
  * Endpoint/URI spans use ASCII; URI user permits validated percent escapes.
  * Credentials use bounded UTF-8 without NUL or colon. Username also excludes
