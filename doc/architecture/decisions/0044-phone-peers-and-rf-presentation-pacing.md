@@ -1403,3 +1403,28 @@ IAX listener. The simulator must execute callback turns, emit no keyed/audio
 output and join successfully. Child coverage profiles survive fixture cleanup.
 This is real-process integration with simulated hardware, not physical-node or
 live-provider acceptance; shipped startup and authorization are unchanged.
+
+## Incoming SIP adapter checkpoint — 2026-11-13
+
+The optional ABI-1 call tail preserves the registration prefix and keeps Sofia
+handles entirely in the native shim. Eight slots retain a nonreused call token,
+one initial SDP offer of at most 4096 bytes, and authoritative coalesced state.
+Terminal slots cannot be overwritten by new calls or the registration event
+queue; only explicit terminal release reclaims them. The consumer requires the
+complete tail before attempting calls. This additive descriptor extension does
+not require a SONAME change; existing registration-prefix consumers still work.
+The current controller cohort requires the new tail. No product-host ABI change.
+
+NUA media and autoanswer remain disabled. Registered accounts alone admit new
+calls, explicit host decisions supply 200/SDP or refusal, and native dialog
+states translate ACK, CANCEL, BYE and termination. Re-INVITE media changes remain
+unsupported. Final shutdown also retires owned calls because Sofia can quiesce
+an unanswered session without a separate call-state event. Host mailbox login,
+private control and RF attachment authority are not supplied by this adapter.
+
+The 8192-byte message bound, eight-entry native proceeding limit, send queue
+and transaction expiry remain finite per operation. The proceeding limit does
+not cap all completed or in-dialog transactions. This controlled loopback
+milestone therefore does not claim a global hostile-traffic memory bound.
+Independent wire coverage and host composition are distinct checkpoints; no
+provider/NAT, product PCM, hardware or public distribution readiness is implied.

@@ -1,4 +1,4 @@
-//! Bounded SIP/UDP registration through an independently replaceable native stack.
+//! SIP/UDP registration and bounded incoming call ownership through an independently replaceable native stack.
 //! The embedding host owns the sole servicing thread, activation and library lease.
 #![deny(warnings, missing_docs)]
 
@@ -44,6 +44,16 @@ unsafe extern "C" {
     fn sip_native_cancel(context: *mut c_void);
     fn sip_native_shutdown(context: *mut c_void);
     fn sip_native_destroy(context: *mut c_void);
+    fn sip_native_admission(context: *mut c_void, enabled: i32);
+    fn sip_native_next_call(context: *mut c_void, output: *mut abi::rptadv_sip_call_v1) -> i32;
+    fn sip_native_respond(
+        context: *mut c_void,
+        call: u64,
+        status: u32,
+        answer: *const c_char,
+    ) -> i32;
+    fn sip_native_hangup(context: *mut c_void, call: u64) -> i32;
+    fn sip_native_release(context: *mut c_void, call: u64) -> i32;
 }
 
 /// Wipe the adapter-owned formatted credential when its context retires.
@@ -411,6 +421,8 @@ unsafe extern "C" fn service(context: *mut c_void, generation: u64) -> i32 {
         if cancel {
             unsafe { sip_native_cancel(native) };
         }
+        let admission = unsafe { (*pointer).observed().status.state == 2 };
+        unsafe { sip_native_admission(native, i32::from(admission)) };
         Ok(0)
     })
 }
@@ -464,7 +476,10 @@ unsafe extern "C" fn unregister(context: *mut c_void, generation: u64) -> i32 {
             account.observed_mut().publish(3, 0, 0);
             account.native
         };
-        unsafe { sip_native_unregister(native) };
+        unsafe {
+            sip_native_admission(native, 0);
+            sip_native_unregister(native);
+        }
         Ok(0)
     })
 }
@@ -480,7 +495,10 @@ unsafe extern "C" fn shutdown(context: *mut c_void, generation: u64) -> i32 {
             account.observed_mut().publish(6, 0, 0);
             account.native
         };
-        unsafe { sip_native_shutdown(native) };
+        unsafe {
+            sip_native_admission(native, 0);
+            sip_native_shutdown(native);
+        }
         Ok(0)
     })
 }
@@ -498,7 +516,72 @@ unsafe extern "C" fn destroy(context: *mut c_void, generation: u64) -> i32 {
     })
 }
 
-/// Borrow the complete registration-only descriptor while retaining the DSO.
+unsafe extern "C" fn next_call(
+    context: *mut c_void,
+    generation: u64,
+    output: *mut abi::rptadv_sip_call_v1,
+) -> i32 {
+    boundary(|| {
+        let native = unsafe { (*checked(context, generation)?).native };
+        if output.is_null()
+            || unsafe { (*output).struct_size } != size_of::<abi::rptadv_sip_call_v1>() as u32
+        {
+            return Err(-1);
+        }
+        // SAFETY: the native owner writes one bounded record synchronously.
+        let code = unsafe { sip_native_next_call(native, output) };
+        if code == 0 {
+            unsafe { (*output).generation = generation };
+        }
+        Ok(code)
+    })
+}
+
+unsafe extern "C" fn respond_call(
+    context: *mut c_void,
+    generation: u64,
+    call: u64,
+    status: u32,
+    answer: abi::rptadv_sip_span_v1,
+) -> i32 {
+    boundary(|| {
+        let native = unsafe { (*checked(context, generation)?).native };
+        let answer = if status == 200 {
+            Some(CString::new(unsafe { field(answer, 4096)? }).map_err(|_| -1)?)
+        } else if (400..=699).contains(&status) && answer.length == 0 {
+            None
+        } else {
+            return Err(-1);
+        };
+        // SAFETY: NUA copies the bounded SDP before returning.
+        Ok(unsafe {
+            sip_native_respond(
+                native,
+                call,
+                status,
+                answer
+                    .as_ref()
+                    .map_or(ptr::null(), |answer| answer.as_ptr()),
+            )
+        })
+    })
+}
+
+unsafe extern "C" fn hangup_call(context: *mut c_void, generation: u64, call: u64) -> i32 {
+    boundary(|| {
+        let native = unsafe { (*checked(context, generation)?).native };
+        Ok(unsafe { sip_native_hangup(native, call) })
+    })
+}
+
+unsafe extern "C" fn release_call(context: *mut c_void, generation: u64, call: u64) -> i32 {
+    boundary(|| {
+        let native = unsafe { (*checked(context, generation)?).native };
+        Ok(unsafe { sip_native_release(native, call) })
+    })
+}
+
+/// Borrow the complete descriptor while retaining the DSO.
 #[unsafe(no_mangle)]
 pub extern "C" fn rptadv_sip_adapter_descriptor_v1() -> *const c_void {
     static DESCRIPTOR: abi::rptadv_sip_descriptor_v1 = abi::rptadv_sip_descriptor_v1 {
@@ -513,6 +596,10 @@ pub extern "C" fn rptadv_sip_adapter_descriptor_v1() -> *const c_void {
         unregister_account: Some(unregister),
         shutdown: Some(shutdown),
         destroy: Some(destroy),
+        next_call: Some(next_call),
+        respond_call: Some(respond_call),
+        hangup_call: Some(hangup_call),
+        release_call: Some(release_call),
     };
     ptr::from_ref(&DESCRIPTOR).cast()
 }

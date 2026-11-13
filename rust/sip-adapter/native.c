@@ -18,17 +18,29 @@
 #include <stdlib.h>
 #include <string.h>
 
+/** Fixed application ownership; native transaction retention is separately timed. */
+#define CALL_CAPACITY 8
+/** One owned call handle and its authoritative, coalesced observation. */
+struct call {
+    nua_handle_t *handle;        /**< Native dialog owner, NULL after termination. */
+    rptadv_sip_call_v1 observed; /**< Stable initial offer and current lifecycle. */
+    int changed;                 /**< Host has not consumed the latest observation. */
+};
+
 /** Private native state; account policy and event retention live in Rust. */
 struct native {
-    su_home_t home[1];      /**< Contact allocation owner. */
-    su_root_t *root;        /**< Synchronous owner-thread event loop. */
-    nua_t *nua;             /**< Native account agent. */
-    nua_handle_t *account;  /**< Single activated registration handle. */
-    sip_contact_t *contact; /**< Copied generated local Contact. */
-    int contact_query_done; /**< Initial parameter query completed. */
-    pthread_t owner;        /**< Creation and service thread identity. */
-    sip_native_sink sink;   /**< Rust observation callback. */
-    void *context;          /**< Stable Rust callback allocation. */
+    su_home_t home[1];                /**< Contact allocation owner. */
+    su_root_t *root;                  /**< Synchronous owner-thread event loop. */
+    nua_t *nua;                       /**< Native account agent. */
+    nua_handle_t *account;            /**< Single activated registration handle. */
+    sip_contact_t *contact;           /**< Copied generated local Contact. */
+    int contact_query_done;           /**< Initial parameter query completed. */
+    pthread_t owner;                  /**< Creation and service thread identity. */
+    sip_native_sink sink;             /**< Rust observation callback. */
+    void *context;                    /**< Stable Rust callback allocation. */
+    struct call calls[CALL_CAPACITY]; /**< Fixed application call slots. */
+    uint64_t next_call;               /**< Last issued call token; exhaustion refuses admission. */
+    int admission;                    /**< Explicit host permission to accept a new offer. */
 };
 
 /** Preserve the embedding process's meaningful signal disposition exactly.
@@ -71,6 +83,113 @@ static const char *challenge_realm(const sip_t *sip, int status) {
     return NULL;
 }
 
+/** Find one live token, never accepting a released or reused slot.
+ * @param state Native owner.
+ * @param token Exact call token.
+ * @return Owned slot or NULL.
+ */
+static struct call *find_call(struct native *state, uint64_t token) {
+    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
+        if (token && state->calls[i].observed.call == token) {
+            return &state->calls[i];
+        }
+    }
+    return NULL;
+}
+
+/** Coalesce state without discarding the terminal observation.
+ * @param call Owned slot.
+ * @param value Neutral lifecycle state.
+ * @param status Native numeric status; zero preserves the previous value.
+ */
+static void call_state(struct call *call, uint32_t value, int status) {
+    if (call->observed.state != value ||
+        (status && call->observed.sip_status != (uint32_t)status)) {
+        call->observed.state = value;
+        if (status) {
+            call->observed.sip_status = (uint32_t)status;
+        }
+        call->changed = 1;
+    }
+}
+
+/** Translate only native call ownership and initial bounded SDP.
+ * @param state Native owner.
+ * @param kind Native event.
+ * @param status Native numeric status.
+ * @param handle Native operation handle.
+ * @param sip Borrowed parsed message, possibly NULL.
+ * @param tags Borrowed callback tags.
+ */
+static void call_event(struct native *state, nua_event_t kind, int status, nua_handle_t *handle,
+                       const sip_t *sip, tagi_t tags[]) {
+    struct call *call = NULL;
+    if (!handle || handle == state->account) {
+        return;
+    }
+    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
+        if (state->calls[i].handle == handle) {
+            call = &state->calls[i];
+            break;
+        }
+    }
+    if (kind == nua_i_invite && status < 200) {
+        if (call) {
+            /* Re-INVITE/media changes are not a supported profile in this milestone. */
+            nua_respond(handle, 488, "Not Acceptable Here", TAG_END());
+            return;
+        }
+        int refusal = 480;
+        if (state->admission && state->next_call != UINT64_MAX) {
+            refusal = 486;
+            for (size_t i = 0; i < CALL_CAPACITY; ++i) {
+                if (!state->calls[i].observed.call) {
+                    call = &state->calls[i];
+                    break;
+                }
+            }
+        }
+        if (call && (!sip || !sip->sip_content_type ||
+                     !su_casematch(sip->sip_content_type->c_type, "application/sdp") ||
+                     !sip->sip_payload || sip->sip_payload->pl_next || !sip->sip_payload->pl_len ||
+                     sip->sip_payload->pl_len > 4096)) {
+            call = NULL;
+            refusal = 488;
+        }
+        if (!call) {
+            nua_respond(handle, refusal, "Call Unavailable", TAG_END());
+            nua_handle_destroy(handle);
+            return;
+        }
+        call->handle = handle;
+        call->observed.struct_size = sizeof(call->observed);
+        call->observed.call = ++state->next_call;
+        call->observed.offer_length = (uint32_t)sip->sip_payload->pl_len;
+        for (size_t i = 0; i < call->observed.offer_length; ++i) {
+            call->observed.offer[i] = (uint8_t)sip->sip_payload->pl_data[i];
+        }
+        call_state(call, 1, status);
+    }
+    if (!call) {
+        return;
+    }
+    if (kind == nua_i_cancel || kind == nua_i_bye) {
+        call_state(call, 4, status);
+    } else if (kind == nua_i_state) {
+        int value = nua_callstate_init;
+        tl_gets(tags, NUTAG_CALLSTATE_REF(value), TAG_END());
+        if (value == nua_callstate_ready) {
+            call_state(call, 3, status);
+        } else if (value == nua_callstate_terminating) {
+            call_state(call, 4, status);
+        } else if (value == nua_callstate_terminated) {
+            call_state(call, 5, status);
+            call->handle = NULL;
+            nua_handle_destroy(handle);
+        }
+    }
+}
+
 /** Native media is disabled. Only bounded observations cross privately to Rust.
  * @param kind Native event discriminator.
  * @param status Numeric native status.
@@ -89,8 +208,20 @@ static void event(nua_event_t kind, int status, const char *phrase, nua_t *nua, 
     uint32_t expiry = 0;
     (void)phrase;
     (void)nua;
-    (void)handle;
     (void)handle_magic;
+    call_event(state, kind, status, handle, sip, tags);
+    if (kind == nua_r_shutdown && status == 200) {
+        /* NUA may remove a pending session without a call-state event.
+         * Final shutdown proves every remaining handle quiescent. */
+        for (size_t i = 0; i < CALL_CAPACITY; ++i) {
+            struct call *call = &state->calls[i];
+            if (call->handle) {
+                call_state(call, 5, 0);
+                nua_handle_destroy(call->handle);
+                call->handle = NULL;
+            }
+        }
+    }
     if (kind == nua_r_get_params && status >= 200) {
         const sip_contact_t *contact = NULL;
         state->contact_query_done = 1;
@@ -180,10 +311,10 @@ void *sip_native_create(const char *bind, sip_native_sink sink, void *context) {
                                 NUTAG_SIPS_URL(NULL), NUTAG_MEDIA_ENABLE(0), NUTAG_AUTOANSWER(0),
                                 NUTAG_AUTOACK(0), NUTAG_RETRY_COUNT(2), NUTAG_M_USERNAME("rptadv"),
                                 NUTAG_OUTBOUND("natify use-rport no-validate options-keepalive"),
-                                NUTAG_KEEPALIVE(15000), NTATAG_STATELESS(1), NTATAG_MAXSIZE(8192),
-                                NTATAG_SIP_T1X64(32000), NTATAG_SIP_T4(5000), NTATAG_SRV_503(0),
-                                TPTAG_QUEUESIZE(4), TPTAG_LOG(0), TPTAG_DUMP(NULL),
-                                NUTAG_USER_AGENT("rpt_advanced"), TAG_END());
+                                NUTAG_KEEPALIVE(15000), NTATAG_MAX_PROCEEDING(CALL_CAPACITY),
+                                NTATAG_MAXSIZE(8192), NTATAG_SIP_T1X64(32000), NTATAG_SIP_T4(5000),
+                                NTATAG_SRV_503(0), TPTAG_QUEUESIZE(4), TPTAG_LOG(0),
+                                TPTAG_DUMP(NULL), NUTAG_USER_AGENT("rpt_advanced"), TAG_END());
     }
     if (!state->nua) {
         if (state->root) {
@@ -255,4 +386,64 @@ void sip_native_destroy(void *context) {
     su_deinit();
     su_home_deinit(state->home);
     free(state);
+}
+
+void sip_native_admission(void *context, int enabled) {
+    struct native *state = context;
+    state->admission = enabled;
+}
+
+int sip_native_next_call(void *context, rptadv_sip_call_v1 *output) {
+    struct native *state = context;
+    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
+        struct call *call = &state->calls[i];
+        if (call->changed) {
+            *output = call->observed;
+            call->changed = 0;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int sip_native_respond(void *context, uint64_t token, uint32_t status, const char *answer) {
+    struct call *call = find_call(context, token);
+    if (!call) {
+        return -2;
+    }
+    if (call->observed.state != 1) {
+        return -3;
+    }
+    call_state(call, status == 200 ? 2 : 4, (int)status);
+    nua_respond(call->handle, (int)status, status == 200 ? "OK" : "Call Unavailable",
+                TAG_IF(answer, SIPTAG_CONTENT_TYPE_STR("application/sdp")),
+                TAG_IF(answer, SIPTAG_PAYLOAD_STR(answer)), TAG_END());
+    return 0;
+}
+
+int sip_native_hangup(void *context, uint64_t token) {
+    struct call *call = find_call(context, token);
+    if (!call) {
+        return -2;
+    }
+    if (call->observed.state == 1) {
+        return sip_native_respond(context, token, 480, NULL);
+    }
+    if (call->observed.state < 4) {
+        call_state(call, 4, 0);
+        nua_bye(call->handle, TAG_END());
+    }
+    return 0;
+}
+
+int sip_native_release(void *context, uint64_t token) {
+    struct call *call = find_call(context, token);
+    if (!call) {
+        return -2;
+    }
+    if (call->observed.state != 5) {
+        return 1;
+    }
+    *call = (struct call){0};
+    return 0;
 }

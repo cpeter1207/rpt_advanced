@@ -1,4 +1,4 @@
-//! Thread-confined SIP registration contexts and retained neutral descriptor leases.
+//! Thread-confined SIP registration and incoming-call contexts and retained neutral descriptor leases.
 //! The composition owns the servicing thread and must join it before dropping its provider.
 use libloading::Library;
 use std::{cell::Cell, ffi::c_void, fmt, mem::size_of, path::Path, ptr::NonNull, sync::Arc};
@@ -108,6 +108,58 @@ impl Default for Status {
     }
 }
 
+/// Current call ownership, retained independently of registration observations.
+#[repr(C)]
+#[derive(Clone)]
+pub struct Call {
+    struct_size: u32,
+    /// Invited=1, answered=2, established=3, closing=4, terminated=5.
+    pub state: u32,
+    /// Immutable account generation.
+    pub generation: u64,
+    /// Nonzero token, never reused within this account generation.
+    pub call: u64,
+    /// Numeric SIP status; no untrusted reason/header text.
+    pub sip_status: u32,
+    offer_length: u32,
+    offer: [u8; 4096],
+}
+impl Default for Call {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            state: 0,
+            generation: 0,
+            call: 0,
+            sip_status: 0,
+            offer_length: 0,
+            offer: [0; 4096],
+        }
+    }
+}
+impl Call {
+    /// Initial bounded SDP. Caller identity grants no mailbox or radio authority.
+    pub fn offer(&self) -> &[u8] {
+        &self.offer[..self.offer_length as usize]
+    }
+
+    fn validate(&self, generation: u64) -> Result<(), Error> {
+        if self.struct_size != size_of::<Self>() as u32
+            || self.generation != generation
+            || self.call == 0
+            || !(1..=5).contains(&self.state)
+            || self.offer_length == 0
+            || self.offer_length as usize > self.offer.len()
+        {
+            return Err(Error::Contract);
+        }
+        Ok(())
+    }
+}
+
+type CallRead = unsafe extern "C" fn(*mut c_void, u64, *mut Call) -> i32;
+type CallResponse = unsafe extern "C" fn(*mut c_void, u64, u64, u32, Span) -> i32;
+type CallAction = unsafe extern "C" fn(*mut c_void, u64, u64) -> i32;
 type Action = unsafe extern "C" fn(*mut c_void, u64) -> i32;
 type Read = unsafe extern "C" fn(*mut c_void, u64, *mut Status) -> i32;
 #[repr(C)]
@@ -124,6 +176,10 @@ struct Descriptor {
     unregister_account: Option<Action>,
     shutdown: Option<Action>,
     destroy: Option<Action>,
+    next_call: Option<CallRead>,
+    respond_call: Option<CallResponse>,
+    hangup_call: Option<CallAction>,
+    release_call: Option<CallAction>,
 }
 impl Descriptor {
     unsafe fn read(pointer: *const Self) -> Result<Self, Error> {
@@ -145,6 +201,10 @@ impl Descriptor {
                 api.unregister_account.is_some(),
                 api.shutdown.is_some(),
                 api.destroy.is_some(),
+                api.next_call.is_some(),
+                api.respond_call.is_some(),
+                api.hangup_call.is_some(),
+                api.release_call.is_some(),
             ]
             .into_iter()
             .all(|present| present)
@@ -259,6 +319,61 @@ impl Account {
         }
         Ok(status)
     }
+    /// Poll one coalesced authoritative call observation. Terminal ownership
+    /// persists until release_call even after this observation is consumed.
+    pub fn next_call(&self) -> Result<Option<Call>, Error> {
+        let context = self.context.get().ok_or(Error::Contract)?;
+        let mut call = Call::default();
+        let code = unsafe {
+            self.provider.api.next_call.unwrap()(context.as_ptr(), self.generation, &mut call)
+        };
+        match code {
+            0 => {
+                call.validate(self.generation)?;
+                Ok(Some(call))
+            }
+            1 => Ok(None),
+            _ => Err(Error::Status(code)),
+        }
+    }
+    /// Explicitly accept with bounded SDP or reject with 400..699 and empty SDP.
+    pub fn respond_call(&self, call: u64, status: u32, answer: &[u8]) -> Result<(), Error> {
+        let context = self.context.get().ok_or(Error::Contract)?;
+        let code = unsafe {
+            self.provider.api.respond_call.unwrap()(
+                context.as_ptr(),
+                self.generation,
+                call,
+                status,
+                Span {
+                    data: answer.as_ptr(),
+                    length: answer.len(),
+                },
+            )
+        };
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(Error::Status(code))
+        }
+    }
+    fn call_action(&self, action: CallAction, call: u64) -> Result<(), Error> {
+        let context = self.context.get().ok_or(Error::Contract)?;
+        let code = unsafe { action(context.as_ptr(), self.generation, call) };
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(Error::Status(code))
+        }
+    }
+    /// End one exact call, without releasing its terminal observation.
+    pub fn hangup_call(&self, call: u64) -> Result<(), Error> {
+        self.call_action(self.provider.api.hangup_call.unwrap(), call)
+    }
+    /// Release an exact terminal token; pending or stale tokens remain errors.
+    pub fn release_call(&self, call: u64) -> Result<(), Error> {
+        self.call_action(self.provider.api.release_call.unwrap(), call)
+    }
     /// Destroy only a fully stopped context; pending/failed destruction retains ownership.
     pub fn destroy(&self) -> Result<(), Error> {
         self.action(self.provider.api.destroy.unwrap())?;
@@ -287,6 +402,15 @@ mod tests {
     unsafe extern "C" fn read(_: *mut c_void, _: u64, _: *mut Status) -> i32 {
         0
     }
+    unsafe extern "C" fn call_read(_: *mut c_void, _: u64, _: *mut Call) -> i32 {
+        1
+    }
+    unsafe extern "C" fn call_response(_: *mut c_void, _: u64, _: u64, _: u32, _: Span) -> i32 {
+        0
+    }
+    unsafe extern "C" fn call_action(_: *mut c_void, _: u64, _: u64) -> i32 {
+        0
+    }
     fn descriptor() -> Descriptor {
         Descriptor {
             struct_size: size_of::<Descriptor>() as u32,
@@ -300,7 +424,20 @@ mod tests {
             unregister_account: Some(action),
             shutdown: Some(action),
             destroy: Some(action),
+            next_call: Some(call_read),
+            respond_call: Some(call_response),
+            hangup_call: Some(call_action),
+            release_call: Some(call_action),
         }
+    }
+    #[test]
+    fn call_consumers_reject_registration_only_descriptor() {
+        let mut table = descriptor();
+        table.struct_size = (24 + size_of::<[usize; 8]>()) as u32;
+        assert!(
+            unsafe { Descriptor::read(&table) }.is_err(),
+            "incoming call consumer requires the complete call tail"
+        );
     }
     #[test]
     fn descriptor_requires_complete_identity_and_lifecycle_before_use() {
@@ -314,7 +451,7 @@ mod tests {
         table = descriptor();
         table.capability[0] = 0;
         assert!(unsafe { Descriptor::read(&table) }.is_err());
-        for absent in 0..8 {
+        for absent in 0..12 {
             table = descriptor();
             match absent {
                 0 => table.create = None,
@@ -324,7 +461,11 @@ mod tests {
                 4 => table.register_account = None,
                 5 => table.unregister_account = None,
                 6 => table.shutdown = None,
-                _ => table.destroy = None,
+                7 => table.destroy = None,
+                8 => table.next_call = None,
+                9 => table.respond_call = None,
+                10 => table.hangup_call = None,
+                _ => table.release_call = None,
             }
             assert!(unsafe { Descriptor::read(&table) }.is_err());
         }
@@ -333,6 +474,6 @@ mod tests {
         assert!(unsafe { Descriptor::read(std::ptr::from_ref(&prefix).cast()) }.is_err());
         assert_eq!(size_of::<Status>(), 40);
         assert_eq!(size_of::<Config>(), 16 + 12 * size_of::<usize>());
-        assert_eq!(size_of::<Descriptor>(), 24 + size_of::<[usize; 8]>());
+        assert_eq!(size_of::<Descriptor>(), 24 + size_of::<[usize; 12]>());
     }
 }

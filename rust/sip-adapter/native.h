@@ -3,6 +3,7 @@
  */
 #ifndef RPTADV_SIP_NATIVE_H
 #define RPTADV_SIP_NATIVE_H
+#include "include/rptadv_sip_adapter.h"
 #include <stddef.h>
 #include <stdint.h>
 /** Numeric event plus optional bounded quoted challenge realm, borrowed synchronously. */
@@ -54,4 +55,35 @@ void sip_native_shutdown(void *context);
  * @param context Quiescent native context, consumed by this call.
  */
 void sip_native_destroy(void *context);
+/** Set the host's current incoming-admission gate.
+ * @param context Live native account.
+ * @param enabled Nonzero only while the account accepts new calls.
+ */
+void sip_native_admission(void *context, int enabled);
+/** Copy one changed call slot without releasing terminal ownership.
+ * @param context Live native account.
+ * @param call Writable complete call snapshot.
+ * @return Zero on an observation or one when empty.
+ */
+int sip_native_next_call(void *context, rptadv_sip_call_v1 *call);
+/** Answer or reject the exact invited call.
+ * @param context Live native account.
+ * @param call Exact token from next_call.
+ * @param status 200 with SDP or 400..699.
+ * @param answer NUL-terminated bounded SDP for success; NULL for rejection.
+ * @return Zero, -2 for stale token, or -3 for invalid call state.
+ */
+int sip_native_respond(void *context, uint64_t call, uint32_t status, const char *answer);
+/** End the exact call without discarding terminal ownership.
+ * @param context Live native account.
+ * @param call Exact live token.
+ * @return Zero or -2 for stale token.
+ */
+int sip_native_hangup(void *context, uint64_t call);
+/** Release only an observed terminal call.
+ * @param context Live native account.
+ * @param call Exact token.
+ * @return Zero, one while live, or -2 for stale token.
+ */
+int sip_native_release(void *context, uint64_t call);
 #endif

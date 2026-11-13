@@ -324,4 +324,5 @@ build/sip-native-events.so: rust/sip-adapter/native.c rust/sip-adapter/native.h 
 
 sip-registration-check: $(SIP_LIBRARY) build/sip-native-events.so
 	$(TEST_ENV) python3 tests/test_sip_registration.py "$(CURDIR)/$(SIP_LIBRARY)"
+	$(TEST_ENV) python3 tests/test_sip_calls.py "$(CURDIR)/$(SIP_LIBRARY)"
 	$(TEST_ENV) python3 tests/test_sip_native_events.py "$(CURDIR)/build/sip-native-events.so"
