@@ -1250,7 +1250,7 @@ unsafe extern "C" fn peer_prepare_audio(
                 unsafe { peer.prepare_audio(pcm, output, flush, result.cast()) }
                     .map_or(-1, |()| unsafe { (*result).status as i32 })
             }
-            Some(PeerHandle::Sip(handle)) => sip_phone::media(&handle.shared, |media| {
+            Some(PeerHandle::Sip(handle)) => sip_phone::media(&handle.shared, "prepare", |media| {
                 let code = media.prepare(pcm, output, flush, unsafe { &mut *result });
                 if code < 0 {
                     Err(crate::phone::media::MediaError::Codec)
@@ -1278,7 +1278,7 @@ unsafe extern "C" fn peer_prepare_audio(
 unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
     boundary(-1, || {
         if let Some(shared) = unsafe { sip_phone::shared(peer) } {
-            return sip_phone::media(shared, |media| media.reset()).map_or(-1, |()| 0);
+            return sip_phone::media(shared, "reset", |media| media.reset()).map_or(-1, |()| 0);
         }
         if let Some(PeerHandle::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
             return unsafe { peer.reset_encoder() }.map_or(-1, |()| 0);
@@ -1343,8 +1343,10 @@ unsafe extern "C" fn peer_send_prepared_timed(
         }
         if let Some(shared) = unsafe { sip_phone::shared(peer) } {
             let bytes: &[u8; 160] = unsafe { &*bytes.cast() };
-            return sip_phone::media(shared, |media| media.send(bytes, timestamp, deadline))
-                .unwrap_or(-1);
+            return sip_phone::media(shared, "send", |media| {
+                media.send(bytes, timestamp, deadline)
+            })
+            .unwrap_or(-1);
         }
         let Some(peer) = (unsafe { iax_peer_mut(peer) }) else {
             return -1;

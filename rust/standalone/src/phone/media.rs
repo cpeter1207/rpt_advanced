@@ -30,6 +30,16 @@ pub enum MediaError {
     InvalidPacket,
     /// Socket I/O failed.
     Network,
+    /// Active RTP socket failed; numeric errno only (zero when unavailable).
+    Socket(i32),
+    /// Released jitter provider operation failed.
+    Jitter,
+    /// Released jitter decision does not match the negotiated packet shape.
+    JitterShape,
+    /// Product source sink violated its ABI or accepted-credit contract.
+    SourceContract,
+    /// The shared media owner lock was poisoned.
+    Owner,
     /// Released G.711 provider operation failed.
     Codec,
     /// The nonwrapping transmit generation is exhausted; replace the call owner.
@@ -365,7 +375,7 @@ impl RtpEndpoint {
         match self.socket.try_recv(&mut wire) {
             Ok(length) => self.receive_wire(&wire[..length], output).map(Some),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(_) => Err(MediaError::Network),
+            Err(error) => Err(MediaError::Socket(error.raw_os_error().unwrap_or(0))),
         }
     }
     fn receive_wire(
@@ -520,9 +530,9 @@ impl RtpEgress {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 Ok(SendStatus::WouldBlock)
             }
-            Err(_) => {
+            Err(error) => {
                 self.pending = None;
-                Err(MediaError::Network)
+                Err(MediaError::Socket(error.raw_os_error().unwrap_or(0)))
             }
         }
     }

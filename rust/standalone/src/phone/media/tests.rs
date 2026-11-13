@@ -170,3 +170,16 @@ fn retirement_fences_old_work_without_discarding_the_new_generation() {
         Ok(SendStatus::Sent)
     );
 }
+
+#[test]
+fn socket_failure_reports_only_numeric_errno_and_releases_pending_media() {
+    let mut sender = egress();
+    let error = sender
+        .send(audio(77), 0, |_| {
+            Err(std::io::Error::from_raw_os_error(111))
+        })
+        .unwrap_err();
+    assert_eq!(format!("{error:?}"), "Socket(111)");
+    assert!(sender.pending.is_none());
+    assert_eq!(sender.header.sequence_number, u16::MAX);
+}

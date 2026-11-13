@@ -1493,3 +1493,10 @@ Delay insertion advances only playout time and emits no fictitious source gap.
 Literal RTP/released-provider tests reproduce both signed offsets, insertion,
 and the former premature decision commit. This fixes proven owned-adapter
 defects; it does not retrospectively prove the cause of a particular live call.
+
+The private SIP bridge reports a fixed operation (read, prepare, send or reset)
+and a payload-free error category on terminal media failure. Jitter
+operation/shape, source-credit contract, codec, owner and socket failures remain
+distinguishable; active socket failures include only numeric errno (zero if
+unavailable). These diagnostics contain no SDP, SIP headers, RTP/audio bytes,
+DTMF/PIN symbols, account identifiers or arbitrary dependency error strings.

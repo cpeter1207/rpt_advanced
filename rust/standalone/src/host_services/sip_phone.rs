@@ -68,6 +68,7 @@ pub(super) unsafe fn shared<'a>(peer: *const c_void) -> Option<&'a Shared> {
 }
 pub(super) fn media<T>(
     shared: &Shared,
+    name: &'static str,
     operation: impl FnOnce(&mut Media) -> Result<T, MediaError>,
 ) -> Result<T, ()> {
     if !shared.live() {
@@ -76,13 +77,14 @@ pub(super) fn media<T>(
     let result = shared
         .media
         .lock()
-        .map_err(|_| ())
-        .and_then(|mut media| operation(&mut media).map_err(|_| ()));
-    if result.is_err() {
+        .map_err(|_| MediaError::Owner)
+        .and_then(|mut media| operation(&mut media));
+    result.map_err(|error| {
         shared.end();
-        eprintln!("phone SIP: media operation failed");
-    }
-    result
+        // Fixed operation labels and a payload-free enum; never format SIP,
+        // RTP, audio, digits, account identifiers or a foreign error string.
+        eprintln!("phone SIP: media {name} failed ({error:?})");
+    })
 }
 pub(super) unsafe fn read(
     shared: &Shared,
@@ -98,7 +100,7 @@ pub(super) unsafe fn read(
         output.represented_node_number = 0;
         return 0;
     }
-    media(shared, |media| unsafe {
+    media(shared, "read", |media| unsafe {
         media.read(completion, sink, output)
     })
     .map_or(-1, |()| 0)

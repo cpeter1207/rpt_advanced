@@ -60,7 +60,7 @@ impl Media {
         let answer = description.answer(endpoint.local_addr()?, call)?;
         let codec = G711Codec::load(description.codec)?;
         let jitter = unsafe { Jitter::phone(std::ptr::from_ref(jitter).cast()) }
-            .map_err(|_| MediaError::Codec)?;
+            .map_err(|_| MediaError::Jitter)?;
         Ok(Self {
             endpoint,
             codec,
@@ -155,7 +155,7 @@ impl Media {
                     if self
                         .jitter
                         .put(timestamp, 160, now, &packet)
-                        .map_err(|_| MediaError::Codec)?
+                        .map_err(|_| MediaError::Jitter)?
                         == Admission::Accepted
                     {
                         self.births[self.birth_slot] = Some((timestamp, now));
@@ -172,7 +172,7 @@ impl Media {
         let decision = self
             .jitter
             .get(now, 160, &mut packet)
-            .map_err(|_| MediaError::Codec)?;
+            .map_err(|_| MediaError::Jitter)?;
         match decision.kind {
             Kind::NotDue => return Ok(()),
             Kind::Packet => {
@@ -182,14 +182,14 @@ impl Media {
                 let skip = decision.start_offset.saturating_neg().max(0) as usize;
                 let span = decision.span as usize;
                 if decision.length != 160 || span != 160 || skip >= span {
-                    return Err(MediaError::InvalidPacket);
+                    return Err(MediaError::JitterShape);
                 }
                 let count = span - skip;
                 let prefix = decision.start_offset.max(0) as u32;
                 let start = decision
                     .timestamp
                     .checked_add(skip as u64)
-                    .ok_or(MediaError::InvalidPacket)?;
+                    .ok_or(MediaError::JitterShape)?;
                 self.codec.decode(&packet, &mut self.pcm)?;
                 self.pcm.copy_within(skip..span, 0);
                 if let Some((_, born)) = self
@@ -208,10 +208,10 @@ impl Media {
                     self.pending = Some(Pending::Gap {
                         start: start
                             .checked_sub(u64::from(prefix))
-                            .ok_or(MediaError::InvalidPacket)?,
+                            .ok_or(MediaError::JitterShape)?,
                         count: (count as u32)
                             .checked_add(prefix)
-                            .ok_or(MediaError::InvalidPacket)?,
+                            .ok_or(MediaError::JitterShape)?,
                     });
                 }
             }
@@ -224,7 +224,7 @@ impl Media {
             Kind::Insertion => {
                 // Only playout time advances. The existing source/ring must not
                 // see fictitious missing media or have its source cursor moved.
-                return self.jitter.advance(now, 0).map_err(|_| MediaError::Codec);
+                return self.jitter.advance(now, 0).map_err(|_| MediaError::Jitter);
             }
         }
         // Keep one provider decision leased until all exact source credit lands.
@@ -245,7 +245,7 @@ impl Media {
         output.state = 1;
         output.represented_node_number = 0;
         if completion != 0 {
-            return Err(MediaError::InvalidPacket);
+            return Err(MediaError::SourceContract);
         }
         if sink.is_null() {
             return Ok(());
@@ -253,7 +253,7 @@ impl Media {
         if unsafe { (*sink).struct_size } < size_of::<abi::rptadv_peer_source_sink_v1>() as u32
             || unsafe { (*sink).abi_version } != 1
         {
-            return Err(MediaError::InvalidPacket);
+            return Err(MediaError::SourceContract);
         }
         let sink = unsafe { &*sink };
         if sink.host_clock_epoch == 0
@@ -265,7 +265,7 @@ impl Media {
                 .host_epoch
                 .is_some_and(|epoch| epoch != sink.host_clock_epoch)
         {
-            return Err(MediaError::InvalidPacket);
+            return Err(MediaError::SourceContract);
         }
         self.host_epoch = Some(sink.host_clock_epoch);
         if self.discontinuity {
@@ -275,7 +275,7 @@ impl Media {
                     output.progress = 2;
                     return Ok(());
                 }
-                _ => return Err(MediaError::InvalidPacket),
+                _ => return Err(MediaError::SourceContract),
             }
         }
         if self.pending.is_none() {
@@ -288,7 +288,7 @@ impl Media {
                     sink.gap.unwrap()(sink.context, *start - u64::from(*prefix), *prefix)
                 };
                 if accepted > *prefix {
-                    return Err(MediaError::InvalidPacket);
+                    return Err(MediaError::SourceContract);
                 }
                 *prefix -= accepted;
                 output.progress = if *prefix == 0 { 1 } else { 2 };
@@ -303,14 +303,14 @@ impl Media {
                 match unsafe { sink.digit.unwrap()(sink.context, u32::from(symbol)) } {
                     0 => true,
                     1 => false,
-                    _ => return Err(MediaError::InvalidPacket),
+                    _ => return Err(MediaError::SourceContract),
                 }
             }
             Pending::Audio {
                 start, count, born, ..
             } => {
                 if born > sink.reference_now_ns {
-                    return Err(MediaError::InvalidPacket);
+                    return Err(MediaError::SourceContract);
                 }
                 let birth = abi::rptadv_source_birth_v1 {
                     struct_size: size_of::<abi::rptadv_source_birth_v1>() as u32,
@@ -330,7 +330,7 @@ impl Media {
                     )
                 };
                 if accepted > remaining {
-                    return Err(MediaError::InvalidPacket);
+                    return Err(MediaError::SourceContract);
                 }
                 self.offset += accepted;
                 self.offset == count
@@ -341,7 +341,7 @@ impl Media {
                     sink.gap.unwrap()(sink.context, start + self.offset as u64, remaining)
                 };
                 if accepted > remaining {
-                    return Err(MediaError::InvalidPacket);
+                    return Err(MediaError::SourceContract);
                 }
                 self.offset += accepted as usize;
                 self.offset == count as usize
@@ -352,7 +352,7 @@ impl Media {
             if self.decision_pending {
                 self.jitter
                     .advance(sink.reference_now_ns, 0)
-                    .map_err(|_| MediaError::Codec)?;
+                    .map_err(|_| MediaError::Jitter)?;
                 self.decision_pending = false;
             }
             self.pending = None;
