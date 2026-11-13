@@ -1428,3 +1428,10 @@ not cap all completed or in-dialog transactions. This controlled loopback
 milestone therefore does not claim a global hostile-traffic memory bound.
 Independent wire coverage and host composition are distinct checkpoints; no
 provider/NAT, product PCM, hardware or public distribution readiness is implied.
+
+The native ownership review added two literal-wire regressions: out-of-dialog
+OPTIONS releases its application-owned handle after the automatic response,
+while in-dialog OPTIONS preserves its call; and delayed ACK cannot move a
+locally closing call back to established. Call lifecycle observations are
+monotonic. A test-only shim observer counts actual native handle destruction
+without changing the selected third-party library or the production ABI.

@@ -103,8 +103,9 @@ static struct call *find_call(struct native *state, uint64_t token) {
  * @param status Native numeric status; zero preserves the previous value.
  */
 static void call_state(struct call *call, uint32_t value, int status) {
-    if (call->observed.state != value ||
-        (status && call->observed.sip_status != (uint32_t)status)) {
+    if (value >= call->observed.state &&
+        (call->observed.state != value ||
+         (status && call->observed.sip_status != (uint32_t)status))) {
         call->observed.state = value;
         if (status) {
             call->observed.sip_status = (uint32_t)status;
@@ -171,6 +172,9 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
         call_state(call, 1, status);
     }
     if (!call) {
+        if (kind == nua_i_options && status >= 200) {
+            nua_handle_destroy(handle);
+        }
         return;
     }
     if (kind == nua_i_cancel || kind == nua_i_bye) {

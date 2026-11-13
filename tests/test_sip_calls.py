@@ -66,6 +66,7 @@ class Fixture:
         assert api.create(C.byref(cfg), C.byref(self.ctx)) == 0
         self.address = None
         self.responses, self.calls = [], {}
+        self.hold_bye = False
         assert api.register(self.ctx, 7) == 0
         self.until(lambda: registration.snapshot(api, self.ctx).state == 2)
 
@@ -97,6 +98,9 @@ class Fixture:
             reply += ["Content-Length: 0", "", ""]
             self.peer.sendto("\r\n".join(reply).encode(), address)
         elif first.startswith("BYE "):
+            if self.hold_bye:
+                self.responses.append((first, values, packet))
+                return
             reply = (
                 ["SIP/2.0 200 OK"]
                 + [
@@ -135,7 +139,7 @@ class Fixture:
             f"From: <sip:caller@fixture.invalid>;tag=caller-{number}",
             "To: " + (to or "<sip:synthetic@registrar.invalid>"),
             f"Call-ID: independent-call-{number}@fixture.invalid",
-            f"CSeq: {2 if method == 'BYE' else 1} {method}",
+            f"CSeq: {3 if method == 'BYE' else 2 if method == 'OPTIONS' else 1} {method}",
             f"Contact: <sip:caller@127.0.0.1:{port}>",
         ]
         if body:
@@ -211,6 +215,43 @@ def lifecycle(api):
         print(f"PASS duplicate INVITE and {mode} retain one terminal owner")
 
 
+def delayed_ack(api):
+    """A late ACK cannot revive an answered call already closing locally."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
+        peer.bind(("127.0.0.1", 0))
+        peer.setblocking(False)
+        f = Fixture(api, peer)
+        f.hold_bye = True
+        f.send("INVITE", body=OFFER)
+        f.until(lambda: bool(f.calls))
+        token = next(iter(f.calls))
+        answer = registration.Span(ANSWER, len(ANSWER))
+        assert api.respond_call(f.ctx, 7, token, 200, answer) == 0
+        f.until(lambda: f.response(1, "INVITE", 200) is not None)
+        assert api.hangup_call(f.ctx, 7, token) == 0
+        f.until(lambda: any(first.startswith("BYE ") for first, _, _ in f.responses))
+        assert f.calls[token].state == 4
+        f.send("ACK", to=f.response(1, "INVITE", 200)[1]["to"])
+        for _ in range(20):
+            f.step()
+            assert f.calls[token].state == 4, "delayed ACK revived closing call"
+            time.sleep(0.002)
+        _, values, _ = next(r for r in f.responses if r[0].startswith("BYE "))
+        reply = (
+            ["SIP/2.0 200 OK"]
+            + [
+                f"{name}: {values[name]}"
+                for name in ("via", "from", "to", "call-id", "cseq")
+            ]
+            + ["Content-Length: 0", "", ""]
+        )
+        peer.sendto("\r\n".join(reply).encode(), f.address)
+        f.until(lambda: f.calls[token].state == 5)
+        assert api.release_call(f.ctx, 7, token) == 0
+        f.close()
+    print("PASS delayed ACK cannot revive a closing call")
+
+
 def capacity(api):
     """Eight slots remain owned until explicit release, independent of events."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
@@ -278,6 +319,8 @@ def run(path):
         assert response[2].split(b"\r\n\r\n", 1)[1] == ANSWER
         f.send("ACK", to=response[1]["to"])
         f.until(lambda f=f: f.calls[call_id].state == 3)
+        f.send("OPTIONS", to=response[1]["to"])
+        f.until(lambda: f.response(1, "OPTIONS", 200) is not None)
         f.send("BYE", to=response[1]["to"])
         f.until(lambda f=f: f.calls[call_id].state == 5)
         f.until(lambda f=f: f.response(1, "BYE", 200) is not None)
@@ -286,6 +329,7 @@ def run(path):
         f.close()
     print("PASS literal REGISTER/INVITE/explicit SDP answer/ACK/BYE and stale tokens")
     lifecycle(api)
+    delayed_ack(api)
     capacity(api)
 
 

@@ -319,7 +319,7 @@ install-sip-development:
 	ln -sfn librptadv_sip_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_sip_adapter.so
 	install -D -m 0644 rust/sip-adapter/include/rptadv_sip_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/sip/rptadv_sip_adapter.h
 
-build/sip-native-events.so: rust/sip-adapter/native.c rust/sip-adapter/native.h | build
+build/sip-native-events.so: tests/sip_native_probe.c rust/sip-adapter/native.c rust/sip-adapter/native.h | build
 	clang -shared -fPIC -Wall -Wextra -Werror -std=c11 $(SIP_NATIVE_FLAGS) $< -L$(SOFIA_PREFIX)/lib -lsofia-sip-ua -Wl,-z,defs -Wl,--no-allow-shlib-undefined -o $@
 
 sip-registration-check: $(SIP_LIBRARY) build/sip-native-events.so

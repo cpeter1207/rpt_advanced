@@ -82,6 +82,35 @@ def run(path):
         while not registered:
             test.fixture(api, peer, ctx)
             assert time.monotonic() < deadline
+        library.sip_test_destroyed_handles.restype = C.c_size_t
+        before = library.sip_test_destroyed_handles()
+        port = peer.getsockname()[1]
+        wire = (
+            f"OPTIONS sip:synthetic@registrar.invalid SIP/2.0\r\n"
+            f"Via: SIP/2.0/UDP 127.0.0.1:{port};branch=z9hG4bK-options;rport\r\n"
+            "From: <sip:probe@fixture.invalid>;tag=probe\r\n"
+            "To: <sip:synthetic@registrar.invalid>\r\n"
+            "Call-ID: independent-options@fixture.invalid\r\n"
+            "CSeq: 1 OPTIONS\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+        )
+        peer.sendto(wire.encode(), peer.last_sender)
+        deadline = time.monotonic() + 3
+        while True:
+            api.service(ctx, 7)
+            try:
+                response, _ = peer.recvfrom(8192)
+            except BlockingIOError:
+                assert time.monotonic() < deadline
+                time.sleep(0.002)
+                continue
+            assert response.startswith(b"SIP/2.0 200 ")
+            break
+        for _ in range(10):
+            api.service(ctx, 7)
+        assert library.sip_test_destroyed_handles() == before + 1, (
+            "out-of-dialog OPTIONS retained its application-owned handle"
+        )
+        print("PASS out-of-dialog OPTIONS releases its application-owned handle")
         observed.clear()
         deadline = time.monotonic() + 8
         while True:
