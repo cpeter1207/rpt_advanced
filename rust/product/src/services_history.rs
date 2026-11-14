@@ -60,6 +60,7 @@ pub(super) struct Block {
     oldest: Option<Bucket>,
     unknown: bool,
     count: u64,
+    qualified: bool,
 }
 impl Block {
     fn include(&mut self, source: Option<Bucket>) {
@@ -83,6 +84,8 @@ pub(super) struct History {
     horizon: u64,
     counters: Option<(u64, u64)>,
     frames: u64,
+    last_qualified: Option<u64>,
+    output_qualified: bool,
     buckets: Box<[Bucket]>,
 }
 impl History {
@@ -103,12 +106,16 @@ impl History {
             horizon,
             counters: Some((state.accepted_frames, state.delivered_frames)),
             frames: 0,
+            last_qualified: None,
+            output_qualified: false,
             buckets: vec![Bucket::default(); count].into_boxed_slice(),
         }))
     }
 
     fn clear_samples(&mut self) {
         self.frames = 0;
+        self.last_qualified = None;
+        self.output_qualified = false;
         self.buckets.fill(Bucket::default());
     }
 
@@ -125,6 +132,7 @@ impl History {
             oldest: None,
             unknown: self.prepared > self.horizon,
             count: 0,
+            qualified: false,
         };
         if self.prepared == 0 {
             return block;
@@ -136,6 +144,7 @@ impl History {
         if block.unknown {
             return block;
         }
+        block.qualified = self.last_qualified.is_some_and(|frame| frame >= first);
         let count = self.buckets.len() as u64;
         for index in first / WIDTH..=(self.frames - 1) / WIDTH {
             let bucket = self.buckets[(index % count) as usize];
@@ -147,9 +156,11 @@ impl History {
     /// Record original source metadata during the sole PCM fill pass.
     pub(super) fn append_block(&mut self, block: &mut Block, input: TimedPeerSample) {
         let source = Bucket::source(input);
+        let qualified = source.is_some() && input.provenance.is_some_and(|p| !p.muted);
+        block.qualified |= qualified;
         block.include(source);
         block.count = block.count.saturating_add(1);
-        if self.record(source).is_none() {
+        if self.record(source, qualified).is_none() {
             block.unknown = true;
         }
     }
@@ -160,6 +171,7 @@ impl History {
         block: Block,
         state: Option<abi::UrpProgrammeBuffering>,
     ) -> Option<SourceTimeBound> {
+        self.output_qualified = false;
         let Some(state) = state else {
             self.invalidate();
             return None;
@@ -188,19 +200,30 @@ impl History {
             self.clear_samples();
             return None;
         }
-        (!block.unknown)
+        let bound = (!block.unknown)
             .then_some(block.oldest)
             .flatten()
-            .map(|oldest| oldest.bound)
+            .map(|oldest| oldest.bound);
+        self.output_qualified = bound.is_some() && block.qualified;
+        bound
     }
 
-    fn record(&mut self, source: Option<Bucket>) -> Option<u64> {
+    /// Voice may remain inside the qualified graph after its source gate closes.
+    /// Reuse the proven DSP lookback; this scalar retains no PCM or extra delay.
+    pub(super) fn output_qualified(&self) -> bool {
+        self.output_qualified
+    }
+
+    fn record(&mut self, source: Option<Bucket>, qualified: bool) -> Option<u64> {
         let frame = self.frames;
         let Some(next) = frame.checked_add(1) else {
             self.invalidate();
             return None;
         };
         self.frames = next;
+        if qualified {
+            self.last_qualified = Some(frame);
+        }
         if !self.buckets.is_empty() {
             let index = frame / WIDTH;
             let count = self.buckets.len() as u64;
@@ -225,6 +248,7 @@ impl History {
         input: TimedPeerSample,
         state: Option<abi::UrpProgrammeBuffering>,
     ) -> Option<SourceTimeBound> {
+        self.output_qualified = false;
         let Some(state) = state else {
             self.invalidate();
             return None;
@@ -257,9 +281,11 @@ impl History {
             return None;
         }
         let source = Bucket::source(input);
-        let frame = self.record(source)?;
+        let qualified = source.is_some() && input.provenance.is_some_and(|p| !p.muted);
+        let frame = self.record(source, qualified)?;
         let delay = state.current_max_delay_frames;
         if delay == 0 {
+            self.output_qualified = qualified;
             return source.map(|source| source.bound);
         }
         // Never map pre-admission or overwritten history. Whole buckets retain
@@ -278,6 +304,9 @@ impl History {
                 return None;
             }
         }
+        self.output_qualified = self
+            .last_qualified
+            .is_some_and(|last| last >= frame - delay);
         Some(oldest.bound)
     }
 

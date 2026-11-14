@@ -124,13 +124,31 @@ impl PrivatePhoneControl {
         &mut self,
         processor: Option<PcmProcessor>,
     ) -> Result<(PreparedPhoneMedia, media::PhoneMediaInput), Error> {
+        self.prepare_media_candidate(processor, false)
+    }
+    pub(crate) fn prepare_pending_voiced_media(
+        &mut self,
+        processor: Option<PcmProcessor>,
+    ) -> Result<(PreparedPhoneMedia, media::PhoneMediaInput), Error> {
+        self.prepare_media_candidate(processor, true)
+    }
+    fn prepare_media_candidate(
+        &mut self,
+        processor: Option<PcmProcessor>,
+        voiced: bool,
+    ) -> Result<(PreparedPhoneMedia, media::PhoneMediaInput), Error> {
         if !self.media_capable() {
             return Err(Error::Admission);
         }
         if self.media_occupied() {
             return Err(Error::Reservation);
         }
-        let (ingress, input, shared) = media::prepare(
+        let prepare = if voiced {
+            media::prepare_voiced
+        } else {
+            media::prepare
+        };
+        let (ingress, input, shared) = prepare(
             self.reply.clone(),
             self.rate,
             self.consumed_revision.unwrap_or(NonZeroU32::MIN),

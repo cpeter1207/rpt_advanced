@@ -379,3 +379,16 @@ are builder decisions recorded in the implementation ledger before changes.
 1. Reproduce mailbox-only prompt, completed-field waiting and password-transition failures in the existing collector/host/catalog fixtures.
 2. Add one credential-free password transition to the existing collector and private prompt dispatcher. Preserve interdigit, overall deadline and attempt limits.
 3. Verify wrong/unknown credentials, retirement and existing private SIP/IAX/foreground flows with sequential wire callers. Run affected strict lint checks and commit a private recovery checkpoint before attachment/VOX work.
+
+### Incoming voice preparation checkpoint (2026-11-14)
+
+- Sequential mailbox/password prompts are committed and privately verified.
+- Typed local attachment preparation uses the existing graph and private egress;
+  accepted publication alone adopts retained ingress. Exact collection and
+  settled/drained source revisions gate rearm.
+- Released source-rate Earshot analysis and source-coordinate admission reuse
+  the existing 160-ms phone ring, with zero additional programme-preroll buffer.
+- Before operator activation: preserve kernel receipt age at the RTP socket,
+  carry original age/retirement through mixed peer output, and compose the
+  actual product call/remote-link path. Do not infer RF qualification from the
+  prepared-graph fixtures. Live changes still require advance notice/approval.

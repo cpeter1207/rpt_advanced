@@ -1540,3 +1540,31 @@ Rearm requires both the authoritative collection release and the serial owner's
 matching settled/drained source revision, not a dirty-work flag or elapsed time.
 A source reset without that release leaves media unavailable rather than
 repeatedly replacing the graph; private control remains available.
+
+### Source-coordinate VOX preparation
+
+Typed hosted phone graph preparation now consumes the existing Radio ABI-5
+speech-analysis descriptor directly, checking its size, capability and complete
+speech tail. Product declares the released Radio alpha11 runtime floor. This
+is an existing DSO dependency, not another classifier, radio session, host ABI
+or programme buffer.
+
+The serial source owner analyzes each accepted prefix exactly once. Existing
+20-ms receipt buckets also retain bounded voice intervals. A positive source
+position admits the still-retained 160-ms onset and the design's 1000-ms default
+hang on that source timeline. The existing ring remains the only programme
+delay. Silence is muted before shared processing and does not claim voice;
+unknown receipt/processing age remains unavailable. DSP and all egress
+conversion still have their existing single owners. Voice qualification follows
+the same proven DSP history horizon as receipt age, retaining a final delayed
+voice sample after the current source interval closes. This adds only scalar
+metadata, not another PCM buffer or an input-amplitude test.
+
+Tests compose the actual released classifier, source ring, qualified processing
+history, typed product mixer and ordinary peer fanout, including seven-sample
+credits, delayed decisions, short onset, hang closure and callback allocation
+checks. These tests do not qualify live link/RF transmission: kernel socket
+receipt age and original-age propagation into mixed peer egress still need
+their existing boundary integration before operator *3 activation. Manual mode,
+configurable hang and receive-window scheduling remain separately tracked
+requirements; this checkpoint adds none of those claims.

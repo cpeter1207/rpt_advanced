@@ -242,6 +242,21 @@ impl<P: rpt_advanced_core::link::PeerInput> ProcessedPeer<P> {
         }
     }
 
+    /// Inspect source-side qualification metadata without another media owner.
+    pub(crate) fn source(&self) -> &P {
+        &self.input
+    }
+
+    /// Qualification follows the same proven output horizon as original age.
+    /// Without a processor the caller can use its current accepted source span.
+    pub(crate) fn output_qualified(&self) -> Option<bool> {
+        self.processor.as_ref().map(|_| {
+            self.history
+                .as_ref()
+                .is_some_and(|history| history.output_qualified())
+        })
+    }
+
     fn forget_history(&mut self) {
         if let Some(history) = self.history.as_mut() {
             history.invalidate();

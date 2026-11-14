@@ -312,7 +312,7 @@ impl PhoneCalls {
         call.owner
             .as_mut()
             .ok_or(Error::Admission)?
-            .prepare_pending_media(processor)
+            .prepare_pending_voiced_media(processor)
     }
     pub(crate) fn adopt_media(
         &mut self,

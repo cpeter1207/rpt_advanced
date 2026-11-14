@@ -1,4 +1,5 @@
 //! One prepared phone receive generation, using the common ring and shared graph.
+use crate::link::phone_speech::SpeechAnalysis;
 use crate::{
     Error,
     link::ring::{InboundConsumer, InboundObserver, InboundPolicy, InboundProducer, InboundRing},
@@ -27,6 +28,8 @@ struct Bucket {
     index: AtomicU64,
     epoch: AtomicU64,
     birth: AtomicU64,
+    voice_start: AtomicU64,
+    voice_end: AtomicU64,
 }
 
 /// Exact call and one independently revocable media generation; no node identity.
@@ -36,6 +39,7 @@ pub(super) struct Shared {
     phase: AtomicU8,
     generation: u64,
     width: u64,
+    voiced: bool,
     oldest: AtomicU64,
     buckets: [Bucket; BUCKETS],
 }
@@ -80,12 +84,65 @@ impl Shared {
             // All fields are atomic and in one total order. A racing reader
             // returns unknown rather than mixing a reused bucket's identity/time.
             slot.revision.fetch_add(1, Ordering::SeqCst);
+            if !retained {
+                slot.voice_start.store(0, Ordering::SeqCst);
+                slot.voice_end.store(0, Ordering::SeqCst);
+            }
             slot.index.store(index, Ordering::SeqCst);
             slot.epoch.store(birth.host_clock_epoch, Ordering::SeqCst);
             slot.birth.store(earliest, Ordering::SeqCst);
             slot.revision.fetch_add(1, Ordering::SeqCst);
         }
         true
+    }
+    // Add source-coordinate admission to existing receipt buckets, never PCM.
+    // Only the serial ingress writes; an interrupted snapshot remains unqualified.
+    fn mark_voice(&self, start: u64, end: u64) {
+        if start >= end {
+            return;
+        }
+        let first = (start / self.width).max(self.oldest.load(Ordering::Acquire));
+        let last = (end - 1) / self.width;
+        for index in first..=last {
+            let slot = self.slot(index);
+            if slot.revision.load(Ordering::SeqCst) == 0
+                || slot.index.load(Ordering::SeqCst) != index
+            {
+                continue;
+            }
+            let left = start.max(index * self.width);
+            let right = end.min((index + 1) * self.width);
+            let old_end = slot.voice_end.load(Ordering::SeqCst);
+            let left = if old_end == 0 {
+                left
+            } else {
+                left.min(slot.voice_start.load(Ordering::SeqCst))
+            };
+            slot.revision.fetch_add(1, Ordering::SeqCst);
+            slot.voice_start.store(left, Ordering::SeqCst);
+            slot.voice_end.store(right.max(old_end), Ordering::SeqCst);
+            slot.revision.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    fn voiced_frame(&self, frame: u64) -> bool {
+        let slot = self.slot(frame / self.width);
+        let before = slot.revision.load(Ordering::SeqCst);
+        before != 0
+            && before & 1 == 0
+            && slot.index.load(Ordering::SeqCst) == frame / self.width
+            && slot.voice_start.load(Ordering::SeqCst) <= frame
+            && frame < slot.voice_end.load(Ordering::SeqCst)
+            && slot.revision.load(Ordering::SeqCst) == before
+    }
+    fn voice_at(&self, position: SourceCoordinate) -> bool {
+        position.generation == self.generation
+            && !position.negative
+            && self.voiced_frame(position.frame)
+            && (position.fraction_billionths == 0
+                || position
+                    .frame
+                    .checked_add(1)
+                    .is_some_and(|next| self.voiced_frame(next)))
     }
     fn bound(&self, frame: u64) -> Option<SourceTimeBound> {
         let index = frame / self.width;
@@ -131,8 +188,23 @@ pub(super) struct Ingress {
     admission: SourceTimeReference,
     cursor: Option<u64>,
     outbound: Option<LinkAudioConsumer>,
+    speech: Option<SpeechAnalysis>,
+    last_voice: Option<u64>,
+    voice_until: u64,
 }
 impl Ingress {
+    fn voice_decision(&mut self, last: Option<u64>) {
+        let Some(last) = last.filter(|last| self.last_voice.is_none_or(|old| *last > old)) else {
+            return;
+        };
+        self.last_voice = Some(last);
+        let end = last.saturating_add(1);
+        // Reuse the existing 160-ms retained onset and the design's 1000-ms
+        // default hang. Neither adds a programme buffer to shared analysis.
+        self.shared
+            .mark_voice(end.saturating_sub(self.shared.width * 8), end);
+        self.voice_until = end.saturating_add(self.shared.width * 50);
+    }
     pub(super) fn active(&self) -> bool {
         self.shared.active()
     }
@@ -218,6 +290,14 @@ impl Ingress {
             .write_tagged(&samples[..offered], self.shared.generation, start, &[])
             .map_err(|_| Error::Write)?;
         self.cursor = Some(start + accepted as u64);
+        if accepted != 0 {
+            if let Some(speech) = self.speech.as_mut() {
+                let decision = speech.process(start, &samples[..accepted])?;
+                self.voice_decision(decision);
+                self.shared
+                    .mark_voice(start, (start + accepted as u64).min(self.voice_until));
+            }
+        }
         Ok(accepted)
     }
     pub(super) fn gap(&mut self, start: u64, count: usize) -> Result<usize, Error> {
@@ -237,6 +317,7 @@ impl Drop for Ingress {
 struct TimedInput {
     reader: InboundConsumer,
     shared: Arc<Shared>,
+    qualified: u64,
 }
 impl PeerInput for TimedInput {
     fn phone_reply(&self) -> Option<&PeerReply> {
@@ -268,30 +349,56 @@ impl PeerInput for TimedInput {
                     .and_then(|position| self.shared.locate(position));
             }
         }
+        if self.shared.voiced {
+            let qualified = sample.age_bound.is_some()
+                && sample.provenance.as_ref().is_some_and(|p| {
+                    p.real
+                        && !p.plc
+                        && !p.gap
+                        && !p.zero_extension
+                        && !p.muted
+                        && p.position
+                            .is_some_and(|position| self.shared.voice_at(position))
+                });
+            if qualified {
+                self.qualified = self.qualified.wrapping_add(1);
+            } else {
+                sample.sample = 0.0;
+                if let Some(provenance) = sample.provenance.as_mut() {
+                    provenance.muted = true;
+                }
+            }
+        }
         Some(sample)
     }
     fn render_timed_block(&mut self, output: &mut [f32]) -> Option<RenderedPeerBlock> {
         let mut real = 0;
         let mut age_bound = None;
-        for (index, sample) in output.iter_mut().enumerate() {
+        let mut contributing = 0;
+        for sample in output.iter_mut() {
             let Some(value) = self.render_timed_sample() else {
                 output.fill(0.0);
                 return None;
             };
             *sample = value.sample;
             real += usize::from(value.provenance.is_some_and(|provenance| provenance.real));
-            age_bound = if index == 0 {
-                value.age_bound
-            } else {
-                age_bound.zip(value.age_bound).and_then(|(previous, next)| {
-                    (previous.host_clock_epoch != 0
-                        && previous.host_clock_epoch == next.host_clock_epoch)
-                        .then_some(SourceTimeBound {
-                            host_clock_epoch: previous.host_clock_epoch,
-                            not_after_ns: previous.not_after_ns.min(next.not_after_ns),
-                        })
-                })
-            };
+            // Source-muted VOX output is known zero, not an unknown-age
+            // contribution. A real sample with missing timing is muted above.
+            if !self.shared.voiced || value.provenance.is_some_and(|p| !p.muted) {
+                age_bound = if contributing == 0 {
+                    value.age_bound
+                } else {
+                    age_bound.zip(value.age_bound).and_then(|(previous, next)| {
+                        (previous.host_clock_epoch != 0
+                            && previous.host_clock_epoch == next.host_clock_epoch)
+                            .then_some(SourceTimeBound {
+                                host_clock_epoch: previous.host_clock_epoch,
+                                not_after_ns: previous.not_after_ns.min(next.not_after_ns),
+                            })
+                    })
+                };
+                contributing += 1;
+            }
         }
         Some(RenderedPeerBlock { real, age_bound })
     }
@@ -364,23 +471,32 @@ impl PeerInput for PhoneMediaInput {
     }
     fn render_timed_block(&mut self, output: &mut [f32]) -> Option<RenderedPeerBlock> {
         if self.active() {
+            let before = self.input.source().qualified;
             let result = self.input.render_timed_block(output);
             if self.active() {
-                return result;
+                if !self.shared.voiced {
+                    return result;
+                }
+                let qualified = self.input.source().qualified.wrapping_sub(before) as usize;
+                let active = self.input.output_qualified().unwrap_or(qualified != 0);
+                if let Some(mut block) = result.filter(|block| active && block.age_bound.is_some())
+                {
+                    // Stateful output may contain the previous block's final voice,
+                    // even when every newly admitted source sample was muted.
+                    block.real = if self.input.output_qualified().is_some() {
+                        output.len()
+                    } else {
+                        qualified
+                    };
+                    return Some(block);
+                }
             }
         }
         output.fill(0.0);
         None
     }
     fn render(&mut self, output: &mut [f32]) -> Option<usize> {
-        if self.active() {
-            let result = self.input.render(output);
-            if self.active() {
-                return result;
-            }
-        }
-        output.fill(0.0);
-        None
+        self.render_timed_block(output).map(|block| block.real)
     }
     fn render_sample(&mut self) -> Option<f32> {
         if !self.active() {
@@ -409,6 +525,29 @@ pub(super) fn prepare(
     expected_revision: NonZeroU32,
     processor: Option<PcmProcessor>,
 ) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
+    prepare_with_speech(reply, rate, expected_revision, processor, None)
+}
+
+pub(super) fn prepare_voiced(
+    reply: PeerReply,
+    rate: u32,
+    expected_revision: NonZeroU32,
+    processor: Option<PcmProcessor>,
+) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
+    if !reply.phone_authenticated() {
+        return Err(Error::Admission);
+    }
+    let speech = SpeechAnalysis::new(rate, (rate / 50) as usize)?;
+    prepare_with_speech(reply, rate, expected_revision, processor, Some(speech))
+}
+
+fn prepare_with_speech(
+    reply: PeerReply,
+    rate: u32,
+    expected_revision: NonZeroU32,
+    processor: Option<PcmProcessor>,
+    speech: Option<SpeechAnalysis>,
+) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
     if !reply.phone_authenticated() {
         return Err(Error::Admission);
     }
@@ -428,6 +567,7 @@ pub(super) fn prepare(
         phase: AtomicU8::new(PREPARED),
         generation,
         width: u64::from(rate) / 50,
+        voiced: speech.is_some(),
         oldest: AtomicU64::new(0),
         buckets: std::array::from_fn(|_| Bucket::default()),
     });
@@ -440,6 +580,7 @@ pub(super) fn prepare(
             TimedInput {
                 reader,
                 shared: Arc::clone(&shared),
+                qualified: 0,
             },
             processor,
         ),
@@ -448,6 +589,9 @@ pub(super) fn prepare(
     Ok((
         Box::new(Ingress {
             outbound: Some(outbound),
+            speech,
+            last_voice: None,
+            voice_until: 0,
             shared: Arc::clone(&shared),
             expected_revision,
             writer,

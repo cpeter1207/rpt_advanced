@@ -1,0 +1,21 @@
+{
+  "attribution": "Google Speech Commands dataset, Pete Warden (2018), from official TensorFlow Micro Speech test data; reused from the released Radio provider fixture.",
+  "upstream_commit": "4eaa491c1c8dedd9a3baf421968afd0d5b82f6aa",
+  "dataset_license": "CC BY4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "source_repository_license": "TFLM-LICENSE",
+  "dataset_source": "https://www.tensorflow.org/tutorials/audio/simple_audio",
+  "files": [
+    {
+      "file": "yes-48000-s16le.pcm",
+      "sha256": "46173e596860b29db01b4daa9f7ad7cfd2d58d5d9395daa2b2840ba45d3a61ba",
+      "source": {
+        "name": "yes_1000ms.wav",
+        "url": "https://raw.githubusercontent.com/tensorflow/tflite-micro/4eaa491c1c8dedd9a3baf421968afd0d5b82f6aa/tensorflow/lite/micro/examples/micro_speech/testdata/yes_1000ms.wav",
+        "sha256": "b40e137a9d25bbdf135e03fa0f6bff4696d0bfc203aef8bc73b27c9428ba5a92",
+        "bytes": 32044
+      },
+      "conversion": "FFmpeg7.1.5 -ar48000 -ac1 -c:a pcm_s16le -f s16le"
+    }
+  ]
+}

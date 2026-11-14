@@ -640,6 +640,9 @@ fn prepared_phone_media_revision_adds_only_scalar_storage_to_existing_ingress() 
         SourceTimeReference,
         Option<u64>,
         Option<LinkAudioConsumer>,
+        Option<SpeechAnalysis>,
+        Option<u64>,
+        u64,
     );
     let previous = std::mem::size_of::<Unstamped>();
     let actual = std::mem::size_of::<Ingress>();
@@ -723,4 +726,255 @@ fn mixed_audio_inputs_delegate_live_timed_and_untimed_output_and_silence() {
             assert_eq!(pcm, [0.0; 480]);
         }
     }
+}
+
+#[test]
+fn voiced_phone_silence_does_not_create_receive_or_transmit_activity() {
+    let (mut ingress, mut input, _) =
+        super::prepare_voiced(reply(), 8000, NonZeroU32::MIN, None).unwrap();
+    adopt(&mut ingress, 0, reference());
+    for block in 0..10 {
+        assert_eq!(
+            ingress.audio(block * 160, &[0.0; 160], Some(birth(10))),
+            Ok(160)
+        );
+    }
+    for _ in 0..12 {
+        let mut output = [1.0; 480];
+        assert!(
+            input.render_timed_block(&mut output).is_none(),
+            "unqualified real silence is not voice"
+        );
+        assert!(output.iter().all(|sample| *sample == 0.0));
+    }
+}
+
+#[test]
+fn voiced_phone_delayed_decision_preserves_short_onset_in_the_existing_ring() {
+    use rpt_advanced_core::link::ReceiveState;
+    for chunk in [160, 7] {
+        let (mut ingress, mut input, _) =
+            super::prepare_voiced(reply(), 8000, NonZeroU32::MIN, None).unwrap();
+        adopt(&mut ingress, 0, reference());
+        let source: Vec<_> = (0..1600)
+            .map(|frame| if frame < 640 { 0.25 } else { 0.0 })
+            .collect();
+        let mut start = 0;
+        while start < 800 {
+            let end = (start + chunk).min(800);
+            let accepted = ingress
+                .audio(start as u64, &source[start..end], Some(birth(10)))
+                .unwrap();
+            assert!(accepted > 0);
+            start += accepted;
+        }
+        let mut receive = ReceiveState::with_policy(8000, ReceivePolicy::Phone).unwrap();
+        assert!(
+            !receive.should_render(input.signals().pcm_epoch(), input.available(), false, 480),
+            "the existing 160-ms reserve still retains the onset"
+        );
+        // The positive frame ends after this short utterance. No PCM is copied,
+        // rewound or queued in the classifier; only source admission changes.
+        ingress.voice_decision(Some(799));
+        while start < source.len() {
+            let end = (start + chunk).min(source.len());
+            start += ingress
+                .audio(start as u64, &source[start..end], Some(birth(10)))
+                .unwrap();
+        }
+        assert!(
+            receive.should_render(input.signals().pcm_epoch(), input.available(), false, 480),
+            "there is no second programme delay"
+        );
+        let mut onset = false;
+        for _ in 0..9600 {
+            let Some(sample) = input.render_timed_sample() else {
+                continue;
+            };
+            if sample.provenance.is_some_and(|p| {
+                p.real
+                    && !p.muted
+                    && p.position
+                        .is_some_and(|position| !position.negative && position.frame < 640)
+            }) && sample.sample > 0.1
+            {
+                onset = true;
+                assert_eq!(sample.age_bound.unwrap().not_after_ns, 10);
+            }
+        }
+        assert!(
+            onset,
+            "retained onset survives delayed qualification and partial credit {chunk}"
+        );
+    }
+}
+
+#[test]
+fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
+    use crate::link::input::AudioInput;
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode, PeerIdentity, SourcePosition},
+    };
+    let speech: Vec<f32> = include_bytes!("../tests/fixtures/phone-speech/yes-48000-s16le.pcm")
+        .chunks_exact(12)
+        .map(|p| f32::from(i16::from_le_bytes([p[0], p[1]])) / 32768.0)
+        .chain(std::iter::repeat_n(0.0, 12_000))
+        .collect();
+    for credit in [160, 7] {
+        let call = reply();
+        let source = call.phone_source().unwrap().clone();
+        let (_graph_state, graph) = crate::services::history_tests::processor_fixture(1, 1);
+        let (mut ingress, mut private, shared) =
+            super::prepare_voiced(call.clone(), 8000, NonZeroU32::MIN, Some(graph)).unwrap();
+        adopt(&mut ingress, 0, reference());
+        let private_out = private.take_output().unwrap();
+        let phone = AudioPeer::for_phone(
+            &source,
+            &call,
+            Mode::TRANSCEIVE,
+            AudioInput::Phone(private),
+            private_out,
+            480,
+        )
+        .unwrap();
+        let (_writer, ordinary) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+        let (public_out, mut public_reader) =
+            LinkAudioQueue::new(1920, 64).unwrap().into_endpoints();
+        let public = AudioPeer::new(
+            PeerIdentity::from_operator("2000").unwrap(),
+            Mode::TRANSCEIVE,
+            AudioInput::Peer(ProcessedPeer::new(ordinary, None)),
+            public_out,
+            480,
+            0,
+        )
+        .unwrap();
+        let domain = rpt_advanced_core::link::RetirementDomain::default();
+        let (mut mixer, mut dispatcher): (crate::worker::Audio, _) =
+            LinkAudio::new_in_domain(vec![phone, public], 480, domain.clone()).unwrap();
+        let (mut controller, mut control) = NodeController::new(
+            ControllerSettings::default(),
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        controller.bind_phone_retirement(&mut control, domain);
+        let mut native = 0;
+        let mut voice = false;
+        let mut remote_audio = false;
+        let mut final_voice = false;
+        for (block_index, block) in speech.chunks(160).enumerate() {
+            let mut offset = 0;
+            while offset < block.len() {
+                let end = (offset + credit).min(block.len());
+                let start = block_index * 160 + offset;
+                let (accepted, allocations) = crate::fixture::allocations(|| {
+                    ingress.audio(
+                        start as u64,
+                        &block[offset..end],
+                        Some(birth(10 + start as u64 * 125_000)),
+                    )
+                });
+                assert_eq!(allocations, 0);
+                let accepted = accepted.unwrap();
+                assert!(accepted > 0);
+                offset += accepted;
+            }
+            for _ in 0..2 {
+                let (_, allocations) = crate::fixture::allocations(|| {
+                    mixer
+                        .process(
+                            &mut controller,
+                            false,
+                            &mut [0.0; 480],
+                            SourcePosition {
+                                generation: 1,
+                                sample: native,
+                                stream: 1,
+                                born_ns: Some(10 + native * 1_000_000_000 / 48_000),
+                            },
+                        )
+                        .unwrap();
+                    dispatcher.dispatch(2);
+                });
+                assert_eq!(allocations, 0);
+                let metadata = mixer.rf_programme();
+                if metadata.private && metadata.active {
+                    voice = true;
+                    assert_eq!(metadata.age_bound.unwrap().host_clock_epoch, 7);
+                    assert!(
+                        metadata.age_bound.unwrap().not_after_ns
+                            <= 10 + block_index as u64 * 20_000_000
+                    );
+                }
+                final_voice = metadata.active;
+                let mut output = [0.0; 480];
+                while public_reader.read_span(&mut output).is_some() {
+                    remote_audio |= output.iter().any(|value| value.abs() > 0.01);
+                }
+                native += 480;
+            }
+        }
+        assert!(
+            voice && remote_audio,
+            "actual released analysis opens existing typed fanout ({credit})"
+        );
+        assert!(
+            !final_voice,
+            "the existing source-coordinate hang closes after silence"
+        );
+        shared.retire();
+        assert!(!call.ended(), "retiring voice preserves private control");
+    }
+}
+
+#[test]
+fn voiced_phone_preserves_the_qualified_dsp_tail_after_source_gate_closes() {
+    let (state, graph) = crate::services::history_tests::processor_fixture(1, 1);
+    let (mut ingress, mut input, shared) =
+        super::prepare_voiced(reply(), 48000, NonZeroU32::MIN, Some(graph)).unwrap();
+    adopt(&mut ingress, 0, reference());
+    // Exercise an exact qualification boundary independently of classifier hang.
+    // The real ring and the qualified one-frame processor retain the sole PCM.
+    ingress.speech = None;
+    for block in 0..10 {
+        let mut source = [0.0; 960];
+        if block == 1 {
+            source[959] = 0.75;
+        }
+        assert_eq!(
+            ingress.audio(block * 960, &source, Some(birth(10))),
+            Ok(960)
+        );
+    }
+    shared.mark_voice(0, 1920);
+    let mut previous_qualified = false;
+    let mut observed_tail = false;
+    for _ in 0..4000 {
+        let before = input.input.source().qualified;
+        let retained = state.retained_sample();
+        let mut output = [0.0];
+        let result = input.render_timed_block(&mut output);
+        let qualified = input.input.source().qualified != before;
+        if previous_qualified && !qualified {
+            assert!(retained.abs() > 0.001, "the real ring retained the marker");
+            assert_eq!(
+                output,
+                [retained],
+                "the final admitted marker is still inside the DSP"
+            );
+            assert!(
+                result.is_some(),
+                "delayed output must retain voice activity"
+            );
+            assert_eq!(result.unwrap().age_bound.unwrap().not_after_ns, 10);
+            observed_tail = true;
+            break;
+        }
+        previous_qualified = qualified;
+    }
+    assert!(observed_tail);
 }

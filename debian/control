@@ -75,6 +75,7 @@ Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
  libusbradioplus-product1 (>= 0.1.0~alpha35-1),
+ librptadvradio5 (>= 0.1.0~alpha11),
  librate-adjusting-pcm-ring3 (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha3),
  librptadvtone1 (>= 0.1.0~alpha1),

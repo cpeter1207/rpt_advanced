@@ -17,6 +17,13 @@ pub(crate) struct State {
     queries: AtomicU64,
 }
 
+impl State {
+    /// The one-frame fixture's actual filtered input retained for its next output.
+    pub(crate) fn retained_sample(&self) -> f32 {
+        f32::from_bits(self.previous.load(Ordering::Relaxed))
+    }
+}
+
 unsafe extern "C" fn process(context: *mut c_void, pcm: *mut f32, count: usize) -> i32 {
     let state = unsafe { &*context.cast::<State>() };
     state.calls.fetch_add(1, Ordering::Relaxed);

@@ -36,6 +36,7 @@ fn main() {
         .allowlist_type("Urp.*")
         .allowlist_function("usbradioplus_product_descriptor_v1")
         .allowlist_function("rpcr3_descriptor")
+        .allowlist_function("rptadv_radio_descriptor")
         .allowlist_function("rptadv_samplerate_adapter_descriptor")
         .allowlist_var("RPCR3_.*")
         .allowlist_var("URP_NATIVE_.*")
@@ -58,4 +59,5 @@ fn main() {
     println!("cargo:rustc-link-lib=rate_adjusting_pcm_ring3");
     println!("cargo:rustc-link-lib=rptadv_samplerate_adapter");
     println!("cargo:rustc-link-lib=dylib=usbradioplus_product");
+    println!("cargo:rustc-link-lib=dylib=rptadvradio");
 }
