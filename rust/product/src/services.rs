@@ -594,6 +594,7 @@ impl HostServices {
         let ready_tail = offset_of!(abi::rptadv_host_services_v10, radio_ready);
         let feedback_tail = offset_of!(abi::rptadv_host_services_v10, radio_feedback_bind);
         let timed_tail = offset_of!(abi::rptadv_host_services_v10, peer_send_prepared_timed);
+        let timed_dial_tail = offset_of!(abi::rptadv_host_services_v10, peer_dial_timed_g711);
         if size < table_size
             && ![
                 required,
@@ -604,6 +605,7 @@ impl HostServices {
                 ready_tail,
                 feedback_tail,
                 timed_tail,
+                timed_dial_tail,
             ]
             .contains(&size)
         {
@@ -645,6 +647,7 @@ impl HostServices {
             || !matches!(egress_count, 0 | 6)
             || (egress_count == 6 && async_count != 3)
             || (api.peer_send_prepared_timed.is_some() && egress_count != 6)
+            || (api.peer_dial_timed_g711.is_some() && api.peer_send_prepared_timed.is_none())
             || (egress_count == 0 && api.peer_write.is_none())
             || (api.peer_read_source.is_some() && egress_count != 6)
         {
@@ -970,7 +973,11 @@ impl HostServices {
         };
         if identity.wire_identity() != remote
             || !local_valid
-            || capabilities & !127 != 0
+            || capabilities & !255 != 0
+            || (capabilities & abi::RPTADV_PEER_TIMED_G711_EGRESS != 0
+                && (protocol != ProtocolId::AllStarLink
+                    || capabilities & 3 != 3
+                    || self.0.peer_send_prepared_timed.is_none()))
             || (protocol != ProtocolId::Phone && capabilities & 96 != 0)
             || (protocol == ProtocolId::Phone
                 && (capabilities & 32 == 0
@@ -1020,11 +1027,43 @@ impl HostServices {
         destination: &str,
         local: &str,
         maximum_frames: usize,
-        mut current: F,
+        current: F,
     ) -> Result<PeerIo, Error>
     where
         F: FnMut() -> bool,
     {
+        self.dial_using(destination, local, maximum_frames, current, false)
+    }
+    /// Dial only a host-proven timed G.711 ordinary IAX route; never use generic fallback.
+    pub fn dial_timed_g711<F>(
+        &self,
+        destination: &str,
+        local: &str,
+        maximum_frames: usize,
+        current: F,
+    ) -> Result<PeerIo, Error>
+    where
+        F: FnMut() -> bool,
+    {
+        self.dial_using(destination, local, maximum_frames, current, true)
+    }
+    fn dial_using<F>(
+        &self,
+        destination: &str,
+        local: &str,
+        maximum_frames: usize,
+        mut current: F,
+        timed: bool,
+    ) -> Result<PeerIo, Error>
+    where
+        F: FnMut() -> bool,
+    {
+        let dial = if timed {
+            self.0.peer_dial_timed_g711
+        } else {
+            self.0.peer_dial
+        }
+        .ok_or(Error::Admission)?;
         unsafe extern "C" fn current_callback<F: FnMut() -> bool>(context: *mut c_void) -> u32 {
             u32::from(
                 catch_unwind(AssertUnwindSafe(|| unsafe { &mut *context.cast::<F>() }()))
@@ -1033,7 +1072,7 @@ impl HostServices {
         }
         let mut handle = ptr::null_mut();
         let code = unsafe {
-            self.0.peer_dial.unwrap()(
+            dial(
                 self.0.context,
                 destination.as_ptr().cast(),
                 destination.len(),
@@ -1049,7 +1088,8 @@ impl HostServices {
             return Err(Error::Operation);
         }
         match unsafe { self.peer(handle) } {
-            Ok(peer) => Ok(peer),
+            Ok(peer) if !timed || (peer.timed_g711_egress() && peer.rate() == 8000) => Ok(peer),
+            Ok(_) => Err(Error::Admission),
             Err(error) => {
                 if !handle.is_null() {
                     unsafe { self.0.peer_destroy.unwrap()(self.0.context, handle) };
@@ -1834,6 +1874,10 @@ impl PeerIo {
             )
         };
         (code == 0).then_some(()).ok_or(Error::Write)
+    }
+    /// Exact host guarantee for the restricted ordinary IAX timed-send profile.
+    pub(crate) fn timed_g711_egress(&self) -> bool {
+        self.capabilities & abi::RPTADV_PEER_TIMED_G711_EGRESS != 0
     }
     /// Whether this host supports source-timed prepared media and readiness deadlines.
     pub(crate) fn prepared_media(&self) -> bool {

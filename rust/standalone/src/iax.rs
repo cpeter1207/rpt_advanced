@@ -121,7 +121,7 @@ pub enum IaxEvent {
 pub struct IaxClient(Arc<IaxOwner>);
 
 struct IaxOwner {
-    library: Option<libloading::Library>,
+    library: Option<Arc<libloading::Library>>,
     api: ClientDescriptor,
     catalog: NonNull<c_void>,
 }
@@ -157,14 +157,17 @@ const CODEC_PROVIDERS: [(u32, &str); 16] = [
     (16, "opus"),
 ];
 
-fn open_catalog(api: &ClientDescriptor) -> Result<NonNull<c_void>, IaxError> {
-    let paths: Vec<_> = CODEC_PROVIDERS
+fn open_catalog(
+    api: &ClientDescriptor,
+    profiles: &[(u32, &str)],
+) -> Result<NonNull<c_void>, IaxError> {
+    let paths: Vec<_> = profiles
         .iter()
         .map(|(_, name)| {
             CString::new(format!("librptadv_codec_{name}.so.1")).expect("static DSO name")
         })
         .collect();
-    let selections: Vec<_> = CODEC_PROVIDERS
+    let selections: Vec<_> = profiles
         .iter()
         .zip(&paths)
         .map(|((id, _), path)| abi::rptadv_iax2_codec_selection_v2 {
@@ -196,11 +199,21 @@ impl IaxClient {
             symbol()
         };
         let api = checked_descriptor(descriptor)?;
-        let catalog = open_catalog(&api)?;
+        let catalog = open_catalog(&api, &CODEC_PROVIDERS)?;
         Ok(Self(Arc::new(IaxOwner {
-            library: Some(library),
+            library: Some(Arc::new(library)),
             api,
             catalog,
+        })))
+    }
+
+    /// Prepare only the released timed PCMU/PCMA profiles for one outbound route.
+    /// The existing listener/full catalog is unchanged; shared code stays loaded.
+    pub(crate) fn timed_g711(&self) -> Result<Self, IaxError> {
+        Ok(Self(Arc::new(IaxOwner {
+            library: self.0.library.clone(),
+            api: self.0.api,
+            catalog: open_catalog(&self.0.api, &CODEC_PROVIDERS[..2])?,
         })))
     }
 
@@ -1031,7 +1044,10 @@ pub(crate) mod tests {
         }
         let mut invalid = descriptor();
         invalid.open_catalog = Some(failed_catalog);
-        assert_eq!(open_catalog(&invalid), Err(IaxError::Codec));
+        assert_eq!(
+            open_catalog(&invalid, &CODEC_PROVIDERS),
+            Err(IaxError::Codec)
+        );
         let header = DescriptorHeader {
             struct_size: size_of::<DescriptorHeader>() as u32,
             abi_version: ABI_VERSION,

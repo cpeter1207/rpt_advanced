@@ -46,6 +46,7 @@ fn main() {
         .allowlist_var("RPTADV_MEDIA_.*")
         .allowlist_var("RPTADV_PEER_EVENT_.*")
         .allowlist_var("RPTADV_PEER_PHONE_INBAND_DIGITS")
+        .allowlist_var("RPTADV_PEER_TIMED_G711_EGRESS")
         .allowlist_var("RPTADV_SITE_.*")
         .allowlist_var("RPTADV_PEER_OBSERVATION_.*")
         .layout_tests(false)

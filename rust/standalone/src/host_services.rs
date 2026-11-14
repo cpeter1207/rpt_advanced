@@ -136,6 +136,7 @@ impl HostServicesOwner {
             radio_ready: Some(crate::radio_host::radio_ready),
             radio_feedback_bind: Some(crate::radio_host::radio_feedback_bind),
             peer_send_prepared_timed: Some(peer_send_prepared_timed),
+            peer_dial_timed_g711: Some(peer_dial_timed_g711),
         });
         Ok(Self {
             context,
@@ -474,6 +475,8 @@ struct IaxHandle {
     local: String,
     remote: String,
     phone: Option<Box<iax_phone::Phone>>,
+    // Some selects lifetime-sticky timed TX. Zero is terminal/unready, never legacy.
+    egress_epoch: Option<u64>,
 }
 impl IaxHandle {
     fn new(peer: IaxPeer, local: &str, remote: &str) -> Self {
@@ -483,6 +486,7 @@ impl IaxHandle {
             local: local.into(),
             remote: remote.into(),
             phone: None,
+            egress_epoch: None,
         }
     }
 }
@@ -537,7 +541,8 @@ unsafe extern "C" fn peer_info(
                     ),
                     None => (
                         1,
-                        if context.ingress.is_some() { 15 } else { 12 },
+                        if context.ingress.is_some() { 15 } else { 12 }
+                            | if peer.egress_epoch.is_some() { 128 } else { 0 },
                         0,
                         0,
                         peer.remote.as_str(),
@@ -989,13 +994,59 @@ unsafe extern "C" fn peer_dial(
     current_context: *mut c_void,
     output: *mut *mut c_void,
 ) -> i32 {
+    unsafe {
+        peer_dial_request(
+            context,
+            [destination, local],
+            [destination_length, local_length],
+            current,
+            current_context,
+            output,
+            false,
+        )
+    }
+}
+
+unsafe extern "C" fn peer_dial_timed_g711(
+    context: *mut c_void,
+    destination: *const c_char,
+    destination_length: usize,
+    local: *const c_char,
+    local_length: usize,
+    _: usize,
+    current: abi::rptadv_current_v1,
+    current_context: *mut c_void,
+    output: *mut *mut c_void,
+) -> i32 {
+    unsafe {
+        peer_dial_request(
+            context,
+            [destination, local],
+            [destination_length, local_length],
+            current,
+            current_context,
+            output,
+            true,
+        )
+    }
+}
+
+unsafe fn peer_dial_request(
+    context: *mut c_void,
+    strings: [*const c_char; 2],
+    lengths: [usize; 2],
+    current: abi::rptadv_current_v1,
+    current_context: *mut c_void,
+    output: *mut *mut c_void,
+    timed: bool,
+) -> i32 {
     boundary(-1, || {
         let Some(context) = (unsafe { context.cast::<StandaloneHostContext>().as_ref() }) else {
             return -1;
         };
         let (Some(destination), Some(local), Some(current), Some(output)) = (
-            unsafe { input(destination, destination_length) },
-            unsafe { input(local, local_length) },
+            unsafe { input(strings[0], lengths[0]) },
+            unsafe { input(strings[1], lengths[1]) },
             current,
             unsafe { output.as_mut() },
         ) else {
@@ -1006,6 +1057,9 @@ unsafe extern "C" fn peer_dial(
             return -1;
         }
         if let Some(remote) = destination.strip_prefix("EchoLink/") {
+            if timed {
+                return -1;
+            }
             let peer = remote
                 .parse::<u32>()
                 .ok()
@@ -1034,13 +1088,16 @@ unsafe extern "C" fn peer_dial(
         let Some(ingress) = &context.ingress else {
             return -1;
         };
-        let peer = match ingress.client.clone().dial_configured(
-            address,
-            local,
-            &remote,
-            &context.secrets,
-            5000,
-        ) {
+        let client = if timed {
+            match ingress.client.timed_g711() {
+                Ok(client) => client,
+                Err(_) => return -1,
+            }
+        } else {
+            ingress.client.clone()
+        };
+        let mut peer = match client.dial_configured(address, local, &remote, &context.secrets, 5000)
+        {
             Ok(peer) => peer,
             Err(error) => {
                 eprintln!("rpt-advanced: IAX2 outbound dial failed: {error}");
@@ -1051,10 +1108,17 @@ unsafe extern "C" fn peer_dial(
             drop(peer);
             return -1;
         }
-        *output = Box::into_raw(Box::new(PeerHandle::Iax(Box::new(IaxHandle::new(
-            peer, local, &remote,
-        )))))
-        .cast();
+        let egress_epoch = if timed {
+            match peer.retire_private_egress() {
+                Ok(epoch) => Some(epoch),
+                Err(_) => return -1,
+            }
+        } else {
+            None
+        };
+        let mut handle = IaxHandle::new(peer, local, &remote);
+        handle.egress_epoch = egress_epoch;
+        *output = Box::into_raw(Box::new(PeerHandle::Iax(Box::new(handle)))).cast();
         0
     })
 }
@@ -1261,6 +1325,9 @@ unsafe extern "C" fn peer_prepare_audio(
             .unwrap_or(-1),
             Some(PeerHandle::Iax(_)) => {
                 let peer = unsafe { iax_peer_mut(peer) }.unwrap();
+                if peer.egress_epoch == Some(0) {
+                    return -1;
+                }
                 if peer
                     .phone
                     .as_ref()
@@ -1285,6 +1352,13 @@ unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i3
         }
         unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| match &mut peer.phone {
             Some(phone) => phone.retire_egress(&mut peer.peer).map_or(-1, |()| 0),
+            None if peer.egress_epoch.is_some() => {
+                peer.egress_epoch = Some(0);
+                peer.peer.retire_private_egress().map_or(-1, |epoch| {
+                    peer.egress_epoch = Some(epoch);
+                    0
+                })
+            }
             None => peer.peer.reset_encoder(),
         })
     })
@@ -1311,7 +1385,9 @@ unsafe extern "C" fn peer_send_prepared(
                 unsafe { peer.send_prepared(bytes, frames, timestamp) }.map_err(|_| ())
             }
             Some(PeerHandle::Sip(_)) => return -1,
-            Some(PeerHandle::Iax(peer)) if peer.phone.is_some() => return -1,
+            Some(PeerHandle::Iax(peer)) if peer.phone.is_some() || peer.egress_epoch.is_some() => {
+                return -1;
+            }
             Some(PeerHandle::Iax(_)) => unsafe { iax_peer_mut(peer) }
                 .unwrap()
                 .peer
@@ -1351,13 +1427,18 @@ unsafe extern "C" fn peer_send_prepared_timed(
         let Some(peer) = (unsafe { iax_peer_mut(peer) }) else {
             return -1;
         };
-        let Some(phone) = &mut peer.phone else {
-            return -1;
-        };
         let bytes = unsafe { std::slice::from_raw_parts(bytes, count) };
-        phone
-            .send_prepared(&mut peer.peer, bytes, frames, timestamp, deadline)
-            .unwrap_or(-1)
+        if let Some(phone) = &mut peer.phone {
+            phone
+                .send_prepared(&mut peer.peer, bytes, frames, timestamp, deadline)
+                .unwrap_or(-1)
+        } else if let Some(epoch) = peer.egress_epoch.filter(|epoch| *epoch != 0) {
+            peer.peer
+                .send_private_prepared(bytes, frames, timestamp, epoch, deadline)
+                .unwrap_or(-1)
+        } else {
+            -1
+        }
     })
 }
 
@@ -2868,17 +2949,24 @@ mod tests {
 
     #[test]
     fn asynchronous_host_delivers_jittered_audio_and_quiesces_after_detach() {
-        host_dial_connects(None);
+        host_dial_connects(None, false);
     }
 
     #[test]
     fn asynchronous_codec_units_use_real_jitter_and_provider_tables() {
         for profile in [4, 8, 11] {
-            host_dial_connects(Some(profile));
+            host_dial_connects(Some(profile), false);
         }
     }
 
-    fn host_dial_connects(profile: Option<u32>) {
+    #[test]
+    fn phone_route_dial_uses_explicit_g711_catalog_and_timed_custody() {
+        for profile in [1, 2, 3] {
+            host_dial_connects(Some(profile), true);
+        }
+    }
+
+    fn host_dial_connects(profile: Option<u32>, timed: bool) {
         unsafe extern "C" fn ordered_addresses(
             _: *mut c_void,
             endpoint: *const u8,
@@ -2920,6 +3008,13 @@ mod tests {
         host.context.resolver =
             Some(crate::directory::Resolver::new(Box::leak(Box::new(resolver))).unwrap());
         let host_context = host.descriptor().context as usize;
+        let dial_callback = if timed {
+            host.descriptor()
+                .peer_dial_timed_g711
+                .expect("explicit phone-route dial capability")
+        } else {
+            host.descriptor().peer_dial.unwrap()
+        };
         let destination = format!("radio@selected.invalid:{}/506315", address.port());
         let (sender, receiver) = std::sync::mpsc::channel();
         let dial = thread::spawn(move || {
@@ -2927,7 +3022,7 @@ mod tests {
             let local = c"524950";
             let mut peer = ptr::null_mut();
             let status = unsafe {
-                super::peer_dial(
+                dial_callback(
                     host_context as *mut c_void,
                     destination.as_ptr(),
                     destination.as_bytes().len(),
@@ -2962,6 +3057,12 @@ mod tests {
         }
         dial.join().unwrap();
         let (status, peer) = receiver.try_recv().unwrap();
+        if timed && profile == Some(3) {
+            assert_ne!(status, 0, "GSM-only remote cannot accept a G.711-only dial");
+            assert_eq!(peer, 0, "rejected restricted dial transfers no owner");
+            assert_eq!(accepted.load(Ordering::Acquire), 0);
+            return;
+        }
         assert_eq!(status, 0);
         assert_ne!(peer, 0);
         assert_ne!(accepted.load(Ordering::Acquire), 0);
@@ -2972,10 +3073,16 @@ mod tests {
             unsafe { super::peer_info(host.descriptor().context, peer as *mut c_void, &mut info) },
             0
         );
-        assert_eq!((info.protocol, info.capabilities), (1, 15));
+        assert_eq!(
+            (info.protocol, info.capabilities),
+            (1, if timed { 143 } else { 15 })
+        );
         let accepted_peer = accepted.swap(0, Ordering::AcqRel) as *mut c_void;
         let server_client = crate::iax::IaxClient::load(library).unwrap();
         let mut inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
+        if timed {
+            verify_timed_g711_send(peer as *mut c_void, &mut inbound);
+        }
 
         // The provider's packet bound is stricter than the host's safe-slice bound.
         let oversized = [0xff; 65508];
@@ -3031,7 +3138,7 @@ mod tests {
             let local = c"524951";
             let mut peer = ptr::null_mut();
             let status = unsafe {
-                super::peer_dial(
+                dial_callback(
                     host_context as *mut c_void,
                     destination.as_ptr(),
                     destination.as_bytes().len(),
@@ -3071,6 +3178,94 @@ mod tests {
         let server_client = crate::iax::IaxClient::load(library).unwrap();
         let inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
         verify_attach_rejection(&mut host, inbound);
+    }
+
+    fn verify_timed_g711_send(peer: *mut c_void, inbound: &mut crate::iax::IaxPeer) {
+        let mut encoded = [0u8; 160];
+        let mut result: abi::rptadv_codec_encode_result_v1 = unsafe { std::mem::zeroed() };
+        result.struct_size = size_of_val(&result) as u32;
+        assert_eq!(
+            unsafe { super::peer_reset_encoder(ptr::null_mut(), peer) },
+            0
+        );
+        let mut received = 0;
+        for _ in 0..3 {
+            assert!(
+                unsafe {
+                    super::peer_prepare_audio(
+                        ptr::null_mut(),
+                        peer,
+                        [0.25; 160].as_ptr(),
+                        160,
+                        encoded.as_mut_ptr(),
+                        160,
+                        0,
+                        &mut result,
+                    )
+                } >= 0
+            );
+            assert_eq!((result.encoded_bytes, result.packet_frames), (160, 160));
+            let now = unsafe { super::peer_elapsed_ms(ptr::null_mut(), peer) };
+            assert_eq!(
+                unsafe {
+                    super::peer_send_prepared_timed(
+                        ptr::null_mut(),
+                        peer,
+                        encoded.as_ptr(),
+                        160,
+                        160,
+                        now,
+                        now,
+                    )
+                },
+                2,
+                "expired media is never accepted"
+            );
+            assert_eq!(
+                unsafe {
+                    super::peer_send_prepared_timed(
+                        ptr::null_mut(),
+                        peer,
+                        encoded.as_ptr(),
+                        160,
+                        160,
+                        now,
+                        now + 150,
+                    )
+                },
+                0
+            );
+            let until = Instant::now() + Duration::from_millis(25);
+            while Instant::now() < until {
+                let mut pcm = [0.0; 1024];
+                let mut text = [0; 4096];
+                if let crate::iax::IaxEvent::Audio(count) =
+                    inbound.poll(&mut pcm, &mut text).unwrap()
+                {
+                    received += pcm[..count]
+                        .iter()
+                        .filter(|sample| sample.abs() > 0.1)
+                        .count();
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        assert!(
+            received >= 160,
+            "real provider delivered deadline-qualified G.711 PCM"
+        );
+        assert_eq!(
+            unsafe {
+                super::peer_send_prepared(ptr::null_mut(), peer, encoded.as_ptr(), 160, 160, 100)
+            },
+            -1,
+            "timed opt-in never restores legacy PCM"
+        );
+        assert_eq!(
+            unsafe { super::peer_send_prepared(ptr::null_mut(), peer, ptr::null(), 0, 0, 100) },
+            -1,
+            "timed opt-in never sends a legacy empty voice marker"
+        );
     }
 
     fn verify_attach_rejection(host: &mut HostServicesOwner, inbound: crate::iax::IaxPeer) {

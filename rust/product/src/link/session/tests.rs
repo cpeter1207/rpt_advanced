@@ -16,7 +16,7 @@ pub(crate) enum Input {
 pub(crate) struct State {
     pub(crate) rate: u32,
     local: Option<Box<str>>,
-    capabilities: u32,
+    pub(crate) capabilities: u32,
     pub(crate) input: VecDeque<Input>,
     pub(crate) texts: Vec<Vec<u8>>,
     pub(crate) digits: Vec<u8>,

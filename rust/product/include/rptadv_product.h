@@ -81,6 +81,8 @@ struct UrpAstSiteSnapshot;
  * the private owner consumes and ignores native symbols in this mode.
  * Current timed private analysis supports exactly 8000 or 48000 Hz. */
 #define RPTADV_PEER_PHONE_INBAND_DIGITS 64U
+/** Ordinary ASL peer with proven G.711 catalog and lifetime timed egress ownership. */
+#define RPTADV_PEER_TIMED_G711_EGRESS 128U
 
 /** Borrowed immutable bytes. Null is valid only with zero length. */
 struct rptadv_peer_bytes_v1 {
@@ -411,8 +413,9 @@ struct rptadv_remote_ticket_v1 {
     void (*destroy)(void *ticket); /**< Cancel before releasing, including while pending. */
 };
 /** Host I/O primitives consumed by the portable product owner.
- * On supported 64-bit platforms, ABI 10 retains its complete 360-byte prefix
- * through radio_update and appends five optional callbacks for a 400-byte table.
+ * ABI 10 preserves its required prefix and complete optional tail boundaries.
+ * The final optional timed-G.711 dial callback adds one pointer; older complete
+ * tables remain valid but cannot advertise this dial capability.
  * Omitted complete capability tails are copied as null; partial tails are rejected.
  * The immutable table, context and callback code remain valid through successful
  * product stop. The context supports concurrent calls. Each non-null radio/peer
@@ -643,6 +646,15 @@ struct rptadv_host_services_v10 {
      * Phone G.711 packets contain exactly 160 bytes/frames; no empty unkey. */
     int (*peer_send_prepared_timed)(void *context, void *peer, const uint8_t *bytes, size_t count,
                                     uint32_t frames, uint32_t timestamp_ms, uint32_t deadline_ms);
+    /** Optional complete ABI-10 tail for a phone-originated ordinary IAX dial.
+     * Same ownership, cancellation and destination contract as peer_dial. Restrict
+     * this call to released PCMU/PCMA 8-kHz 20-ms media, complete initial TX
+     * retirement before returning, and advertise TIMED_G711_EGRESS. Generic
+     * catalogs/listeners remain unchanged. Null means unavailable; never fall
+     * back to generic dial or infer support from an 8-kHz negotiated rate. */
+    int (*peer_dial_timed_g711)(void *context, const char *destination, size_t destination_length,
+                               const char *local, size_t local_length, size_t maximum_frames,
+                               rptadv_current_v1 current, void *current_context, void **peer);
 };
 
 /** Exact revision of a typed site control request. */

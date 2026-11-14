@@ -1609,3 +1609,25 @@ the existing timed G.711 token/retirement integration, including legacy ACK
 transition and the lifetime-sticky mode. Application expiry alone is not proof
 of that downstream provider boundary; unsupported negotiated destinations must
 not fall back to legacy phone transmission.
+
+### Explicit restricted ordinary IAX dial
+
+The optional final ABI-10 host callback peer_dial_timed_g711 uses the ordinary
+dial ownership/current-generation contract, but opens a per-call catalog with
+only released neutral profiles 1 and 2. It completes initial local TX retirement
+before publishing an ordinary ASL handle with capability 128. Neither a caller
+ID nor an 8-kHz rate establishes this guarantee. The full catalog and listener
+are unchanged; no provider API or codec dependency changes.
+
+On supported 64-bit targets the host table grows from 416 to 424 bytes. The old
+complete prefix remains valid, the new pointer is nullable, and partial tails
+are rejected. The product rejects missing/incomplete capability and destroys a
+wrong returned handle exactly once. Older/Asterisk hosts do not provide this
+optional route. This additive host tail does not change the product SONAME.
+
+The host token is lifetime-sticky: reset retires provider TX before encoder use;
+failed reset cannot restore legacy media. Timed G.711 uses the released expiring
+Mini path; ordinary reliable control remains serviced by the existing executor.
+This increment supports fresh restricted dials only, not transitions of existing
+unknown-codec/legacy-PCM calls. Outbound selection, retry transport intent, and
+operator attachment activation remain separately gated.

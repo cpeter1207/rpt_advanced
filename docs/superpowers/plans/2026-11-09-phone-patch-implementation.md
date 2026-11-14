@@ -414,3 +414,15 @@ The next controlled prerequisite is ordinary G.711 IAX timed custody using the
 released provider. Sticky transition/legacy ACK/unkey and actual negotiated
 codec support must be qualified before operator attachment activation. No
 non-G.711 production support or hardware qualification is claimed here.
+
+#### Explicit restricted-dial checkpoint
+
+Add one optional, sized ABI-10 dial tail and one ordinary-peer capability for
+fresh G.711-only timed routes. Keep generic catalogs/listeners unchanged; no
+private identity or source authority is granted. Validate PCMU/PCMA actual
+provider sends, expired media refusal, forbidden legacy media/empty markers,
+GSM-only rejection, cancellation, exact ownership, old complete prefix, missing
+or partial tail, and wrong returned capability. Then bind the existing Outbound
+clock, retain only transport intent through retry, and compose authenticated
+attachment before enabling the operator command. No live change is authorized
+by this checkpoint.

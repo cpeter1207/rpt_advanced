@@ -176,3 +176,112 @@ fn private_inband_capability_requires_the_complete_timed_phone_profile() {
         assert_eq!(result.is_ok(), expected, "capability mask {capabilities}");
     }
 }
+
+#[test]
+fn timed_g711_dial_tail_preserves_the_old_complete_prefix_and_rejects_partial_or_incomplete_hosts()
+{
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    let prefix = std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_timed_g711);
+    table.struct_size = prefix as u32;
+    assert!(
+        unsafe { HostServices::open(&table) }.is_ok(),
+        "previous complete host table remains valid"
+    );
+    table.struct_size += 1;
+    assert!(
+        unsafe { HostServices::open(&table) }.is_err(),
+        "partial dial tail is not readable"
+    );
+    table.struct_size = std::mem::size_of_val(&table) as u32;
+    table.peer_dial_timed_g711 = table.peer_dial;
+    assert!(
+        unsafe { HostServices::open(&table) }.is_err(),
+        "timed dial requires timed async prepared callbacks"
+    );
+}
+
+#[test]
+fn timed_g711_capability_requires_an_ordinary_async_prepared_peer() {
+    let (peer, state) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    let (phone, _) = crate::link::session::tests::phone_source_peer();
+    let mut services = peer.services;
+    services.0.peer_send_prepared_timed = phone.services.0.peer_send_prepared_timed;
+    for (capabilities, expected) in [
+        (143, true),
+        (128, false),
+        (142, false),
+        (141, false),
+        (179, false),
+        (151, false),
+    ] {
+        state.lock().unwrap().capabilities = capabilities;
+        let result = unsafe { services.inspect_peer(peer.handle.as_ptr()) };
+        assert_eq!(
+            result.is_ok(),
+            expected,
+            "timed route capabilities {capabilities}"
+        );
+    }
+}
+
+#[test]
+fn timed_g711_dial_rejects_missing_tail_or_wrong_returned_capability_without_leaking() {
+    unsafe extern "C" fn dial(
+        context: *mut c_void,
+        _: *const c_char,
+        _: usize,
+        _: *const c_char,
+        _: usize,
+        _: usize,
+        current: abi::rptadv_current_v1,
+        current_context: *mut c_void,
+        output: *mut *mut c_void,
+    ) -> i32 {
+        if current.is_none_or(|check| unsafe { check(current_context) } == 0) {
+            return -1;
+        }
+        let state = unsafe {
+            &*context.cast::<std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>>()
+        };
+        unsafe {
+            *output = Box::into_raw(Box::new(state.clone())).cast();
+        }
+        0
+    }
+    let (peer, state) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    let (phone, _) = crate::link::session::tests::phone_source_peer();
+    let mut table = peer.services.0;
+    table.context = ptr::from_ref(&state).cast_mut().cast();
+    table.peer_send_prepared_timed = phone.services.0.peer_send_prepared_timed;
+    let absent = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(
+        absent
+            .dial_timed_g711("radio@127.0.0.1/2000", "1000", 960, || true)
+            .is_err()
+    );
+    table.peer_dial_timed_g711 = Some(dial);
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(
+        services
+            .dial_timed_g711("radio@127.0.0.1/2000", "1000", 960, || false)
+            .is_err()
+    );
+    assert_eq!(state.lock().unwrap().drops, 0);
+    assert!(
+        services
+            .dial_timed_g711("radio@127.0.0.1/2000", "1000", 960, || true)
+            .is_err()
+    );
+    assert_eq!(
+        state.lock().unwrap().drops,
+        1,
+        "wrong capability owner is destroyed exactly once"
+    );
+    state.lock().unwrap().capabilities |= 128;
+    let returned = services
+        .dial_timed_g711("radio@127.0.0.1/2000", "1000", 960, || true)
+        .unwrap();
+    assert!(returned.timed_g711_egress());
+    drop(returned);
+    assert_eq!(state.lock().unwrap().drops, 2);
+}

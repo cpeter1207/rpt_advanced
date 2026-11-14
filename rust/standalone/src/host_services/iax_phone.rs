@@ -143,6 +143,7 @@ impl HostServicesOwner {
             local: account.settings().local_node.clone(),
             remote,
             phone: Some(phone),
+            egress_epoch: None,
         }))))
         .cast())
     }
