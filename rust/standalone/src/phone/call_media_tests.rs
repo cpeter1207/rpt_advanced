@@ -12,6 +12,7 @@ struct Sink {
     gaps: Vec<(u64, u32)>,
     digits: Vec<u32>,
     discontinuities: usize,
+    ranges: Vec<(u64, usize)>,
 }
 unsafe extern "C" fn audio(
     context: *mut c_void,
@@ -30,6 +31,7 @@ unsafe extern "C" fn audio(
     );
     sink.audio
         .push((start, accepted, unsafe { (*birth).born_ns }));
+    sink.ranges.push((start, accepted));
     sink.pcm
         .extend_from_slice(unsafe { std::slice::from_raw_parts(samples, accepted) });
     accepted
@@ -38,6 +40,7 @@ unsafe extern "C" fn gap(context: *mut c_void, start: u64, count: u32) -> u32 {
     let sink = unsafe { &mut *context.cast::<Sink>() };
     let accepted = count.min(sink.credit as u32);
     sink.gaps.push((start, accepted));
+    sink.ranges.push((start, accepted as usize));
     accepted
 }
 unsafe extern "C" fn digit(context: *mut c_void, symbol: u32) -> i32 {
@@ -370,4 +373,64 @@ async fn unavailable_socket_receipt_mapping_uses_existing_source_gap() {
     read(&mut media, &mut sink, 40_000_000);
     assert!(sink.audio.is_empty());
     assert_eq!(sink.gaps, [((1u64 << 32) + 1000, 160)]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn adaptive_delay_reduction_preserves_exact_source_gap_credit() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    let mut sink = Sink {
+        credit: 40,
+        ..Sink::default()
+    };
+    let origin = 1u64 << 32;
+    // Use the real jitter's deterministic early-arrival trace. RTP parsing and
+    // receipt retention are exercised separately; no provider decision is faked.
+    for index in 0..100u64 {
+        let timestamp = origin + 1000 + index * 160;
+        let born = 1_000_000_000 + index * 20_000_000;
+        media.clock = Some((timestamp as u32, timestamp));
+        assert_eq!(
+            media
+                .jitter
+                .put(timestamp, 160, born, &[0xa5; 160])
+                .unwrap(),
+            Admission::Accepted
+        );
+        media.births[index as usize % 64] = Some((timestamp, born));
+        let now = born + 40_000_000;
+        read(&mut media, &mut sink, now);
+        if matches!(media.pending, Some(Pending::Audio { prefix, .. }) if prefix > 0) {
+            let before = sink.audio.len();
+            sink.credit = 0;
+            assert_eq!(read(&mut media, &mut sink, now), 2);
+            assert_eq!(
+                sink.audio.len(),
+                before,
+                "refused gap cannot release later PCM"
+            );
+            sink.credit = 40;
+        }
+        while media.pending.is_some() {
+            read(&mut media, &mut sink, now);
+        }
+    }
+    assert!(
+        media.jitter.observe().unwrap().skipped_span > 0,
+        "exercise actual adaptive delay reduction"
+    );
+    let mut end = origin + 1000;
+    for (start, count) in sink.ranges {
+        assert_eq!(
+            start, end,
+            "every skipped interval must precede later PCM as credited gap"
+        );
+        end += count as u64;
+    }
+    assert!(
+        !sink.gaps.is_empty(),
+        "adaptation must be represented as source loss"
+    );
 }

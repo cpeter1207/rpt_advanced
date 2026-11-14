@@ -31,6 +31,8 @@ pub(crate) struct Media {
     pcm: [f32; 160],
     pending: Option<Pending>,
     offset: usize,
+    // End of source media actually credited by product, independent of jitter adaptation.
+    source_end: Option<u64>,
     decision_pending: bool,
     host_epoch: Option<u64>,
     discontinuity: bool,
@@ -71,6 +73,7 @@ impl Media {
             pcm: [0.0; 160],
             pending: None,
             offset: 0,
+            source_end: None,
             decision_pending: false,
             host_epoch: None,
             discontinuity: true,
@@ -186,17 +189,33 @@ impl Media {
                 // The neutral ABI returns the packet timestamp, not the requested
                 // cursor. Positive offsets are missing prefixes; negative ones
                 // trim samples that have already been released (as in IAX playout).
-                let skip = decision.start_offset.saturating_neg().max(0) as usize;
                 let span = decision.span as usize;
-                if decision.length != 160 || span != 160 || skip >= span {
+                if decision.length != 160 || span != 160 {
                     return Err(MediaError::JitterShape);
                 }
+                let skip = u64::from(decision.start_offset.saturating_neg().max(0) as u32).max(
+                    self.source_end
+                        .map_or(0, |end| end.saturating_sub(decision.timestamp)),
+                );
+                if skip >= span as u64 {
+                    // An already credited gap may cover a packet returned later
+                    // by native adaptation. Never publish that source range twice.
+                    return self.jitter.advance(now, 0).map_err(|_| MediaError::Jitter);
+                }
+                let skip = skip as usize;
                 let count = span - skip;
-                let prefix = decision.start_offset.max(0) as u32;
                 let start = decision
                     .timestamp
                     .checked_add(skip as u64)
                     .ok_or(MediaError::JitterShape)?;
+                // Delay reduction may advance jitter's cursor before its next
+                // packet offset is calculated. Expose that skipped source span
+                // through the existing retained gap before offering any PCM.
+                let prefix = if let Some(end) = self.source_end {
+                    u32::try_from(start - end).map_err(|_| MediaError::JitterShape)?
+                } else {
+                    decision.start_offset.max(0) as u32
+                };
                 self.codec.decode(&packet, &mut self.pcm)?;
                 self.pcm.copy_within(skip..span, 0);
                 if let Some((_, born)) = self
@@ -223,10 +242,16 @@ impl Media {
                 }
             }
             Kind::Missing => {
-                self.pending = Some(Pending::Gap {
-                    start: decision.timestamp,
-                    count: decision.span,
-                });
+                let end = decision
+                    .timestamp
+                    .checked_add(u64::from(decision.span))
+                    .ok_or(MediaError::JitterShape)?;
+                let start = self.source_end.unwrap_or(decision.timestamp);
+                if start >= end {
+                    return self.jitter.advance(now, 0).map_err(|_| MediaError::Jitter);
+                }
+                let count = u32::try_from(end - start).map_err(|_| MediaError::JitterShape)?;
+                self.pending = Some(Pending::Gap { start, count });
             }
             Kind::Insertion => {
                 // Only playout time advances. The existing source/ring must not
@@ -298,6 +323,7 @@ impl Media {
                     return Err(MediaError::SourceContract);
                 }
                 *prefix -= accepted;
+                self.source_end = Some(*start - u64::from(*prefix));
                 output.progress = if *prefix == 0 { 1 } else { 2 };
                 return Ok(());
             }
@@ -340,6 +366,7 @@ impl Media {
                     return Err(MediaError::SourceContract);
                 }
                 self.offset += accepted;
+                self.source_end = Some(start + self.offset as u64);
                 self.offset == count
             }
             Pending::Gap { start, count } => {
@@ -351,6 +378,7 @@ impl Media {
                     return Err(MediaError::SourceContract);
                 }
                 self.offset += accepted as usize;
+                self.source_end = Some(start + self.offset as u64);
                 self.offset == count as usize
             }
         };
