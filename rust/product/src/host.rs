@@ -195,6 +195,11 @@ pub struct GenerationControl {
     dispatcher: PreparedDispatch,
     status: LinkAudioStatus,
     redirects: Vec<(String, PeerCommand)>,
+    phone_redirects: Vec<(
+        PhoneSource,
+        PeerReply,
+        crate::link::private_phone::PreparedPhoneMedia,
+    )>,
     awaiting: Vec<(String, crate::link::ring::InboundObserver)>,
     local_update: Option<LocalRingUpdate>,
     awaiting_local: bool,
@@ -249,6 +254,7 @@ fn prepared(
     local: &str,
     settings: &ResolvedNodeSettings,
     peers: &[PeerOwner],
+    phones: Option<&mut PhoneCalls>,
     worker: &mut MediaWorker,
     text: &mut TextExecutor,
     services: HostServices,
@@ -270,6 +276,7 @@ fn prepared(
     let mut text_origins = Vec::new();
     let mut audio = Vec::new();
     let mut redirects = Vec::new();
+    let mut phone_redirects = Vec::new();
     let mut awaiting = Vec::new();
     let mut wakes = Vec::new();
     for peer in peers.iter().filter(|peer| peer.local == local) {
@@ -326,6 +333,43 @@ fn prepared(
             },
         ));
     }
+    if let Some(phones) = phones {
+        for (source, reply) in phones.attachments(local) {
+            // A graph replacement is an explicit media cut, never a transfer
+            // of the private call handle or revival of the previous generation.
+            phones
+                .retire_media(&source, &reply)
+                .map_err(|_| RuntimeError::Rejected)?;
+            let processor = services
+                .prepare_peer_processing(
+                    &settings.radio.processing_configuration,
+                    local,
+                    MAXIMUM_FRAMES,
+                )
+                .map_err(|_| RuntimeError::Preparation)?;
+            let (pending, mut input) = phones
+                .prepare_pending_media(&source, &reply, processor)
+                .map_err(|_| RuntimeError::Preparation)?;
+            let output = input.take_output().ok_or(RuntimeError::Preparation)?;
+            phone_redirects.push((source.clone(), reply.clone(), pending));
+            wakes.push(
+                phones
+                    .media_wake(&source, &reply)
+                    .map_err(|_| RuntimeError::Preparation)?,
+            );
+            audio.push(
+                AudioPeer::for_phone(
+                    &source,
+                    &reply,
+                    Mode::TRANSCEIVE,
+                    AudioInput::Phone(input),
+                    output,
+                    MAXIMUM_FRAMES,
+                )
+                .map_err(|_| RuntimeError::Preparation)?,
+            );
+        }
+    }
     let retirement = worker.retirement_domain();
     let (mut audio, dispatcher) =
         LinkAudio::new_in_domain(audio, MAXIMUM_FRAMES, retirement.clone())
@@ -352,6 +396,7 @@ fn prepared(
             dispatcher,
             status,
             redirects,
+            phone_redirects,
             awaiting,
             local_update: None,
             awaiting_local: false,
@@ -460,6 +505,7 @@ impl Host {
                     name,
                     settings,
                     &[],
+                    None,
                     media_worker(&mut media_workers, name)?,
                     &mut text,
                     services,
@@ -627,6 +673,7 @@ impl Host {
                     name,
                     settings,
                     peers,
+                    None,
                     media_worker(media_workers, name)?,
                     &mut text,
                     services,
@@ -948,6 +995,7 @@ impl Host {
                 local,
                 settings,
                 &self.peers,
+                Some(&mut self.phone_calls),
                 media_worker(&mut self.media_workers, local)?,
                 &mut self.text,
                 self.services,
@@ -1672,6 +1720,16 @@ impl Host {
                         control.awaiting_local = !worker.local_ring_applied(generation);
                     }
                 }
+            }
+            // Only an accepted active graph may publish its retained source endpoint.
+            if status.active == Some(generation) {
+                let mut pending = Vec::new();
+                for (source, reply, media) in control.phone_redirects.drain(..) {
+                    if let Err(media) = self.phone_calls.adopt_media(&source, &reply, media) {
+                        pending.push((source, reply, media));
+                    }
+                }
+                control.phone_redirects = pending;
             }
             let mut pending = Vec::new();
             for (remote, command) in control.redirects.drain(..) {

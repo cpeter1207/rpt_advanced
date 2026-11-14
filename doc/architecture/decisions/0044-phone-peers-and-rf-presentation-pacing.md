@@ -1515,3 +1515,28 @@ This bridge alone does not authorize attachment, implement VOX or qualify RF.
 Programme return drains its retained SRC/codec tail at the existing source-idle
 deadline; successful finite private prompts still use explicit completion.
 G.711 silence-tail padding and original-age deadlines remain with the same owner.
+
+### Typed hosted phone graph preparation
+
+The control owner can reserve one exact authenticated call per hosted node,
+checking both current account and node policy before graph preparation. The
+prepared graph uses AudioInput::Phone and AudioPeer::for_phone, preserving the
+call token, existing processing factory, source ring and serial return wake.
+Graph replacement explicitly retires the old media generation before preparing
+a new one; it never transfers or duplicates transport ownership. Ordinary Engine
+collection reconciliation may reprepare retired media while attachment intent
+persists. Failed preparation clears that intent and emits a credential-free
+warning. Committed reload and stop retain existing whole-call retirement.
+
+This Rust preparation seam has no host ABI or operator-command activation.
+The *3 command remains unavailable until source-rate VOX, retained onset, source
+age and transmission qualification are composed. The targeted typed-slot fixture
+is a preparation/lifetime test, not a voice or hardware acceptance claim.
+
+Graph candidates retain their unpublished ingress until accepted publication;
+Busy retries cannot fill the private owner's command queue. Delivery retains the
+same endpoint under queue backpressure and rejects a superseded generation.
+Rearm requires both the authoritative collection release and the serial owner's
+matching settled/drained source revision, not a dirty-work flag or elapsed time.
+A source reset without that release leaves media unavailable rather than
+repeatedly replacing the graph; private control remains available.

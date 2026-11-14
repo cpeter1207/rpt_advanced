@@ -1,7 +1,7 @@
 //! Serialized private call ownership; no radio binding, topology, or ASL session.
 pub use crate::link::private_phone::media::PhoneMediaInput;
 use crate::link::{
-    private_phone::{PrivatePhoneControl, PrivatePhoneSession},
+    private_phone::{PreparedPhoneMedia, PrivatePhoneControl, PrivatePhoneSession},
     session::PeerIoWorker,
 };
 use crate::{
@@ -78,6 +78,8 @@ struct Call {
     login: LoginCollector,
     grammar: Option<PhoneDtmfGrammar>,
     collection_dirty: bool,
+    collection_released: bool,
+    attachment: Option<String>,
     source: PhoneSource,
     signals: PeerSignals,
     mailbox: Option<PhoneMailbox>,
@@ -227,6 +229,8 @@ impl PhoneCalls {
             login: LoginCollector::default(),
             grammar: None,
             collection_dirty: false,
+            collection_released: false,
+            attachment: None,
             source: source.clone(),
             signals: PeerSignals::for_phone(source.clone()),
             mailbox: None,
@@ -295,11 +299,125 @@ impl PhoneCalls {
             .ok_or(Error::Admission)?
             .prepare_media(processor)
     }
+    pub(crate) fn prepare_pending_media(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        processor: Option<PcmProcessor>,
+    ) -> Result<(PreparedPhoneMedia, PhoneMediaInput), Error> {
+        let call = self.current(source, reply)?;
+        if call.mailbox.is_none() {
+            return Err(Error::Admission);
+        }
+        call.owner
+            .as_mut()
+            .ok_or(Error::Admission)?
+            .prepare_pending_media(processor)
+    }
+    pub(crate) fn adopt_media(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        media: PreparedPhoneMedia,
+    ) -> Result<(), PreparedPhoneMedia> {
+        let Ok(call) = self.current(source, reply) else {
+            return Ok(());
+        };
+        let Some(owner) = call.owner.as_mut() else {
+            return Ok(());
+        };
+        owner.adopt_media(media)
+    }
     /// Revoke only this call's prepared programme generation, preserving private control.
     pub fn retire_media(&mut self, source: &PhoneSource, reply: &PeerReply) -> Result<(), Error> {
         let call = self.current(source, reply)?;
         call.owner.as_mut().ok_or(Error::Admission)?.retire_media();
         Ok(())
+    }
+    /// Reserve one current authenticated call per hosted node; repeating the
+    /// same reservation is idempotent. This does not authorize the target policy.
+    pub(crate) fn attach(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        target: &str,
+    ) -> Result<bool, Error> {
+        if self
+            .calls
+            .iter()
+            .any(|call| call.attachment.as_deref() == Some(target) && &call.source != source)
+        {
+            return Err(Error::Reservation);
+        }
+        let call = self.current(source, reply)?;
+        if call.mailbox.is_none()
+            || !call
+                .owner
+                .as_ref()
+                .is_some_and(PrivatePhoneControl::media_capable)
+        {
+            return Err(Error::Admission);
+        }
+        if let Some(existing) = &call.attachment {
+            return if existing == target {
+                Ok(false)
+            } else {
+                Err(Error::Reservation)
+            };
+        }
+        call.attachment = Some(target.to_owned());
+        Ok(true)
+    }
+    pub(crate) fn detach_media(&mut self, source: &PhoneSource, reply: &PeerReply) {
+        if let Ok(call) = self.current(source, reply) {
+            call.attachment = None;
+            if let Some(owner) = call.owner.as_mut() {
+                owner.retire_media();
+            }
+        }
+    }
+    /// Snapshot exact identities only; the existing private owner keeps transport custody.
+    pub(crate) fn attachments(&self, local: &str) -> Vec<(PhoneSource, PeerReply)> {
+        self.calls
+            .iter()
+            .filter(|call| {
+                call.attachment.as_deref() == Some(local)
+                    && call.signals.reply_target().phone_authenticated()
+            })
+            .map(|call| (call.source.clone(), call.signals.reply_target()))
+            .collect()
+    }
+    pub(crate) fn media_wake(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+    ) -> Result<crate::link::dispatcher::PeerWake, Error> {
+        Ok(self
+            .current(source, reply)?
+            .owner
+            .as_ref()
+            .ok_or(Error::Admission)?
+            .media_wake())
+    }
+    /// Source loss/control retires only the generation. Persistent intent permits
+    /// a new generation after the authoritative collection has released its cut.
+    pub(crate) fn media_refresh_nodes(&self) -> Vec<String> {
+        self.calls
+            .iter()
+            .filter(|call| {
+                call.signals.reply_target().phone_authenticated()
+                    && call.collection_released
+                    && !call
+                        .grammar
+                        .as_ref()
+                        .is_some_and(PhoneDtmfGrammar::collecting)
+                    && call
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| !owner.media_occupied() && owner.media_rearm_ready())
+            })
+            .filter_map(|call| call.attachment.clone())
+            .collect()
     }
     /// One copied digit still belongs to the original call and ingress token.
     pub(crate) fn event(&mut self) -> Option<(PhoneSource, PeerReply, char, u64)> {
@@ -346,6 +464,7 @@ impl PhoneCalls {
     ) -> Result<Vec<PhoneDtmfAction>, Error> {
         let call = self.current(source, reply)?;
         call.collection_dirty = true;
+        call.collection_released = false;
         Ok(call
             .grammar
             .as_mut()
@@ -357,6 +476,7 @@ impl PhoneCalls {
             if let Some(grammar) = &mut call.grammar {
                 grammar.cancel();
                 call.collection_dirty = true;
+                call.collection_released = false;
             }
         }
     }
@@ -366,6 +486,7 @@ impl PhoneCalls {
     pub(crate) fn node_collections_discarded(&mut self) {
         for call in &mut self.calls {
             call.collection_dirty = true;
+            call.collection_released = false;
         }
     }
     /// Existing node expiry supplies exact dirty tokens, including silent expiry.
@@ -375,6 +496,7 @@ impl PhoneCalls {
         };
         if let Ok(call) = self.current(source, reply) {
             call.collection_dirty = true;
+            call.collection_released = false;
         }
     }
     /// Ordinary serialized control supplies the authoritative lifecycle fence.
@@ -405,7 +527,8 @@ impl PhoneCalls {
                 continue;
             }
             if let Some(owner) = call.owner.as_mut() {
-                call.collection_dirty = !owner.collection_ended(&reply);
+                call.collection_released = owner.collection_ended(&reply);
+                call.collection_dirty = !call.collection_released;
             }
         }
     }
@@ -491,6 +614,7 @@ impl PhoneCalls {
         call.login.clear();
         call.mailbox = Some(record.clone());
         call.collection_dirty = true;
+        call.collection_released = false;
         Ok(PhoneLogin::Authenticated)
     }
     /// The configured profile is visible only for the same authenticated call.

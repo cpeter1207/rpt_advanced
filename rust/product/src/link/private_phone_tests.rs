@@ -2772,3 +2772,40 @@ fn prepared_phone_programme_drains_a_short_final_packet_on_existing_idle_deadlin
     );
     assert!(input.active() && !reply.ended());
 }
+
+#[test]
+fn unpublished_phone_media_candidates_never_fill_an_active_prompt_queue() {
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    control
+        .send(crate::phone::tests::private_prompt(
+            &reply,
+            Box::new(Speech::new(96000)),
+        ))
+        .ok()
+        .unwrap();
+    state.lock().unwrap().prepared_result = 1;
+    session.step(0).unwrap();
+    assert!(session.current.is_some());
+    let slots = control.replies.slots();
+    for _ in 0..100 {
+        control.retire_media();
+        let (pending, input) = control.prepare_pending_media(None).unwrap();
+        assert_eq!(
+            control.replies.slots(),
+            slots,
+            "rejected graph never publishes"
+        );
+        drop((pending, input));
+    }
+    control.retire_media();
+    let (pending, input) = control.prepare_pending_media(None).unwrap();
+    control.adopt_media(pending).ok().unwrap();
+    assert_eq!(
+        control.replies.slots(),
+        slots - 1,
+        "accepted graph publishes exactly once"
+    );
+    drop(input);
+    assert!(!reply.ended());
+}

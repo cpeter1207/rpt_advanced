@@ -129,7 +129,7 @@ impl Host {
         self.peer_io.reap();
     }
     /// Called only by the ordinary Engine pump, never pending-reload servicing.
-    pub(crate) fn reconcile_private_collections(&mut self) {
+    pub(crate) fn reconcile_private_collections(&mut self, clock: RuntimeClock) {
         let runtime = &mut self.runtime;
         self.phone_calls
             .reconcile_collections(|local, source, reply| {
@@ -138,6 +138,58 @@ impl Host {
                     .links()
                     .phone_collection_pending(source, reply)
             });
+        // Run only on ordinary Engine control, not recursively inside pump or
+        // pending reload. The old generation is already revoked by its owner.
+        if !self.runtime.reload_pending() {
+            for local in self.phone_calls.media_refresh_nodes() {
+                if self.refresh(&local, clock).is_err() {
+                    self.services
+                        .scheduler_notice("phone attachment: media preparation failed");
+                    for (source, reply) in self.phone_calls.attachments(&local) {
+                        self.phone_calls.detach_media(&source, &reply);
+                    }
+                }
+            }
+        }
+    }
+    /// Prepare a typed graph attachment while retaining the existing private
+    /// call owner. Operator activation remains gated by the VOX/timing milestone.
+    pub fn attach_phone(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        target: &str,
+        clock: RuntimeClock,
+    ) -> Result<(), RuntimeError> {
+        let local = self
+            .phone_calls
+            .local(source, reply)
+            .ok_or(RuntimeError::Rejected)?
+            .to_owned();
+        self.phone_calls
+            .mailbox(source, reply)
+            .ok_or(RuntimeError::Rejected)?;
+        self.authorize_phone_account(source.account(), &local)?;
+        if self.runtime.settings(target).is_none()
+            || !self
+                .runtime
+                .document()
+                .phone_local_attachment_allowed(source.account(), target)
+        {
+            return Err(RuntimeError::Rejected);
+        }
+        if !self
+            .phone_calls
+            .attach(source, reply, target)
+            .map_err(|_| RuntimeError::Rejected)?
+        {
+            return Ok(());
+        }
+        if let Err(error) = self.refresh(target, clock) {
+            self.phone_calls.detach_media(source, reply);
+            return Err(error);
+        }
+        Ok(())
     }
     pub(super) fn private_phone_actions(
         &mut self,

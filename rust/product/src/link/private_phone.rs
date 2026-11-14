@@ -25,7 +25,7 @@ use std::{
     num::NonZeroU32,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Instant,
 };
@@ -75,6 +75,9 @@ enum PrivateCommand {
     CollectionEnded(NonZeroU32),
 }
 
+/// Unpublished source endpoint owned by its graph candidate, not the call queue.
+pub(crate) struct PreparedPhoneMedia(Box<media::Ingress>);
+
 /// Control endpoint retains the exact source's revocation fence, never a radio handle.
 pub(crate) struct PrivatePhoneControl {
     replies: Producer<PrivateCommand>,
@@ -83,6 +86,7 @@ pub(crate) struct PrivatePhoneControl {
     reply: PeerReply,
     wake: PeerWake,
     stop: Arc<AtomicBool>,
+    source_ready: Arc<AtomicU32>,
     rate: u32,
     source_media: bool,
     media: Option<Arc<media::Shared>>,
@@ -103,19 +107,28 @@ impl PrivatePhoneControl {
         self.wake.notify();
         Ok(())
     }
-    /// Prepare only a source-timed receive generation, not an RF attachment.
+    /// Prepare and immediately queue the existing direct media API.
     pub(crate) fn prepare_media(
         &mut self,
         processor: Option<PcmProcessor>,
     ) -> Result<media::PhoneMediaInput, Error> {
-        if !self.source_media || !self.reply.phone_authenticated() {
-            return Err(Error::Admission);
-        }
-        if self.media.as_ref().is_some_and(|media| media.occupied()) {
-            return Err(Error::Reservation);
-        }
         if self.replies.slots() == 0 {
             return Err(Error::Allocation);
+        }
+        let (pending, input) = self.prepare_pending_media(processor)?;
+        self.adopt_media(pending).map_err(|_| Error::Allocation)?;
+        Ok(input)
+    }
+    /// Graph preparation retains the ingress itself until publication succeeds.
+    pub(crate) fn prepare_pending_media(
+        &mut self,
+        processor: Option<PcmProcessor>,
+    ) -> Result<(PreparedPhoneMedia, media::PhoneMediaInput), Error> {
+        if !self.media_capable() {
+            return Err(Error::Admission);
+        }
+        if self.media_occupied() {
+            return Err(Error::Reservation);
         }
         let (ingress, input, shared) = media::prepare(
             self.reply.clone(),
@@ -123,12 +136,40 @@ impl PrivatePhoneControl {
             self.consumed_revision.unwrap_or(NonZeroU32::MIN),
             processor,
         )?;
-        self.replies
-            .push(PrivateCommand::Media(ingress))
-            .unwrap_or_else(|_| unreachable!("reserved private command slot"));
         self.media = Some(shared);
+        Ok((PreparedPhoneMedia(ingress), input))
+    }
+    /// Return the same prepared endpoint when the bounded owner queue is full.
+    pub(crate) fn adopt_media(
+        &mut self,
+        media: PreparedPhoneMedia,
+    ) -> Result<(), PreparedPhoneMedia> {
+        if !media.0.prepared() || !self.media_capable() {
+            return Ok(());
+        }
+        if self.replies.slots() == 0 {
+            return Err(media);
+        }
+        self.replies
+            .push(PrivateCommand::Media(media.0))
+            .unwrap_or_else(|_| unreachable!("reserved private command slot"));
         self.wake.notify();
-        Ok(input)
+        Ok(())
+    }
+    /// Existing serial wake and source qualification, without copying its handle.
+    pub(crate) fn media_capable(&self) -> bool {
+        self.source_media && self.reply.phone_authenticated() && !self.stop.load(Ordering::Acquire)
+    }
+    /// Rearm only after the serial owner has acknowledged this exact source cut.
+    pub(crate) fn media_rearm_ready(&self) -> bool {
+        self.source_ready.load(Ordering::Acquire)
+            == self.consumed_revision.unwrap_or(NonZeroU32::MIN).get()
+    }
+    pub(crate) fn media_occupied(&self) -> bool {
+        self.media.as_ref().is_some_and(|media| media.occupied())
+    }
+    pub(crate) fn media_wake(&self) -> PeerWake {
+        self.wake.clone()
     }
     pub(crate) fn retire_media(&mut self) {
         if let Some(media) = self.media.take() {
@@ -179,6 +220,7 @@ pub(crate) struct PrivatePhoneSession {
     io: PeerIo,
     reply: PeerReply,
     stop: Arc<AtomicBool>,
+    source_ready: Arc<AtomicU32>,
     wake: PeerWake,
     epoch: Option<Instant>,
     source_clock: Option<SourceTimeClock>,
@@ -239,6 +281,7 @@ impl PrivatePhoneSession {
         let (digits, events) = RingBuffer::new(64);
         let wake = PeerWake::default();
         let stop = Arc::new(AtomicBool::new(false));
+        let source_ready = Arc::new(AtomicU32::new(0));
         let control = PrivatePhoneControl {
             replies,
             digits: events,
@@ -246,6 +289,7 @@ impl PrivatePhoneSession {
             reply: reply.clone(),
             wake: wake.clone(),
             stop: Arc::clone(&stop),
+            source_ready: Arc::clone(&source_ready),
             rate,
             source_media: io.source_media(),
             media: None,
@@ -255,6 +299,7 @@ impl PrivatePhoneSession {
                 io,
                 reply,
                 stop,
+                source_ready,
                 wake,
                 epoch: None,
                 source_clock: None,
@@ -570,6 +615,20 @@ impl PrivatePhoneSession {
                 self.pending_release = None;
             }
         }
+        self.source_ready.store(
+            if source_drained
+                && self.revision.0.get() == Some(self.settled_revision)
+                && self
+                    .source
+                    .as_ref()
+                    .is_some_and(SourceIngress::ready_for_media)
+            {
+                self.settled_revision.get()
+            } else {
+                0
+            },
+            Ordering::Release,
+        );
         if let Some(media) = self.media.as_mut().filter(|media| media.prepared()) {
             let expected = media.expected_revision();
             if self.revision.0.get() != Some(expected) {

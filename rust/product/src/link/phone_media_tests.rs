@@ -639,6 +639,7 @@ fn prepared_phone_media_revision_adds_only_scalar_storage_to_existing_ingress() 
         u64,
         SourceTimeReference,
         Option<u64>,
+        Option<LinkAudioConsumer>,
     );
     let previous = std::mem::size_of::<Unstamped>();
     let actual = std::mem::size_of::<Ingress>();

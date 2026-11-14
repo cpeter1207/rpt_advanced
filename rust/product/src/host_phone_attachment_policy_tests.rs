@@ -345,3 +345,43 @@ fn phone_attachment_policy_reload_revokes_old_source_and_rechecks_new_call() {
         await_private_drop(&fresh_state);
     }
 }
+
+#[test]
+fn prepared_phone_attachment_uses_a_typed_slot_and_preserves_private_ownership() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut host, _) = policy_host(
+        "1000",
+        "attach_local_nodes=1000\n",
+        "phone_allow_accounts=provider\n",
+    );
+    let (phone, state) = crate::link::session::tests::phone_source_peer_at_rate(8000);
+    let id = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    let source = host.phone_source(id).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    finish_prompt(&mut host, &source, &reply);
+    host.authenticate_phone(&source, &reply, "100", "1234", clock())
+        .unwrap();
+    finish_prompt(&mut host, &source, &reply);
+    host.reconcile_private_collections(clock());
+    host.attach_phone(&source, &reply, "1000", clock()).unwrap();
+    assert_eq!(host.phone_calls.attachments("1000").len(), 1);
+    assert!(host.peers.is_empty(), "phone has no public node identity");
+    assert!(host.phone_calls.media_refresh_nodes().is_empty());
+    host.attach_phone(&source, &reply, "1000", clock()).unwrap();
+    assert_eq!(host.phone_calls.attachments("1000").len(), 1);
+    assert!(host.attach_phone(&source, &reply, "2000", clock()).is_err());
+    assert_eq!(host.phone_calls.attachments("1000").len(), 1);
+    host.phone_calls.retire_media(&source, &reply).unwrap();
+    assert_eq!(host.phone_calls.media_refresh_nodes(), ["1000"]);
+    host.reconcile_private_collections(clock());
+    assert!(host.phone_calls.media_refresh_nodes().is_empty());
+    assert!(!reply.ended());
+    host.retire_phone(&source);
+    assert!(host.phone_calls.attachments("1000").is_empty());
+    assert!(reply.ended());
+    assert!(host.stop(20));
+    await_private_drop(&state);
+}

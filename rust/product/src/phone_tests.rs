@@ -759,3 +759,43 @@ fn private_collection_reconcile_waits_for_authentication_grammar_and_local_targe
     });
     assert!(!reply.ended());
 }
+
+#[test]
+fn phone_attachment_rearm_requires_authoritative_collection_release_not_clean_work_flag() {
+    use crate::link::session::SerialSession;
+    let (mut calls, mut session, _state, source, reply) = controlled_source_session(8000);
+    session.set_source_clock(
+        crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
+    );
+    session.step(0).unwrap();
+    calls.attach(&source, &reply, "1000").unwrap();
+    calls.reconcile_collections(|_, _, _| Some(true));
+    assert!(!calls.calls[0].collection_dirty);
+    assert!(
+        calls.media_refresh_nodes().is_empty(),
+        "pending node command cannot rearm"
+    );
+    calls.collection_expired(&reply);
+    calls.reconcile_collections(|_, _, _| Some(false));
+    assert_eq!(calls.media_refresh_nodes(), ["1000"]);
+}
+
+#[test]
+fn phone_attachment_rearm_waits_for_the_serial_source_cut_after_reset() {
+    use crate::link::session::SerialSession;
+    let (mut calls, mut session, state, source, reply) = controlled_source_session(8000);
+    session.set_source_clock(
+        crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
+    );
+    calls.attach(&source, &reply, "1000").unwrap();
+    calls.reconcile_collections(|_, _, _| Some(false));
+    session.step(0).unwrap();
+    assert_eq!(calls.media_refresh_nodes(), ["1000"]);
+    state.lock().unwrap().source_reset = true;
+    session.step(1).unwrap();
+    assert!(
+        calls.media_refresh_nodes().is_empty(),
+        "a reset cannot churn rejected generations"
+    );
+    assert!(!reply.ended());
+}
