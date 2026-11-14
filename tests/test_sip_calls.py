@@ -1,8 +1,11 @@
 """Literal-wire incoming call fixture; no production SIP parser builds requests."""
 
 import ctypes as C
+import os
+import re
 import socket
 import sys
+import tempfile
 import time
 
 import test_sip_registration as registration
@@ -338,5 +341,61 @@ def run(path):
     capacity(api)
 
 
+def run_checked_diagnostics(path):
+    # Capture the native stderr descriptor, not Python's text wrapper. The same
+    # literal fixture covers duplicate requests, repeated hangup and every close.
+    with tempfile.TemporaryFile() as captured:
+        previous = os.dup(2)
+        try:
+            os.dup2(captured.fileno(), 2)
+            run(path)
+        finally:
+            os.dup2(previous, 2)
+            os.close(previous)
+        captured.seek(0)
+        raw = captured.read()
+    records = [
+        line for line in raw.splitlines() if line.startswith(b"phone SIP: call=")
+    ]
+    assert records, "missing sanitized per-call terminal diagnostics"
+    pattern = rb"phone SIP: call=([1-9][0-9]*) event=(remote-bye|remote-cancel|native-terminal|local-close|local-reject|account-shutdown) status=([0-9]+) elapsed_ms=(-1|[0-9]+)"
+    identities, events = set(), set()
+    for line in records:
+        match = re.fullmatch(pattern, line)
+        assert match is not None, (
+            "call diagnostics must contain only allowlisted scalar fields"
+        )
+        token, event, status, elapsed = match.groups()
+        assert (token, event) not in identities, (
+            "duplicate requests cannot spam call diagnostics"
+        )
+        identities.add((token, event))
+        events.add(event)
+        assert int(status) <= 699 and int(elapsed) >= -1
+    assert {
+        b"remote-bye",
+        b"remote-cancel",
+        b"native-terminal",
+        b"local-close",
+        b"local-reject",
+        b"account-shutdown",
+    } <= events
+    for forbidden in (
+        b"Authorization",
+        b"independent-call-",
+        b"fixture.invalid",
+        b"registrar.invalid",
+        b"fixture-secret",
+        b"application/sdp",
+        b"a=rtpmap",
+    ):
+        assert forbidden not in raw, (
+            "call diagnostics exposed protocol or secret content"
+        )
+    print(
+        "PASS fixed terminal categories, opaque tokens, numeric status/time and no duplicate/payload logging"
+    )
+
+
 if __name__ == "__main__":
-    run(sys.argv[1])
+    run_checked_diagnostics(sys.argv[1])

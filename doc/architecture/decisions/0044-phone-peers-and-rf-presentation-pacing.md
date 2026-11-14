@@ -1674,3 +1674,16 @@ quiet closure, destination mix-minus, attached private-command isolation, the
 known remote return pattern and SIP hangup without ending the established
 ordinary node link. This is controlled integration evidence, not physical RF,
 NAT media, receive-window scheduling, arbitrary-codec or older-host qualification.
+
+### Private SIP call-close diagnostics
+
+The owned Sofia shim emits one record per admitted call and fixed close category
+(remote BYE, remote CANCEL, native terminal, explicit local close/rejection, or
+account shutdown). Records contain only a process-local nonreused opaque token,
+a fixed category, numeric native status, and monotonic elapsed milliseconds
+(`-1` when unavailable). A native status does not prove a wire response was
+received. Local categories identify the invoked operation, not its root cause.
+No SIP reason/header/URI, account/caller identity, authentication material,
+DTMF, or audio is logged. Repeated events are coalesced per category; no
+per-packet logging is added. This changes neither signaling nor attachment
+policy and cannot retrospectively explain an earlier unrecorded disconnect.

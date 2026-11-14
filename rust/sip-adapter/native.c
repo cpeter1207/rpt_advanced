@@ -3,6 +3,7 @@
  */
 #define _GNU_SOURCE
 #include "native.h"
+#include <inttypes.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sofia-sip/bnf.h>
@@ -16,8 +17,12 @@
 #include <sofia-sip/su_string.h>
 #include <sofia-sip/su_wait.h>
 #include <sofia-sip/tport_tag.h>
+#include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 /** Fixed application ownership; native transaction retention is separately timed. */
 #define CALL_CAPACITY 8
@@ -26,6 +31,9 @@ struct call {
     nua_handle_t *handle;        /**< Native dialog owner, NULL after termination. */
     rptadv_sip_call_v1 observed; /**< Stable initial offer and current lifecycle. */
     int changed;                 /**< Host has not consumed the latest observation. */
+    uint64_t diagnostic_token;   /**< Process-local opaque log identity, never a SIP Call-ID. */
+    uint64_t admitted_ms;        /**< Monotonic origin; zero means unavailable. */
+    uint32_t notices;            /**< At most one record per fixed transition category. */
 };
 
 /** Private native state; account policy and event retention live in Rust. */
@@ -43,6 +51,67 @@ struct native {
     uint64_t next_call;               /**< Last issued call token; exhaustion refuses admission. */
     int admission;                    /**< Explicit host permission to accept a new offer. */
 };
+
+/** Fixed lifecycle notices; no foreign text, account identity or media is logged. */
+enum call_notice {
+    REMOTE_BYE,
+    REMOTE_CANCEL,
+    NATIVE_TERMINAL,
+    LOCAL_CLOSE,
+    LOCAL_REJECT,
+    ACCOUNT_SHUTDOWN
+};
+/** Process-wide diagnostic serial, independent of account/provider identities. */
+static atomic_uint_least64_t diagnostic_sequence;
+
+/** Allocate a nonreused log token, or disable diagnostics after exhaustion.
+ * @return Opaque nonzero token, or zero.
+ */
+static uint64_t diagnostic_token(void) {
+    uint_least64_t previous = atomic_load_explicit(&diagnostic_sequence, memory_order_relaxed);
+    while (previous != UINT64_MAX) {
+        if (atomic_compare_exchange_weak_explicit(&diagnostic_sequence, &previous, previous + 1,
+                                                  memory_order_relaxed, memory_order_relaxed)) {
+            return previous + 1;
+        }
+    }
+    return 0;
+}
+
+/** Obtain elapsed-time evidence without using wall clock or wire timestamps.
+ * @return Monotonic milliseconds, or zero when unavailable.
+ */
+static uint64_t monotonic_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 ||
+        (uint64_t)now.tv_sec > (UINT64_MAX - 999) / 1000) {
+        return 0;
+    }
+    return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+}
+
+/** Record only a factual transition or explicit local API request once.
+ * @param call Owned admitted slot.
+ * @param notice Fixed internal category, never a native reason string.
+ * @param status Numeric native event status; zero means no status is supplied.
+ */
+static void call_notice(struct call *call, enum call_notice notice, int status) {
+    static const char *const names[] = {"remote-bye",  "remote-cancel", "native-terminal",
+                                        "local-close", "local-reject",  "account-shutdown"};
+    uint32_t bit = UINT32_C(1) << notice;
+    if (!call->diagnostic_token || (call->notices & bit)) {
+        return;
+    }
+    call->notices |= bit;
+    uint64_t now = monotonic_ms();
+    int64_t elapsed = -1;
+    if (call->admitted_ms && now >= call->admitted_ms && now - call->admitted_ms <= INT64_MAX) {
+        elapsed = (int64_t)(now - call->admitted_ms);
+    }
+    (void)dprintf(STDERR_FILENO,
+                  "phone SIP: call=%" PRIu64 " event=%s status=%d elapsed_ms=%" PRId64 "\n",
+                  call->diagnostic_token, names[notice], status, elapsed);
+}
 
 /** Preserve the embedding process's meaningful signal disposition exactly.
  * @param a Original signal disposition.
@@ -187,6 +256,8 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
             call->observed.source[i] = bytes[i];
         }
         call->handle = handle;
+        call->diagnostic_token = diagnostic_token();
+        call->admitted_ms = monotonic_ms();
         call->observed.struct_size = sizeof(call->observed);
         call->observed.call = ++state->next_call;
         call->observed.offer_length = (uint32_t)sip->sip_payload->pl_len;
@@ -202,6 +273,7 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
         return;
     }
     if (kind == nua_i_cancel || kind == nua_i_bye) {
+        call_notice(call, kind == nua_i_bye ? REMOTE_BYE : REMOTE_CANCEL, status);
         call_state(call, 4, status);
     } else if (kind == nua_i_state) {
         int value = nua_callstate_init;
@@ -211,6 +283,7 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
         } else if (value == nua_callstate_terminating) {
             call_state(call, 4, status);
         } else if (value == nua_callstate_terminated) {
+            call_notice(call, NATIVE_TERMINAL, status);
             call_state(call, 5, status);
             call->handle = NULL;
             nua_handle_destroy(handle);
@@ -244,6 +317,7 @@ static void event(nua_event_t kind, int status, const char *phrase, nua_t *nua, 
         for (size_t i = 0; i < CALL_CAPACITY; ++i) {
             struct call *call = &state->calls[i];
             if (call->handle) {
+                call_notice(call, NATIVE_TERMINAL, 0);
                 call_state(call, 5, 0);
                 nua_handle_destroy(call->handle);
                 call->handle = NULL;
@@ -403,6 +477,11 @@ void sip_native_cancel(void *context) {
 
 void sip_native_shutdown(void *context) {
     struct native *state = context;
+    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
+        if (state->calls[i].handle) {
+            call_notice(&state->calls[i], ACCOUNT_SHUTDOWN, 0);
+        }
+    }
     nua_shutdown(state->nua);
 }
 
@@ -442,6 +521,9 @@ int sip_native_respond(void *context, uint64_t token, uint32_t status, const cha
     if (call->observed.state != 1) {
         return -3;
     }
+    if (status != 200) {
+        call_notice(call, LOCAL_REJECT, (int)status);
+    }
     call_state(call, status == 200 ? 2 : 4, (int)status);
     nua_respond(call->handle, (int)status, status == 200 ? "OK" : "Call Unavailable",
                 TAG_IF(answer, SIPTAG_CONTENT_TYPE_STR("application/sdp")),
@@ -453,6 +535,9 @@ int sip_native_hangup(void *context, uint64_t token) {
     struct call *call = find_call(context, token);
     if (!call) {
         return -2;
+    }
+    if (call->observed.state < 4) {
+        call_notice(call, LOCAL_CLOSE, 0);
     }
     if (call->observed.state == 1) {
         return sip_native_respond(context, token, 480, NULL);
