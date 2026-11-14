@@ -288,7 +288,16 @@ fn caller(client: IaxClient, local: SocketAddr, target: SocketAddr) {
         .unwrap();
     assert_eq!(call.peer.sample_rate_hz(), 8000);
     let login = prompt(&mut call.peer, "login");
-    for digit in b"100#1234#" {
+    for digit in b"100#" {
+        call.peer.send_digit(*digit).unwrap();
+        thread::sleep(Duration::from_millis(30));
+    }
+    let password = prompt(&mut call.peer, "password");
+    assert_prompt(
+        &password,
+        ".--. .- ... ... .-- --- .-. -../.--. --- ..- -. -..",
+    );
+    for digit in b"1234#" {
         call.peer.send_digit(*digit).unwrap();
         thread::sleep(Duration::from_millis(30));
     }
@@ -303,10 +312,7 @@ fn caller(client: IaxClient, local: SocketAddr, target: SocketAddr) {
         &authenticated,
         ".-.. --- --. .. -./--- -.-/..- -. .-.. --- -.-. -.-/... . .--. .- .-. .- - .",
     );
-    assert_prompt(
-        &login,
-        "-- .- .. .-.. -... --- -..-/.--. --- ..- -. -../.--. .. -./.--. --- ..- -. -..",
-    );
+    assert_prompt(&login, "-- .- .. .-.. -... --- -..-/.--. --- ..- -. -..");
 }
 
 #[test]

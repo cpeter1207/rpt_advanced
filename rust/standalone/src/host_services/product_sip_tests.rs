@@ -205,7 +205,13 @@ fn call_flow(sip: UdpSocket, registered: Option<SocketAddr>, login_only: bool) {
     let mut codec = G711Codec::load(G711::Mulaw).unwrap();
     let login = caller.prompt(&mut codec, "login");
     if !login_only {
-        caller.digits(b"100#1234#");
+        caller.digits(b"100#");
+        let password = caller.prompt(&mut codec, "password");
+        assert_prompt(
+            &password,
+            ".--. .- ... ... .-- --- .-. -../.--. --- ..- -. -..",
+        );
+        caller.digits(b"1234#");
         let authenticated = caller.prompt(&mut codec, "authenticated");
         caller.digits(b"*4#*70");
         let status = caller.prompt(&mut codec, "status");
@@ -215,10 +221,7 @@ fn call_flow(sip: UdpSocket, registered: Option<SocketAddr>, login_only: bool) {
             ".-.. --- --. .. -./--- -.-/..- -. .-.. --- -.-. -.-/... . .--. .- .-. .- - .",
         );
     }
-    assert_prompt(
-        &login,
-        "-- .- .. .-.. -... --- -..-/.--. --- ..- -. -../.--. .. -./.--. --- ..- -. -..",
-    );
+    assert_prompt(&login, "-- .- .. .-.. -... --- -..-/.--. --- ..- -. -..");
     caller.request("BYE", "");
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut packet = [0; 8192];

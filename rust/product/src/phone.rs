@@ -97,6 +97,7 @@ struct LoginCollector {
 }
 /// Local-only result; credential buffers never implement Debug or enter node parsers.
 pub(crate) enum LoginInput {
+    Password,
     Credentials { mailbox: String, pin: String },
     Retry,
 }
@@ -119,7 +120,10 @@ impl LoginCollector {
         if digit == '#' {
             if !self.pin_phase && !self.invalid && !self.mailbox.is_empty() {
                 self.pin_phase = true;
-                return None;
+                // A field boundary is not an interdigit pause. The unchanged
+                // admission deadline bounds time spent hearing the next prompt.
+                self.last_ms = None;
+                return Some(LoginInput::Password);
             }
             let credentials = LoginInput::Credentials {
                 mailbox: if self.invalid {

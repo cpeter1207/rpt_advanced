@@ -229,7 +229,7 @@ fn real_three_second_login_pause_resets_privately_before_the_next_digit() {
         .lock()
         .unwrap()
         .iter()
-        .any(|text| text == "Login unsuccessful. Try again")
+        .any(|text| text == "Login unsuccessful. Enter your mailbox number followed by pound")
     {
         host.pump(private_clock(&host)).unwrap();
         assert!(Instant::now() < deadline);
@@ -253,6 +253,77 @@ fn await_private_drop(
         std::thread::yield_now();
     }
     assert_eq!(state.lock().unwrap().drops, 1);
+}
+
+#[test]
+fn sequential_login_prompts_wait_for_each_field_without_public_audio_or_credentials() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut host, speech) = driven_mailbox_host();
+    let (phone, state) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", private_clock(&host))
+        .unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    let await_prompt = |host: &mut Host, count: usize| {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while speech.opened.lock().unwrap().len() < count {
+            host.pump(private_clock(host)).unwrap();
+            assert!(Instant::now() < deadline, "private prompt was not prepared");
+            std::thread::yield_now();
+        }
+    };
+    await_prompt(&mut host, 1);
+    assert_eq!(
+        speech.opened.lock().unwrap()[0],
+        "Enter your mailbox number followed by pound"
+    );
+    state.lock().unwrap().input.extend(
+        "100#"
+            .bytes()
+            .map(crate::link::session::tests::Input::Digit),
+    );
+    await_digits(&host, &source, 4);
+    host.pump(private_clock(&host)).unwrap();
+    await_prompt(&mut host, 2);
+    assert_eq!(
+        speech.opened.lock().unwrap()[1],
+        "Enter your password followed by pound"
+    );
+    assert!(!reply.phone_authenticated());
+    std::thread::sleep(Duration::from_millis(3010));
+    host.pump(private_clock(&host)).unwrap();
+    assert_eq!(
+        speech.opened.lock().unwrap().len(),
+        2,
+        "field transition must not time out while hearing the password prompt"
+    );
+    state.lock().unwrap().input.extend(
+        "1234#"
+            .bytes()
+            .map(crate::link::session::tests::Input::Digit),
+    );
+    await_digits(&host, &source, 5);
+    host.pump(private_clock(&host)).unwrap();
+    await_prompt(&mut host, 3);
+    assert!(reply.phone_authenticated());
+    assert_eq!(
+        speech.opened.lock().unwrap().as_slice(),
+        [
+            "Enter your mailbox number followed by pound",
+            "Enter your password followed by pound",
+            "Mailbox authenticated. Protected commands still require node unlock",
+        ]
+    );
+    assert!(host.peers.is_empty() && host.operations.is_empty());
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    {
+        let state = state.lock().unwrap();
+        assert!(state.texts.is_empty() && state.digits.is_empty());
+    }
+    assert!(host.stop(private_clock(&host).now_ms + 1));
 }
 
 #[test]
@@ -513,18 +584,32 @@ fn private_worker_login_failure_and_provider_hangup_revoke_only_that_call() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut host = mailbox_host();
+    let (mut host, speech) = driven_mailbox_host();
     for input in ["100#9999#100#9999#100#9999#", "*41000#*70#*41000#"] {
         let (phone, state) = crate::link::session::tests::phone_peer();
         let call = phone.identity().call_id().unwrap();
         host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
         let source = host.phone_source(call).unwrap().clone();
         let reply = host.phone_reply(&source).unwrap();
-        state
-            .lock()
-            .unwrap()
-            .input
-            .extend(input.bytes().map(crate::link::session::tests::Input::Digit));
+        // Exercise each actual field/prompt in sequence instead of filling the
+        // four-entry station preparation queue with several logins at once.
+        for field in input.split_inclusive('#') {
+            let before = speech.opened.lock().unwrap().len();
+            state
+                .lock()
+                .unwrap()
+                .input
+                .extend(field.bytes().map(crate::link::session::tests::Input::Digit));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                host.pump(private_clock(&host)).unwrap();
+                if reply.ended() || speech.opened.lock().unwrap().len() > before {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "private login response missing");
+                std::thread::yield_now();
+            }
+        }
         pump_until(&mut host, |host| host.phone_source(call).is_none());
         assert!(reply.ended() && !reply.phone_authenticated());
         await_private_drop(&state);

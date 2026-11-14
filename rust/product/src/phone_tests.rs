@@ -111,6 +111,36 @@ fn login_collection_bounds_digits_and_time_without_replaying_credentials() {
 }
 
 #[test]
+fn login_mailbox_terminator_requests_the_password_without_authenticating() {
+    let mut collector = LoginCollector::default();
+    for digit in "100".chars() {
+        assert!(collector.digit(digit, 10).is_none());
+    }
+    assert!(matches!(
+        collector.digit('#', 20),
+        Some(LoginInput::Password)
+    ));
+    assert!(collector.pin_phase && collector.pin.is_empty());
+}
+
+#[test]
+fn login_completed_field_waits_for_password_but_partial_digits_still_expire() {
+    let mut collector = LoginCollector::default();
+    for digit in "100#".chars() {
+        collector.digit(digit, 10);
+    }
+    assert!(
+        collector.tick(10_000).is_none(),
+        "listening to the second prompt is not an interdigit timeout"
+    );
+    assert_eq!(collector.mailbox, "100");
+    assert!(collector.digit('1', 10_001).is_none());
+    assert!(collector.tick(13_000).is_none());
+    assert!(matches!(collector.tick(13_001), Some(LoginInput::Retry)));
+    assert!(collector.mailbox.is_empty() && collector.pin.is_empty() && !collector.pin_phase);
+}
+
+#[test]
 fn private_input_helpers_preserve_bounds_and_retire_authenticated_ended_owners() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

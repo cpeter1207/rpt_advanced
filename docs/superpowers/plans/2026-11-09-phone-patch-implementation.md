@@ -373,3 +373,9 @@ Plan self-review: all P01–P18 have implementation and composed verification
 tasks; the five review-focus failures are assigned above. Dependency adoption
 requires a real build probe. Interface details not public in the approved design
 are builder decisions recorded in the implementation ledger before changes.
+
+### Incoming login prompt checkpoint (owner clarification, 2026-11-13)
+
+1. Reproduce mailbox-only prompt, completed-field waiting and password-transition failures in the existing collector/host/catalog fixtures.
+2. Add one credential-free password transition to the existing collector and private prompt dispatcher. Preserve interdigit, overall deadline and attempt limits.
+3. Verify wrong/unknown credentials, retirement and existing private SIP/IAX/foreground flows with sequential wire callers. Run affected strict lint checks and commit a private recovery checkpoint before attachment/VOX work.

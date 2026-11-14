@@ -93,6 +93,9 @@ impl Host {
                     .login_digit(&source, &reply, digit, now_ms)
                     .map_err(|_| RuntimeError::Rejected)
                     .and_then(|input| match input {
+                        Some(LoginInput::Password) => {
+                            self.prepare_login_prompt(&source, &reply, Prompt::Password)
+                        }
                         Some(LoginInput::Credentials { mailbox, pin }) => self
                             .authenticate_phone(&source, &reply, &mailbox, &pin, clock)
                             .map(|_| ()),

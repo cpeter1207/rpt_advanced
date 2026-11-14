@@ -89,6 +89,16 @@ Provider/trunk authentication never substitutes for mailbox authentication.
 Store PINs as salted password digests; use bounded login attempts and private
 prompts. Never log or regenerate PIN/unlock digits.
 
+Owner clarification (2026-11-13): incoming login uses two sequential private
+prompts. Ask for the mailbox number followed by pound; only after that completed
+field ask for the password followed by pound. Reuse the numeric PIN verifier and
+existing collector, rather than adding another authentication path. The
+three-second interdigit timeout applies inside an incomplete field, not while
+the caller listens between completed mailbox and first password digit. The
+existing 60-second admission deadline and three failed verifications remain.
+Unknown and known mailbox numbers receive the same password prompt; retries
+start again at the mailbox prompt without credential echo or node input.
+
 A command-only incoming call consumes a transport resource but no RF attachment
 slot. `*3` without an explicit destination attaches the configured local target;
 `*3<node>` selects an eligible explicit target using normal collection completion.
