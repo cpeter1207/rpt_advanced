@@ -656,7 +656,18 @@ fn generated_status_obeys_exact_audience_and_per_peer_telemetry_gate() {
             100,
         )
         .unwrap();
-        let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
+        let (other_producer, mut other_consumer) =
+            LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+        let other_peer = AudioPeer::new(
+            rpt_advanced_core::link::PeerIdentity::from_operator("300").unwrap(),
+            Mode::TRANSCEIVE,
+            Quiet(PeerSignals::new()),
+            other_producer,
+            960,
+            100,
+        )
+        .unwrap();
+        let (mut links, mut dispatcher) = LinkAudio::new(vec![peer, other_peer], 960).unwrap();
         let (mut controller, mut control) = NodeController::new(
             ControllerSettings {
                 full_duplex: true,
@@ -690,6 +701,9 @@ fn generated_status_obeys_exact_audience_and_per_peer_telemetry_gate() {
             let mut output = [0.0; 960];
             consumer.read(&mut output);
             found_peer |= output.iter().any(|sample| *sample > 0.0);
+            let mut unrelated = [0.0; 960];
+            other_consumer.read(&mut unrelated);
+            assert_eq!(unrelated, [0.0; 960], "status never leaks to another peer");
             if rf.iter().any(|sample| *sample > 0.0) {
                 found_local = true;
             }

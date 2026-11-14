@@ -1718,11 +1718,13 @@ the source coordinate and are skipped, never replayed as a catch-up burst.
 
 The owner-requested generic completed/unavailable responses have a distinct
 typed message catalog entry with no caller-supplied arguments. Only this
-constrained outcome may be mirrored to LOCAL RF and an exact authenticated
-phone caller. RF-origin node operations also return that outcome to currently
-attached authenticated calls. Existing status producers, bounded private reply
+constrained outcome returns exclusively to its requesting source. The owner
+superseded the earlier mirroring requirement on 2026-11-14: an authenticated
+phone receives only its exact private reply, while an RF-origin operation
+returns only to LOCAL RF, never to attached phones. Retired or invalid private
+callers do not fall back to RF. Existing status producers, bounded private reply
 outboxes and local status delivery are reused; no PCM queue or peer fanout is
-added. Failure to prepare RF output does not discard a valid private reply.
+added. Existing exact-peer status replies remain source-scoped.
 
 Authentication, mailbox/PIN prompts, policy denials, stopped macros and detailed
 status retain their existing private or source-scoped routes. Phone tokens still
@@ -1743,10 +1745,11 @@ call and macro-permit checks. Retired source authority cancels that unfinished
 retry. Successful final publication discards the borrowed record, so later
 established-link recovery retains no phone authority or RF result provenance.
 
-The combined synthetic call fixture observes each finite LOCAL operation result
-through actual radio callback progress and PTT-off quiet before measuring new
-phone speech. Authentication and detailed status remain private; a completed
-result cannot satisfy the later speech-output assertion. The synthetic remote
+The earlier combined synthetic qualification drained mirrored LOCAL results
+before measuring phone speech. Source-only regression coverage now requires
+phone operation outcomes to remain private and RF operation outcomes to leave
+all phone reply queues empty. Authentication and detailed status remain private;
+a private completed result cannot satisfy a public speech-output assertion. The synthetic remote
 is serviced until its bounded caller completes, rather than stopping at an
 independent cutoff before return audio is requested. Qualification commands
 retain an outer process watchdog; this changes no production or protocol timer.

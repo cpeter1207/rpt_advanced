@@ -32,52 +32,36 @@ impl Host {
         }
         result
     }
-    /// Mirror only a typed, credential-free node outcome. An explicit caller
-    /// remains exact-source; RF outcomes go only to attached authenticated calls.
+    /// Return a fixed outcome only to its requesting source. A private caller
+    /// never falls back to RF; RF-origin results never enumerate phone listeners.
     pub(crate) fn node_operation_result(
         &mut self,
         local: &str,
         reply: Option<&PeerReply>,
         outcome: OperationResult,
     ) -> Result<(), RuntimeError> {
-        let targets = if let Some(reply) = reply {
+        if let Some(reply) = reply {
             self.current_private_phone(local, reply)?;
-            vec![(
-                reply.phone_source().ok_or(RuntimeError::Rejected)?.clone(),
-                reply.clone(),
-            )]
-        } else {
-            let mut targets = self.phone_calls.attachments(local);
-            // Media-only callees are not private control-result recipients.
-            targets.retain(|(_, target)| target.phone_authenticated());
-            targets
-        };
+        }
         #[cfg(test)]
         super::tests::phone::before_operation_result();
-        for (source, target) in targets {
-            // Attachment enumeration and explicit requests both retain exact call authority.
+        if let Some(reply) = reply {
+            let source = reply.phone_source().ok_or(RuntimeError::Rejected)?.clone();
             let delivery = self
-                .phone_calls
-                .local(&source, &target)
-                .ok_or(RuntimeError::Rejected)
-                .and_then(|bound| self.current_private_phone(bound, &target))
+                .current_private_phone(local, reply)
                 .and_then(|()| {
                     self.runtime
-                        .prepare_phone_operation_result(local, outcome, &target)
+                        .prepare_phone_operation_result(local, outcome, reply)
                 })
                 .and_then(|stream| {
                     self.phone_calls
-                        .queue_reply(&source, &target, stream)
+                        .queue_reply(&source, reply, stream)
                         .map_err(|_| RuntimeError::Rejected)
                 });
-            if let Err(error) = delivery {
+            if delivery.is_err() {
                 self.retire_phone(&source);
-                if reply.is_some() {
-                    return Err(error);
-                }
-                self.services
-                    .scheduler_notice("node operation result: private preparation failed");
             }
+            return delivery;
         }
         if self.runtime.queue_operation_result(local, outcome).is_err() {
             self.services

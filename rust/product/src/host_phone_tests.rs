@@ -1307,9 +1307,9 @@ mod attachment_policy;
 #[path = "host_phone_site_tests.rs"]
 mod site_reports;
 
-/// Generic node outcomes are the only private-call wording admitted to local RF.
+/// Generic node outcomes stay private to their exact authenticated caller.
 #[test]
-fn node_operation_results_reach_local_rf_and_exact_phone_only() {
+fn node_operation_results_reach_exact_phone_without_local_rf() {
     use rpt_advanced_core::phone_dtmf::PhoneDtmfAction;
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -1348,10 +1348,10 @@ fn node_operation_results_reach_local_rf_and_exact_phone_only() {
             )
             .unwrap();
         }
-        assert!(host.take_phone_reply(&source, &reply).unwrap().is_some());
+        attachment_policy::finish_prompt(&mut host, &source, &reply);
         assert!(
-            probe_public_phone_media(&mut host, "1000"),
-            "generic completion/unavailability must reach LOCAL RF"
+            !probe_public_phone_media(&mut host, "1000"),
+            "phone completion/unavailability must not reach local RF"
         );
         let expected = if completed {
             "Command completed"
@@ -1368,6 +1368,28 @@ fn node_operation_results_reach_local_rf_and_exact_phone_only() {
         );
         assert!(state.lock().unwrap().texts.is_empty());
         assert!(state.lock().unwrap().digits.is_empty());
+        let foreign =
+            rpt_advanced_core::link::PeerSignals::for_phone(source.clone()).reply_target();
+        assert!(
+            host.node_operation_result(
+                "1000",
+                Some(&foreign),
+                rpt_advanced_core::messages::OperationResult::Completed,
+            )
+            .is_err()
+        );
+        assert!(!probe_public_phone_media(&mut host, "1000"));
+        assert!(host.take_phone_reply(&source, &reply).unwrap().is_none());
+        assert!(host.retire_phone(&source));
+        assert!(
+            host.node_operation_result(
+                "1000",
+                Some(&reply),
+                rpt_advanced_core::messages::OperationResult::Completed,
+            )
+            .is_err()
+        );
+        assert!(!probe_public_phone_media(&mut host, "1000"));
         assert!(host.stop(private_clock(&host).now_ms + 1));
     }
 }

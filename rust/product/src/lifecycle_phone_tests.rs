@@ -147,7 +147,7 @@ fn wait_for(engine: &Arc<Engine>, mut predicate: impl FnMut() -> bool) {
 }
 
 #[test]
-fn asynchronous_phone_link_results_reach_local_rf_without_remote_fanout() {
+fn asynchronous_phone_link_results_stay_private_without_rf_or_remote_fanout() {
     static PUBLIC_SAMPLES: AtomicU64 = AtomicU64::new(0);
     unsafe extern "C" fn write(
         _: *mut c_void,
@@ -268,7 +268,7 @@ fn asynchronous_phone_link_results_reach_local_rf_without_remote_fanout() {
             .all(|text| !text.contains("1234") && !text.contains('*') && !text.contains('#'))
     );
     assert!(
-        engine
+        !engine
             .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
             .unwrap()
     );

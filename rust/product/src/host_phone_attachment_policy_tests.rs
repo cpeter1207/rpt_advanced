@@ -27,7 +27,7 @@ fn policy_host(local: &str, account: &str, target: &str) -> (Host, Arc<SpeechFix
     (host, speech)
 }
 
-fn finish_prompt(host: &mut Host, source: &PhoneSource, reply: &PeerReply) {
+pub(super) fn finish_prompt(host: &mut Host, source: &PhoneSource, reply: &PeerReply) {
     let mut prompt = host.take_phone_reply(source, reply).unwrap().unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut output = [0.0; 960];
@@ -425,7 +425,7 @@ fn phone_attachment_reuses_ordinary_transport_without_losing_either_owner() {
 }
 
 #[test]
-fn rf_operation_results_reach_only_current_attached_phone() {
+fn rf_operation_results_never_reach_attached_or_detached_phones() {
     use rpt_advanced_core::messages::OperationResult;
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -447,7 +447,10 @@ fn rf_operation_results_reach_only_current_attached_phone() {
     host.attach_phone(&source, &reply, "1000", clock()).unwrap();
     for result in [OperationResult::Completed, OperationResult::Unavailable] {
         host.node_operation_result("1000", None, result).unwrap();
-        finish_prompt(&mut host, &source, &reply);
+        assert!(
+            host.take_phone_reply(&source, &reply).unwrap().is_none(),
+            "RF command outcomes belong only to the local transmitter"
+        );
     }
     host.phone_calls.detach_media(&source, &reply);
     host.node_operation_result("1000", None, OperationResult::Completed)
