@@ -1,5 +1,5 @@
 //! Narrow 8 kHz G.711 phone profile. All operations run off audio.
-use std::net::SocketAddr;
+use std::{net::SocketAddr, os::fd::AsRawFd, time::Instant};
 
 #[cfg(test)]
 mod tests;
@@ -261,12 +261,42 @@ pub enum SendStatus {
     Expired,
 }
 
+/// Advance the conservative socket-ingress bound only on an actual kernel
+/// EAGAIN. Capturing before the syscall never rejuvenates a queued datagram.
+fn receive_datagram(
+    socket: &tokio::net::UdpSocket,
+    wire: &mut [u8],
+    flags: i32,
+    floor: &mut Instant,
+) -> std::io::Result<usize> {
+    let before = Instant::now();
+    // SAFETY: the live single-owner UDP descriptor and writable slice remain
+    // valid for this nonblocking syscall; MSG_PEEK never consumes queued data.
+    let size = unsafe {
+        libc::recv(
+            socket.as_raw_fd(),
+            wire.as_mut_ptr().cast(),
+            wire.len(),
+            libc::MSG_DONTWAIT | flags,
+        )
+    };
+    if size >= 0 {
+        return Ok(size as usize);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        *floor = before;
+    }
+    Err(error)
+}
+
 /// Serial datagram owner, separate from packet jitter and PCM processing.
 pub struct RtpEndpoint {
     socket: tokio::net::UdpSocket,
     media: MediaDescription,
     egress: RtpEgress,
     started: std::time::Instant,
+    receipt_floor: Instant,
     source: Option<u32>,
     events: [Option<(u32, u8, bool)>; 16],
     next_event: usize,
@@ -288,6 +318,8 @@ impl RtpEndpoint {
         {
             return Err(MediaError::UnsupportedDescription);
         }
+        // Every possible receipt follows this initial monotonic lower bound.
+        let receipt_floor = Instant::now();
         let socket = tokio::net::UdpSocket::bind(local)
             .await
             .map_err(|_| MediaError::Network)?;
@@ -309,6 +341,7 @@ impl RtpEndpoint {
                 epoch: 1,
             },
             started: std::time::Instant::now(),
+            receipt_floor,
             media,
             source: None,
             events: [None; 16],
@@ -358,22 +391,48 @@ impl RtpEndpoint {
     }
     /// Receive a source-filtered packet without reordering it before jitter.
     pub async fn receive(&mut self, output: &mut [u8; 160]) -> Result<RtpEvent, MediaError> {
-        let mut wire = [0; 2048];
-        let length = self
-            .socket
-            .recv(&mut wire)
-            .await
-            .map_err(|_| MediaError::Network)?;
-        self.receive_wire(&wire[..length], output)
+        loop {
+            self.socket
+                .readable()
+                .await
+                .map_err(|_| MediaError::Network)?;
+            if let Some((event, _)) = self.try_receive(output)? {
+                return Ok(event);
+            }
+        }
     }
     /// Poll on the existing SIP owner without blocking signaling or retained source credit.
+    /// The receipt floor precedes every packet since the last proven empty socket;
+    /// it cannot advance merely because Tokio has not dispatched readiness yet.
     pub(crate) fn try_receive(
         &mut self,
         output: &mut [u8; 160],
-    ) -> Result<Option<RtpEvent>, MediaError> {
+    ) -> Result<Option<(RtpEvent, Instant)>, MediaError> {
         let mut wire = [0; 2048];
-        match self.socket.try_recv(&mut wire) {
-            Ok(length) => self.receive_wire(&wire[..length], output).map(Some),
+        let mut attempted = false;
+        let result = self.socket.try_io(tokio::io::Interest::READABLE, || {
+            attempted = true;
+            receive_datagram(&self.socket, &mut wire, 0, &mut self.receipt_floor)
+        });
+        if !attempted {
+            // A cached WouldBlock is not an empty-socket observation. A real
+            // nonconsuming probe keeps idle bounds current without stealing
+            // data or introducing a second socket/receiver.
+            match receive_datagram(
+                &self.socket,
+                &mut [0; 1],
+                libc::MSG_PEEK,
+                &mut self.receipt_floor,
+            ) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(MediaError::Socket(error.raw_os_error().unwrap_or(0))),
+            }
+        }
+        match result {
+            Ok(length) => self
+                .receive_wire(&wire[..length], output)
+                .map(|event| Some((event, self.receipt_floor))),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(MediaError::Socket(error.raw_os_error().unwrap_or(0))),
         }

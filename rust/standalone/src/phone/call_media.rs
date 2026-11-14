@@ -145,12 +145,12 @@ impl Media {
         for _ in 0..8 {
             match self.endpoint.try_receive(&mut packet) {
                 Ok(None) => break,
-                Ok(Some(RtpEvent::None | RtpEvent::Digit { ended: false, .. })) => {}
-                Ok(Some(RtpEvent::Digit { digit, ended: true })) => {
+                Ok(Some((RtpEvent::None | RtpEvent::Digit { ended: false, .. }, _))) => {}
+                Ok(Some((RtpEvent::Digit { digit, ended: true }, _))) => {
                     self.pending = Some(Pending::Digit(digit));
                     return Ok(());
                 }
-                Ok(Some(RtpEvent::Audio { timestamp, .. })) => {
+                Ok(Some((RtpEvent::Audio { timestamp, .. }, receipt))) => {
                     let timestamp = self.timestamp(timestamp)?;
                     if self
                         .jitter
@@ -158,7 +158,14 @@ impl Media {
                         .map_err(|_| MediaError::Jitter)?
                         == Admission::Accepted
                     {
-                        self.births[self.birth_slot] = Some((timestamp, now));
+                        // The sink reference was captured before this elapsed
+                        // observation, so subtraction is conservatively older.
+                        // Missing/overflowed mapping takes the existing gap path.
+                        self.births[self.birth_slot] = std::time::Instant::now()
+                            .checked_duration_since(receipt)
+                            .and_then(|age| u64::try_from(age.as_nanos()).ok())
+                            .and_then(|age| now.checked_sub(age))
+                            .map(|born| (timestamp, born));
                         self.birth_slot = (self.birth_slot + 1) % self.births.len();
                     }
                 }

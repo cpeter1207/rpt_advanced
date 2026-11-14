@@ -1568,3 +1568,17 @@ receipt age and original-age propagation into mixed peer egress still need
 their existing boundary integration before operator *3 activation. Manual mode,
 configurable hang and receive-window scheduling remain separately tracked
 requirements; this checkpoint adds none of those claims.
+
+### SIP socket receipt qualification
+
+The existing single RTP owner now retains one monotonic last-proven-empty
+socket bound, initialized before bind. Only an actual nonblocking kernel EAGAIN
+advances it. A cached Tokio WouldBlock uses a nonconsuming kernel probe rather
+than assuming the socket is empty. Queued datagrams keep the previous bound
+while private source credit is refused; draining later cannot make them fresh.
+
+The original sink reference maps that lower bound conservatively once into
+the existing packet-birth slots. Unknown, underflowed or unavailable mapping
+takes the existing source-gap path. This proves a socket-ingress not-after
+bound, not NIC, wire or remote capture time. It adds no packet/PCM queue,
+wall-clock mapping, receiver task or provider ABI.

@@ -108,6 +108,8 @@ async fn source_retains_refused_prefix_birth_digits_and_gaps() {
     let mut sink = Sink::default();
     let born = 1_000_000_000;
     assert_eq!(read(&mut media, &mut sink, born), 0);
+    let receipt = media.births.iter().flatten().next().unwrap().1;
+    assert!(receipt <= born);
     assert_eq!(read(&mut media, &mut sink, born + 40_000_000), 2);
     assert_eq!(
         media.jitter.put(
@@ -126,7 +128,11 @@ async fn source_retains_refused_prefix_birth_digits_and_gaps() {
     let start = (1u64 << 32) + u64::from(timestamp);
     assert_eq!(
         sink.audio,
-        [(start, 0, born), (start, 60, born), (start + 60, 100, born)]
+        [
+            (start, 0, receipt),
+            (start, 60, receipt),
+            (start + 60, 100, receipt)
+        ]
     );
     assert_eq!(sink.discontinuities, 1);
     assert_eq!(media.timestamp(80), Ok(start + 160));
@@ -189,8 +195,11 @@ async fn signed_offset(offset: i32) {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(2)).await;
     assert_eq!(read(&mut media, &mut sink, born + 10_000_000), 0);
+    let first_birth = media.births[0].unwrap().1;
+    let second_birth = media.births[1].unwrap().1;
+    assert!(first_birth <= born && second_birth <= born + 10_000_000);
     assert_eq!(read(&mut media, &mut sink, born + 40_000_000), 1);
-    assert_eq!(sink.audio, [(start, 160, born)]);
+    assert_eq!(sink.audio, [(start, 160, first_birth)]);
     sink.audio.clear();
     sink.pcm.clear();
     sink.credit = 0;
@@ -214,8 +223,8 @@ async fn signed_offset(offset: i32) {
         assert_eq!(
             sink.audio,
             [
-                (start + 200, 50, born + 10_000_000),
-                (start + 250, 110, born + 10_000_000)
+                (start + 200, 50, second_birth),
+                (start + 250, 110, second_birth)
             ]
         );
     } else {
@@ -230,9 +239,9 @@ async fn signed_offset(offset: i32) {
         assert_eq!(
             sink.audio,
             [
-                (start + 160, 0, born + 10_000_000),
-                (start + 160, 50, born + 10_000_000),
-                (start + 210, 70, born + 10_000_000)
+                (start + 160, 0, second_birth),
+                (start + 160, 50, second_birth),
+                (start + 210, 70, second_birth)
             ]
         );
     }
@@ -282,4 +291,83 @@ async fn jitter_delay_insertion_does_not_publish_a_source_gap() {
         sink.gaps.is_empty(),
         "insertion delays playout but must not advance source coordinates"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn socket_backlog_keeps_receipt_age_before_dequeue_and_refused_credit() {
+    for refused in [false, true] {
+        let providers = ProviderSet::load().unwrap();
+        let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let clock = std::time::Instant::now();
+        let now = || 1_000_000_000 + clock.elapsed().as_nanos() as u64;
+        let mut media = fixture_media(&sender, jitter).await;
+        let target = media.endpoint.local_addr().unwrap();
+        let mut sink = Sink::default();
+        let timestamp = if refused {
+            sender
+                .send_to(&packet(1, 1000, 0, &[0xa5; 160]), target)
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            read(&mut media, &mut sink, now());
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            read(&mut media, &mut sink, now());
+            assert!(matches!(media.pending, Some(Pending::Audio { .. })));
+            1160
+        } else {
+            1000
+        };
+        sender
+            .send_to(&packet(2, timestamp, 0, &[0xa5; 160]), target)
+            .unwrap();
+        // No owner reads this queued packet while the product retains its prefix.
+        let queued_before = now();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if refused {
+            read(&mut media, &mut sink, now());
+            assert!(matches!(media.pending, Some(Pending::Audio { .. })));
+            sink.credit = 160;
+            read(&mut media, &mut sink, now());
+        }
+        read(&mut media, &mut sink, now());
+        let timestamp = (1u64 << 32) + u64::from(timestamp);
+        let (_, born) = media
+            .births
+            .iter()
+            .flatten()
+            .find(|(start, _)| *start == timestamp)
+            .copied()
+            .unwrap();
+        assert!(
+            born <= queued_before,
+            "dequeue must not rejuvenate a queued packet"
+        );
+        assert!(
+            now() - born >= 250_000_000,
+            "backpressure keeps original age"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unavailable_socket_receipt_mapping_uses_existing_source_gap() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    sender
+        .send_to(
+            &packet(1, 1000, 0, &[0xa5; 160]),
+            media.endpoint.local_addr().unwrap(),
+        )
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let mut sink = Sink {
+        credit: 160,
+        ..Sink::default()
+    };
+    read(&mut media, &mut sink, 0);
+    read(&mut media, &mut sink, 40_000_000);
+    assert!(sink.audio.is_empty());
+    assert_eq!(sink.gaps, [((1u64 << 32) + 1000, 160)]);
 }

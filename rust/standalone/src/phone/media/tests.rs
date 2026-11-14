@@ -183,3 +183,53 @@ fn socket_failure_reports_only_numeric_errno_and_releases_pending_media() {
     assert!(sender.pending.is_none());
     assert_eq!(sender.header.sequence_number, u16::MAX);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn socket_receipt_floor_requires_real_empty_probe_and_never_dequeues_on_cached_readiness() {
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut endpoint = RtpEndpoint::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        MediaDescription {
+            remote: sender.local_addr().unwrap(),
+            codec: G711::Mulaw,
+            telephone_event: None,
+        },
+        1,
+        1,
+    )
+    .await
+    .unwrap();
+    let mut output = [0; 160];
+    assert!(endpoint.try_receive(&mut output).unwrap().is_none());
+    let first = endpoint.receipt_floor;
+    let mut packet = [0xa5; 172];
+    packet[..12].copy_from_slice(&[0x80, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 19]);
+    sender
+        .send_to(&packet, endpoint.local_addr().unwrap())
+        .unwrap();
+    // No reactor yield: the kernel has data but Tokio has not observed it.
+    assert!(endpoint.try_receive(&mut output).unwrap().is_none());
+    assert_eq!(endpoint.receipt_floor, first);
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let (_, receipt) = endpoint.try_receive(&mut output).unwrap().unwrap();
+    assert_eq!(receipt, first);
+    assert_eq!(
+        output, [0xa5; 160],
+        "the cached-readiness probe was nonconsuming"
+    );
+    assert!(endpoint.try_receive(&mut output).unwrap().is_none());
+    let drained = endpoint.receipt_floor;
+    assert!(drained > first);
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    assert!(endpoint.try_receive(&mut output).unwrap().is_none());
+    let idle = endpoint.receipt_floor;
+    assert!(
+        idle > drained,
+        "real empty probes keep a fresh burst eligible"
+    );
+    sender
+        .send_to(&packet, endpoint.local_addr().unwrap())
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    assert_eq!(endpoint.try_receive(&mut output).unwrap().unwrap().1, idle);
+}

@@ -392,3 +392,12 @@ are builder decisions recorded in the implementation ledger before changes.
   carry original age/retirement through mixed peer output, and compose the
   actual product call/remote-link path. Do not infer RF qualification from the
   prepared-graph fixtures. Live changes still require advance notice/approval.
+
+#### Socket receipt checkpoint
+
+SIP RTP retains the actual kernel-empty monotonic cut through paused source
+credit, and maps it once into the existing packet birth slots. Queued >250-ms
+media and refused-prefix backlog regressions preserve age; cached readiness
+cannot move the cut without a real empty probe. Missing mapping becomes the
+existing source gap. Mixed fanout original-age deadline and operator activation
+remain separate, with the existing 200-ms egress and 500-ms total caps distinct.
