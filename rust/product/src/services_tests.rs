@@ -1555,3 +1555,13 @@ pub(crate) fn timed_dial_fixture_with_bind_failures(
         peers,
     )
 }
+
+/// Existing source-phone operations with one test-selected outgoing factory.
+pub(crate) fn phone_factory_fixture(
+    configure: impl FnOnce(&mut abi::rptadv_host_services_v10),
+) -> HostServices {
+    let (phone, _) = crate::link::session::tests::phone_source_peer();
+    let mut table = phone.services.0;
+    configure(&mut table);
+    unsafe { HostServices::open(&table) }.unwrap()
+}

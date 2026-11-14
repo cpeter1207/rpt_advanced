@@ -86,4 +86,35 @@ int sip_native_hangup(void *context, uint64_t call);
  * @return Zero, one while live, or -2 for stale token.
  */
 int sip_native_release(void *context, uint64_t call);
+/** Start a host-approved outgoing offer in the existing bounded slot owner.
+ * @param context Live registered account.
+ * @param aor Validated local address of record.
+ * @param hop Prepared numeric proxy endpoint.
+ * @param destination Validated SIP destination URI.
+ * @param offer Bounded NUL-terminated SDP, copied synchronously.
+ * @param token Receives exact nonzero owner token only on success.
+ * @return Zero, one at capacity, or a negative neutral error.
+ */
+int sip_native_originate(void *context, const char *aor, const char *hop, const char *destination,
+                         const char *offer, uint64_t *token);
+/** Accept the retained outgoing answer after host media validation.
+ * @param context Live native account.
+ * @param token Exact outgoing call token.
+ * @return Zero, -2 stale, or -3 invalid state.
+ */
+int sip_native_acknowledge(void *context, uint64_t token);
+/** Take one bounded pending call challenge on the serial owner.
+ * @param context Live native account.
+ * @param token Receives exact outgoing call token.
+ * @param realm Writable 256-byte realm extent.
+ * @return Copied bytes, or zero when empty.
+ */
+size_t sip_native_next_authentication(void *context, uint64_t *token, char realm[256]);
+/** Supply ephemeral credentials only for the exact pending outgoing call.
+ * @param context Live native account.
+ * @param token Exact outgoing token.
+ * @param credentials Native Digest syntax, copied synchronously.
+ * @return Zero, -2 stale, or -3 invalid state.
+ */
+int sip_native_authenticate_call(void *context, uint64_t token, const char *credentials);
 #endif

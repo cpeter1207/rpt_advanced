@@ -1453,6 +1453,20 @@ pub(crate) fn timed_dial_handle() -> (*mut c_void, Shared) {
     (Box::into_raw(Box::new(Arc::clone(&state))).cast(), state)
 }
 
+/// Fresh source-phone state transferred once by an outgoing lifecycle fixture.
+pub(crate) fn phone_dial_handle(local: &str) -> (*mut c_void, Shared) {
+    let state = Arc::new(Mutex::new(State {
+        rate: 8000,
+        local: Some(local.into()),
+        capabilities: 51,
+        fail_ready: true,
+        continuous_async: true,
+        encode_unit: Some(160),
+        ..State::default()
+    }));
+    (Box::into_raw(Box::new(Arc::clone(&state))).cast(), state)
+}
+
 pub(crate) fn phone_source_peer() -> (PeerIo, Shared) {
     phone_source_peer_at_rate(8000)
 }

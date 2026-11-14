@@ -5,7 +5,7 @@ use std::{ffi::c_void, mem::size_of, ptr};
 
 /// Selected product descriptor retained by the composition loader.
 #[derive(Clone, Copy)]
-pub struct Product(&'static ffi::rptadv_product_descriptor_v1);
+pub struct Product(ffi::rptadv_product_descriptor_v1);
 // SAFETY: the table is immutable for process lifetime and product operations serialize internally.
 unsafe impl Send for Product {}
 // SAFETY: every operation is defined as concurrently callable by the product ABI.
@@ -13,8 +13,8 @@ unsafe impl Sync for Product {}
 
 impl Product {
     /// Borrow the validated table while the composition loader retains its DSO.
-    pub(crate) fn descriptor(&self) -> &'static ffi::rptadv_product_descriptor_v1 {
-        self.0
+    pub(crate) fn descriptor(&self) -> &ffi::rptadv_product_descriptor_v1 {
+        &self.0
     }
 
     /// Admit a claimed Echo QSO without a channel or lifecycle-global lookup.
@@ -30,14 +30,29 @@ impl Product {
     /// # Safety
     /// `pointer` provides a readable size/version prefix and remains loaded through unload.
     pub unsafe fn open(pointer: *const ffi::rptadv_product_descriptor_v1) -> Option<Self> {
-        if pointer.is_null()
-            || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
-                != size_of::<ffi::rptadv_product_descriptor_v1>() as u32
+        if pointer.is_null() {
+            return None;
+        }
+        let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
+        let prefix = std::mem::offset_of!(ffi::rptadv_product_descriptor_v1, phone_command);
+        let full = size_of::<ffi::rptadv_product_descriptor_v1>();
+        if size < prefix
+            || (size > prefix && size < full)
             || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 8
         {
             return None;
         }
-        let descriptor = unsafe { &*pointer };
+        // A released prefix does not promise storage for the optional tail.
+        // Retain a normalized value, never a full reference over shorter storage.
+        let mut descriptor: ffi::rptadv_product_descriptor_v1 = unsafe { std::mem::zeroed() };
+        unsafe {
+            ptr::copy_nonoverlapping(
+                pointer.cast::<u8>(),
+                ptr::from_mut(&mut descriptor).cast(),
+                size.min(full),
+            )
+        };
+        descriptor.struct_size = full as u32;
         (descriptor.capability == *b"rptadv.prod8\0\0\0\0"
             && descriptor.start.is_some()
             && descriptor.reload.is_some()

@@ -43,6 +43,8 @@ use std::{
 
 #[path = "host_phone_auth.rs"]
 mod phone_auth;
+#[path = "host_phone_outgoing.rs"]
+mod phone_outgoing;
 #[path = "host_phone_worker.rs"]
 mod phone_worker;
 #[path = "host_remote.rs"]
@@ -937,7 +939,9 @@ impl Host {
     ) -> Result<(), RuntimeError> {
         // Telephone media needs explicit authenticated *3 policy and per-node rings.
         // Pending private calls must never enter this numeric-node/ASL path.
-        if io.identity().protocol() == ProtocolId::Phone {
+        if io.identity().protocol() == ProtocolId::Phone
+            || self.phone_calls.outgoing_reserved(local)
+        {
             return Err(RuntimeError::Rejected);
         }
         self.peers

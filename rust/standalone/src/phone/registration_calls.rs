@@ -1,6 +1,10 @@
 //! Call admission and retained product steps on the existing SIP reactor.
 use super::{Command as OwnerCommand, Entry, Error, Reactor, Reply};
-use crate::{abi, phone::call_media::Media, phone_accounts::PreparedAccount};
+use crate::{
+    abi,
+    phone::call_media::{Media, Offer},
+    phone_accounts::PreparedAccount,
+};
 use rptadv_peer_support::sip::registration::Call as Observation;
 use std::{
     collections::BTreeMap,
@@ -34,6 +38,42 @@ impl Client {
             owner: Arc::new(OnceLock::new()),
         }
     }
+    /// Start one exact outgoing call; local is the initiating controller binding.
+    pub(crate) fn originate(
+        &self,
+        account: &PreparedAccount,
+        local: &str,
+        destination: String,
+        jitter: &'static abi::rptadv_jitter_descriptor_v1,
+    ) -> Result<Dial, Error> {
+        if self
+            .owner
+            .get()
+            .is_some_and(|owner| *owner == std::thread::current().id())
+        {
+            return Err(Error::Owner);
+        }
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        let close = Arc::new(AtomicBool::new(false));
+        let mut dial = Dial {
+            result,
+            pending: Some(OwnerCommand::Call(Command::Originate(
+                account.settings().id.clone(),
+                account.generation(),
+                local.to_owned(),
+                destination,
+                jitter,
+                Arc::clone(&close),
+                reply,
+            ))),
+            close,
+            client: self.clone(),
+            finished: false,
+        };
+        dial.submit()?;
+        Ok(dial)
+    }
+
     fn request<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, Error> {
         if self
             .owner
@@ -48,6 +88,59 @@ impl Client {
             .map_err(|_| Error::Owner)?;
         result.recv().map_err(|_| Error::Owner)?
     }
+}
+
+/// A unique pending originator claim; dropping it cancels only that exact call.
+pub(crate) struct Dial {
+    result: std::sync::mpsc::Receiver<Result<Handle, Error>>,
+    pending: Option<OwnerCommand>,
+    close: Arc<AtomicBool>,
+    client: Client,
+    finished: bool,
+}
+impl Dial {
+    /// Retain a refused command locally; never block cancellation on queue space.
+    fn submit(&mut self) -> Result<(), Error> {
+        if let Some(command) = self.pending.take() {
+            match self.client.sender.try_send(command) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(command)) => self.pending = Some(command),
+                Err(mpsc::error::TrySendError::Closed(_)) => return Err(Error::Owner),
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn try_complete(&mut self) -> Result<Option<Handle>, Error> {
+        if self.finished {
+            return Err(Error::Call);
+        }
+        self.submit()?;
+        match self.result.try_recv() {
+            Ok(result) => {
+                self.finished = true;
+                result.map(Some)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.finished = true;
+                Err(Error::Owner)
+            }
+        }
+    }
+}
+impl Drop for Dial {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.close.store(true, Ordering::Release);
+            self.client.wake.notify_one();
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Direction {
+    Incoming,
+    Outgoing,
 }
 
 /// One foreground receipt; dropping an unconsumed receipt closes that exact call.
@@ -89,6 +182,7 @@ pub(crate) struct Shared {
     pub(crate) source: std::net::SocketAddr,
     pub(crate) media: Mutex<Media>,
     pub(crate) inband: bool,
+    pub(crate) direction: Direction,
     state: AtomicU32,
     close: Arc<AtomicBool>,
     stopped: AtomicBool,
@@ -105,6 +199,9 @@ impl Shared {
         self.client.wake.notify_one();
     }
     pub(crate) fn answer(&self) -> Result<(), Error> {
+        if self.direction != Direction::Incoming {
+            return Err(Error::Call);
+        }
         self.client
             .request(|reply| Command::Answer(self.key.clone(), reply))
     }
@@ -164,6 +261,15 @@ pub(super) struct Step {
     context: usize,
 }
 pub(super) enum Command {
+    Originate(
+        String,
+        u64,
+        String,
+        String,
+        &'static abi::rptadv_jitter_descriptor_v1,
+        Arc<AtomicBool>,
+        Reply<Handle>,
+    ),
     Prepare(
         Key,
         &'static abi::rptadv_jitter_descriptor_v1,
@@ -174,7 +280,14 @@ pub(super) enum Command {
     Attach(Key, Step, Reply<()>),
     Detach(Key, Reply<()>),
 }
+struct Outgoing {
+    local: String,
+    offer: Offer,
+    jitter: &'static abi::rptadv_jitter_descriptor_v1,
+    reply: Reply<Handle>,
+}
 pub(super) struct Slot {
+    outgoing: Option<Outgoing>,
     observation: Observation,
     close: Arc<AtomicBool>,
     dispatched: bool,
@@ -206,6 +319,7 @@ impl Entry {
                 self.calls.insert(
                     token,
                     Slot {
+                        outgoing: None,
                         observation: call,
                         close: Arc::new(AtomicBool::new(false)),
                         dispatched: false,
@@ -258,7 +372,11 @@ impl Reactor {
                     if slot.close.load(Ordering::Acquire) && slot.observation.state < 4 {
                         let _ = native.hangup_call(*token);
                     }
-                    if !slot.dispatched && !retiring && slot.observation.state == 1 {
+                    if !slot.dispatched
+                        && !retiring
+                        && slot.observation.state == 1
+                        && slot.observation.direction == 0
+                    {
                         slot.dispatched = true;
                         let receipt = Receipt {
                             account: Arc::clone(&account),
@@ -306,6 +424,100 @@ impl Reactor {
             }
         }
     }
+    /// Complete at most the existing native slot count, on the same serial reactor.
+    /// No RefCell or media borrow is retained across endpoint preparation.
+    pub(super) async fn service_outgoing(&mut self) {
+        for owner in self.active.values().chain(&self.retiring) {
+            let tokens: [Option<u64>; 8] = {
+                let entry = owner.borrow();
+                let mut tokens = [None; 8];
+                for (index, (token, slot)) in entry.calls.iter().enumerate() {
+                    if slot.outgoing.is_some()
+                        && (slot.observation.state != 1
+                            || slot.close.load(Ordering::Acquire)
+                            || entry.retiring
+                            || entry.done)
+                    {
+                        tokens[index] = Some(*token);
+                    }
+                }
+                tokens
+            };
+            for token in tokens.into_iter().flatten() {
+                let (outgoing, observation, closed, retiring, account) = {
+                    let mut entry = owner.borrow_mut();
+                    let retiring = entry.retiring || entry.done;
+                    let account = Arc::clone(&entry.settings);
+                    let slot = entry.calls.get_mut(&token).expect("retained outgoing slot");
+                    (
+                        slot.outgoing.take().expect("pending outgoing owner"),
+                        slot.observation.clone(),
+                        Arc::clone(&slot.close),
+                        retiring,
+                        account,
+                    )
+                };
+                let Outgoing {
+                    local,
+                    offer,
+                    jitter,
+                    reply,
+                } = outgoing;
+                let result = async {
+                    if retiring
+                        || closed.load(Ordering::Acquire)
+                        || observation.state != 2
+                        || observation.direction != 1
+                    {
+                        return Err(Error::Call);
+                    }
+                    let media = offer
+                        .accept(observation.offer(), jitter)
+                        .await
+                        .map_err(|_| Error::Call)?;
+                    if closed.load(Ordering::Acquire) {
+                        return Err(Error::Call);
+                    }
+                    let source = observation.source()?;
+                    let mut entry = owner.borrow_mut();
+                    entry.account.acknowledge_call(token)?;
+                    let id = account.settings().id.clone();
+                    let shared = Arc::new(Shared {
+                        key: Key {
+                            account: id.clone(),
+                            generation: account.generation(),
+                            call: token,
+                        },
+                        account: id,
+                        local,
+                        remote: format!("{:016x}{token:016x}", account.generation()),
+                        source,
+                        inband: media.inband,
+                        direction: Direction::Outgoing,
+                        media: Mutex::new(media),
+                        state: AtomicU32::new(3),
+                        close: Arc::clone(&closed),
+                        stopped: AtomicBool::new(false),
+                        client: self.calls.clone(),
+                    });
+                    entry
+                        .calls
+                        .get_mut(&token)
+                        .expect("retained outgoing slot")
+                        .shared = Some(Arc::clone(&shared));
+                    Ok(Handle { shared })
+                }
+                .await;
+                if result.is_err() {
+                    closed.store(true, Ordering::Release);
+                    if observation.state < 4 {
+                        let _ = owner.borrow().account.hangup_call(token);
+                    }
+                }
+                let _ = reply.send(result);
+            }
+        }
+    }
     fn call_owner(&self, key: &Key) -> Result<super::Owner, Error> {
         self.active
             .values()
@@ -320,6 +532,67 @@ impl Reactor {
     }
     pub(super) async fn call_command(&mut self, command: Command) {
         match command {
+            Command::Originate(id, generation, local, destination, jitter, close, reply) => {
+                let result = async {
+                    if close.load(Ordering::Acquire) {
+                        return Err(Error::Call);
+                    }
+                    let owner = self.active.get(&id).cloned().ok_or(Error::Call)?;
+                    let route = {
+                        let entry = owner.borrow();
+                        if entry.retiring
+                            || entry.done
+                            || entry.settings.generation() != generation
+                            || entry.last.state != 2
+                        {
+                            return Err(Error::Call);
+                        }
+                        entry.settings.remote()
+                    };
+                    let offer = Offer::new(route, generation)
+                        .await
+                        .map_err(|_| Error::Call)?;
+                    #[cfg(test)]
+                    super::outgoing_tests::before_originate();
+                    if close.load(Ordering::Acquire) {
+                        return Err(Error::Call);
+                    }
+                    let token = owner
+                        .borrow_mut()
+                        .account
+                        .originate_call(&destination, offer.description())?;
+                    Ok((owner, offer, token))
+                }
+                .await;
+                match result {
+                    Ok((owner, offer, token)) => {
+                        let mut observation = Observation::default();
+                        observation.generation = generation;
+                        observation.call = token;
+                        observation.state = 1;
+                        observation.direction = 1;
+                        owner.borrow_mut().calls.insert(
+                            token,
+                            Slot {
+                                outgoing: Some(Outgoing {
+                                    local,
+                                    offer,
+                                    jitter,
+                                    reply,
+                                }),
+                                observation,
+                                close,
+                                dispatched: true,
+                                shared: None,
+                                step: None,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
             Command::Prepare(key, jitter, remote, reply) => {
                 let result = async {
                     let owner = self.call_owner(&key)?;
@@ -327,6 +600,7 @@ impl Reactor {
                         let entry = owner.borrow();
                         let slot = entry.calls.get(&key.call).ok_or(Error::Call)?;
                         if entry.retiring
+                            || slot.observation.direction != 0
                             || slot.observation.state != 1
                             || slot.shared.is_some()
                             || slot.close.load(Ordering::Acquire)
@@ -348,6 +622,7 @@ impl Reactor {
                         remote,
                         source: slot.observation.source()?,
                         inband: media.inband,
+                        direction: Direction::Incoming,
                         media: Mutex::new(media),
                         state: AtomicU32::new(slot.observation.state),
                         close: Arc::clone(&slot.close),

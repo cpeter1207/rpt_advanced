@@ -23,6 +23,7 @@ class Call(C.Structure):
         ("source_family", C.c_uint16),
         ("source_port", C.c_uint16),
         ("source", C.c_ubyte * 16),
+        ("direction", C.c_uint32),
     ]
 
 

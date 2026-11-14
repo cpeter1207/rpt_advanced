@@ -355,3 +355,46 @@ fn accepted_stream_setup_failure_rejects_the_new_lease() {
     assert!(backend.requests.is_empty());
     assert_eq!(next.read(&mut [0]).unwrap(), 0);
 }
+
+#[test]
+fn phone_socket_commands_are_explicit_and_disconnect_does_not_cancel_the_call() {
+    let (mut server, mut client, mut backend) = setup();
+    client
+        .write_all(&frame(
+            json!({"version":1,"operation":"phone-dial","node":"1000",
+        "account":"office","destination":"sip:synthetic@fixture.invalid"}),
+        ))
+        .unwrap();
+    assert_eq!(
+        read_reply(&mut server, &mut client, &mut backend)["ok"],
+        true
+    );
+    assert_eq!(backend.requests.len(), 1);
+    assert!(!manual_request(&backend.requests[0]));
+    drop(client);
+    server.poll(&mut backend);
+    assert!(
+        backend.cleared.is_empty(),
+        "telephone calls are not temporary manual-RF leases"
+    );
+    assert_eq!(
+        backend.requests.len(),
+        1,
+        "disconnect must not synthesize a hangup"
+    );
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    server.poll(&mut backend);
+    client
+        .write_all(&frame(
+            json!({"version":1,"operation":"phone-hangup","node":"1000","call_id":73}),
+        ))
+        .unwrap();
+    assert_eq!(
+        read_reply(&mut server, &mut client, &mut backend)["ok"],
+        true
+    );
+    assert_eq!(backend.requests.len(), 2);
+    assert_eq!(backend.requests[1]["call_id"], 73);
+    server.close(&mut backend);
+    assert!(backend.cleared.is_empty());
+}

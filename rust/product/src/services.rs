@@ -595,6 +595,7 @@ impl HostServices {
         let feedback_tail = offset_of!(abi::rptadv_host_services_v10, radio_feedback_bind);
         let timed_tail = offset_of!(abi::rptadv_host_services_v10, peer_send_prepared_timed);
         let timed_dial_tail = offset_of!(abi::rptadv_host_services_v10, peer_dial_timed_g711);
+        let phone_dial_tail = offset_of!(abi::rptadv_host_services_v10, peer_dial_phone);
         if size < table_size
             && ![
                 required,
@@ -606,6 +607,7 @@ impl HostServices {
                 feedback_tail,
                 timed_tail,
                 timed_dial_tail,
+                phone_dial_tail,
             ]
             .contains(&size)
         {
@@ -648,6 +650,8 @@ impl HostServices {
             || (egress_count == 6 && async_count != 3)
             || (api.peer_send_prepared_timed.is_some() && egress_count != 6)
             || (api.peer_dial_timed_g711.is_some() && api.peer_send_prepared_timed.is_none())
+            || (api.peer_dial_phone.is_some()
+                && (api.peer_send_prepared_timed.is_none() || api.peer_read_source.is_none()))
             || (egress_count == 0 && api.peer_write.is_none())
             || (api.peer_read_source.is_some() && egress_count != 6)
         {
@@ -1046,6 +1050,71 @@ impl HostServices {
         F: FnMut() -> bool,
     {
         self.dial_using(destination, local, maximum_frames, current, true)
+    }
+    /// Whether the selected host exposes the complete optional telephone factory.
+    pub(crate) fn phone_dial_available(&self) -> bool {
+        self.0.peer_dial_phone.is_some()
+    }
+    /// Dial an explicitly admitted telephone intent without node-dial fallback.
+    pub(crate) fn dial_phone<F>(
+        &self,
+        account: &PhoneAccountId,
+        local: &str,
+        destination: &str,
+        maximum_frames: usize,
+        mut current: F,
+    ) -> Result<PeerIo, Error>
+    where
+        F: FnMut() -> bool,
+    {
+        let dial = self.0.peer_dial_phone.ok_or(Error::Admission)?;
+        unsafe extern "C" fn current_callback<F: FnMut() -> bool>(context: *mut c_void) -> u32 {
+            u32::from(
+                catch_unwind(AssertUnwindSafe(|| unsafe { &mut *context.cast::<F>() }()))
+                    .unwrap_or(false),
+            )
+        }
+        let context = ptr::from_mut(&mut current).cast();
+        if unsafe { current_callback::<F>(context) } == 0 {
+            return Err(Error::Admission);
+        }
+        let mut handle = ptr::null_mut();
+        let label = account.as_str();
+        let code = unsafe {
+            dial(
+                self.0.context,
+                label.as_ptr().cast(),
+                label.len(),
+                local.as_ptr().cast(),
+                local.len(),
+                destination.as_ptr().cast(),
+                destination.len(),
+                maximum_frames,
+                Some(current_callback::<F>),
+                context,
+                &mut handle,
+            )
+        };
+        if code != 0 {
+            return Err(Error::Operation);
+        }
+        match unsafe { self.peer(handle) } {
+            Ok(peer)
+                if peer.phone_account() == Some(account)
+                    && peer.local() == local
+                    && peer.source_media()
+                    && unsafe { current_callback::<F>(context) } != 0 =>
+            {
+                Ok(peer)
+            }
+            Ok(_) => Err(Error::Admission),
+            Err(error) => {
+                if !handle.is_null() {
+                    unsafe { self.0.peer_destroy.unwrap()(self.0.context, handle) };
+                }
+                Err(error)
+            }
+        }
     }
     fn dial_using<F>(
         &self,

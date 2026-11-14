@@ -38,8 +38,12 @@ _Static_assert(offsetof(struct rptadv_host_services_v10, radio_feedback_bind) ==
                "preserve the complete SDK33 host prefix");
 _Static_assert(offsetof(struct rptadv_host_services_v10, peer_send_prepared_timed) == 408,
                "preserve the complete previous host prefix");
-_Static_assert(sizeof(struct rptadv_host_services_v10) == 416,
-               "update the complete ABI-10 size deliberately");
+_Static_assert(offsetof(struct rptadv_host_services_v10, peer_dial_timed_g711) == 416,
+               "preserve the complete timed-egress host prefix");
+_Static_assert(offsetof(struct rptadv_host_services_v10, peer_dial_phone) == 424,
+               "preserve the complete restricted-dial host prefix");
+_Static_assert(sizeof(struct rptadv_host_services_v10) == 432,
+               "the optional telephone factory extends ABI 10");
 
 static int node(void *context, const struct rptadv_node_host_configuration *record) {
     assert(record);

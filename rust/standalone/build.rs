@@ -67,6 +67,7 @@ fn main() {
         .allowlist_var("RPTADV_PHONE_ACCOUNT_.*")
         .allowlist_var("RPTADV_IAX2_SERVICE_ONLY")
         .allowlist_var("RPTADV_SITE_.*")
+        .allowlist_var("RPTADV_PHONE_(COMMAND_.*|DIAL|HANGUP)")
         .allowlist_var("URP_NATIVE_.*")
         .allowlist_var("URP_AST_.*")
         .allowlist_type("Urp.*")

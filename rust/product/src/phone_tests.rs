@@ -833,3 +833,291 @@ fn slow_login_digits_keep_credentials_private_and_keep_absolute_admission_deadli
     assert_eq!(calls.expire_authentication(60000), [reply.clone()]);
     assert!(reply.ended());
 }
+
+#[test]
+fn outgoing_claim_counts_pending_capacity_and_never_releases_a_successor() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let io = peer(false);
+    let account = io.phone_account().unwrap().clone();
+    let local = io.local().to_owned();
+    let provider_call = io.identity().call_id().unwrap();
+    drop(io);
+    let mut calls = PhoneCalls::new(1, 1).unwrap();
+    let first = calls
+        .reserve_outgoing(account.clone(), &local)
+        .expect("peer-free outgoing intent must reserve before a provider call exists");
+    assert!(first.current());
+    assert_eq!(first.account(), &account);
+    assert_eq!(first.local(), local);
+    assert!(calls.source(provider_call).is_none());
+    assert!(calls.outgoing_reserved(&local));
+    assert!(calls.reserve_outgoing(account.clone(), &local).is_err());
+    assert!(
+        calls.admit(peer(false), 0).is_err(),
+        "pending and incoming share capacity"
+    );
+    assert!(calls.cancel_outgoing("other", first.id()).is_err());
+    assert!(first.current());
+    assert!(calls.cancel_outgoing(&local, first.id()).unwrap().is_none());
+    assert!(!first.current());
+    let second = calls.reserve_outgoing(account, &local).unwrap();
+    assert_ne!(first.id(), second.id());
+    assert!(calls.cancel_outgoing(&local, first.id()).is_err());
+    assert!(calls.adopt_outgoing(&first, peer(false)).is_err());
+    assert!(second.current() && calls.outgoing_reserved(&local));
+    assert!(calls.retire_all().is_empty());
+    assert!(!second.current() && !calls.outgoing_reserved(&local));
+    assert!(calls.is_empty());
+    let last = calls
+        .reserve_outgoing(first.account().clone(), &local)
+        .unwrap();
+    drop(calls);
+    assert!(
+        !last.current(),
+        "destroying the control owner must cancel pending dial work"
+    );
+}
+
+#[test]
+fn outgoing_adoption_is_media_only_and_does_not_expire_as_an_incoming_login() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let io = peer(false);
+    let local = io.local().to_owned();
+    let account = io.phone_account().unwrap().clone();
+    let mut calls = PhoneCalls::new(1, 1).unwrap();
+    let claim = calls.reserve_outgoing(account, &local).unwrap();
+    let source = calls.adopt_outgoing(&claim, io).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    assert!(reply.phone_outgoing() && reply.phone_media_authorized());
+    assert!(!reply.phone_authenticated());
+    assert!(calls.mailbox(&source, &reply).is_none());
+    assert!(
+        calls
+            .authenticate(&source, &reply, &records(), "100", "1234", 0)
+            .is_err()
+    );
+    assert!(calls.login_digit(&source, &reply, '1', 0).is_err());
+    assert!(calls.actions(&source, &reply, '*', 0).is_err());
+    assert!(calls.expire_authentication(600_000).is_empty());
+    assert!(!reply.ended() && claim.current());
+    assert!(calls.admit(peer(true), 0).is_err());
+    assert_eq!(
+        calls.cancel_outgoing(&local, claim.id()).unwrap(),
+        Some(reply.clone())
+    );
+    assert!(reply.ended() && !claim.current() && calls.is_empty());
+}
+
+#[test]
+fn outgoing_provider_identity_must_match_the_pending_account_and_local() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for wrong_account in [false, true] {
+        let io = peer(false);
+        let account = if wrong_account {
+            rpt_advanced_core::link::PhoneAccountId::new("other").unwrap()
+        } else {
+            io.phone_account().unwrap().clone()
+        };
+        let local = if wrong_account {
+            io.local().to_owned()
+        } else {
+            "other".to_owned()
+        };
+        let mut calls = PhoneCalls::new(1, 1).unwrap();
+        let claim = calls.reserve_outgoing(account, &local).unwrap();
+        assert!(calls.adopt_outgoing(&claim, io).is_err());
+        assert!(claim.current() && calls.outgoing_reserved(&local));
+        assert!(calls.cancel_outgoing(&local, claim.id()).unwrap().is_none());
+        assert!(!claim.current() && calls.is_empty());
+    }
+}
+
+#[test]
+fn outgoing_media_uses_existing_source_owner_and_releases_callee_digits_without_grammar() {
+    use crate::link::{
+        private_phone::PrivatePhoneSession,
+        session::{SerialSession, tests::Input},
+    };
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (io, state) = crate::link::session::tests::phone_source_peer();
+    let local = io.local().to_owned();
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let claim = calls
+        .reserve_outgoing(io.phone_account().unwrap().clone(), &local)
+        .unwrap();
+    let source = calls.adopt_outgoing(&claim, io).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let io = calls.calls[0].io.take().unwrap();
+    let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    calls.calls[0].owner = Some(control);
+    session.set_source_clock(
+        crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
+    );
+    let input = calls
+        .prepare_media(&source, &reply, None)
+        .expect("the outgoing role must reach the same prepared media path without a mailbox");
+    session.step(0).unwrap();
+    assert!(input.active());
+    calls.attach(&source, &reply, &local).unwrap();
+    assert_eq!(calls.attachments(&local), [(source.clone(), reply.clone())]);
+    assert!(calls.attach(&source, &reply, "other").is_err());
+    state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+    session.step(1).unwrap();
+    let (event_source, event_reply, digit, _) = calls.event().unwrap();
+    assert_eq!(
+        (event_source, event_reply, digit),
+        (source.clone(), reply.clone(), '5')
+    );
+    assert!(!input.active());
+    calls.reconcile_collections(|_, _, _| panic!("callee never owns a node collector"));
+    for now in 2..22 {
+        session.step(now).unwrap();
+    }
+    assert!(!crate::link::private_phone::tests::collection_suppressed(
+        &session
+    ));
+    assert!(calls.calls[0].grammar.is_none() && calls.calls[0].mailbox.is_none());
+    assert_eq!(calls.media_refresh_nodes(), [local.clone()]);
+    let replacement = calls.prepare_media(&source, &reply, None).unwrap();
+    session.step(22).unwrap();
+    assert!(replacement.active());
+    assert_eq!(
+        calls.cancel_outgoing(&local, claim.id()).unwrap(),
+        Some(reply.clone())
+    );
+    assert!(!replacement.active() && reply.ended());
+}
+
+#[test]
+fn outgoing_initial_source_cut_rearms_without_any_callee_digit() {
+    use crate::link::{
+        private_phone::PrivatePhoneSession,
+        session::{SerialSession, tests::Input},
+    };
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (io, state) = crate::link::session::tests::phone_source_peer();
+    let local = io.local().to_owned();
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let claim = calls
+        .reserve_outgoing(io.phone_account().unwrap().clone(), &local)
+        .unwrap();
+    let source = calls.adopt_outgoing(&claim, io).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let io = calls.calls[0].io.take().unwrap();
+    let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    calls.calls[0].owner = Some(control);
+    session.set_source_clock(
+        crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
+    );
+    calls.attach(&source, &reply, &local).unwrap();
+    let old = calls.prepare_media(&source, &reply, None).unwrap();
+    state.lock().unwrap().source_reset = true;
+    session.step(0).unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.0; 160]));
+    assert!(
+        !old.active(),
+        "the initial source cut still revokes its prepared predecessor"
+    );
+    assert!(
+        calls.event().is_none(),
+        "source reset is not a synthetic callee digit"
+    );
+    calls.reconcile_collections(|_, _, _| panic!("outgoing has no node collector"));
+    for now in 1..4 {
+        session.step(now).unwrap();
+    }
+    assert_eq!(
+        calls.media_refresh_nodes(),
+        [local],
+        "quiet initial source cut must become rearm-ready without login digits"
+    );
+    let replacement = calls.prepare_media(&source, &reply, None).unwrap();
+    session.step(4).unwrap();
+    assert!(replacement.active());
+    // A later reset remains a real cut, not a special initial-call exception.
+    state.lock().unwrap().source_reset = true;
+    session.step(5).unwrap();
+    assert!(!replacement.active());
+    assert!(calls.event().is_none());
+    assert_eq!(calls.media_refresh_nodes(), [claim.local()]);
+    let stale = calls.prepare_media(&source, &reply, None).unwrap();
+    // A newer digit invalidates the scalar captured by preparation. It still
+    // waits for the existing exact callee release and never becomes a command.
+    state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+    session.step(6).unwrap();
+    assert!(!stale.active());
+    assert!(calls.media_refresh_nodes().is_empty());
+    assert_eq!(calls.event().unwrap().2, '5');
+    calls.reconcile_collections(|_, _, _| panic!("outgoing has no node collector"));
+    session.step(7).unwrap();
+    assert_eq!(calls.media_refresh_nodes(), [claim.local()]);
+    let fresh = calls.prepare_media(&source, &reply, None).unwrap();
+    // Cancellation while its fresh generation is pending cannot revive media.
+    claim.cancel();
+    assert_eq!(calls.expire_authentication(8), [reply.clone()]);
+    assert!(session.step(8).is_err());
+    assert!(!fresh.active() && !reply.phone_media_authorized());
+    assert!(!reply.phone_authenticated());
+    assert!(!calls.outgoing_reserved(claim.local()));
+}
+
+#[test]
+fn outgoing_failed_completion_reaps_only_the_canceled_pending_claim() {
+    let mut calls = PhoneCalls::new(2, 2).unwrap();
+    let account = rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap();
+    let old = calls.reserve_outgoing(account.clone(), "1000").unwrap();
+    let other = calls.reserve_outgoing(account.clone(), "2000").unwrap();
+    // A rejected executor completion cannot synchronously mutate PhoneCalls.
+    // Its exact job can still cancel its own atomic intent before the next pump.
+    old.cancel();
+    assert!(calls.expire_authentication(1).is_empty());
+    assert!(
+        !calls.outgoing_reserved("1000"),
+        "ordinary pump must release canceled pending capacity"
+    );
+    assert!(other.current() && calls.outgoing_reserved("2000"));
+    let successor = calls.reserve_outgoing(account, "1000").unwrap();
+    assert!(calls.cancel_outgoing("1000", old.id()).is_err());
+    assert!(successor.current() && calls.outgoing_reserved("1000"));
+    let (io, _) = crate::link::session::tests::phone_source_peer();
+    assert!(calls.adopt_outgoing(&old, io).is_err());
+    assert!(successor.current());
+}
+
+#[test]
+fn outgoing_uncertain_completion_cancels_adopted_media_on_the_existing_pump() {
+    let mut calls = PhoneCalls::new(2, 2).unwrap();
+    let account = rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap();
+    let old = calls.reserve_outgoing(account.clone(), "1000").unwrap();
+    let other = calls.reserve_outgoing(account.clone(), "2000").unwrap();
+    let (io, state) = crate::link::session::tests::phone_source_peer();
+    let source = calls.adopt_outgoing(&old, io).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    assert!(reply.phone_media_authorized());
+    old.cancel();
+    assert_eq!(
+        calls.expire_authentication(1),
+        [reply.clone()],
+        "uncertain completion must retire the exact already-adopted call too"
+    );
+    assert!(reply.ended() && !reply.phone_media_authorized());
+    assert_eq!(state.lock().unwrap().drops, 1);
+    assert!(other.current() && calls.outgoing_reserved("2000"));
+    let successor = calls.reserve_outgoing(account, "1000").unwrap();
+    assert!(calls.cancel_outgoing("1000", old.id()).is_err());
+    assert!(successor.current());
+}

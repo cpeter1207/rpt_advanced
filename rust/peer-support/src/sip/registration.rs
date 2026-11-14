@@ -126,6 +126,8 @@ pub struct Call {
     source_family: u16,
     source_port: u16,
     source: [u8; 16],
+    /// Incoming=0, outgoing=1; direction is not mailbox/control authority.
+    pub direction: u32,
 }
 impl Default for Call {
     fn default() -> Self {
@@ -140,11 +142,12 @@ impl Default for Call {
             source_family: 0,
             source_port: 0,
             source: [0; 16],
+            direction: 0,
         }
     }
 }
 impl Call {
-    /// Initial bounded SDP. Caller identity grants no mailbox or radio authority.
+    /// Remote offer/answer, empty before an outgoing answer; never mailbox authority.
     pub fn offer(&self) -> &[u8] {
         &self.offer[..self.offer_length as usize]
     }
@@ -164,14 +167,24 @@ impl Call {
         Ok(std::net::SocketAddr::new(ip, self.source_port))
     }
 
-    fn validate(&self, generation: u64) -> Result<(), Error> {
+    fn validate(&mut self, generation: u64, supports_outgoing: bool) -> Result<(), Error> {
+        if !supports_outgoing {
+            // This field was padding in the released incoming-only record.
+            self.direction = 0;
+        }
+        let absent_answer = self.direction == 1
+            && matches!(self.state, 1 | 4 | 5)
+            && self.offer_length == 0
+            && self.source_family == 0
+            && self.source_port == 0
+            && self.source == [0; 16];
         if self.struct_size != size_of::<Self>() as u32
             || self.generation != generation
             || self.call == 0
             || !(1..=5).contains(&self.state)
-            || self.source().is_err()
-            || self.offer_length == 0
+            || self.direction > 1
             || self.offer_length as usize > self.offer.len()
+            || (!absent_answer && (self.source().is_err() || self.offer_length == 0))
         {
             return Err(Error::Contract);
         }
@@ -179,6 +192,7 @@ impl Call {
     }
 }
 
+type CallOriginate = unsafe extern "C" fn(*mut c_void, u64, Span, Span, *mut u64) -> i32;
 type CallRead = unsafe extern "C" fn(*mut c_void, u64, *mut Call) -> i32;
 type CallResponse = unsafe extern "C" fn(*mut c_void, u64, u64, u32, Span) -> i32;
 type CallAction = unsafe extern "C" fn(*mut c_void, u64, u64) -> i32;
@@ -202,18 +216,32 @@ struct Descriptor {
     respond_call: Option<CallResponse>,
     hangup_call: Option<CallAction>,
     release_call: Option<CallAction>,
+    originate_call: Option<CallOriginate>,
+    acknowledge_call: Option<CallAction>,
 }
 impl Descriptor {
     unsafe fn read(pointer: *const Self) -> Result<Self, Error> {
-        if pointer.is_null()
-            || unsafe { std::ptr::addr_of!((*pointer).struct_size).read_unaligned() }
-                < size_of::<Self>() as u32
-        {
+        if pointer.is_null() {
             return Err(Error::Contract);
         }
-        let api = unsafe { pointer.read_unaligned() };
+        let size = unsafe { std::ptr::addr_of!((*pointer).struct_size).read_unaligned() } as usize;
+        let prefix = std::mem::offset_of!(Self, originate_call);
+        if size < prefix || (size > prefix && size < size_of::<Self>()) {
+            return Err(Error::Contract);
+        }
+        // Zero initializes nullable optional slots without reading past the released prefix.
+        let mut api = std::mem::MaybeUninit::<Self>::zeroed();
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                pointer.cast::<u8>(),
+                api.as_mut_ptr().cast::<u8>(),
+                size.min(size_of::<Self>()),
+            );
+        }
+        let api = unsafe { api.assume_init() };
         if api.abi_version != 1
             || api.capability != *b"rptadv.sip\0\0\0\0\0\0"
+            || api.originate_call.is_some() != api.acknowledge_call.is_some()
             || ![
                 api.create.is_some(),
                 api.service.is_some(),
@@ -351,7 +379,7 @@ impl Account {
         };
         match code {
             0 => {
-                call.validate(self.generation)?;
+                call.validate(self.generation, self.provider.api.originate_call.is_some())?;
                 Ok(Some(call))
             }
             1 => Ok(None),
@@ -378,6 +406,38 @@ impl Account {
         } else {
             Err(Error::Status(code))
         }
+    }
+    /// Originate one exact call using the optional outgoing tail and retained local offer.
+    pub fn originate_call(&self, destination: &str, offer: &[u8]) -> Result<u64, Error> {
+        let action = self.provider.api.originate_call.ok_or(Error::Contract)?;
+        let context = self.context.get().ok_or(Error::Contract)?;
+        let mut call = 0;
+        let code = unsafe {
+            action(
+                context.as_ptr(),
+                self.generation,
+                destination.into(),
+                Span {
+                    data: offer.as_ptr(),
+                    length: offer.len(),
+                },
+                &mut call,
+            )
+        };
+        if code != 0 {
+            return Err(Error::Status(code));
+        }
+        if call == 0 {
+            return Err(Error::Contract);
+        }
+        Ok(call)
+    }
+    /// ACK a final answer only after the consumer has validated its media contract.
+    pub fn acknowledge_call(&self, call: u64) -> Result<(), Error> {
+        self.call_action(
+            self.provider.api.acknowledge_call.ok_or(Error::Contract)?,
+            call,
+        )
     }
     fn call_action(&self, action: CallAction, call: u64) -> Result<(), Error> {
         let context = self.context.get().ok_or(Error::Contract)?;
@@ -433,6 +493,9 @@ mod tests {
     unsafe extern "C" fn call_action(_: *mut c_void, _: u64, _: u64) -> i32 {
         0
     }
+    unsafe extern "C" fn originate(_: *mut c_void, _: u64, _: Span, _: Span, _: *mut u64) -> i32 {
+        0
+    }
     fn descriptor() -> Descriptor {
         Descriptor {
             struct_size: size_of::<Descriptor>() as u32,
@@ -450,6 +513,8 @@ mod tests {
             respond_call: Some(call_response),
             hangup_call: Some(call_action),
             release_call: Some(call_action),
+            originate_call: Some(originate),
+            acknowledge_call: Some(call_action),
         }
     }
     #[test]
@@ -473,7 +538,7 @@ mod tests {
         table = descriptor();
         table.capability[0] = 0;
         assert!(unsafe { Descriptor::read(&table) }.is_err());
-        for absent in 0..12 {
+        for absent in 0..14 {
             table = descriptor();
             match absent {
                 0 => table.create = None,
@@ -487,7 +552,9 @@ mod tests {
                 8 => table.next_call = None,
                 9 => table.respond_call = None,
                 10 => table.hangup_call = None,
-                _ => table.release_call = None,
+                11 => table.release_call = None,
+                12 => table.originate_call = None,
+                _ => table.acknowledge_call = None,
             }
             assert!(unsafe { Descriptor::read(&table) }.is_err());
         }
@@ -496,6 +563,81 @@ mod tests {
         assert!(unsafe { Descriptor::read(std::ptr::from_ref(&prefix).cast()) }.is_err());
         assert_eq!(size_of::<Status>(), 40);
         assert_eq!(size_of::<Config>(), 16 + 12 * size_of::<usize>());
-        assert_eq!(size_of::<Descriptor>(), 24 + size_of::<[usize; 12]>());
+        assert_eq!(size_of::<Descriptor>(), 24 + size_of::<[usize; 14]>());
+    }
+    #[test]
+    fn outgoing_offer_is_absent_until_a_validated_answer_arrives() {
+        let mut call = Call {
+            generation: 7,
+            call: 1,
+            state: 1,
+            direction: 1,
+            ..Call::default()
+        };
+        assert!(
+            call.validate(7, true).is_ok(),
+            "outgoing setup has no remote SDP yet"
+        );
+        for state in [4, 5] {
+            call.state = state;
+            assert!(
+                call.validate(7, true).is_ok(),
+                "failed outgoing setup still owns its token"
+            );
+        }
+        for state in [2, 3] {
+            call.state = state;
+            assert_eq!(call.validate(7, true), Err(Error::Contract));
+        }
+        call.offer_length = 1;
+        call.source_family = 4;
+        call.source_port = 5060;
+        assert!(call.validate(7, true).is_ok());
+        call.direction = 2;
+        assert_eq!(call.validate(7, true), Err(Error::Contract));
+        call.direction = 0;
+        assert!(call.validate(7, true).is_ok());
+        call.offer_length = 0;
+        assert_eq!(
+            call.validate(7, true),
+            Err(Error::Contract),
+            "incoming admission requires an offer"
+        );
+    }
+    #[test]
+    fn optional_outgoing_tail_preserves_incoming_prefix_without_reading_old_padding() {
+        let mut table = descriptor();
+        let prefix = std::mem::offset_of!(Descriptor, originate_call) as u32;
+        table.struct_size = prefix;
+        let incoming =
+            unsafe { Descriptor::read(&table) }.expect("released incoming prefix remains usable");
+        assert!(incoming.originate_call.is_none());
+        assert!(incoming.acknowledge_call.is_none());
+        for size in prefix + 1..size_of::<Descriptor>() as u32 {
+            table.struct_size = size;
+            assert!(
+                unsafe { Descriptor::read(&table) }.is_err(),
+                "partial outgoing group rejected"
+            );
+        }
+        table = descriptor();
+        table.originate_call = None;
+        table.acknowledge_call = None;
+        assert!(unsafe { Descriptor::read(&table) }.is_ok());
+        let mut call = Call {
+            generation: 7,
+            call: 1,
+            state: 1,
+            direction: 0xdeadbeef,
+            source_family: 4,
+            source_port: 5060,
+            offer_length: 1,
+            ..Call::default()
+        };
+        assert!(call.validate(7, false).is_ok());
+        assert_eq!(
+            call.direction, 0,
+            "old ABI padding cannot become outgoing authority"
+        );
     }
 }

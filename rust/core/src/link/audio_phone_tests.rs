@@ -485,3 +485,67 @@ fn phone_fanout_keeps_original_deadline_excludes_self_and_never_advances_it_on_p
         }
     }
 }
+
+#[test]
+fn outgoing_phone_role_uses_existing_exact_mixer_fence_without_control_authority() {
+    let source = source(7, 9, 13);
+    let outgoing = PeerSignals::for_outgoing_phone(source.clone());
+    let current = outgoing.reply_target();
+    let (writer, mut output) = LinkAudioQueue::new(16, 4).unwrap().into_endpoints();
+    let peer = AudioPeer::for_phone(
+        &source,
+        &current,
+        Mode::TRANSCEIVE,
+        input(current.clone()),
+        writer,
+        4,
+    )
+    .expect("outgoing media-only role must use the existing typed phone slot");
+    assert!(!current.phone_authenticated());
+    assert!(!peer.ended());
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 4).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    links
+        .process(
+            &mut controller,
+            true,
+            &mut [0.5; 4],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    assert!(links.peers[0].active);
+    dispatcher.dispatch(1);
+    let mut sent = [0.0; 4];
+    assert_eq!(
+        output.read(&mut sent),
+        0,
+        "outgoing media must reach the real dispatcher"
+    );
+    assert_eq!(
+        sent, [0.5; 4],
+        "return is local radio without phone self-echo"
+    );
+    links
+        .process(
+            &mut controller,
+            true,
+            &mut [0.5; 4],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    outgoing.end();
+    dispatcher.dispatch(1);
+    assert_eq!(
+        output.read(&mut sent),
+        4,
+        "retirement fences queued return media"
+    );
+    assert!(links.peers[0].ended());
+    assert!(!current.phone_authenticated());
+}

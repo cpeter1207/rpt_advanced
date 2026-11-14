@@ -42,6 +42,7 @@ pub struct StandaloneHostContext {
     secrets: SecretsFile,
     ingress: Option<PeerIngress>,
     echo: Mutex<Option<Arc<Accounts>>>,
+    sip: Mutex<Option<sip_phone::Originator>>,
 }
 
 /// An executor cannot publish peers until its jitter provider is available.
@@ -82,6 +83,7 @@ impl HostServicesOwner {
             secrets,
             ingress,
             echo: Mutex::new(None),
+            sip: Mutex::new(None),
         });
         let descriptor = Box::new(abi::rptadv_host_services_v10 {
             struct_size: size_of::<abi::rptadv_host_services_v10>() as u32,
@@ -137,6 +139,7 @@ impl HostServicesOwner {
             radio_feedback_bind: Some(crate::radio_host::radio_feedback_bind),
             peer_send_prepared_timed: Some(peer_send_prepared_timed),
             peer_dial_timed_g711: Some(peer_dial_timed_g711),
+            peer_dial_phone: Some(sip_phone::dial),
         });
         Ok(Self {
             context,

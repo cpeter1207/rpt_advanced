@@ -9,6 +9,9 @@ use std::{
     sync::Mutex,
 };
 
+#[path = "runtime_phone.rs"]
+mod phone;
+
 /// Product startup, reload, or shutdown failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeError {
@@ -70,7 +73,7 @@ impl RuntimeError {
 
 /// Running product and host context. Product stop precedes host/provider release.
 pub struct ProductRuntime {
-    product: &'static abi::rptadv_product_descriptor_v1,
+    product: abi::rptadv_product_descriptor_v1,
     reload: unsafe extern "C" fn(*const c_char, usize) -> i32,
     stop: unsafe extern "C" fn() -> i32,
     host: Option<HostServicesOwner>,
@@ -84,7 +87,7 @@ pub struct ProductRuntime {
 impl ProductRuntime {
     /// Borrow the retained immutable product table for local composition adapters.
     pub(crate) fn product_descriptor(&self) -> &abi::rptadv_product_descriptor_v1 {
-        self.product
+        &self.product
     }
 
     /// Copy the last successfully committed document, never a staged candidate.
@@ -129,7 +132,7 @@ impl ProductRuntime {
     /// # Safety
     /// The descriptors and their code must stay live until stop; the host table owns its context.
     pub unsafe fn start(
-        product: &'static abi::rptadv_product_descriptor_v1,
+        product: &abi::rptadv_product_descriptor_v1,
         host: HostServicesOwner,
         control: *const abi::rptadv_control_descriptor_v1,
         file: *const abi::rptadv_file_descriptor,
@@ -165,7 +168,7 @@ impl ProductRuntime {
             return Err(RuntimeError::Start);
         }
         Ok(Self {
-            product,
+            product: *product,
             reload,
             stop,
             host: Some(host),
@@ -199,14 +202,14 @@ impl ProductRuntime {
         #[cfg(test)]
         crate::host_services::product_phone_tests::configure_foreground_fixture(&mut host);
         with_echo_preparation(configuration_path, &descriptors, |preparation| {
-            unsafe { host.prepare_echo(descriptors.product, configuration, preparation) }
+            unsafe { host.prepare_echo(&descriptors.product, configuration, preparation) }
                 .map_err(RuntimeError::Echo)
         })?;
         // SAFETY: provider_ref points into the boxed owner moved into ProductRuntime below. The
         // product stops before host and provider boxes are dropped, including startup rollback.
         let mut runtime = unsafe {
             Self::start(
-                descriptors.product,
+                &descriptors.product,
                 host,
                 descriptors.control,
                 descriptors.file,
@@ -243,7 +246,7 @@ impl ProductRuntime {
                 .as_deref()
                 .ok_or(RuntimeError::InvalidDescriptor)?;
             let outcome = with_echo_preparation(path, descriptors, |preparation| {
-                unsafe { host.reload_echo(self.product, configuration, preparation, apply) }
+                unsafe { host.reload_echo(&self.product, configuration, preparation, apply) }
                     .map_err(RuntimeError::EchoUpdate)
             })?;
             if outcome.product.published() {
@@ -378,7 +381,24 @@ impl ProductRuntime {
         self.host
             .as_ref()
             .ok_or(crate::iax::IaxError::Operation)?
-            .incoming_provider(self.product, call, account, listener)
+            .incoming_provider(&self.product, call, account, listener)
+    }
+
+    /// Publish the existing committed reactor/account cohort for control-only dials.
+    pub(crate) fn publish_sip(
+        &self,
+        worker: Option<&crate::phone::registration::Worker>,
+        accounts: &crate::phone_accounts::PreparedAccounts,
+    ) {
+        if let Some(host) = &self.host {
+            host.publish_sip(worker, accounts);
+        }
+    }
+    /// Gate new calls across the existing foreground publication transaction.
+    pub(crate) fn set_sip_dial_admission(&self, admitting: bool) {
+        if let Some(host) = &self.host {
+            host.set_sip_dial_admission(admitting);
+        }
     }
 
     /// Consume a SIP receipt through the same private product admission contract.
@@ -392,12 +412,13 @@ impl ProductRuntime {
         self.host
             .as_ref()
             .ok_or(crate::phone::registration::Error::Call)?
-            .incoming_sip(self.product, receipt)
+            .incoming_sip(&self.product, receipt)
     }
 
     /// Stop product workers before releasing host state and provider libraries.
     pub fn stop(&mut self) -> Result<(), RuntimeError> {
         if let Some(host) = &self.host {
+            host.publish_sip(None, &crate::phone_accounts::PreparedAccounts::default());
             host.stop_echo().map_err(RuntimeError::Echo)?;
         }
         if unsafe { (self.stop)() } != 0 {
@@ -655,6 +676,7 @@ mod tests {
             inspect_configuration: None,
             inspect_secrets: None,
             reload_poll: Some(reload_ready),
+            phone_command: None,
         }))
     }
 
@@ -662,6 +684,127 @@ mod tests {
         let mut product = *descriptor(start_without_counts, stop_without_counts, None);
         product.incoming = Some(incoming);
         Box::leak(Box::new(product))
+    }
+
+    #[test]
+    fn local_phone_commands_use_typed_identity_and_return_no_dialed_data() {
+        use serde_json::json;
+        type Seen = (String, u32, String, String, u64);
+        static SEEN: std::sync::Mutex<Vec<Seen>> = std::sync::Mutex::new(Vec::new());
+        unsafe extern "C" fn phone(
+            local: *const c_char,
+            length: usize,
+            request: *const abi::rptadv_phone_command_v1,
+            output: *mut u64,
+        ) -> i32 {
+            let request = unsafe { &*request };
+            let text = |data: *const c_char, length| {
+                if length == 0 {
+                    return String::new();
+                }
+                String::from_utf8(
+                    unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) }.to_vec(),
+                )
+                .unwrap()
+            };
+            let node = text(local, length);
+            SEEN.lock().unwrap().push((
+                node.clone(),
+                request.operation,
+                text(request.account, request.account_length),
+                text(request.destination, request.destination_length),
+                request.call_id,
+            ));
+            if node == "2000" {
+                return -1;
+            }
+            unsafe {
+                output.write(if request.operation == abi::RPTADV_PHONE_DIAL {
+                    73
+                } else {
+                    request.call_id
+                })
+            };
+            0
+        }
+        let mut api = *descriptor(start_without_counts, stop_without_counts, None);
+        api.phone_command = Some(phone);
+        let mut process = unsafe {
+            ProductRuntime::start(
+                &api,
+                host(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                "[general]\n",
+            )
+        }
+        .unwrap();
+        let dial = json!({"operation":"phone-dial","node":"1000","account":"office","destination":"sip:synthetic@fixture.invalid"});
+        let result = process
+            .local_radio_request(&dial)
+            .expect("typed telephone bridge");
+        assert_eq!(result, json!({"accepted":true,"call_id":73}));
+        assert!(
+            !result.to_string().contains("office") && !result.to_string().contains("synthetic")
+        );
+        let hangup = json!({"operation":"phone-hangup","node":"1000","call_id":73});
+        assert_eq!(
+            process.local_radio_request(&hangup).unwrap(),
+            json!({"accepted":true,"call_id":73})
+        );
+        assert_eq!(
+            *SEEN.lock().unwrap(),
+            [
+                (
+                    "1000".into(),
+                    abi::RPTADV_PHONE_DIAL,
+                    "office".into(),
+                    "sip:synthetic@fixture.invalid".into(),
+                    0
+                ),
+                (
+                    "1000".into(),
+                    abi::RPTADV_PHONE_HANGUP,
+                    String::new(),
+                    String::new(),
+                    73
+                )
+            ]
+        );
+        for invalid in [
+            json!({"operation":"phone-dial","node":"1000","account":"office"}),
+            json!({"operation":"phone-dial","node":"1000","destination":"123"}),
+            json!({"operation":"phone-dial","node":"1000","account":"office","destination":"123","call_id":73}),
+            json!({"operation":"phone-hangup","node":"1000","call_id":0}),
+            json!({"operation":"phone-hangup","node":"1000","call_id":-1}),
+            json!({"operation":"phone-hangup","node":"1000","call_id":73,"destination":"123"}),
+        ] {
+            assert!(process.local_radio_request(&invalid).is_err());
+        }
+        assert_eq!(SEEN.lock().unwrap().len(), 2);
+        let mut unavailable = dial.clone();
+        unavailable["node"] = json!("2000");
+        let error = process.local_radio_request(&unavailable).unwrap_err();
+        assert!(!error.contains("office") && !error.contains("synthetic"));
+        process.reload_fault.store(-7, Ordering::Release);
+        assert!(
+            process.local_radio_request(&dial).is_err(),
+            "fatal reload closes admission"
+        );
+        process.reload_fault.store(0, Ordering::Release);
+        process.product.phone_command = None;
+        assert!(
+            process.local_radio_request(&dial).is_err(),
+            "old complete prefix remains unavailable"
+        );
+        process.product.phone_command = Some(phone);
+        process.stop().unwrap();
+        assert!(
+            process.local_radio_request(&dial).is_err(),
+            "stopped owner cannot dial"
+        );
+        assert_eq!(SEEN.lock().unwrap().len(), 3);
     }
 
     #[test]

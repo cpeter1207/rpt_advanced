@@ -34,6 +34,7 @@ fn main() {
         .allowlist_function("ast_(replace_sigchld|unreplace_sigchld)")
         .allowlist_type("rptadv_.*")
         .allowlist_var("RPTADV_SITE_.*")
+        .allowlist_var("RPTADV_PHONE_(COMMAND_.*|DIAL|HANGUP)")
         .allowlist_type("UrpAstSite.*")
         .allowlist_type("Urp(AstRemoteControl|RemoteOperation|RemoteTicket)")
         .allowlist_var("URP_AST_(REMOTE_.*|OPTION_REMOTE_CONTROL)")

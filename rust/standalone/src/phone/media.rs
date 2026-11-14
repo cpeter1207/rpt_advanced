@@ -62,6 +62,14 @@ impl G711 {
 impl MediaDescription {
     /// Select one supported audio stream without accepting security downgrade.
     pub fn parse(source: &[u8]) -> Result<Self, MediaError> {
+        Self::parse_description(source, false)
+    }
+    /// Answers may only retain offered payloads; invalid advertised events are
+    /// not equivalent to genuinely omitting RFC4733 and choosing inband DTMF.
+    pub(crate) fn parse_answer(source: &[u8]) -> Result<Self, MediaError> {
+        Self::parse_description(source, true)
+    }
+    fn parse_description(source: &[u8], answer: bool) -> Result<Self, MediaError> {
         use sdp::description::session::SessionDescription;
         let invalid = MediaError::UnsupportedDescription;
         if source.len() > 16_384 {
@@ -78,6 +86,14 @@ impl MediaDescription {
             || name.port.range.is_some()
             || session.encryption_key.is_some()
             || media.encryption_key.is_some()
+        {
+            return Err(invalid);
+        }
+        if answer
+            && name
+                .formats
+                .iter()
+                .any(|pt| !matches!(pt.as_str(), "0" | "8" | "101"))
         {
             return Err(invalid);
         }
@@ -155,6 +171,17 @@ impl MediaDescription {
             if pt == payload && format != expected && format != format!("{expected}/1") {
                 return Err(invalid);
             }
+            if answer && name.formats.iter().any(|value| value == pt) {
+                let offered = match pt {
+                    "0" => "PCMU/8000",
+                    "8" => "PCMA/8000",
+                    "101" => "telephone-event/8000",
+                    _ => return Err(invalid),
+                };
+                if format != offered && format != format!("{offered}/1") {
+                    return Err(invalid);
+                }
+            }
         }
         let telephone_event = attributes().filter(|a| a.key == "rtpmap").find_map(|a| {
             let (pt, format) = a.value.as_deref()?.split_once(' ')?;
@@ -170,6 +197,9 @@ impl MediaDescription {
                 && events_supported)
                 .then_some(number)
         });
+        if answer && name.formats.iter().any(|pt| pt == "101") && telephone_event != Some(101) {
+            return Err(invalid);
+        }
         Ok(Self {
             remote: SocketAddr::new(ip, port),
             codec,
@@ -178,21 +208,41 @@ impl MediaDescription {
     }
     /// Answer the selected stream at a local media address.
     pub fn answer(&self, local: SocketAddr, session: u64) -> Result<Vec<u8>, MediaError> {
+        Self::describe(local, session, &[self.codec], self.telephone_event)
+    }
+    /// Offer the two existing G.711 profiles and the fixed telephone-event map.
+    pub(crate) fn offer(local: SocketAddr, session: u64) -> Result<Vec<u8>, MediaError> {
+        Self::describe(local, session, &[G711::Mulaw, G711::Alaw], Some(101))
+    }
+    fn describe(
+        local: SocketAddr,
+        session: u64,
+        codecs: &[G711],
+        event: Option<u8>,
+    ) -> Result<Vec<u8>, MediaError> {
         if local.ip().is_unspecified() || local.ip().is_multicast() || local.port() == 0 {
             return Err(MediaError::UnsupportedDescription);
         }
         let family = if local.is_ipv4() { "IP4" } else { "IP6" };
-        let payload = self.codec.payload();
-        let (event_format, event_attributes) = self
-            .telephone_event
-            .map(|pt| {
-                (
-                    format!(" {pt}"),
-                    format!("a=rtpmap:{pt} telephone-event/8000\r\na=fmtp:{pt} 0-15\r\n"),
-                )
-            })
-            .unwrap_or_default();
-        Ok(format!("v=0\r\no=- {session} {session} IN {family} {}\r\ns=rpt-advanced\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {payload}{event_format}\r\na=rtpmap:{payload} {}/8000\r\na=ptime:20\r\na=sendrecv\r\n{event_attributes}", local.ip(), local.ip(), local.port(), self.codec.name()).into_bytes())
+        let mut formats = codecs
+            .iter()
+            .map(|codec| codec.payload().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut attributes = codecs
+            .iter()
+            .map(|codec| format!("a=rtpmap:{} {}/8000\r\n", codec.payload(), codec.name()))
+            .collect::<String>();
+        if let Some(pt) = event {
+            use std::fmt::Write;
+            write!(formats, " {pt}").expect("String formatting");
+            write!(
+                attributes,
+                "a=rtpmap:{pt} telephone-event/8000\r\na=fmtp:{pt} 0-15\r\n"
+            )
+            .expect("String formatting");
+        }
+        Ok(format!("v=0\r\no=- {session} {session} IN {family} {}\r\ns=rpt-advanced\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {formats}\r\n{attributes}a=ptime:20\r\na=sendrecv\r\n", local.ip(), local.ip(), local.port()).into_bytes())
     }
 }
 
@@ -347,6 +397,38 @@ impl RtpEndpoint {
             events: [None; 16],
             next_event: 0,
         })
+    }
+    /// Adopt an answer on this same offered socket only after a proven empty cut.
+    /// This bounded drain is not RTP admission: old SSRC/event state cannot survive.
+    pub(crate) async fn select_answer(
+        mut self,
+        media: MediaDescription,
+    ) -> Result<Self, MediaError> {
+        if media.remote.is_ipv4() != self.media.remote.is_ipv4()
+            || media.telephone_event.is_some_and(|pt| pt != 101)
+        {
+            return Err(MediaError::UnsupportedDescription);
+        }
+        self.socket
+            .connect(media.remote)
+            .await
+            .map_err(|_| MediaError::Network)?;
+        let mut wire = [0; 2048];
+        for _ in 0..64 {
+            match receive_datagram(&self.socket, &mut wire, 0, &mut self.receipt_floor) {
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.egress.header.payload_type = media.codec.payload();
+                    self.media = media;
+                    self.source = None;
+                    self.events = [None; 16];
+                    self.next_event = 0;
+                    return Ok(self);
+                }
+                Err(error) => return Err(MediaError::Socket(error.raw_os_error().unwrap_or(0))),
+            }
+        }
+        Err(MediaError::Network)
     }
     /// Actual listening address, including an allocated ephemeral port.
     pub fn local_addr(&self) -> Result<SocketAddr, MediaError> {

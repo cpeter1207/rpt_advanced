@@ -229,7 +229,10 @@ fn full_foreground_registers_reloads_and_stops_without_radio_output() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    wait_for_log(&logs, "foreground SIP fixture stopped with no radio output");
+    wait_for_log(
+        &logs,
+        "foreground SIP fixture stopped; authorized voice output: false",
+    );
     reader.join().unwrap();
     if std::env::var_os("CARGO_LLVM_COV").is_some() {
         let profiles: Vec<_> = fs::read_dir(&fixture.directory)

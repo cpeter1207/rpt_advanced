@@ -655,6 +655,20 @@ struct rptadv_host_services_v10 {
     int (*peer_dial_timed_g711)(void *context, const char *destination, size_t destination_length,
                                const char *local, size_t local_length, size_t maximum_frames,
                                rptadv_current_v1 current, void *current_context, void **peer);
+    /** Optional account-aware outgoing telephone factory. Call only off realtime
+     * and provider-reactor threads, after product call policy/isolation admission.
+     * Account is a configured label; local is the initiating hosted node, not an
+     * implicit account default; destination is provider telephone addressing.
+     * Borrow all spans/current context only until return. Check current before
+     * INVITE, throughout answer wait and before transferring one established
+     * PHONE owner through peer. Cancellation/refusal transfers nothing and closes
+     * that exact pending call. Use existing peer operations for media/teardown.
+     * Null means unavailable, never a generic node-dial fallback or login grant. */
+    int (*peer_dial_phone)(void *context, const char *account, size_t account_length,
+                           const char *local, size_t local_length,
+                           const char *destination, size_t destination_length,
+                           size_t maximum_frames, rptadv_current_v1 current,
+                           void *current_context, void **peer);
 };
 
 /** Exact revision of a typed site control request. */
@@ -693,6 +707,32 @@ struct rptadv_site_command_v1 {
     const char *target;   /**< Borrowed target name, not NUL terminated. */
     size_t target_length; /**< Name byte count; null is valid only for zero length. */
     double value;         /**< Normalized manual fan demand, otherwise zero. */
+};
+
+/** Exact version of an administrative telephone call request. */
+#define RPTADV_PHONE_COMMAND_ABI_VERSION 1U
+/** Reserve the initiating node and originate on one configured account. */
+#define RPTADV_PHONE_DIAL 1U
+/** Retire only the named local node's exact pending or active call claim. */
+#define RPTADV_PHONE_HANGUP 2U
+
+/** Typed telephone control, never an incoming caller's command authority.
+ * The host authenticates administrative callers before invoking this API.
+ * DIAL requires nonempty account/destination and call_id zero. HANGUP requires
+ * a nonzero call_id and empty account/destination. Account labels are at most
+ * 64 bytes and local node labels at most 63 bytes, matching existing identities.
+ * Destination is at most 255 bytes and follows provider policy.
+ * All spans are borrowed only until return and are never diagnostic payloads.
+ */
+struct rptadv_phone_command_v1 {
+    uint32_t struct_size; /**< Complete readable record size. */
+    uint32_t abi_version; /**< Exact RPTADV_PHONE_COMMAND_ABI_VERSION. */
+    uint32_t operation; /**< RPTADV_PHONE_DIAL or RPTADV_PHONE_HANGUP. */
+    const char *account; /**< Configured account label, not provider credentials. */
+    size_t account_length; /**< Account byte count. */
+    const char *destination; /**< Provider destination, not an AllStar node alias. */
+    size_t destination_length; /**< Destination byte count. */
+    uint64_t call_id; /**< Exact prior claim for hangup; zero for dial. */
 };
 
 /** Portable runtime entry points.
@@ -761,6 +801,17 @@ struct rptadv_product_descriptor_v1 {
      * through pending/fatal outcomes; adopt them on either committed status.
      * Each call is nonblocking with respect to physical rig I/O. */
     int (*reload_poll)(void);
+    /** Optional typed telephone control. Zero accepts the operation, not proof
+     * of answer or media delivery; -1 is unavailable/stale/refused, -2 invalid.
+     * On accepted DIAL, call_id receives a nonzero process-local claim. HANGUP
+     * uses request.call_id and writes that same value after exact retirement.
+     * The output is required and reset to zero on failure. The first supported
+     * route reserves a peer-free initiating node for the exact call; it does not
+     * impose a persistent node connectivity restriction. Null means unavailable.
+     * Consumers accept only the prior complete prefix or this complete tail,
+     * never a partial function pointer, and retain descriptor code through stop. */
+    int (*phone_command)(const char *local, size_t local_length,
+                         const struct rptadv_phone_command_v1 *request, uint64_t *call_id);
 };
 
 /** Return immutable process-lifetime product metadata.

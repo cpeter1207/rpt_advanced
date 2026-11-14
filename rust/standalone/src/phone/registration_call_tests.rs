@@ -36,6 +36,7 @@ async fn failed_native_close_before_ack_still_retires_the_product_step() {
         source: "127.0.0.1:9999".parse().unwrap(),
         media: Mutex::new(media),
         inband: true,
+        direction: Direction::Incoming,
         state: AtomicU32::new(2),
         close: Arc::clone(&closed),
         stopped: AtomicBool::new(false),
@@ -48,6 +49,7 @@ async fn failed_native_close_before_ack_still_retires_the_product_step() {
     entry.calls.insert(
         1,
         Slot {
+            outgoing: None,
             observation,
             close: closed,
             dispatched: true,

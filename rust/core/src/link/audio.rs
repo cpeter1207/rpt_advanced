@@ -311,7 +311,7 @@ impl<P: PeerInput> AudioPeer<P> {
         outbound: LinkAudioProducer,
         maximum: usize,
     ) -> Result<Self, AdmissionError> {
-        if !reply.phone_authenticated()
+        if !reply.phone_media_authorized()
             || reply.phone_source() != Some(source)
             || input.phone_reply() != Some(reply)
             || input.receive_policy() != ReceivePolicy::Phone
@@ -364,7 +364,7 @@ impl<P: PeerInput> AudioPeer<P> {
             || self
                 .phone
                 .as_ref()
-                .is_some_and(|reply| !reply.phone_authenticated())
+                .is_some_and(|reply| !reply.phone_media_authorized())
     }
     /// Mark this peer as a one-based member of a configured priority group.
     pub fn with_group(mut self, selection: GroupSelection, slot: std::num::NonZeroUsize) -> Self {
@@ -515,7 +515,7 @@ impl LinkDispatcher {
                                     || (!generation.ended()
                                         && phone
                                             .as_ref()
-                                            .is_none_or(PeerReply::phone_authenticated))
+                                            .is_none_or(PeerReply::phone_media_authorized))
                             },
                         )
                         && self.retirement.revision() == revision
@@ -538,7 +538,7 @@ impl LinkDispatcher {
             let (generation, phone) = &self.fences[index];
             let eligible = destination.eligible
                 && !generation.ended()
-                && phone.as_ref().is_none_or(PeerReply::phone_authenticated);
+                && phone.as_ref().is_none_or(PeerReply::phone_media_authorized);
             if eligible {
                 let offset = (index + 1) * self.scratch.len();
                 for (frame, sample) in self.scratch[..block.frames].iter_mut().enumerate() {

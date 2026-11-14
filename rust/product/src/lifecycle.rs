@@ -81,6 +81,8 @@ fn spawn_dial(operation: impl FnOnce() + Send + 'static) -> std::io::Result<Join
         .spawn(operation)
 }
 
+#[path = "lifecycle_phone_command.rs"]
+mod phone_command;
 #[path = "lifecycle_site.rs"]
 mod site;
 
@@ -170,6 +172,78 @@ impl Drop for Call {
     }
 }
 impl Engine {
+    fn start_phone(
+        self: &Arc<Self>,
+        local: String,
+        account: rpt_advanced_core::link::PhoneAccountId,
+        destination: String,
+    ) -> Result<u64, RuntimeError> {
+        let call = self.enter()?;
+        if !self.services.phone_dial_available() {
+            return Err(RuntimeError::Rejected);
+        }
+        let revision = self.revision.load(Ordering::Acquire);
+        let engine = Arc::clone(self);
+        let claim = self.run(move |host| {
+            if !engine.current(revision) {
+                return Err(RuntimeError::Rejected);
+            }
+            host.reserve_outgoing_phone(account, &local)
+        })?;
+        let id = claim.id();
+        let pending = Arc::clone(&claim);
+        let engine = Arc::clone(self);
+        let operation = move || {
+            let _call = call;
+            let current = || engine.current(revision) && pending.current();
+            let io = engine
+                .services
+                .dial_phone(
+                    pending.account(),
+                    pending.local(),
+                    &destination,
+                    crate::host::MAXIMUM_FRAMES,
+                    current,
+                )
+                .ok();
+            let owner = Arc::clone(&engine);
+            let retained = Arc::clone(&pending);
+            let completed = engine.run_inner(true, move |host| {
+                if owner.current(revision) && retained.current() {
+                    if let Some(io) = io {
+                        return host
+                            .adopt_outgoing_phone(&retained, io, owner.clock())
+                            .map(|_| ());
+                    }
+                }
+                host.cancel_outgoing_phone(retained.local(), retained.id())
+            });
+            if completed.is_err() {
+                // An uncertain control completion may already have adopted media.
+                // The existing pump observes this exact atomic claim in either state.
+                pending.cancel();
+            }
+        };
+        match spawn_dial(operation) {
+            Ok(thread) => self
+                .jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(thread),
+            Err(_) => {
+                claim.cancel();
+                let _ = self.run_inner(true, move |host| {
+                    host.cancel_outgoing_phone(claim.local(), id)
+                });
+                return Err(RuntimeError::Preparation);
+            }
+        }
+        Ok(id)
+    }
+    fn hangup_phone(self: &Arc<Self>, local: String, id: u64) -> Result<(), RuntimeError> {
+        let _call = self.enter()?;
+        self.run(move |host| host.cancel_outgoing_phone(&local, id))
+    }
     pub(crate) fn execute(
         self: &Arc<Self>,
         local: String,
@@ -709,6 +783,9 @@ impl Engine {
                     .map(str::to_owned)
                     .collect::<Vec<_>>()
                 {
+                    if host.outgoing_phone_reserved(&local) {
+                        continue;
+                    }
                     let node = host.runtime.node(&local).ok_or(RuntimeError::MissingNode)?;
                     let work = node
                         .work()
@@ -1352,6 +1429,7 @@ static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descr
     site_command: Some(crate::site::command::execute),
     radio_control: Some(crate::radio_control::execute),
     reload_poll: Some(rptadv_product_reload_poll),
+    phone_command: Some(phone_command::execute),
 };
 
 /// Return immutable process-lifetime product metadata.

@@ -54,6 +54,25 @@ unsafe extern "C" {
     ) -> i32;
     fn sip_native_hangup(context: *mut c_void, call: u64) -> i32;
     fn sip_native_release(context: *mut c_void, call: u64) -> i32;
+    fn sip_native_originate(
+        context: *mut c_void,
+        aor: *const c_char,
+        hop: *const c_char,
+        destination: *const c_char,
+        offer: *const c_char,
+        token: *mut u64,
+    ) -> i32;
+    fn sip_native_acknowledge(context: *mut c_void, call: u64) -> i32;
+    fn sip_native_next_authentication(
+        context: *mut c_void,
+        token: *mut u64,
+        realm: *mut c_char,
+    ) -> usize;
+    fn sip_native_authenticate_call(
+        context: *mut c_void,
+        token: u64,
+        credentials: *const c_char,
+    ) -> i32;
 }
 
 /// Wipe the adapter-owned formatted credential when its context retires.
@@ -65,6 +84,14 @@ impl Drop for Secret {
             unsafe { ptr::write_volatile(byte, 0) };
         }
     }
+}
+
+/// Reuse one private account secret for a validated native challenge only.
+fn format_credentials(auth: &Secret, realm: &[u8]) -> Secret {
+    let mut value = Secret(b"Digest:".to_vec());
+    value.0.extend_from_slice(realm);
+    value.0.extend_from_slice(&auth.0);
+    value
 }
 
 /// Callback-owned observations; no callback borrows the surrounding account.
@@ -404,12 +431,9 @@ unsafe extern "C" fn service(context: *mut c_void, generation: u64) -> i32 {
             let observed = account.observed_mut();
             let credentials = if observed.authenticate {
                 observed.authenticate = false;
-                let mut value = Secret(b"Digest:".to_vec());
-                value
-                    .0
-                    .extend_from_slice(&observed.realm[..observed.realm_length]);
-                value.0.extend_from_slice(&account.auth.0);
-                Some(value)
+                let realm = observed.realm;
+                let length = observed.realm_length;
+                Some(format_credentials(&account.auth, &realm[..length]))
             } else {
                 None
             };
@@ -420,6 +444,26 @@ unsafe extern "C" fn service(context: *mut c_void, generation: u64) -> i32 {
         }
         if cancel {
             unsafe { sip_native_cancel(native) };
+        }
+        // Call challenges live in their authoritative slots, never the account event queue.
+        for _ in 0..8 {
+            let mut token = 0;
+            let mut realm = [0u8; 256];
+            let length = unsafe {
+                sip_native_next_authentication(native, &mut token, realm.as_mut_ptr().cast())
+            };
+            if length == 0 {
+                break;
+            }
+            if length > realm.len() {
+                return Err(-4);
+            }
+            let value = format_credentials(unsafe { &(*pointer).auth }, &realm[..length]);
+            let result =
+                unsafe { sip_native_authenticate_call(native, token, value.0.as_ptr().cast()) };
+            if result != 0 {
+                return Err(result);
+            }
         }
         let admission = unsafe { (*pointer).observed().status.state == 2 };
         unsafe { sip_native_admission(native, i32::from(admission)) };
@@ -581,6 +625,46 @@ unsafe extern "C" fn release_call(context: *mut c_void, generation: u64, call: u
     })
 }
 
+unsafe extern "C" fn originate_call(
+    context: *mut c_void,
+    generation: u64,
+    destination: abi::rptadv_sip_span_v1,
+    offer: abi::rptadv_sip_span_v1,
+    call: *mut u64,
+) -> i32 {
+    boundary(|| {
+        if call.is_null() {
+            return Err(-1);
+        }
+        unsafe { call.write(0) };
+        let pointer = unsafe { checked(context, generation)? };
+        if unsafe { (*pointer).observed().status.state } != 2 {
+            return Err(-3);
+        }
+        let destination = sip_uri(unsafe { field(destination, 1030)? }, true)?;
+        let offer = CString::new(unsafe { field(offer, 4096)? }).map_err(|_| -1)?;
+        let account = unsafe { &*pointer };
+        // Native calls copy strings synchronously and retain only their owned slot.
+        Ok(unsafe {
+            sip_native_originate(
+                account.native,
+                account.aor.as_ptr(),
+                account.hop.as_ptr(),
+                destination.as_ptr(),
+                offer.as_ptr(),
+                call,
+            )
+        })
+    })
+}
+
+unsafe extern "C" fn acknowledge_call(context: *mut c_void, generation: u64, call: u64) -> i32 {
+    boundary(|| {
+        let native = unsafe { (*checked(context, generation)?).native };
+        Ok(unsafe { sip_native_acknowledge(native, call) })
+    })
+}
+
 /// Borrow the complete descriptor while retaining the DSO.
 #[unsafe(no_mangle)]
 pub extern "C" fn rptadv_sip_adapter_descriptor_v1() -> *const c_void {
@@ -600,6 +684,8 @@ pub extern "C" fn rptadv_sip_adapter_descriptor_v1() -> *const c_void {
         respond_call: Some(respond_call),
         hangup_call: Some(hangup_call),
         release_call: Some(release_call),
+        originate_call: Some(originate_call),
+        acknowledge_call: Some(acknowledge_call),
     };
     ptr::from_ref(&DESCRIPTOR).cast()
 }

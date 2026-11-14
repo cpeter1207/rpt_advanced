@@ -34,6 +34,10 @@ struct call {
     uint64_t diagnostic_token;   /**< Process-local opaque log identity, never a SIP Call-ID. */
     uint64_t admitted_ms;        /**< Monotonic origin; zero means unavailable. */
     uint32_t notices;            /**< At most one record per fixed transition category. */
+    char realm[256];             /**< One pending bounded native Digest realm. */
+    size_t realm_length;         /**< Nonzero until the serial owner supplies credentials. */
+    unsigned challenges;         /**< Bounded outgoing authentication attempts. */
+    int cancel_pending;          /**< A late accepted offer still requires one local BYE. */
 };
 
 /** Private native state; account policy and event retention live in Rust. */
@@ -184,6 +188,47 @@ static void call_state(struct call *call, uint32_t value, int status) {
     }
 }
 
+/** Copy one bounded remote SDP and its actual message source, never header routing.
+ * @param state Native event owner.
+ * @param call Exact dialog slot.
+ * @param sip Current parsed message.
+ * @return Nonzero only for a complete supported envelope; SDP policy remains with the host.
+ */
+static int remote_media(struct native *state, struct call *call, const sip_t *sip) {
+    if (!sip || !sip->sip_content_type ||
+        !su_casematch(sip->sip_content_type->c_type, "application/sdp") || !sip->sip_payload ||
+        sip->sip_payload->pl_next || !sip->sip_payload->pl_len ||
+        sip->sip_payload->pl_len > sizeof(call->observed.offer)) {
+        return 0;
+    }
+    msg_t *message = nua_current_request(state->nua);
+    su_sockaddr_t *source = message ? msg_addr(message) : NULL;
+    if (!source || (source->su_family != AF_INET && source->su_family != AF_INET6)) {
+        return 0;
+    }
+    const uint8_t *bytes;
+    size_t length;
+    if (source->su_family == AF_INET) {
+        call->observed.source_family = 4;
+        call->observed.source_port = ntohs(source->su_sin.sin_port);
+        bytes = (const uint8_t *)&source->su_sin.sin_addr;
+        length = 4;
+    } else {
+        call->observed.source_family = 6;
+        call->observed.source_port = ntohs(source->su_sin6.sin6_port);
+        bytes = (const uint8_t *)&source->su_sin6.sin6_addr;
+        length = 16;
+    }
+    for (size_t i = 0; i < length; ++i) {
+        call->observed.source[i] = bytes[i];
+    }
+    call->observed.offer_length = (uint32_t)sip->sip_payload->pl_len;
+    for (size_t i = 0; i < call->observed.offer_length; ++i) {
+        call->observed.offer[i] = (uint8_t)sip->sip_payload->pl_data[i];
+    }
+    return 1;
+}
+
 /** Translate only native call ownership and initial bounded SDP.
  * @param state Native owner.
  * @param kind Native event.
@@ -220,10 +265,7 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
                 }
             }
         }
-        if (call && (!sip || !sip->sip_content_type ||
-                     !su_casematch(sip->sip_content_type->c_type, "application/sdp") ||
-                     !sip->sip_payload || sip->sip_payload->pl_next || !sip->sip_payload->pl_len ||
-                     sip->sip_payload->pl_len > 4096)) {
+        if (call && !remote_media(state, call, sip)) {
             call = NULL;
             refusal = 488;
         }
@@ -232,38 +274,11 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
             nua_handle_destroy(handle);
             return;
         }
-        msg_t *request = nua_current_request(state->nua);
-        su_sockaddr_t *source = request ? msg_addr(request) : NULL;
-        if (!source || (source->su_family != AF_INET && source->su_family != AF_INET6)) {
-            nua_respond(handle, 488, "Call Unavailable", TAG_END());
-            nua_handle_destroy(handle);
-            return;
-        }
-        const uint8_t *bytes;
-        size_t length;
-        if (source->su_family == AF_INET) {
-            call->observed.source_family = 4;
-            call->observed.source_port = ntohs(source->su_sin.sin_port);
-            bytes = (const uint8_t *)&source->su_sin.sin_addr;
-            length = 4;
-        } else {
-            call->observed.source_family = 6;
-            call->observed.source_port = ntohs(source->su_sin6.sin6_port);
-            bytes = (const uint8_t *)&source->su_sin6.sin6_addr;
-            length = 16;
-        }
-        for (size_t i = 0; i < length; ++i) {
-            call->observed.source[i] = bytes[i];
-        }
         call->handle = handle;
         call->diagnostic_token = diagnostic_token();
         call->admitted_ms = monotonic_ms();
         call->observed.struct_size = sizeof(call->observed);
         call->observed.call = ++state->next_call;
-        call->observed.offer_length = (uint32_t)sip->sip_payload->pl_len;
-        for (size_t i = 0; i < call->observed.offer_length; ++i) {
-            call->observed.offer[i] = (uint8_t)sip->sip_payload->pl_data[i];
-        }
         call_state(call, 1, status);
     }
     if (!call) {
@@ -271,6 +286,44 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
             nua_handle_destroy(handle);
         }
         return;
+    }
+    if (call->observed.direction == 1 && kind == nua_r_invite) {
+        if (status == 401 || status == 407) {
+            const char *realm = challenge_realm(sip, status);
+            if (call->observed.state == 1 && realm && call->challenges < 2) {
+                call->realm_length = strlen(realm);
+                for (size_t i = 0; i < call->realm_length; ++i) {
+                    call->realm[i] = realm[i];
+                }
+                ++call->challenges;
+                call_state(call, 1, status);
+            } else {
+                call_state(call, 4, status);
+                call->cancel_pending = 1;
+                nua_cancel(handle, TAG_END());
+            }
+        } else if (status >= 200 && status < 300) {
+            if (call->observed.state == 1) {
+                if (remote_media(state, call, sip)) {
+                    call_state(call, 2, status);
+                } else {
+                    /* A final success still requires ACK before rejecting its media. */
+                    nua_ack(handle, TAG_END());
+                    call_state(call, 4, 488);
+                    nua_bye(handle, TAG_END());
+                }
+            } else if (call->observed.state >= 3) {
+                nua_ack(handle, TAG_END());
+                if (call->cancel_pending) {
+                    call->cancel_pending = 0;
+                    nua_bye(handle, TAG_END());
+                }
+            }
+        } else if (status >= 300) {
+            call_state(call, 4, status);
+        } else {
+            call_state(call, 1, status);
+        }
     }
     if (kind == nua_i_cancel || kind == nua_i_bye) {
         call_notice(call, kind == nua_i_bye ? REMOTE_BYE : REMOTE_CANCEL, status);
@@ -353,7 +406,7 @@ static void event(nua_event_t kind, int status, const char *phrase, nua_t *nua, 
         }
     }
     if (kind == nua_r_register || kind == nua_r_unregister || kind == nua_r_shutdown ||
-        kind == nua_i_outbound || kind == nua_r_authenticate) {
+        kind == nua_i_outbound || (kind == nua_r_authenticate && handle == state->account)) {
         uint32_t translated = kind == nua_r_register     ? 1
                               : kind == nua_r_unregister ? 2
                               : kind == nua_r_shutdown   ? 3
@@ -518,7 +571,7 @@ int sip_native_respond(void *context, uint64_t token, uint32_t status, const cha
     if (!call) {
         return -2;
     }
-    if (call->observed.state != 1) {
+    if (call->observed.state != 1 || call->observed.direction != 0) {
         return -3;
     }
     if (status != 200) {
@@ -539,8 +592,17 @@ int sip_native_hangup(void *context, uint64_t token) {
     if (call->observed.state < 4) {
         call_notice(call, LOCAL_CLOSE, 0);
     }
+    if (call->observed.direction == 1 && call->observed.state == 1) {
+        call_state(call, 4, 0);
+        call->cancel_pending = 1;
+        nua_cancel(call->handle, TAG_END());
+        return 0;
+    }
     if (call->observed.state == 1) {
         return sip_native_respond(context, token, 480, NULL);
+    }
+    if (call->observed.direction == 1 && call->observed.state == 2) {
+        nua_ack(call->handle, TAG_END());
     }
     if (call->observed.state < 4) {
         call_state(call, 4, 0);
@@ -558,5 +620,83 @@ int sip_native_release(void *context, uint64_t token) {
         return 1;
     }
     *call = (struct call){0};
+    return 0;
+}
+
+int sip_native_originate(void *context, const char *aor, const char *hop, const char *destination,
+                         const char *offer, uint64_t *token) {
+    struct native *state = context;
+    if (!state->admission || state->next_call == UINT64_MAX) {
+        return -3;
+    }
+    struct call *call = NULL;
+    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
+        if (!state->calls[i].observed.call) {
+            call = &state->calls[i];
+            break;
+        }
+    }
+    if (!call) {
+        return 1;
+    }
+    nua_handle_t *handle =
+        nua_handle(state->nua, NULL, SIPTAG_FROM_STR(aor), SIPTAG_TO_STR(destination), TAG_END());
+    if (!handle) {
+        return -4;
+    }
+    call->handle = handle;
+    call->diagnostic_token = diagnostic_token();
+    call->admitted_ms = monotonic_ms();
+    call->observed.struct_size = sizeof(call->observed);
+    call->observed.call = ++state->next_call;
+    call->observed.direction = 1;
+    call_state(call, 1, 0);
+    *token = call->observed.call;
+    nua_invite(handle, NUTAG_URL(destination), NUTAG_PROXY(hop), SIPTAG_CONTACT(state->contact),
+               NUTAG_AUTOACK(0), SIPTAG_CONTENT_TYPE_STR("application/sdp"),
+               SIPTAG_PAYLOAD_STR(offer), TAG_END());
+    return 0;
+}
+
+int sip_native_acknowledge(void *context, uint64_t token) {
+    struct call *call = find_call(context, token);
+    if (!call) {
+        return -2;
+    }
+    if (call->observed.direction != 1 || (call->observed.state != 2 && call->observed.state != 3)) {
+        return -3;
+    }
+    if (call->observed.state == 2) {
+        nua_ack(call->handle, TAG_END());
+    }
+    return 0;
+}
+
+size_t sip_native_next_authentication(void *context, uint64_t *token, char realm[256]) {
+    struct native *state = context;
+    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
+        struct call *call = &state->calls[i];
+        if (call->observed.state == 1 && call->realm_length) {
+            size_t length = call->realm_length;
+            for (size_t j = 0; j < length; ++j) {
+                realm[j] = call->realm[j];
+            }
+            call->realm_length = 0;
+            *token = call->observed.call;
+            return length;
+        }
+    }
+    return 0;
+}
+
+int sip_native_authenticate_call(void *context, uint64_t token, const char *credentials) {
+    struct call *call = find_call(context, token);
+    if (!call) {
+        return -2;
+    }
+    if (call->observed.state != 1 || call->observed.direction != 1) {
+        return -3;
+    }
+    nua_authenticate(call->handle, NUTAG_AUTH(credentials), TAG_END());
     return 0;
 }

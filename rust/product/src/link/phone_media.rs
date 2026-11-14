@@ -45,10 +45,10 @@ pub(super) struct Shared {
 }
 impl Shared {
     pub(super) fn occupied(&self) -> bool {
-        self.phase.load(Ordering::Acquire) != RETIRED && self.reply.phone_authenticated()
+        self.phase.load(Ordering::Acquire) != RETIRED && self.reply.phone_media_authorized()
     }
     fn active(&self) -> bool {
-        self.phase.load(Ordering::Acquire) == ACTIVE && self.reply.phone_authenticated()
+        self.phase.load(Ordering::Acquire) == ACTIVE && self.reply.phone_media_authorized()
     }
     pub(super) fn retire(&self) {
         self.phase.store(RETIRED, Ordering::Release);
@@ -542,7 +542,7 @@ pub(super) fn prepare_voiced(
     expected_revision: NonZeroU32,
     processor: Option<PcmProcessor>,
 ) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
-    if !reply.phone_authenticated() {
+    if !reply.phone_media_authorized() {
         return Err(Error::Admission);
     }
     let speech = SpeechAnalysis::new(rate, (rate / 50) as usize)?;
@@ -556,7 +556,7 @@ fn prepare_with_speech(
     processor: Option<PcmProcessor>,
     speech: Option<SpeechAnalysis>,
 ) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
-    if !reply.phone_authenticated() {
+    if !reply.phone_media_authorized() {
         return Err(Error::Admission);
     }
     let generation = NEXT_GENERATION

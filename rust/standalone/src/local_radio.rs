@@ -31,6 +31,9 @@ impl ProductRuntime {
                     path.to_str().ok_or("configuration path is not UTF-8")?
                 ))
             }
+            Some(operation @ ("phone-dial" | "phone-hangup")) => {
+                self.local_phone_request(operation, request)
+            }
             Some(operation) => {
                 let node = request["node"].as_str().ok_or("missing local node")?;
                 let mut native = decode(operation, request)?;

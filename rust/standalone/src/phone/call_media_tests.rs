@@ -434,3 +434,135 @@ async fn adaptive_delay_reduction_preserves_exact_source_gap_credit() {
         "adaptation must be represented as source loss"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn outgoing_offer_keeps_one_port_selects_answer_and_discards_preanswer_packets() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let route = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let recipient = UdpSocket::bind("127.0.0.1:0").unwrap();
+    recipient.set_nonblocking(true).unwrap();
+    let offer = Offer::new(route.local_addr().unwrap(), 77)
+        .await
+        .expect("outgoing call must reserve its RTP port before INVITE");
+    let description = MediaDescription::parse(offer.description()).unwrap();
+    let offered = description.remote;
+    let text = std::str::from_utf8(offer.description()).unwrap();
+    assert!(text.contains("RTP/AVP 0 8 101"));
+    assert_eq!(description.telephone_event, Some(101));
+    // This came from the temporary route before final-answer adoption, not the recipient.
+    route
+        .send_to(&packet(1, 100, 0, &[0xa5; 160]), offered)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let answer = format!(
+        "v=0\r\no=fixture 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 8 101\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=sendrecv\r\n",
+        recipient.local_addr().unwrap().port()
+    );
+    let mut media = offer.accept(answer.as_bytes(), jitter).await.unwrap();
+    assert_eq!(
+        media.endpoint.local_addr().unwrap(),
+        offered,
+        "answer must not replace the advertised socket"
+    );
+    media.poll(1_000_000_000).unwrap();
+    assert!(
+        media.births.iter().all(Option::is_none),
+        "pre-answer datagram entered the selected media source"
+    );
+    media.reset().unwrap();
+    assert_eq!(
+        media
+            .send(&[0xd5; 160], 0, media.elapsed_ms() + 100)
+            .unwrap(),
+        0
+    );
+    let mut wire = [0; 2048];
+    let (count, source) = recipient.recv_from(&mut wire).unwrap();
+    assert_eq!(source, offered);
+    assert_eq!(count, 172);
+    assert_eq!(
+        wire[1] & 0x7f,
+        8,
+        "answer-selected G.711 codec controls RTP payload"
+    );
+    recipient
+        .send_to(&packet(2, 260, 8, &[0xd5; 160]), offered)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    media.poll(1_010_000_000).unwrap();
+    assert!(media.births.iter().any(Option::is_some));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn outgoing_offer_refuses_unoffered_events_and_uncleared_receive_backlog() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let route = UdpSocket::bind("127.0.0.1:0").unwrap();
+    for crowded in [false, true] {
+        let offer = Offer::new(route.local_addr().unwrap(), 78).await.unwrap();
+        let target = MediaDescription::parse(offer.description()).unwrap().remote;
+        if crowded {
+            for sequence in 0..80 {
+                route
+                    .send_to(&packet(sequence, 100, 0, &[0xa5; 160]), target)
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let answer = MediaDescription {
+            remote: route.local_addr().unwrap(),
+            codec: super::super::media::G711::Mulaw,
+            telephone_event: Some(if crowded { 101 } else { 102 }),
+        }
+        .answer(route.local_addr().unwrap(), 78)
+        .unwrap();
+        assert!(
+            offer.accept(&answer, jitter).await.is_err(),
+            "an unoffered event map or an unproven empty cut must not activate media"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn outgoing_answer_cannot_reinterpret_an_advertised_format_as_inband_fallback() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let recipient = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let valid = format!(
+        "v=0\r\no=fixture 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=sendrecv\r\n",
+        recipient.local_addr().unwrap().port()
+    );
+    for (from, to) in [
+        ("telephone-event/8000", "telephone-event/16000"),
+        ("telephone-event/8000", "PCMU/8000"),
+        ("RTP/AVP 0 101", "RTP/AVP 0 101 110"),
+        ("a=fmtp:101 0-15", "a=fmtp:101 0-9"),
+    ] {
+        let offer = Offer::new(recipient.local_addr().unwrap(), 79)
+            .await
+            .unwrap();
+        assert!(
+            offer
+                .accept(valid.replace(from, to).as_bytes(), jitter)
+                .await
+                .is_err(),
+            "unoffered answer format must be refused, not silently treated as inband DTMF"
+        );
+    }
+    let offer = Offer::new(recipient.local_addr().unwrap(), 80)
+        .await
+        .unwrap();
+    let no_events = valid
+        .replace("RTP/AVP 0 101", "RTP/AVP 0")
+        .replace("a=rtpmap:101 telephone-event/8000\r\n", "")
+        .replace("a=fmtp:101 0-15\r\n", "");
+    assert!(
+        offer
+            .accept(no_events.as_bytes(), jitter)
+            .await
+            .unwrap()
+            .inband,
+        "genuine omission of events retains the existing inband fallback"
+    );
+}

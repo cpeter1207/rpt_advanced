@@ -3623,3 +3623,33 @@ fn phone_outer_activity_does_not_create_revive_or_touch_other_collectors() {
     signals.end();
     links.phone_input_activity(&source, &reply, 40000);
 }
+
+#[test]
+fn outgoing_phone_role_cannot_create_an_incoming_command_collector() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource};
+    let source = PhoneSource::new(
+        PhoneAccountId::new("office").unwrap(),
+        7,
+        PhoneCallId::new([1; 16]).unwrap(),
+        9,
+        13,
+    )
+    .unwrap();
+    let outgoing = PeerSignals::for_outgoing_phone(source.clone());
+    let reply = outgoing.reply_target();
+    assert!(reply.phone_media_authorized());
+    assert!(!reply.phone_authenticated());
+    let mut links = links();
+    let before = links.peer_commands.len();
+    for digit in "*70#*32000#".chars() {
+        assert!(
+            links
+                .phone_digit(&source, digit, 1, reply.clone(), 3000)
+                .is_none()
+        );
+    }
+    assert_eq!(links.peer_commands.len(), before);
+    assert_eq!(links.phone_collection_pending(&source, &reply), None);
+    assert!(!outgoing.authenticate_phone());
+    links.close();
+}

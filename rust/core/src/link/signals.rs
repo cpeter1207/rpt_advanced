@@ -38,10 +38,20 @@ const LIVE: u8 = 0;
 const RETIRING: u8 = 1;
 const RETIRED: u8 = 2;
 
+// One byte replaces the former authentication Boolean in the same Arc owner.
+// Outgoing media permission is never a successful incoming login.
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum PhoneAdmission {
+    Unauthenticated = 0,
+    Mailbox = 1,
+    OutgoingMedia = 2,
+}
+
 #[derive(Debug)]
 struct ReplyState {
     phone: Option<super::PhoneSource>,
-    phone_authenticated: AtomicBool,
+    phone_admission: AtomicU8,
     phase: AtomicU8,
     domains: OnceLock<Box<RetirementLink>>,
     radio_keyed: AtomicBool,
@@ -66,7 +76,18 @@ impl PeerReply {
     }
     /// Mailbox admission is separate from provider authentication and admin unlock.
     pub fn phone_authenticated(&self) -> bool {
-        !self.ended() && self.0.phone_authenticated.load(Ordering::Acquire)
+        !self.ended()
+            && self.0.phone_admission.load(Ordering::Acquire) == PhoneAdmission::Mailbox as u8
+    }
+    /// Media permission is distinct from incoming mailbox/control admission.
+    pub fn phone_media_authorized(&self) -> bool {
+        !self.ended()
+            && matches!(self.0.phone_admission.load(Ordering::Acquire),
+            value if value == PhoneAdmission::Mailbox as u8 || value == PhoneAdmission::OutgoingMedia as u8)
+    }
+    /// True only for an explicitly constructed outgoing media-only call.
+    pub fn phone_outgoing(&self) -> bool {
+        self.0.phone_admission.load(Ordering::Acquire) == PhoneAdmission::OutgoingMedia as u8
     }
     /// Revoke queued commands and replies before their owner reclaims the connection.
     pub fn retire(&self) {
@@ -153,19 +174,23 @@ impl Default for PeerSignals {
 impl PeerSignals {
     /// Prepare empty state before either endpoint is exposed.
     pub fn new() -> Self {
-        Self::with_phone(None)
+        Self::with_phone(None, PhoneAdmission::Unauthenticated)
     }
     /// Construct private control state before any radio attachment exists.
     pub fn for_phone(source: super::PhoneSource) -> Self {
-        Self::with_phone(Some(source))
+        Self::with_phone(Some(source), PhoneAdmission::Unauthenticated)
     }
-    fn with_phone(phone: Option<super::PhoneSource>) -> Self {
+    /// Construct one exact outgoing call without incoming mailbox/control authority.
+    pub fn for_outgoing_phone(source: super::PhoneSource) -> Self {
+        Self::with_phone(Some(source), PhoneAdmission::OutgoingMedia)
+    }
+    fn with_phone(phone: Option<super::PhoneSource>, admission: PhoneAdmission) -> Self {
         Self {
             pcm: AtomicU64::new(0),
             dtmf_muted: AtomicBool::new(false),
             reply: PeerReply(Arc::new(ReplyState {
                 phone,
-                phone_authenticated: AtomicBool::new(false),
+                phone_admission: AtomicU8::new(admission as u8),
                 phase: AtomicU8::new(LIVE),
                 domains: OnceLock::new(),
                 radio_keyed: AtomicBool::new(false),
@@ -181,13 +206,13 @@ impl PeerSignals {
     /// Publish only a mailbox PIN result already verified by serialized control.
     /// This never grants node-administration unlock and is not a PIN verifier.
     pub fn authenticate_phone(&self) -> bool {
-        if self.reply.phone_source().is_none() || self.ended() {
+        if self.reply.phone_source().is_none() || self.ended() || self.reply.phone_outgoing() {
             return false;
         }
         self.reply
             .0
-            .phone_authenticated
-            .store(true, Ordering::Release);
+            .phone_admission
+            .store(PhoneAdmission::Mailbox as u8, Ordering::Release);
         true
     }
     /// Publish only after real decoded samples become visible in the shared ring.
@@ -296,3 +321,7 @@ impl PeerSignals {
 #[cfg(test)]
 #[path = "signals_domain_tests.rs"]
 mod domain_tests;
+
+#[cfg(test)]
+#[path = "signals_phone_role_tests.rs"]
+mod phone_role_tests;

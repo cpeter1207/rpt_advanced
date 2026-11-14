@@ -22,7 +22,7 @@ use tokio::sync::mpsc as mailbox;
 #[path = "registration_calls.rs"]
 pub(crate) mod calls;
 
-const SERVICE_INTERVAL: Duration = Duration::from_millis(10);
+pub(crate) const SERVICE_INTERVAL: Duration = Duration::from_millis(10);
 // Native shutdown has a documented 30-second bound; allow scheduling headroom.
 const SHUTDOWN_LIMIT: Duration = Duration::from_secs(35);
 type Reply<T> = mpsc::SyncSender<Result<T, Error>>;
@@ -75,6 +75,7 @@ pub(crate) struct Worker {
     runtime: tokio::runtime::Handle,
     preparation: Option<tokio::task::JoinHandle<()>>,
     incoming: mpsc::Receiver<calls::Receipt>,
+    client: calls::Client,
 }
 impl Worker {
     #[cfg(test)]
@@ -86,6 +87,7 @@ impl Worker {
             Arc::new(crate::providers::ResolverLibrary::load().map_err(|_| Error::Owner)?);
         let (sender, receiver) = mailbox::channel(1);
         let calls = calls::Client::new(sender.clone());
+        let client = calls.clone();
         let (incoming, receipts) = mpsc::sync_channel(8);
         let owned = Arc::clone(&provider);
         let (ready, started) = mpsc::sync_channel(1);
@@ -121,6 +123,7 @@ impl Worker {
                 runtime,
                 preparation: None,
                 incoming: receipts,
+                client,
             }),
             Err(error) => {
                 let _ = thread.join();
@@ -165,6 +168,11 @@ impl Worker {
         result
     }
 
+    /// Clone only the existing serial reactor's checked command sender.
+    pub(crate) fn client(&self) -> calls::Client {
+        self.client.clone()
+    }
+
     /// Drain bounded signaling receipts on foreground, outside the callback owner.
     pub(crate) fn incoming(&self) -> Option<calls::Receipt> {
         self.incoming.try_recv().ok()
@@ -191,7 +199,7 @@ impl Worker {
         })
     }
     #[cfg(test)]
-    fn observe(&self) -> Result<Vec<(String, Status)>, Error> {
+    pub(crate) fn observe(&self) -> Result<Vec<(String, Status)>, Error> {
         self.request(Command::Observe)
     }
     /// Request removal, service shutdown, then join before releasing the code lease.
@@ -341,11 +349,12 @@ impl Reactor {
         }
         result
     }
-    fn service(&mut self) {
+    async fn service(&mut self) {
         let now = Instant::now();
         for entry in self.active.values().chain(self.retiring.iter()) {
             entry.borrow_mut().service(now);
         }
+        self.service_outgoing().await;
         self.service_calls();
         self.retiring.retain(|entry| {
             let entry = entry.borrow();
@@ -360,8 +369,8 @@ impl Reactor {
         let wake = Arc::clone(&self.calls.wake);
         loop {
             tokio::select! {
-                _ = ticker.tick() => self.service(),
-                _ = wake.notified() => self.service(),
+                _ = ticker.tick() => self.service().await,
+                _ = wake.notified() => self.service().await,
                 command = receiver.recv(), if !stopping => match command {
                     Some(Command::Prepare(accounts, reply)) => { let _ = reply.send(self.prepare(accounts)); }
                     Some(Command::Publish(committed, reply)) => { let _ = reply.send(self.publish(committed)); }
@@ -577,3 +586,7 @@ impl Entry {
 #[cfg(test)]
 #[path = "registration_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "registration_outgoing_tests.rs"]
+mod outgoing_tests;

@@ -6,7 +6,7 @@ use rpt_advanced_core::{
     runtime::dtmf::DigitOutcome,
 };
 
-fn engine(
+pub(super) fn engine(
     configuration: String,
     services: HostServices,
     speech: Arc<SpeechFixture>,
@@ -64,7 +64,7 @@ fn configuration() -> String {
     ))
 }
 
-fn speech() -> Arc<SpeechFixture> {
+pub(super) fn speech() -> Arc<SpeechFixture> {
     let mut fixture = SpeechFixture::default();
     fixture.frames = Some(960);
     Arc::new(fixture)

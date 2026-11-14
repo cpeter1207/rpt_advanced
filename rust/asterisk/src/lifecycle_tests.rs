@@ -208,6 +208,7 @@ static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descr
     site_command: Some(site_command),
     radio_control: None,
     reload_poll: Some(reload_ready),
+    phone_command: None,
 };
 unsafe extern "C" fn reload_ready() -> i32 {
     0
@@ -589,4 +590,18 @@ fn product_mixed_reload_cohorts_are_rejected_before_use() {
         }
         assert!(unsafe { Product::open(&api) }.is_none());
     }
+}
+
+#[test]
+fn telephone_product_tail_accepts_complete_prefix_and_rejects_partial_pointer() {
+    let mut table = DESCRIPTOR;
+    let prefix = std::mem::offset_of!(ffi::rptadv_product_descriptor_v1, phone_command) as u32;
+    table.struct_size = prefix;
+    let opened = unsafe { crate::product::Product::open(&table) }
+        .expect("the complete product prefix must remain readable without a telephone tail");
+    assert!(opened.descriptor().phone_command.is_none());
+    table.struct_size = prefix + 1;
+    assert!(unsafe { crate::product::Product::open(&table) }.is_none());
+    table.struct_size = std::mem::size_of_val(&table) as u32;
+    assert!(unsafe { crate::product::Product::open(&table) }.is_some());
 }

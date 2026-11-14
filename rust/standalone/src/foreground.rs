@@ -110,6 +110,7 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         sip_update
             .map_or(Ok(()), |update| update.commit())
             .map_err(sip_error)?;
+        runtime.publish_sip(accounts.sip.as_ref(), &accounts.active);
         let registration = crate::registration::RegistrationWorker::start(registrations)
             .map_err(ForegroundError::Registration)?;
         run_runtime(
@@ -180,6 +181,7 @@ fn run_runtime(
         registration: &mut registration,
         accounts: &mut accounts,
     });
+    runtime.publish_sip(None, &crate::phone_accounts::PreparedAccounts::default());
     let sip_result = accounts
         .sip
         .as_mut()
@@ -411,6 +413,7 @@ impl ForegroundControl<'_> {
         let sip_update = prepare_sip_accounts(&mut self.accounts.sip, &candidate)?;
         let profiles = crate::iax::listeners::resolve_profiles(&radios, &candidate)
             .map_err(ForegroundError::Iax)?;
+        self.runtime.set_sip_dial_admission(false);
         let result = update_iax_listeners(
             self.listeners,
             profiles,
@@ -422,6 +425,7 @@ impl ForegroundControl<'_> {
         if let Err(error) = &result {
             if !matches!(error, ForegroundError::Runtime(error) if error.publication().published())
             {
+                self.runtime.set_sip_dial_admission(true);
                 return result;
             }
         }
@@ -431,6 +435,12 @@ impl ForegroundControl<'_> {
         let sip_result = sip_update
             .map_or(Ok(()), |update| update.commit())
             .map_err(sip_error);
+        let dialing = if sip_result.is_ok() && !self.runtime.reload_fatal() {
+            self.accounts.sip.as_ref()
+        } else {
+            None
+        };
+        self.runtime.publish_sip(dialing, &self.accounts.active);
         match read_secrets(self.secrets_path)
             .and_then(|secrets| registration_targets(&updated, &secrets))
         {
@@ -1337,6 +1347,7 @@ mod tests {
             inspect_configuration: None,
             inspect_secrets: None,
             reload_poll: Some(reload_ready),
+            phone_command: None,
         }));
         let host = crate::host_services::HostServicesOwner::new(
             Vec::new(),
@@ -1686,7 +1697,7 @@ mod tests {
             .unwrap();
         let runtime = unsafe {
             ProductRuntime::start(
-                descriptors.product,
+                &descriptors.product,
                 host,
                 control,
                 descriptors.file,

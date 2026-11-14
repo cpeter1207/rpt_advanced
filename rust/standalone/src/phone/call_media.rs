@@ -20,6 +20,46 @@ enum Pending {
     Digit(u8),
 }
 
+/// One pre-answer socket/offer, never an incoming receipt or a usable media handle.
+pub(crate) struct Offer {
+    endpoint: RtpEndpoint,
+    description: Vec<u8>,
+}
+impl Offer {
+    pub(crate) async fn new(route: SocketAddr, session: u64) -> Result<Self, MediaError> {
+        let media = MediaDescription {
+            remote: route,
+            codec: super::media::G711::Mulaw,
+            telephone_event: Some(101),
+        };
+        let local = if route.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        }
+        .parse()
+        .expect("literal endpoint");
+        let endpoint = RtpEndpoint::bind(local, media, session as u32, 0).await?;
+        let description = MediaDescription::offer(endpoint.local_addr()?, session)?;
+        Ok(Self {
+            endpoint,
+            description,
+        })
+    }
+    pub(crate) fn description(&self) -> &[u8] {
+        &self.description
+    }
+    pub(crate) async fn accept(
+        self,
+        answer: &[u8],
+        jitter: &'static abi::rptadv_jitter_descriptor_v1,
+    ) -> Result<Media, MediaError> {
+        let description = MediaDescription::parse_answer(answer)?;
+        let endpoint = self.endpoint.select_answer(description.clone()).await?;
+        Media::from_endpoint(endpoint, description, Vec::new(), jitter)
+    }
+}
+
 /// One serial media owner; product Outbound still owns PCM conversion and pacing.
 pub(crate) struct Media {
     endpoint: RtpEndpoint,
@@ -57,9 +97,17 @@ impl Media {
         }
         .parse()
         .expect("literal endpoint");
-        let inband = description.telephone_event.is_none();
         let endpoint = RtpEndpoint::bind(local, description.clone(), call as u32, 0).await?;
         let answer = description.answer(endpoint.local_addr()?, call)?;
+        Self::from_endpoint(endpoint, description, answer, jitter)
+    }
+    fn from_endpoint(
+        endpoint: RtpEndpoint,
+        description: MediaDescription,
+        answer: Vec<u8>,
+        jitter: &'static abi::rptadv_jitter_descriptor_v1,
+    ) -> Result<Self, MediaError> {
+        let inband = description.telephone_event.is_none();
         let codec = G711Codec::load(description.codec)?;
         let jitter = unsafe { Jitter::phone(std::ptr::from_ref(jitter).cast()) }
             .map_err(|_| MediaError::Jitter)?;

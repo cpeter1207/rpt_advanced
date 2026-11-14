@@ -33,7 +33,7 @@ impl Host {
         result
     }
     /// Mirror only a typed, credential-free node outcome. An explicit caller
-    /// remains exact-source; RF-origin outcomes go only to currently attached calls.
+    /// remains exact-source; RF outcomes go only to attached authenticated calls.
     pub(crate) fn node_operation_result(
         &mut self,
         local: &str,
@@ -47,7 +47,10 @@ impl Host {
                 reply.clone(),
             )]
         } else {
-            self.phone_calls.attachments(local)
+            let mut targets = self.phone_calls.attachments(local);
+            // Media-only callees are not private control-result recipients.
+            targets.retain(|(_, target)| target.phone_authenticated());
+            targets
         };
         #[cfg(test)]
         super::tests::phone::before_operation_result();
@@ -129,7 +132,11 @@ impl Host {
                 self.retire_phone(&source);
                 continue;
             }
-            let result = if reply.phone_authenticated() {
+            let result = if reply.phone_outgoing() {
+                // A called party supplies media only. Consumption records its
+                // source-cut release, never credentials or a node command.
+                Ok(())
+            } else if reply.phone_authenticated() {
                 if let Some(local) = self.phone_calls.local(&source, &reply)
                     && let Some(node) = self.runtime.node(local)
                 {

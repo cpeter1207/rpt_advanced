@@ -106,7 +106,7 @@ const PROVIDERS: [ProviderSpec; 14] = [
 /// A product-only load for configuration checking, before device providers are needed.
 pub(crate) struct ProductInspection {
     _library: ProviderLibrary,
-    api: NonNull<crate::abi::rptadv_product_descriptor_v1>,
+    api: crate::abi::rptadv_product_descriptor_v1,
 }
 
 impl ProductInspection {
@@ -124,30 +124,36 @@ impl ProductInspection {
     }
 
     pub(crate) fn api(&self) -> &crate::abi::rptadv_product_descriptor_v1 {
-        // The retained library keeps the complete immutable descriptor loaded.
-        unsafe { self.api.as_ref() }
+        // The retained library keeps the copied function pointers loaded.
+        &self.api
     }
 }
 
 fn inspection_api(
     descriptor: *const c_void,
     spec: ProviderSpec,
-) -> Result<NonNull<crate::abi::rptadv_product_descriptor_v1>, ProviderError> {
+) -> Result<crate::abi::rptadv_product_descriptor_v1, ProviderError> {
     if !valid_descriptor(descriptor, spec) {
         return Err(ProviderError::IncompatibleDescriptor(spec.library));
     }
-    if descriptor_size(descriptor, spec.layout)
-        != std::mem::size_of::<crate::abi::rptadv_product_descriptor_v1>()
-    {
+    let size = descriptor_size(descriptor, spec.layout);
+    let prefix = std::mem::offset_of!(crate::abi::rptadv_product_descriptor_v1, phone_command);
+    let full = std::mem::size_of::<crate::abi::rptadv_product_descriptor_v1>();
+    if size < prefix || (size > prefix && size < full) {
         return Err(ProviderError::IncompleteDescriptor(spec.library));
     }
-    let api = NonNull::new(
-        descriptor
-            .cast_mut()
-            .cast::<crate::abi::rptadv_product_descriptor_v1>(),
-    )
-    .expect("descriptor was checked for null");
-    if !product_functions_complete(unsafe { api.as_ref() }) {
+    // Copy only declared storage, so an incoming-only released table never lends
+    // an out-of-bounds full descriptor reference. Missing optional callbacks stay null.
+    let mut api: crate::abi::rptadv_product_descriptor_v1 = unsafe { std::mem::zeroed() };
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            descriptor.cast::<u8>(),
+            std::ptr::from_mut(&mut api).cast(),
+            size.min(full),
+        )
+    };
+    api.struct_size = full as u32;
+    if !product_functions_complete(&api) {
         return Err(ProviderError::IncompleteDescriptor(spec.library));
     }
     Ok(api)
@@ -339,7 +345,7 @@ pub struct RadioRuntimeDescriptors {
 /// Product/control/media descriptors retained for the standalone product lifetime.
 pub struct ProductRuntimeDescriptors {
     /// Portable controller implementation.
-    pub product: &'static crate::abi::rptadv_product_descriptor_v1,
+    pub product: crate::abi::rptadv_product_descriptor_v1,
     /// Lock-free standalone control-task executor.
     pub control: &'static crate::abi::rptadv_control_descriptor_v1,
     /// Local sound-file stream provider.
@@ -462,14 +468,7 @@ impl ProviderSet {
                 return Err(ProviderError::IncompatibleDescriptor(spec.library));
             }
         }
-        let product = self.typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>(
-            "librptadv_product.so.3",
-        )?;
-        if !product_functions_complete(product) {
-            return Err(ProviderError::IncompleteDescriptor(
-                "librptadv_product.so.3",
-            ));
-        }
+        self.product_descriptor()?;
         let control = self.typed_descriptor::<crate::abi::rptadv_control_descriptor_v1>(
             "librptadv_control_standalone_adapter.so.1",
         )?;
@@ -622,14 +621,7 @@ impl ProviderSet {
     pub fn product_runtime_descriptors(
         &'static self,
     ) -> Result<ProductRuntimeDescriptors, ProviderError> {
-        let product = self.typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>(
-            "librptadv_product.so.3",
-        )?;
-        if !product_functions_complete(product) {
-            return Err(ProviderError::IncompleteDescriptor(
-                "librptadv_product.so.3",
-            ));
-        }
+        let product = self.product_descriptor()?;
         let control = self.typed_descriptor::<crate::abi::rptadv_control_descriptor_v1>(
             "librptadv_control_standalone_adapter.so.1",
         )?;
@@ -645,6 +637,18 @@ impl ProviderSet {
             file,
             speech,
         })
+    }
+
+    fn product_descriptor(
+        &self,
+    ) -> Result<crate::abi::rptadv_product_descriptor_v1, ProviderError> {
+        let spec = PROVIDERS[0];
+        let loaded = self
+            .descriptors
+            .iter()
+            .find(|loaded| loaded.library == spec.library)
+            .ok_or(ProviderError::MissingDescriptor(spec.library))?;
+        inspection_api(loaded.descriptor.as_ptr(), spec)
     }
 
     fn native_product_descriptor(&self) -> Result<&crate::abi::UrpAstDescriptor, ProviderError> {
@@ -1186,9 +1190,7 @@ pub(crate) mod tests {
     #[test]
     fn runtime_validation_rechecks_descriptor_identity() {
         let mut providers = super::ProviderSet::load().unwrap();
-        let mut descriptor = *providers
-            .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.3")
-            .unwrap();
+        let mut descriptor = providers.product_descriptor().unwrap();
         descriptor.abi_version += 1;
         replace_descriptor(&mut providers, "librptadv_product.so.3", descriptor);
         assert_eq!(
@@ -1684,6 +1686,47 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn telephone_product_tail_copies_only_the_complete_inspection_prefix() {
+        unsafe extern "C" fn telephone(
+            _: *const std::ffi::c_char,
+            _: usize,
+            _: *const crate::abi::rptadv_phone_command_v1,
+            _: *mut u64,
+        ) -> i32 {
+            0
+        }
+        let spec = super::PROVIDERS[0];
+        let library = super::ProviderLibrary::open(spec, None).unwrap();
+        let raw = library.descriptor(spec.symbol).unwrap();
+        let prefix = std::mem::offset_of!(crate::abi::rptadv_product_descriptor_v1, phone_command);
+        assert!(super::descriptor_size(raw, spec.layout) >= prefix);
+        let mut table: crate::abi::rptadv_product_descriptor_v1 = unsafe { std::mem::zeroed() };
+        // The retained released descriptor supplies its existing complete prefix.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                raw.cast::<u8>(),
+                std::ptr::from_mut(&mut table).cast::<u8>(),
+                prefix,
+            );
+        }
+        table.struct_size = prefix as u32;
+        table.phone_command = Some(telephone); // Must not be read past the declared prefix.
+        let pointer = std::ptr::from_ref(&table).cast();
+        let api = super::inspection_api(pointer, spec)
+            .expect("complete product prefix remains valid without the telephone tail");
+        let inspection = super::ProductInspection {
+            _library: library,
+            api,
+        };
+        assert!(inspection.api().phone_command.is_none());
+        table.struct_size += 1;
+        assert!(super::inspection_api(std::ptr::from_ref(&table).cast(), spec).is_err());
+        table.struct_size = std::mem::size_of_val(&table) as u32;
+        assert!(super::inspection_api(std::ptr::from_ref(&table).cast(), spec).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn installed_provider_set_has_complete_runtime_tables() {
         let providers = Box::leak(Box::new(super::ProviderSet::load().unwrap()));
 
@@ -1698,9 +1741,7 @@ pub(crate) mod tests {
     #[test]
     fn runtime_function_tables_reject_each_missing_operation() {
         let providers = super::ProviderSet::load().unwrap();
-        let mut product = *providers
-            .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.3")
-            .unwrap();
+        let mut product = providers.product_descriptor().unwrap();
         assert!(super::product_functions_complete(&product));
         missing_fields!(product, super::product_functions_complete, start reload reload_poll stop authorize_incoming incoming link_command link_status digit inspect_configuration inspect_secrets site_command radio_control);
     }
@@ -1755,9 +1796,7 @@ pub(crate) mod tests {
     #[test]
     fn runtime_validation_reports_each_incomplete_provider_table() {
         let mut providers = super::ProviderSet::load().unwrap();
-        let valid_product = *providers
-            .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.3")
-            .unwrap();
+        let valid_product = providers.product_descriptor().unwrap();
         let valid_control = *providers
             .typed_descriptor::<crate::abi::rptadv_control_descriptor_v1>(
                 "librptadv_control_standalone_adapter.so.1",

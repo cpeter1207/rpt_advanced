@@ -12,6 +12,8 @@ use std::{
 
 #[path = "lifecycle_phone_tests.rs"]
 mod phone;
+#[path = "lifecycle_phone_outgoing_tests.rs"]
+mod phone_outgoing;
 
 #[path = "lifecycle_phone_account_tests.rs"]
 mod phone_account;

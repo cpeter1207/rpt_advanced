@@ -285,3 +285,153 @@ fn timed_g711_dial_rejects_missing_tail_or_wrong_returned_capability_without_lea
     drop(returned);
     assert_eq!(state.lock().unwrap().drops, 2);
 }
+
+#[test]
+fn outgoing_phone_factory_tail_accepts_complete_prefix_but_never_partial_tail() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_phone) as u32;
+    let old =
+        unsafe { HostServices::open(&table) }.expect("complete previous host prefix remains valid");
+    assert!(old.0.peer_dial_phone.is_none());
+    table.struct_size += 1;
+    assert!(unsafe { HostServices::open(&table) }.is_err());
+    table.struct_size = std::mem::size_of_val(&table) as u32;
+    assert!(
+        unsafe { HostServices::open(&table) }
+            .unwrap()
+            .0
+            .peer_dial_phone
+            .is_none()
+    );
+}
+
+#[test]
+fn outgoing_phone_factory_requires_complete_media_group() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    unsafe extern "C" fn dial(
+        _: *mut c_void,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: usize,
+        _: abi::rptadv_current_v1,
+        _: *mut c_void,
+        _: *mut *mut c_void,
+    ) -> i32 {
+        -1
+    }
+    table.peer_dial_phone = Some(dial);
+    assert!(
+        unsafe { HostServices::open(&table) }.is_err(),
+        "telephone factory requires the existing async, timed and source media group"
+    );
+    let (phone, _) = crate::link::session::tests::phone_source_peer();
+    let mut complete = phone.services.0;
+    complete.peer_dial_phone = Some(dial);
+    assert!(unsafe { HostServices::open(&complete) }.is_ok());
+    let mut missing = complete;
+    missing.peer_read_source = None;
+    assert!(unsafe { HostServices::open(&missing) }.is_err());
+    missing = complete;
+    missing.peer_send_prepared_timed = None;
+    assert!(unsafe { HostServices::open(&missing) }.is_err());
+}
+
+#[test]
+fn outgoing_phone_factory_validates_exact_media_owner_and_final_cancellation() {
+    unsafe extern "C" fn dial(
+        context: *mut c_void,
+        _: *const c_char,
+        _: usize,
+        _: *const c_char,
+        _: usize,
+        _: *const c_char,
+        _: usize,
+        _: usize,
+        _: abi::rptadv_current_v1,
+        _: *mut c_void,
+        output: *mut *mut c_void,
+    ) -> i32 {
+        let state = unsafe {
+            &*context.cast::<std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>>()
+        };
+        unsafe {
+            *output = Box::into_raw(Box::new(state.clone())).cast();
+        }
+        0
+    }
+    let (phone, state) = crate::link::session::tests::phone_source_peer();
+    let mut table = phone.services.0;
+    table.context = ptr::from_ref(&state).cast_mut().cast();
+    let account = PhoneAccountId::new("provider").unwrap();
+    let missing = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(
+        missing
+            .dial_phone(&account, "1000", "5550100", 960, || true)
+            .is_err()
+    );
+    table.peer_dial_phone = Some(dial);
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(
+        services
+            .dial_phone(&account, "1000", "5550100", 960, || false)
+            .is_err()
+    );
+    assert_eq!(
+        state.lock().unwrap().drops,
+        0,
+        "initial cancellation never invokes factory"
+    );
+    for (local, label) in [("other", "provider"), ("1000", "other")] {
+        assert!(
+            services
+                .dial_phone(
+                    &PhoneAccountId::new(label).unwrap(),
+                    local,
+                    "5550100",
+                    960,
+                    || true
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(
+        state.lock().unwrap().drops,
+        2,
+        "mismatched owners retire exactly once"
+    );
+    let mut calls = 0;
+    assert!(
+        services
+            .dial_phone(&account, "1000", "5550100", 960, || {
+                calls += 1;
+                calls == 1
+            })
+            .is_err()
+    );
+    assert_eq!(
+        state.lock().unwrap().drops,
+        3,
+        "late cancellation owns returned handle"
+    );
+    let returned = services
+        .dial_phone(&account, "1000", "5550100", 960, || true)
+        .expect("exact PHONE/account/local source contract must be usable");
+    assert_eq!(returned.phone_account(), Some(&account));
+    drop(returned);
+    assert_eq!(state.lock().unwrap().drops, 4);
+    state.lock().unwrap().capabilities = 11;
+    assert!(
+        services
+            .dial_phone(&account, "1000", "5550100", 960, || true)
+            .is_err()
+    );
+    assert_eq!(
+        state.lock().unwrap().drops,
+        5,
+        "ordinary transport cannot become called-party media"
+    );
+}

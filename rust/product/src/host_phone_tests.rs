@@ -1428,3 +1428,262 @@ fn account_interdigit_timing_reaches_private_login_and_command_grammar() {
     assert!(!reply.ended());
     assert!(host.stop(20));
 }
+
+#[test]
+fn outgoing_claim_blocks_an_already_pending_ordinary_publication_before_binding() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = mailbox_host();
+    let effect = host
+        .runtime
+        .command(
+            "1000",
+            operation(LinkAction::Transceive, "2000"),
+            clock(),
+            false,
+        )
+        .unwrap();
+    let LinkEffect::Connect(attempt) = effect else {
+        panic!("pending ordinary dial")
+    };
+    let account = rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap();
+    let claim = host.phone_calls.reserve_outgoing(account, "1000").unwrap();
+    assert!(
+        host.runtime
+            .finish_connect("1000", attempt, true, clock())
+            .unwrap()
+    );
+    let (io, state) = peer(48000);
+    assert_eq!(
+        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock()),
+        Err(RuntimeError::Rejected)
+    );
+    assert!(host.peers.is_empty());
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    assert_eq!(state.lock().unwrap().drops, 1);
+    host.reject_peer("1000", "2000", clock().now_ms);
+    host.phone_calls
+        .cancel_outgoing("1000", claim.id())
+        .unwrap();
+    let ordinary = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    assert!(ordinary.lock().unwrap().bound_radio.is_some());
+    assert!(host.stop(20));
+}
+
+#[test]
+fn outgoing_claim_policy_uses_explicit_eligible_local_and_refuses_owned_peers() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let configuration = format!(
+        "phone_allow_accounts=provider\n{}\nprotocol=sip\nattach_local_nodes=1000 2000\n[2000]\nradio_channel=second\nduplex=full\nphone_allow_accounts=provider\n",
+        account_configuration("1000")
+    );
+    let mut host = Host::start(
+        document("usb", &configuration),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let account = rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap();
+    let _ordinary = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    assert!(
+        host.reserve_outgoing_phone(account.clone(), "1000")
+            .is_err()
+    );
+    let claim = host
+        .reserve_outgoing_phone(account.clone(), "2000")
+        .expect("eligible explicit local is not restricted to account's incoming default");
+    assert_eq!(claim.local(), "2000");
+    assert!(claim.current());
+    assert!(
+        host.reserve_outgoing_phone(account.clone(), "missing")
+            .is_err()
+    );
+    assert!(
+        host.reserve_outgoing_phone(
+            rpt_advanced_core::link::PhoneAccountId::new("unknown").unwrap(),
+            "2000"
+        )
+        .is_err()
+    );
+    assert!(host.stop(20));
+    assert!(!claim.current());
+}
+
+fn outgoing_host() -> Host {
+    let configuration = format!(
+        "phone_allow_accounts=provider\n{}\nprotocol=sip\nattach_local_nodes=1000\n",
+        account_configuration("1000")
+    );
+    Host::start(
+        document("usb", &configuration),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn outgoing_actual_host_adopts_media_without_login_or_callee_control() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = outgoing_host();
+    let account = rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap();
+    let claim = host.reserve_outgoing_phone(account, "1000").unwrap();
+    let (io, state) = crate::link::session::tests::phone_source_peer();
+    // The source fixture defaults to one inline asynchronous turn; this case
+    // feeds digits after adoption and therefore uses its existing live pump.
+    state.lock().unwrap().continuous_async = true;
+    let source = host
+        .adopt_outgoing_phone(&claim, io, private_clock(&host))
+        .expect("answered outgoing call must enter the existing private media owner");
+    let reply = host.phone_reply(&source).unwrap();
+    assert!(reply.phone_outgoing() && reply.phone_media_authorized());
+    assert!(!reply.phone_authenticated() && host.phone_mailbox(&source, &reply).is_none());
+    assert_eq!(
+        host.phone_calls.attachments("1000"),
+        [(source.clone(), reply.clone())]
+    );
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend("100#1234#*4#*32000**#".bytes().map(Input::Digit));
+    await_digits(&host, &source, "100#1234#*4#*32000**#".len());
+    host.pump(private_clock(&host)).unwrap();
+    assert!(!reply.phone_authenticated() && !reply.ended());
+    assert!(host.operations.is_empty() && host.peers.is_empty());
+    assert!(host.take_phone_reply(&source, &reply).unwrap().is_none());
+    let mut late = private_clock(&host);
+    late.now_ms = 600_000;
+    host.pump(late).unwrap();
+    assert!(!reply.ended() && claim.current());
+    state.lock().unwrap().source_closed = true;
+    pump_until(&mut host, |host| {
+        host.phone_source(source.call_id()).is_none()
+    });
+    assert!(reply.ended() && !claim.current());
+    assert!(!host.phone_calls.outgoing_reserved("1000"));
+    assert!(host.stop(late.now_ms));
+}
+
+#[test]
+fn outgoing_pending_claim_survives_failed_preparation_but_not_committed_reload() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = outgoing_host();
+    let account = rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap();
+    let claim = host.reserve_outgoing_phone(account, "1000").unwrap();
+    let configuration = host.runtime.document().clone();
+    assert_eq!(
+        crate::media::text::tests::failing_start(0, || host.reload(configuration, clock())),
+        Err(RuntimeError::Preparation)
+    );
+    assert!(claim.current() && host.phone_calls.outgoing_reserved("1000"));
+    host.reload(
+        ConfigDocument::parse("[general]\nenabled=no\n").unwrap(),
+        clock(),
+    )
+    .unwrap();
+    assert!(!claim.current() && !host.phone_calls.outgoing_reserved("1000"));
+    assert!(host.stop(20));
+}
+
+/// Read the real serialized reservation without exposing test policy in production.
+pub(crate) fn outgoing_reserved(host: &Host, local: &str) -> bool {
+    host.phone_calls.outgoing_reserved(local)
+}
+pub(crate) fn outgoing_media_reply(host: &Host, local: &str) -> Option<PeerReply> {
+    host.phone_calls
+        .attachments(local)
+        .into_iter()
+        .next()
+        .map(|(_, reply)| reply)
+}
+
+pub(crate) fn retain_outgoing_test_retry(host: &mut Host) {
+    let effect = host
+        .runtime
+        .command(
+            "1000",
+            operation(LinkAction::PermanentTransceive, "2000"),
+            clock(),
+            false,
+        )
+        .unwrap();
+    let LinkEffect::Connect(attempt) = effect else {
+        panic!("permanent intent")
+    };
+    assert!(
+        !host
+            .runtime
+            .finish_connect("1000", attempt, false, clock())
+            .unwrap()
+    );
+}
+
+#[test]
+fn rf_operation_results_do_not_retire_or_privately_prompt_an_outgoing_callee() {
+    use rpt_advanced_core::messages::OperationResult;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let speech = Arc::new(crate::media::text::tests::SpeechFixture::default());
+    let configuration = format!(
+        "phone_allow_accounts=provider\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n{}\nprotocol=sip\nattach_local_nodes=1000\n",
+        account_configuration("1000")
+    );
+    let mut host = Host::start(
+        document("usb", &configuration),
+        crate::media::text::tests::preparer(Arc::clone(&speech)),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let account = rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap();
+    let claim = host.reserve_outgoing_phone(account, "1000").unwrap();
+    let (io, state) = crate::link::session::tests::phone_source_peer();
+    state.lock().unwrap().continuous_async = true;
+    let source = host
+        .adopt_outgoing_phone(&claim, io, private_clock(&host))
+        .unwrap();
+    let reply = host.phone_reply(&source).unwrap();
+    assert!(reply.phone_media_authorized() && !reply.phone_authenticated());
+    for outcome in [OperationResult::Completed, OperationResult::Unavailable] {
+        assert!(
+            host.node_operation_result("1000", Some(&reply), outcome)
+                .is_err()
+        );
+        host.node_operation_result("1000", None, outcome).unwrap();
+        assert!(
+            claim.current() && !reply.ended(),
+            "RF result must not retire a media-only callee"
+        );
+        assert!(host.take_phone_reply(&source, &reply).unwrap().is_none());
+        assert!(
+            probe_public_phone_media(&mut host, "1000"),
+            "LOCAL RF result still renders"
+        );
+        assert!(reply.phone_media_authorized() && !reply.phone_authenticated());
+    }
+    let opened = speech.opened.lock().unwrap();
+    assert!(opened.iter().any(|text| text == "Command completed"));
+    assert!(
+        opened
+            .iter()
+            .any(|text| text == "Requested operation is unavailable")
+    );
+    drop(opened);
+    host.cancel_outgoing_phone("1000", claim.id()).unwrap();
+    assert!(reply.ended() && !claim.current());
+    assert!(host.stop(20));
+}

@@ -1,4 +1,4 @@
-//! Command-only phone I/O on the existing serial peer owner, independent of RF.
+//! Private phone I/O on the existing serial peer owner, independent of RF.
 use super::{
     dispatcher::PeerWake,
     outbound::Outbound,
@@ -148,12 +148,16 @@ impl PrivatePhoneControl {
         } else {
             media::prepare
         };
-        let (ingress, input, shared) = prepare(
-            self.reply.clone(),
-            self.rate,
-            self.consumed_revision.unwrap_or(NonZeroU32::MIN),
-            processor,
-        )?;
+        // An outgoing call has no command collector. Its serial source owner
+        // publishes the exact settled cut, including resets without a digit.
+        // Initial preparation remains inert until that owner validates it.
+        let revision = if self.reply.phone_outgoing() {
+            NonZeroU32::new(self.source_ready.load(Ordering::Acquire))
+        } else {
+            self.consumed_revision
+        }
+        .unwrap_or(NonZeroU32::MIN);
+        let (ingress, input, shared) = prepare(self.reply.clone(), self.rate, revision, processor)?;
         self.media = Some(shared);
         Ok((PreparedPhoneMedia(ingress), input))
     }
@@ -176,12 +180,18 @@ impl PrivatePhoneControl {
     }
     /// Existing serial wake and source qualification, without copying its handle.
     pub(crate) fn media_capable(&self) -> bool {
-        self.source_media && self.reply.phone_authenticated() && !self.stop.load(Ordering::Acquire)
+        self.source_media
+            && self.reply.phone_media_authorized()
+            && !self.stop.load(Ordering::Acquire)
     }
     /// Rearm only after the serial owner has acknowledged this exact source cut.
     pub(crate) fn media_rearm_ready(&self) -> bool {
-        self.source_ready.load(Ordering::Acquire)
-            == self.consumed_revision.unwrap_or(NonZeroU32::MIN).get()
+        let ready = self.source_ready.load(Ordering::Acquire);
+        if self.reply.phone_outgoing() {
+            ready != 0
+        } else {
+            ready == self.consumed_revision.unwrap_or(NonZeroU32::MIN).get()
+        }
     }
     pub(crate) fn media_occupied(&self) -> bool {
         self.media.as_ref().is_some_and(|media| media.occupied())
@@ -200,10 +210,10 @@ impl PrivatePhoneControl {
         self.consumed_revision = Some(event.revision);
         Some((event.symbol, event.received_ms))
     }
-    /// Called only after the authoritative grammars are idle on ordinary control.
+    /// Called after incoming collectors are idle, or a callee digit has no command sink.
     /// Refusal retains the same consumed revision; no new source activity is inferred.
     pub(crate) fn collection_ended(&mut self, reply: &PeerReply) -> bool {
-        if self.reply != *reply || !reply.phone_authenticated() {
+        if self.reply != *reply || !reply.phone_media_authorized() {
             return false;
         }
         let Some(revision) = self.consumed_revision.filter(|_| self.source_media) else {
@@ -377,6 +387,8 @@ impl PrivatePhoneSession {
         // Reuse the actual last source-read reference at post-read adoption.
         // Original receipt birth is never changed or synthesized.
         *admission = reference;
+        let outgoing = self.reply.phone_outgoing();
+        let pending_release = &mut self.pending_release;
         let digits = &mut self.digits;
         let revision = &self.revision;
         let media = &mut self.media;
@@ -499,6 +511,12 @@ impl PrivatePhoneSession {
                         }) {
                             Ok(()) => {
                                 *source_end = 0;
+                                if outgoing {
+                                    // No incoming collector owns a callee reset.
+                                    // Capture AFTER reset may complete a digit;
+                                    // end_command/drain still qualify this cut.
+                                    *pending_release = revision.0.get();
+                                }
                                 return 1;
                             }
                             Err(error) => Err(error),

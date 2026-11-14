@@ -1,12 +1,12 @@
 /** @file
- * @brief SIP/UDP registration and bounded incoming-call capability. All calls are off audio.
+ * @brief SIP/UDP registration and bounded call capability. All calls are off audio.
  *
  * One context owns one account and one UDP socket, not a thread. Create prepares
  * only; register_account sends REGISTER after the host commits configuration.
  * The host serializes every
  * call on the same host-owned thread and joins it before releasing the DSO.
  * No adapter-created threads, media processing or implicit answer.
- * The call tail admits eight incoming calls per account, including unreleased
+ * The call tail owns eight incoming/outgoing calls per account, including unreleased
  * terminal observations. Offers and answers are limited to 4096 SDP bytes.
  * next_call coalesces observations per call without discarding ownership:
  * terminal calls remain until release_call. Call IDs are never reused in an
@@ -83,16 +83,20 @@ typedef struct rptadv_sip_status_v1 {
 } rptadv_sip_status_v1;
 /** Authoritative coalesced call observation; no raw signaling headers or caller identity. */
 typedef struct rptadv_sip_call_v1 {
-    uint32_t struct_size;   /**< Complete writable record size. */
-    uint32_t state;         /**< 1 invited, 2 answered, 3 established, 4 closing, 5 terminated. */
-    uint64_t generation;    /**< Immutable account generation. */
-    uint64_t call;          /**< Nonzero call token, never reused in this account. */
-    uint32_t sip_status;    /**< Numeric status only. */
-    uint32_t offer_length;  /**< Valid initial SDP bytes; unchanged for this call. */
-    uint8_t offer[4096];    /**< Initial SDP, not NUL terminated. */
-    uint16_t source_family; /**< Actual transport source: 4 or 6, never a SIP header. */
+    uint32_t struct_size; /**< Complete writable record size. */
+    uint32_t state;       /**< 1 invited/dialing, 2 answer awaiting ACK, 3 established, 4 closing, 5
+                             terminated. */
+    uint64_t generation;  /**< Immutable account generation. */
+    uint64_t call;        /**< Nonzero call token, never reused in this account. */
+    uint32_t sip_status;  /**< Numeric status only. */
+    uint32_t offer_length;  /**< Incoming initial offer or outgoing final answer length; zero before
+                               an outgoing answer. */
+    uint8_t offer[4096];    /**< Remote SDP, not NUL terminated; stable once a successful answer is
+                               observed. */
+    uint16_t source_family; /**< Actual transport source: 0 absent, 4 IPv4, 6 IPv6; never a header. */
     uint16_t source_port;   /**< Actual source UDP port in host order. */
     uint8_t source[16];     /**< IPv4 first four octets or all IPv6 octets. */
+    uint32_t direction;     /**< 0 incoming, 1 outgoing; never an authorization grant. */
 } rptadv_sip_call_v1;
 /** Sized implementation-neutral ABI 1; registration prefix and optional call tail. */
 typedef struct rptadv_sip_descriptor_v1 {
@@ -118,6 +122,16 @@ typedef struct rptadv_sip_descriptor_v1 {
                            uint64_t call); /**< Reject invited call or send BYE, idempotently. */
     int32_t (*release_call)(void *context, uint64_t generation,
                             uint64_t call); /**< Reclaim terminal slot only; 1 while live. */
+    /** Optional outgoing tail: require both complete slots. Originate only after
+     * host policy/isolation approval. Zero returns one nonzero owned call token;
+     * all other results clear it. One means shared eight-slot capacity exhausted.
+     * Digest uses this account only; direction grants no mailbox authority. */
+    int32_t (*originate_call)(void *context, uint64_t generation, rptadv_sip_span_v1 destination,
+                              rptadv_sip_span_v1 offer, uint64_t *call);
+    /** Acknowledge the exact outgoing final answer after host media validation.
+     * No automatic 2xx ACK occurs before this request. Ending a pending offer
+     * cancels it; ending an unacknowledged answer sends ACK then BYE. */
+    int32_t (*acknowledge_call)(void *context, uint64_t generation, uint64_t call);
 } rptadv_sip_descriptor_v1;
 /** Borrow immutable descriptor while the DSO lease is held.
  * @return Complete immutable capability descriptor.

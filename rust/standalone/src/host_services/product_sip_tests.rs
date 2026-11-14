@@ -2,6 +2,8 @@
 use super::*;
 use crate::phone::media::{G711, G711Codec};
 use std::collections::BTreeMap;
+#[path = "product_sip_outgoing_tests.rs"]
+mod outgoing;
 #[path = "product_sip_vox_tests.rs"]
 mod vox;
 
@@ -362,7 +364,7 @@ fn product_call(no_mailbox: bool, voice: bool, existing: bool) {
     install_simulated_radio(&mut host);
     let mut runtime = unsafe {
         ProductRuntime::start(
-            descriptors.product,
+            &descriptors.product,
             host,
             descriptors.control,
             descriptors.file,

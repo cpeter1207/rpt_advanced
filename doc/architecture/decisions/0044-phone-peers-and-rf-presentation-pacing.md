@@ -1801,3 +1801,129 @@ collection, renew authorization, or touch another source. This ensures slow
 quoted terminators do not lose their destination while every actual key remains
 within the configured gap. Inclusive expiry and rollback cannot revive or
 shorten that existing deadline.
+
+### Bounded outgoing SIP adapter
+
+The neutral SIP descriptor appends explicit originate and acknowledge slots.
+An outgoing-capable consumer requires both complete slots; incoming and
+registration prefixes keep their layout. The call record's direction occupies
+previous 64-bit alignment padding, and is never inferred from caller identity.
+The synchronized consumer validates direction explicitly when this tail is
+present; an incoming-only provider's former padding is normalized to incoming.
+The complete incoming prefix remains usable, while partial outgoing tails or
+a single callback without its partner are rejected. This additive owned
+ABI tail retains SONAME1; outgoing deployment must ship the adapter and its
+updated consumer together. No Sofia ABI is exposed or modified.
+
+Outgoing and incoming dialogs share the existing eight owned slots, including
+terminal observations awaiting release. The same remote-SDP extent holds an
+incoming initial offer or an outgoing final answer. A dialing or failed
+outgoing call may have no remote SDP/source; an answered/established call must
+have both. The serial owner supplies the existing account credentials for at
+most two bounded native call challenges, separately from account registration
+state. Contact and transport route are passed explicitly through supported NUA
+tags, using the already prepared account socket/Contact.
+
+A successful final answer is retained until explicit host media validation and
+ACK. Cancellation, answer rejection and teardown keep the same token until
+native termination and explicit release. No outgoing callee receives incoming
+mailbox or private command authority. This adapter checkpoint does not expose
+operator dialing or establish node isolation; those remain controller work.
+
+
+### Outgoing media-only source role
+
+The exact existing PeerReply allocation stores a one-byte phone admission state
+in place of its prior Boolean: unauthenticated incoming, verified mailbox, or
+explicit outgoing media-only. The outgoing constructor is used only by a
+controller-originated call owner. It never follows from transport registration
+or a claimed endpoint. Mailbox/control authentication remains false for that
+role, and the incoming authentication operation cannot convert it. The typed
+phone mixer accepts either verified incoming media or explicitly owned outgoing
+media, while preserving exact source/reply/ingress matching and retirement.
+
+This scalar prerequisite adds no PCM owner, call thread or unlock grant. The
+ordinary phone command collector still rejects media-only outgoing sources.
+Actual controller origination, account/target policy and peer-isolation claim
+publication must be completed before selecting it in the product.
+
+
+### Outgoing SIP reactor and optional host factory
+
+The existing SIP reactor retains an outgoing Offer on the exact advertised RTP
+socket. A final answer must select only the offered G.711 and optional
+telephone-event formats; an advertised event format cannot silently fall back
+to in-band detection when its mapping is invalid. Before ACK, reconnecting that
+socket requires a bounded real-kernel empty observation and resets its source
+and event identity. No pending offer reaches incoming receipt admission.
+
+The unique pending Dial owns its result channel and close flag before command
+submission. Refused queue credit retains that same command locally; polling
+retries the existing bounded queue without blocking caller cancellation. The
+reactor checks the close flag before preparation and again before INVITE. That
+flag then belongs to the same native slot and media Handle. No caller callback
+or borrowed callback context crosses into the reactor, and no second thread or
+PCM queue is introduced.
+
+One nullable HostServices10 tail, peer_dial_phone, identifies the configured
+account, initiating local node and provider destination separately. It runs on
+ordinary control/lifecycle work, never on the SIP or audio callback thread. The
+standalone host retains only a clone of its existing reactor sender and exact
+committed account pointers. Reload suspends new admission while publication is
+unresolved, restores the old cohort on rejection, and publishes only the
+committed SIP cohort on success. Pending calls recheck the caller's current
+predicate and the exact account pointer; changed accounts or stop cancel them.
+The account's incoming default local_node does not silently override the
+explicit initiating local node.
+
+The previous complete ABI10 prefix remains valid with the new callback absent;
+partial tails and an offered telephone factory without the existing complete
+async/prepared/timed/source media group are rejected. Asterisk explicitly
+supplies None. This owned optional tail keeps the existing host ABI version and
+requires synchronized current header/consumer builds for outgoing use. It does
+not imply outgoing Asterisk provider composition is implemented.
+
+The factory returns the existing typed PHONE transport owner, not incoming
+mailbox authority. The product still must prepare the typed outgoing role,
+validate account/target policy, and acquire the initiating-node isolation claim
+before selecting this factory. This seam alone enables neither an operator
+telephone command nor a live outgoing call, and it does not provide linked-peer
+custody isolation or outbound IVR DTMF.
+
+
+### Outgoing source cuts and explicit local invocation
+
+A called party has no mailbox or node-command collector. Its actual provider
+source discontinuity still retires the old media generation and advances the
+existing private source revision. The same serial owner records the final
+revision after reset (including any completed digit) as a pending release; the
+existing detector-tail and raw-drain checks must qualify it before publication.
+Outgoing media preparation/rearm reads that existing settled source-ready scalar.
+A newer onset or reset invalidates a captured candidate, and no original birth
+or source age is renewed. Incoming calls retain their collector-owned release.
+This reuses the private owner and scalar evidence, without another queue, clock,
+synthetic digit or authentication grant.
+
+Standalone adapts explicit `phone-dial` and `phone-hangup` requests through its
+existing service-owned0600 local-control socket. Its existing version/frame bounds
+remain in force. The product's typed command validates account, initiating node,
+current call claim and provider policy. Accepted dialing returns only acceptance
+and an opaque call identifier, not answer status or copied destination data.
+Hangup requires that exact identifier. Socket disconnect retains a telephone call;
+connection cleanup still owns only temporary manual RF requests. Stopped/fatal
+runtime or absent optional product support is unavailable. No new listener,
+thread, DTMF default or callee control authority is introduced. Neither request
+content nor dialed destinations are logged by this bridge.
+
+This first outgoing composition requires an explicitly peer-free initiating node
+for the exact pending/active call. It is not the full linked-peer custody-isolation
+implementation, outgoing Asterisk composition, or physical/public-provider call
+acceptance. Those remain separately verified milestones.
+
+
+The outgoing/incoming integration keeps generic RF-operation private mirrors
+limited to authenticated incoming attachments. An outgoing callee is eligible
+for its call's media but not private control results; excluding it from that
+recipient list must not retire its call. Explicit private result requests still
+require exact mailbox authority, and LOCAL RF result rendering is independent.
+Media attachment enumeration remains shared for graph preparation and cleanup.

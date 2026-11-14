@@ -183,7 +183,7 @@ static int end(void *opaque, uint64_t generation, uint64_t token) {
 }
 static const rptadv_sip_descriptor_v1 api = {
     sizeof(api), 1, "rptadv.sip", create, service, event, status,
-    activate, stop, stop, destroy, call, respond, end, end
+    activate, stop, stop, destroy, call, respond, end, end, NULL, NULL
 };
 const rptadv_sip_descriptor_v1 *rptadv_sip_adapter_descriptor_v1(void) { return &api; }
 "#,

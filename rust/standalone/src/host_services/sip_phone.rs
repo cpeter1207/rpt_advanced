@@ -17,7 +17,154 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
+/// Only immutable account pointers and a clone of the existing reactor sender.
+pub(super) struct Originator {
+    client: crate::phone::registration::calls::Client,
+    accounts: crate::phone_accounts::PreparedAccounts,
+    admitting: bool,
+}
+
+fn account_current(
+    context: &super::StandaloneHostContext,
+    account: &Arc<crate::phone_accounts::PreparedAccount>,
+) -> bool {
+    context
+        .sip
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .is_some_and(|owner| {
+            owner
+                .accounts
+                .as_slice()
+                .iter()
+                .any(|current| Arc::ptr_eq(current, account))
+        })
+}
+
+/// Ordinary control/lifecycle work only; never block the reactor or radio callback.
+pub(super) unsafe extern "C" fn dial(
+    context: *mut c_void,
+    account: *const std::ffi::c_char,
+    account_length: usize,
+    local: *const std::ffi::c_char,
+    local_length: usize,
+    destination: *const std::ffi::c_char,
+    destination_length: usize,
+    maximum_frames: usize,
+    current: abi::rptadv_current_v1,
+    current_context: *mut c_void,
+    output: *mut *mut c_void,
+) -> i32 {
+    super::boundary(-1, || {
+        let Some(output) = (unsafe { output.as_mut() }) else {
+            return -1;
+        };
+        *output = std::ptr::null_mut();
+        let (Some(context), Some(account), Some(local), Some(destination), Some(current)) = (
+            unsafe { context.cast::<super::StandaloneHostContext>().as_ref() },
+            unsafe { super::input(account, account_length) },
+            unsafe { super::input(local, local_length) },
+            unsafe { super::input(destination, destination_length) },
+            current,
+        ) else {
+            return -1;
+        };
+        if maximum_frames == 0
+            || local.is_empty()
+            || local.len() > 63
+            || local.chars().any(char::is_control)
+            || unsafe { current(current_context) } == 0
+        {
+            return -1;
+        }
+        let Some(ingress) = context.ingress.as_ref() else {
+            return -1;
+        };
+        let (client, account) = {
+            let binding = context
+                .sip
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(owner) = binding.as_ref().filter(|owner| owner.admitting) else {
+                return -1;
+            };
+            let Some(account) = owner
+                .accounts
+                .as_slice()
+                .iter()
+                .find(|candidate| {
+                    let settings = candidate.settings();
+                    settings.enabled
+                        && settings.protocol == PhoneAccountProtocol::Sip
+                        && settings.id == account
+                })
+                .cloned()
+            else {
+                return -1;
+            };
+            (owner.client.clone(), account)
+        };
+        if unsafe { current(current_context) } == 0 || !account_current(context, &account) {
+            return -1;
+        }
+        let Ok(mut pending) =
+            client.originate(&account, local, destination.to_owned(), ingress.jitter)
+        else {
+            return -1;
+        };
+        loop {
+            if unsafe { current(current_context) } == 0 || !account_current(context, &account) {
+                return -1;
+            }
+            match pending.try_complete() {
+                Ok(Some(handle)) => {
+                    if unsafe { current(current_context) } == 0
+                        || !account_current(context, &account)
+                        || !handle.shared.live()
+                    {
+                        return -1;
+                    }
+                    *output = Box::into_raw(Box::new(PeerHandle::Sip(handle))).cast();
+                    return 0;
+                }
+                Err(_) => return -1,
+                Ok(None) => std::thread::sleep(crate::phone::registration::SERVICE_INTERVAL),
+            }
+        }
+    })
+}
+
 impl HostServicesOwner {
+    /// Publish only a committed SIP cohort; no reactor callback is invoked here.
+    pub(crate) fn publish_sip(
+        &self,
+        worker: Option<&crate::phone::registration::Worker>,
+        accounts: &crate::phone_accounts::PreparedAccounts,
+    ) {
+        let originator = worker.map(|worker| Originator {
+            client: worker.client(),
+            accounts: accounts.clone(),
+            admitting: true,
+        });
+        *self
+            .context
+            .sip
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = originator;
+    }
+    /// Suspend only new dials during product/account publication, not live calls.
+    pub(crate) fn set_sip_dial_admission(&self, admitting: bool) {
+        if let Some(owner) = self
+            .context
+            .sip
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+        {
+            owner.admitting = admitting;
+        }
+    }
     pub(crate) fn incoming_sip(
         &self,
         product: &abi::rptadv_product_descriptor_v1,

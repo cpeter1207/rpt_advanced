@@ -1,4 +1,4 @@
-//! Bounded, service-only local tuner transport. All work runs off audio callbacks.
+//! Bounded service-only local control. All work runs off audio callbacks.
 
 use serde_json::{Value, json};
 use std::{
@@ -20,7 +20,7 @@ pub(crate) trait Backend {
     fn clear_manual(&mut self, node: &str);
 }
 
-/// One connection is one exclusive temporary-maintenance lease.
+/// One exclusive control connection; only manual RF requests are session leases.
 pub(crate) struct Server {
     listener: UnixListener,
     path: PathBuf,
@@ -186,6 +186,8 @@ fn validate(request: &Value) -> Result<(), String> {
             | "command"
             | "transmit"
             | "reload"
+            | "phone-dial"
+            | "phone-hangup"
     ) {
         return Err("unknown local control operation".into());
     }

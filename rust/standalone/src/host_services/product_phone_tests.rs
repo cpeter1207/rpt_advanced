@@ -28,6 +28,8 @@ struct RadioPump {
 static RADIO: Mutex<Option<RadioPump>> = Mutex::new(None);
 static PUBLIC_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 static LAST_PTT: AtomicBool = AtomicBool::new(false);
+// Test-only local RF input; the existing callback scratch remains the sole PCM block.
+static LOCAL_INPUT: AtomicBool = AtomicBool::new(false);
 static RADIO_TURNS: AtomicUsize = AtomicUsize::new(0);
 static RADIO_JOIN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
@@ -52,16 +54,23 @@ unsafe extern "C" fn activate(
         let mut skipped = 0u64;
         while !stopping.load(Ordering::Acquire) {
             let mut samples = [0.0; 960];
+            let local_input = LOCAL_INPUT.load(Ordering::Acquire);
+            if local_input {
+                for (index, sample) in samples.iter_mut().enumerate() {
+                    *sample =
+                        0.2 * ((first + index as u64) as f32 * std::f32::consts::TAU / 48.0).sin();
+                }
+            }
             let metadata = abi::UrpNativeReceiveMetadata {
                 struct_size: size_of::<abi::UrpNativeReceiveMetadata>() as u32,
                 abi_version: 1,
                 generation_id: 1,
                 first_sample_index: first,
                 frame_count: 960,
-                raw_receiver_keyed: 0,
-                receiver_keyed: 0,
+                raw_receiver_keyed: u32::from(local_input),
+                receiver_keyed: u32::from(local_input),
                 vad_mode: 0,
-                rf_burst_id: 0,
+                rf_burst_id: u64::from(local_input),
                 vad_voice_sample_index: u64::MAX,
                 vad_preroll_frames: 0,
                 vad_voice_active: 0,
@@ -413,7 +422,7 @@ fn real_product_private_call_authenticates_and_returns_status_without_radio_outp
     install_simulated_radio(&mut host);
     let mut runtime = unsafe {
         ProductRuntime::start(
-            descriptors.product,
+            &descriptors.product,
             host,
             descriptors.control,
             descriptors.file,
