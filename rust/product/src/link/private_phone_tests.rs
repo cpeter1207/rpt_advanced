@@ -2550,3 +2550,182 @@ fn private_pending_reader_anchors_cadence_at_first_actual_samples() {
     session.step(160).unwrap();
     assert_eq!(session.source_position, 1920);
 }
+
+#[test]
+fn prepared_phone_media_returns_programme_through_the_existing_timed_egress_owner() {
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    let clock = SourceTimeClock::new(Instant::now()).unwrap();
+    session.set_source_clock(clock);
+    let mut input = control.prepare_media(None).unwrap();
+    let mut programme = input.take_output().expect("one programme producer");
+    assert!(
+        input.take_output().is_none(),
+        "the graph owns exactly one producer"
+    );
+    session.step(0).unwrap();
+    assert!(input.active());
+    let span = AudioSpan {
+        generation: 1,
+        burst: 1,
+        source_start: 0,
+        stream: 7,
+        born_ns: Some(clock.reference().now_ns),
+    };
+    assert_eq!(programme.write(span, &[0.25; 1920]), 0);
+    state.lock().unwrap().prepared_result = 1;
+    for now in 1..20 {
+        session.step(now).unwrap();
+        if !state.lock().unwrap().prepared.is_empty() {
+            break;
+        }
+    }
+    let first = state
+        .lock()
+        .unwrap()
+        .prepared
+        .first()
+        .cloned()
+        .expect("programme used the current encoder");
+    let deadline = state.lock().unwrap().timed_deadlines[0];
+    session.step(20).unwrap();
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.prepared.last().unwrap(),
+            &first,
+            "retry packet is retained"
+        );
+        assert_eq!(
+            state.timed_deadlines.last(),
+            Some(&deadline),
+            "retry cannot renew original age"
+        );
+        assert!(state.audio.is_empty(), "no legacy write path");
+    }
+    control.retire_media();
+    let sent = state.lock().unwrap().prepared.len();
+    session.step(21).unwrap();
+    assert_eq!(
+        state.lock().unwrap().prepared.len(),
+        sent,
+        "retirement cancels blocked programme"
+    );
+    assert!(!input.active());
+    assert!(!reply.ended(), "retiring media preserves private control");
+}
+
+#[test]
+fn prepared_phone_programme_yields_to_private_prompt_then_resumes_without_new_encoder() {
+    let (mut calls, mut session, mut control, state, source, reply) =
+        crate::phone::tests::private_source_session();
+    assert_eq!(
+        calls
+            .authenticate(
+                &source,
+                &reply,
+                &crate::phone::tests::records(),
+                "100",
+                "1234",
+                0
+            )
+            .unwrap(),
+        crate::phone::PhoneLogin::Authenticated,
+    );
+    let clock = SourceTimeClock::new(Instant::now()).unwrap();
+    session.set_source_clock(clock);
+    let mut input = control.prepare_media(None).unwrap();
+    let mut programme = input.take_output().unwrap();
+    session.step(0).unwrap();
+    assert!(session.programme);
+    let span = AudioSpan {
+        generation: 1,
+        burst: 1,
+        source_start: 0,
+        stream: 7,
+        born_ns: Some(clock.reference().now_ns),
+    };
+    programme.write(span, &[0.75; 1920]);
+    state.lock().unwrap().prepared_result = 1;
+    for now in 1..20 {
+        session.step(now).unwrap();
+        if !state.lock().unwrap().prepared.is_empty() {
+            break;
+        }
+    }
+    let resets = state.lock().unwrap().encoder_resets;
+    calls
+        .queue_reply(&source, &reply, Box::new(Speech::new(1920)))
+        .unwrap();
+    control
+        .send(calls.take_reply(&source, &reply).unwrap().unwrap())
+        .ok()
+        .unwrap();
+    state.lock().unwrap().prepared_result = 0;
+    session.step(20).unwrap();
+    assert!(
+        !session.programme,
+        "private reply wins over blocked programme"
+    );
+    assert!(state.lock().unwrap().encoder_resets > resets);
+    for now in (30..200).step_by(10) {
+        session.step(now).unwrap();
+        if session.programme {
+            break;
+        }
+    }
+    assert!(
+        session.programme,
+        "finite private tail completes before programme resumes"
+    );
+    let sent = state.lock().unwrap().prepared.len();
+    programme.write(
+        AudioSpan {
+            source_start: 1920,
+            born_ns: Some(clock.reference().now_ns),
+            ..span
+        },
+        &[0.75; 1920],
+    );
+    for now in 200..220 {
+        session.step(now).unwrap();
+        if state.lock().unwrap().prepared.len() > sent {
+            break;
+        }
+    }
+    assert!(state.lock().unwrap().prepared.len() > sent);
+    assert!(input.active() && !reply.ended());
+}
+
+#[test]
+fn prepared_phone_programme_retirement_after_selection_cancels_the_pending_send() {
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    let clock = SourceTimeClock::new(Instant::now()).unwrap();
+    session.set_source_clock(clock);
+    let mut input = control.prepare_media(None).unwrap();
+    let mut output = input.take_output().unwrap();
+    session.step(0).unwrap();
+    output.write(
+        AudioSpan {
+            generation: 1,
+            burst: 1,
+            source_start: 0,
+            stream: 7,
+            born_ns: Some(clock.reference().now_ns),
+        },
+        &[0.25; 1920],
+    );
+    state.lock().unwrap().prepared_result = 1;
+    for now in 1..20 {
+        session.step(now).unwrap();
+        if !state.lock().unwrap().prepared.is_empty() {
+            break;
+        }
+    }
+    let media = Arc::clone(control.media.as_ref().unwrap());
+    let sent = state.lock().unwrap().prepared.len();
+    assert!(sent > 0);
+    BEFORE_SEND.with_borrow_mut(|callback| *callback = Some(Box::new(move || media.retire())));
+    session.step(20).unwrap();
+    assert_eq!(state.lock().unwrap().prepared.len(), sent);
+    assert!(!reply.ended());
+}

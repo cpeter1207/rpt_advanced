@@ -59,7 +59,7 @@ fn concurrent_owner_retirement_wins_between_admission_and_authentication_publish
     assert!(calls.is_empty());
 }
 
-fn records() -> Vec<PhoneMailbox> {
+pub(crate) fn records() -> Vec<PhoneMailbox> {
     resolve_phone_mailboxes(
         &ConfigDocument::parse(include_str!("tests/fixtures/phone_mailbox.conf")).unwrap(),
     )
@@ -198,18 +198,32 @@ fn pending_private_handoff_keeps_the_control_queue_when_the_owner_is_full() {
     assert!(calls.calls[0].replies.is_empty());
 }
 
-pub(crate) fn private_session(
-    async_enabled: bool,
-    prepared: bool,
-) -> (
+pub(crate) type PrivateSessionFixture = (
     PhoneCalls,
     crate::link::private_phone::PrivatePhoneSession,
     crate::link::private_phone::PrivatePhoneControl,
     std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>,
     PhoneSource,
     PeerReply,
-) {
-    let (io, state) = crate::link::session::tests::phone_with_egress(async_enabled, prepared);
+);
+
+pub(crate) fn private_session(async_enabled: bool, prepared: bool) -> PrivateSessionFixture {
+    private_session_with_peer(crate::link::session::tests::phone_with_egress(
+        async_enabled,
+        prepared,
+    ))
+}
+
+pub(crate) fn private_source_session() -> PrivateSessionFixture {
+    private_session_with_peer(crate::link::session::tests::phone_source_peer())
+}
+
+fn private_session_with_peer(
+    (io, state): (
+        PeerIo,
+        std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+    ),
+) -> PrivateSessionFixture {
     let mut calls = PhoneCalls::new(1, 16).unwrap();
     let source = calls.admit(io, 0).unwrap();
     let reply = calls.reply(&source).unwrap();

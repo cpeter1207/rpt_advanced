@@ -16,7 +16,7 @@ use crate::{
     },
 };
 use rpt_advanced_core::{
-    audio::{AudioSpan, LinkAudioProducer, LinkAudioQueue, PlaybackOutcome},
+    audio::{AudioSpan, LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue, PlaybackOutcome},
     link::PeerReply,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -196,6 +196,8 @@ pub(crate) struct PrivatePhoneSession {
     source_end: u64,
     output: LinkAudioProducer,
     outbound: Outbound,
+    spare_output: Option<(LinkAudioConsumer, u64)>,
+    programme: bool,
     source_position: u64,
     // Inactive cadence anchors at the next actual rendered samples.
     next_audio_ns: u64,
@@ -269,6 +271,8 @@ impl PrivatePhoneSession {
                 source_end: 0,
                 output,
                 outbound,
+                spare_output: None,
+                programme: false,
                 source_position: 0,
                 next_audio_ns: 0,
                 audio_cadence_active: false,
@@ -483,6 +487,22 @@ impl PrivatePhoneSession {
             matches!(result.progress, 0 | 3) && !result.finish_pending,
         ))
     }
+    /// Private replies take priority without another encoder or pending packet.
+    /// A completed prompt drains its finite tail before programme resumes.
+    fn select_programme(&mut self, wanted: bool) -> Result<(), Error> {
+        if self.programme == wanted || (wanted && !self.outbound.ready_for_input()) {
+            return Ok(());
+        }
+        let queue = self.spare_output.take().ok_or(Error::Admission)?;
+        self.outbound.retire(&mut self.io)?;
+        self.spare_output = Some(self.outbound.exchange(queue)?);
+        self.outbound.guard_programme(
+            wanted.then(|| self.media.as_ref().expect("active programme").guard()),
+        );
+        self.programme = wanted;
+        Ok(())
+    }
+
     fn step_inner(&mut self, now_ms: u64) -> Result<(), Error> {
         if self.stop.load(Ordering::Acquire) || self.reply.ended() {
             return Err(Error::Hangup);
@@ -497,7 +517,7 @@ impl PrivatePhoneSession {
                         self.audio_cadence_active = false;
                         break;
                     }
-                    Some(PrivateCommand::Media(media)) => {
+                    Some(PrivateCommand::Media(mut media)) => {
                         // Cancelled queued boxes cannot replace a newer live or
                         // prepared generation. Retain only the existing one slot.
                         if !media.prepared()
@@ -508,6 +528,8 @@ impl PrivatePhoneSession {
                         {
                             media.retire();
                         } else {
+                            self.select_programme(false)?;
+                            self.spare_output = media.take_output().map(|queue| (queue, 0));
                             self.media = Some(media);
                         }
                     }
@@ -567,6 +589,9 @@ impl PrivatePhoneSession {
                 media.retire();
             }
         }
+        self.select_programme(
+            self.current.is_none() && self.media.as_ref().is_some_and(|media| media.active()),
+        )?;
         if now_ns >= self.next_audio_ns && self.outbound.ready_for_input() {
             if let Some(reply) = &mut self.current {
                 let count = reply.render(false, &mut self.pcm);

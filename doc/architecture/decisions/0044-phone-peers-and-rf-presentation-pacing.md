@@ -1500,3 +1500,14 @@ operation/shape, source-credit contract, codec, owner and socket failures remain
 distinguishable; active socket failures include only numeric errno (zero if
 unavailable). These diagnostics contain no SDP, SIP headers, RTP/audio bytes,
 DTMF/PIN symbols, account identifiers or arbitrary dependency error strings.
+
+### Private programme return ownership
+
+A prepared phone media generation supplies one ordinary bounded mix-minus queue
+to its typed graph slot. The existing private serial session exchanges that
+queue with its private-prompt queue at the same Outbound owner; it does not add
+another converter, encoder, retry packet or PCM staging array. Private replies
+preempt programme and finish their finite tail before programme resumes.
+Original span birth/deadline metadata remains with the queue. The generation's
+existing retirement token also guards copied conversion and blocked native sends.
+This bridge alone does not authorize attachment, implement VOX or qualify RF.

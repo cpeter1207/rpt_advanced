@@ -4,7 +4,10 @@ use crate::{
     Error,
     services::{PeerIo, SourceTimeClock},
 };
-use rpt_advanced_core::audio::{AudioSpan, LinkAudioConsumer};
+use rpt_advanced_core::{
+    audio::{AudioSpan, LinkAudioConsumer},
+    link::PeerReply,
+};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -105,6 +108,7 @@ pub(super) struct Outbound {
     pub(super) statistics: Arc<EgressStatistics>,
     queue: LinkAudioConsumer,
     retired_rejections: u64,
+    queue_rejections_seen: u64,
     converter: Egress,
     rate: u32,
     native: [f32; BLOCK],
@@ -120,6 +124,7 @@ pub(super) struct Outbound {
     private: bool,
     private_finishing: bool,
     private_clock: Option<SourceTimeClock>,
+    programme_guard: Option<PeerReply>,
     next_audio_ms: u64,
     unkey_ns: Option<u64>,
     idle_timestamp: u32,
@@ -134,6 +139,7 @@ impl Outbound {
             statistics: Arc::new(EgressStatistics::new()),
             queue,
             retired_rejections: 0,
+            queue_rejections_seen: 0,
             converter: Egress::new(rate, BLOCK).map_err(|_| Error::Allocation)?,
             rate,
             native: [0.0; BLOCK],
@@ -149,6 +155,7 @@ impl Outbound {
             private: false,
             private_finishing: false,
             private_clock: None,
+            programme_guard: None,
             next_audio_ms: 0,
             unkey_ns: None,
             idle_timestamp: 0,
@@ -210,11 +217,25 @@ impl Outbound {
             && self.queue.peek_span().is_none()
     }
     pub(super) fn redirect(&mut self, queue: LinkAudioConsumer) -> Result<(), Error> {
+        self.exchange((queue, 0)).map(drop)
+    }
+    /// Exchange only the queue; conversion, encoder and retry ownership remain here.
+    /// The observation cursor follows a parked queue, avoiding duplicate drop counts.
+    pub(super) fn exchange(
+        &mut self,
+        (queue, seen): (LinkAudioConsumer, u64),
+    ) -> Result<(LinkAudioConsumer, u64), Error> {
+        let dropped = self.queue.dropped_samples();
         self.retired_rejections = self
             .retired_rejections
-            .saturating_add(self.queue.dropped_samples());
-        self.queue = queue;
-        self.discard()
+            .saturating_add(dropped.saturating_sub(self.queue_rejections_seen));
+        let old = std::mem::replace(&mut self.queue, queue);
+        self.queue_rejections_seen = seen;
+        self.discard()?;
+        Ok((old, dropped))
+    }
+    pub(super) fn guard_programme(&mut self, signals: Option<PeerReply>) {
+        self.programme_guard = signals;
     }
     fn discard(&mut self) -> Result<(), Error> {
         self.pending = None;
@@ -226,9 +247,13 @@ impl Outbound {
         self.converter.reset().map_err(|_| Error::Translation)
     }
     fn current(&self, stream: u64) -> bool {
-        self.clock
+        self.programme_guard
             .as_ref()
-            .is_none_or(|clock| clock.stream() == stream)
+            .is_none_or(|signals| !signals.ended())
+            && self
+                .clock
+                .as_ref()
+                .is_none_or(|clock| clock.stream() == stream)
     }
     /// Return an absolute source/expiry wake. Each call handles at most one media item.
     pub(super) fn step(&mut self, io: &mut PeerIo, now_ms: u64) -> Result<Option<u64>, Error> {
@@ -253,8 +278,11 @@ impl Outbound {
             now_ms.saturating_mul(1_000_000)
         };
         self.statistics.rejected.store(
-            self.retired_rejections
-                .saturating_add(self.queue.dropped_samples()),
+            self.retired_rejections.saturating_add(
+                self.queue
+                    .dropped_samples()
+                    .saturating_sub(self.queue_rejections_seen),
+            ),
             Ordering::Relaxed,
         );
         let oldest = self
@@ -663,6 +691,13 @@ impl Outbound {
         Ok(())
     }
     fn send(&mut self, io: &mut PeerIo, now: u64) -> Result<(), Error> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| !self.current(pending.stream))
+        {
+            return self.discard_media(io);
+        }
         if let Some(pending) = &self.pending {
             let status = if let Some(deadline) = pending.deadline {
                 io.send_prepared_timed(
@@ -749,6 +784,25 @@ mod tests {
         if let Some(hook) = hook {
             hook();
         }
+    }
+
+    #[test]
+    fn exchanging_return_queues_does_not_count_old_rejections_twice() {
+        let (mut producer, input) = rpt_advanced_core::audio::LinkAudioQueue::new(1, 1)
+            .unwrap()
+            .into_endpoints();
+        producer.write(AudioSpan::default(), &[0.25; 2]);
+        let mut outbound = Outbound::new(8000, input).unwrap();
+        let (_, other) = rpt_advanced_core::audio::LinkAudioQueue::new(1, 1)
+            .unwrap()
+            .into_endpoints();
+        let parked = outbound.exchange((other, 0)).unwrap();
+        let _ = outbound.exchange(parked).unwrap();
+        let (_, next) = rpt_advanced_core::audio::LinkAudioQueue::new(1, 1)
+            .unwrap()
+            .into_endpoints();
+        outbound.redirect(next).unwrap();
+        assert_eq!(outbound.retired_rejections, 1);
     }
 
     #[test]

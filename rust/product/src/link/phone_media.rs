@@ -4,6 +4,7 @@ use crate::{
     link::ring::{InboundConsumer, InboundObserver, InboundPolicy, InboundProducer, InboundRing},
     services::{PcmProcessor, ProcessedPeer, SourceBirth, SourceTimeReference},
 };
+use rpt_advanced_core::audio::{LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue};
 use rpt_advanced_core::link::{
     PeerInput, PeerReply, PeerSignals, PhoneSource, ReceivePolicy, RenderedPeerBlock,
     SourceCoordinate, SourceTimeBound, TimedPeerSample,
@@ -129,8 +130,18 @@ pub(super) struct Ingress {
     minimum_frame: u64,
     admission: SourceTimeReference,
     cursor: Option<u64>,
+    outbound: Option<LinkAudioConsumer>,
 }
 impl Ingress {
+    pub(super) fn active(&self) -> bool {
+        self.shared.active()
+    }
+    pub(super) fn guard(&self) -> PeerReply {
+        self.shared.observer.signals().reply_target()
+    }
+    pub(super) fn take_output(&mut self) -> Option<LinkAudioConsumer> {
+        self.outbound.take()
+    }
     pub(super) fn prepared(&self) -> bool {
         self.shared.phase.load(Ordering::Acquire) == PREPARED
     }
@@ -302,8 +313,13 @@ impl PeerInput for TimedInput {
 pub struct PhoneMediaInput {
     input: ProcessedPeer<TimedInput>,
     shared: Arc<Shared>,
+    outbound: Option<LinkAudioProducer>,
 }
 impl PhoneMediaInput {
+    /// Transfer the existing mix-minus queue producer to exactly one typed graph slot.
+    pub fn take_output(&mut self) -> Option<LinkAudioProducer> {
+        self.outbound.take()
+    }
     /// Actual provider/account/call/ingress identity retained by this consumer.
     pub fn source(&self) -> &PhoneSource {
         self.shared
@@ -415,7 +431,11 @@ pub(super) fn prepare(
         oldest: AtomicU64::new(0),
         buckets: std::array::from_fn(|_| Bucket::default()),
     });
+    let (output, outbound) = LinkAudioQueue::new(48_000 / 5, 64)
+        .map_err(|_| Error::Allocation)?
+        .into_endpoints();
     let input = PhoneMediaInput {
+        outbound: Some(output),
         input: ProcessedPeer::new(
             TimedInput {
                 reader,
@@ -427,6 +447,7 @@ pub(super) fn prepare(
     };
     Ok((
         Box::new(Ingress {
+            outbound: Some(outbound),
             shared: Arc::clone(&shared),
             expected_revision,
             writer,
