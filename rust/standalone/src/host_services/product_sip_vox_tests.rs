@@ -1,4 +1,4 @@
-//! Actual SIP caller -> authenticated controller -> ordinary restricted IAX remote.
+//! Actual SIP caller -> authenticated controller -> an existing or phone-origin IAX remote.
 use super::*;
 
 #[derive(Default)]
@@ -53,7 +53,7 @@ impl Remote {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let address = socket.local_addr().unwrap();
         drop(socket);
-        // Full remote catalog: the actual controller must choose the restricted dial.
+        // Full remote catalog exercises the actual ordinary or phone-origin factory.
         let client = IaxClient::load(Path::new("librptadviax2.so.2")).unwrap();
         let server = IaxServer::bind(&client, address, &["2000".into()]).unwrap();
         Self {
@@ -66,6 +66,10 @@ impl Remote {
             return_packets: 0,
             next_return: Instant::now(),
         }
+    }
+    pub fn clear_voice_observation(&self) {
+        assert!(self.observation.accepted.load(Ordering::Acquire));
+        self.observation.voiced.store(0, Ordering::Release);
     }
     pub fn pump(&mut self) {
         let now = SystemTime::now()
@@ -144,7 +148,7 @@ fn media(caller: &mut Caller, codec: &mut G711Codec, samples: &[f32]) {
         thread::sleep(Duration::from_millis(20));
     }
 }
-pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>) {
+pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool) {
     let mut caller = Caller::establish(sip, None);
     caller.keepalive = true;
     let mut codec = G711Codec::load(G711::Mulaw).unwrap();
@@ -161,17 +165,19 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>) {
         0,
         "unauthenticated voice is private"
     );
-    assert!(!observation.accepted.load(Ordering::Acquire));
+    assert_eq!(observation.accepted.load(Ordering::Acquire), existing);
     caller.digits(b"100#");
     caller.prompt(&mut codec, "password");
     caller.digits(b"1234#");
     caller.prompt(&mut codec, "authenticated");
-    caller.digits(b"*4#*32000**#");
-    let completed = caller.prompt(&mut codec, "remote connect");
-    assert_prompt(
-        &completed,
-        "-.-. --- -- -- .- -. -../-.-. --- -- .--. .-.. . - . -..",
-    );
+    if !existing {
+        caller.digits(b"*4#*32000**#");
+        let completed = caller.prompt(&mut codec, "remote connect");
+        assert_prompt(
+            &completed,
+            "-.-. --- -- -- .- -. -../-.-. --- -- .--. .-.. . - . -..",
+        );
+    }
     assert!(observation.accepted.load(Ordering::Acquire));
     media(&mut caller, &mut codec, &speech);
     assert_eq!(
@@ -180,7 +186,7 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>) {
         "dial alone does not attach phone audio"
     );
     assert_eq!(PUBLIC_OUTPUT.load(Ordering::Acquire), 0);
-    caller.digits(b"#*3#");
+    caller.digits(if existing { b"*3#" } else { b"#*3#" });
     let completed = caller.prompt(&mut codec, "local attachment");
     assert_prompt(
         &completed,

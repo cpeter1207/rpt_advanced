@@ -1706,3 +1706,10 @@ of audio already accepted into an ordinary network provider's own storage or
 reliable retransmission queue. The earlier restricted-transport eligibility
 policy is superseded; the P12 local DAC presentation requirement is unchanged.
 Explicitly timed/private handles retain their existing provider contract.
+
+The composed regression first establishes an ordinary link, then authenticates
+and explicitly attaches a SIP caller. It retains the original one-second voice
+fixture, mix-minus and private-status checks, return audio, and ordinary-link
+survival after phone BYE. Its simulated 48-kHz device uses absolute 20-ms
+deadlines so callback work is included in the frame budget. Missed slots advance
+the source coordinate and are skipped, never replayed as a catch-up burst.

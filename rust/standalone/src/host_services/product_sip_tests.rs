@@ -267,20 +267,26 @@ fn call_flow(sip: UdpSocket, registered: Option<SocketAddr>, login_only: bool) {
 
 #[test]
 fn real_product_private_sip_call_authenticates_and_returns_status_without_radio_output() {
-    product_call(false, false);
+    product_call(false, false, false);
 }
 #[test]
 fn real_product_zero_mailbox_sip_call_prompts_and_hangs_up_without_radio_output() {
-    product_call(true, false);
+    product_call(true, false, false);
 }
 #[test]
 fn real_product_sip_call_connects_remote_and_transmits_voice() {
-    product_call(false, true);
+    product_call(false, true, false);
 }
-fn product_call(no_mailbox: bool, voice: bool) {
+#[test]
+fn real_product_sip_call_attaches_to_existing_ordinary_iax_link() {
+    product_call(false, true, true);
+}
+fn product_call(no_mailbox: bool, voice: bool, existing: bool) {
     const CHILD: &str = "RPTADV_TEST_REAL_SIP_PHONE_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
-        let test = if voice {
+        let test = if existing {
+            "host_services::product_phone_tests::sip::real_product_sip_call_attaches_to_existing_ordinary_iax_link"
+        } else if voice {
             "host_services::product_phone_tests::sip::real_product_sip_call_connects_remote_and_transmits_voice"
         } else if no_mailbox {
             "host_services::product_phone_tests::sip::real_product_zero_mailbox_sip_call_prompts_and_hangs_up_without_radio_output"
@@ -300,6 +306,14 @@ fn product_call(no_mailbox: bool, voice: bool) {
         );
         return;
     }
+    // Isolated child only: retain ordinary redacted product diagnostics on failure.
+    unsafe {
+        libc::openlog(
+            c"rpt-sip-phone-fixture".as_ptr(),
+            libc::LOG_PERROR,
+            libc::LOG_USER,
+        )
+    };
     let directory = std::env::temp_dir().join(format!("rpt-real-sip-phone-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     let secret = directory.join("phone.secret");
@@ -364,12 +378,46 @@ fn product_call(no_mailbox: bool, voice: bool) {
     if let Some(remote) = remote.as_mut() {
         runtime.enable_listener(&mut remote.server).unwrap();
     }
+    if existing {
+        let remote = remote.as_mut().unwrap();
+        let command = runtime.product_descriptor().link_command.unwrap();
+        // This is the same ordinary CLI entry point, before any private call exists.
+        let ordinary =
+            thread::spawn(move || unsafe { command(c"1000".as_ptr(), 4, c"2000".as_ptr(), 4, 1) });
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !ordinary.is_finished() && Instant::now() < deadline {
+            remote.pump();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(ordinary.join().unwrap(), 0);
+        let mut quiet_since = Instant::now();
+        let mut public = PUBLIC_OUTPUT.load(Ordering::Acquire);
+        loop {
+            remote.pump();
+            let current = PUBLIC_OUTPUT.load(Ordering::Acquire);
+            if current != public || LAST_PTT.load(Ordering::Acquire) {
+                quiet_since = Instant::now();
+                public = current;
+            }
+            if quiet_since.elapsed() >= Duration::from_millis(750) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "ordinary connection notice must drain"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Ordinary public link notices precede the privacy observation interval.
+        PUBLIC_OUTPUT.store(0, Ordering::Release);
+        remote.clear_voice_observation();
+    }
     let observation = remote
         .as_ref()
         .map(|remote| Arc::clone(&remote.observation));
     let caller = thread::spawn(move || {
         if let Some(observation) = observation {
-            vox::call(sip, observation);
+            vox::call(sip, observation, existing);
         } else {
             call_flow(sip, None, no_mailbox);
         }
@@ -387,6 +435,20 @@ fn product_call(no_mailbox: bool, voice: bool) {
         thread::sleep(Duration::from_millis(1));
     }
     let result = caller.join();
+    if voice {
+        unsafe extern "C" fn status(_: *mut c_void, text: *const std::ffi::c_char, length: usize) {
+            let text = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) };
+            eprintln!("composed link status: {}", String::from_utf8_lossy(text));
+        }
+        unsafe {
+            runtime.product_descriptor().link_status.unwrap()(
+                c"1000".as_ptr(),
+                4,
+                Some(status),
+                ptr::null_mut(),
+            );
+        }
+    }
     if result.is_ok() {
         if let Some(remote) = remote.as_mut() {
             // Ending the private caller must not disconnect its established node link.

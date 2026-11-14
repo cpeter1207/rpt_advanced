@@ -47,6 +47,9 @@ unsafe extern "C" fn activate(
     let stopping = Arc::clone(&stop);
     let worker = thread::spawn(move || {
         let mut first = 0;
+        let started = Instant::now();
+        let mut next = started;
+        let mut skipped = 0u64;
         while !stopping.load(Ordering::Acquire) {
             let mut samples = [0.0; 960];
             let metadata = abi::UrpNativeReceiveMetadata {
@@ -92,8 +95,25 @@ unsafe extern "C" fn activate(
             LAST_PTT.store(keyed != 0, Ordering::Release);
             RADIO_TURNS.fetch_add(1, Ordering::Relaxed);
             first += 960;
-            thread::sleep(Duration::from_millis(20));
+            // A hardware frame clock includes callback work in its 20-ms
+            // budget. Relative sleeps incorrectly slow the simulated device.
+            next += Duration::from_millis(20);
+            if let Some(late) = Instant::now().checked_duration_since(next) {
+                // A missed deadline drops elapsed slots, never an unbounded
+                // catch-up burst. Native source coordinates retain that gap.
+                let missed = (late.as_millis() / 20 + 1) as u64;
+                skipped += missed;
+                first += missed * 960;
+                next += Duration::from_millis(missed * 20);
+            }
+            thread::sleep(next.saturating_duration_since(Instant::now()));
         }
+        eprintln!(
+            "simulated radio clock: callbacks={} skipped={skipped} source_ms={} elapsed_ms={}",
+            first / 960 - skipped,
+            first / 48,
+            started.elapsed().as_millis()
+        );
     });
     *RADIO.lock().unwrap() = Some(RadioPump { stop, worker });
     0
