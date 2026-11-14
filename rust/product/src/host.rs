@@ -1337,7 +1337,11 @@ impl Host {
                 for remote in remotes {
                     self.detach_notifying(local, &remote, clock.now_ms, false);
                 }
-                self.private_phone_result(&reply, true)
+                self.node_operation_result(
+                    local,
+                    Some(&reply),
+                    rpt_advanced_core::messages::OperationResult::Completed,
+                )
             }
             LinkEffect::Detach(remotes) => {
                 for remote in remotes {

@@ -38,6 +38,14 @@ impl RetryWork {
         self.attempt.timed_g711()
     }
 
+    /// Borrow original admitted custody across host publication, never a new command grant.
+    pub fn pending_operation(&self) -> Option<&DigitOperation> {
+        self.pending_source.as_ref()
+    }
+    /// An unfinished RF command retains its generic outcome through initial retries.
+    pub fn local_operation_result(&self) -> bool {
+        pending_local_result(self.pending_source.as_ref())
+    }
     /// Exact private caller of an unfinished initial attempt; established recovery has none.
     pub fn private_reply(&self) -> Option<&PeerReply> {
         pending_phone_reply(self.pending_source.as_ref())
@@ -60,6 +68,21 @@ impl RetryWork {
     }
 }
 impl ConnectAttempt {
+    /// Borrow original admitted custody across host publication, never a new command grant.
+    pub fn pending_operation(&self) -> Option<&DigitOperation> {
+        self.pending_source.as_ref()
+    }
+    /// Called only by RF DTMF dispatch after command admission. Reuse the existing
+    /// unfinished source record; CLI, scheduled work, peers and macros stay unmarked.
+    pub fn retain_local_operation_result(&mut self, operation: &DigitOperation) {
+        if pending_local_result(Some(operation)) {
+            self.pending_source = Some(operation.clone());
+        }
+    }
+    /// Whether the initiating RF command requested a fixed local outcome.
+    pub fn local_operation_result(&self) -> bool {
+        pending_local_result(self.pending_source.as_ref())
+    }
     /// A private phone's initial dial selects the explicit timed G.711 route.
     pub fn timed_g711(&self) -> bool {
         self.private_reply().is_some()
@@ -97,6 +120,12 @@ fn pending_source_current(source: Option<&DigitOperation>, now_ms: Option<u64>) 
             && source.macro_permit.as_ref().is_none_or(|permit| {
                 now_ms.map_or_else(|| permit.active(), |now| permit.current_at(now))
             })
+    })
+}
+
+fn pending_local_result(source: Option<&DigitOperation>) -> bool {
+    source.is_some_and(|source| {
+        source.reply.is_none() && source.origin.is_none() && source.macro_permit.is_none()
     })
 }
 
@@ -1173,6 +1202,37 @@ impl NodeLinkControl {
             }
         }
         result
+    }
+    /// Restore original source custody only after admitted host publication failed
+    /// and rejection recreated the same permanent retry. Retired authority cancels
+    /// that unfinished retry; established recovery never supplies a source here.
+    pub fn restore_pending_operation(
+        &mut self,
+        remote: &str,
+        source: DigitOperation,
+        now_ms: u64,
+        generation_current: bool,
+    ) {
+        if !self
+            .manager
+            .snapshot()
+            .iter()
+            .any(|peer| peer.name == remote && peer.retrying && peer.permanent)
+        {
+            return;
+        }
+        self.pending_source_retries
+            .retain(|(name, _)| name != remote);
+        if self.admitting
+            && generation_current
+            && pending_source_current(Some(&source), Some(now_ms))
+            && self.macro_operation_current(&source, now_ms)
+        {
+            self.pending_source_retries
+                .push((remote.to_owned(), source));
+        } else {
+            self.manager.cancel_retry(remote);
+        }
     }
     /// Reserve one due hub-recovery dial outside the serialized control owner.
     pub fn take_retry(&mut self, now_ms: u64, work: GenerationWork) -> Option<RetryWork> {

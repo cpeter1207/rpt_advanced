@@ -147,8 +147,7 @@ fn wait_for(engine: &Arc<Engine>, mut predicate: impl FnMut() -> bool) {
 }
 
 #[test]
-fn asynchronous_phone_link_commands_deliver_privately_without_public_connect_or_disconnect_notices()
-{
+fn asynchronous_phone_link_results_reach_local_rf_without_remote_fanout() {
     static PUBLIC_SAMPLES: AtomicU64 = AtomicU64::new(0);
     unsafe extern "C" fn write(
         _: *mut c_void,
@@ -269,7 +268,7 @@ fn asynchronous_phone_link_commands_deliver_privately_without_public_connect_or_
             .all(|text| !text.contains("1234") && !text.contains('*') && !text.contains('#'))
     );
     assert!(
-        !engine
+        engine
             .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
             .unwrap()
     );
@@ -454,7 +453,7 @@ fn initial_private_retry_completes_privately_then_transport_loss_uses_ordinary_p
             .lock()
             .unwrap()
             .iter()
-            .any(|text| text == "Command failed")
+            .any(|text| text == "Requested operation is unavailable")
     );
     let now_ms = engine.elapsed_ms();
     let retry = engine
@@ -919,6 +918,302 @@ fn private_collection_real_engine_reconciles_loss_without_clearing_new_input() {
 
 #[path = "lifecycle_phone_remote_tests.rs"]
 mod radio_status;
+
+/// RF initiation is retained through the existing unfinished-attempt retry record.
+#[test]
+fn rf_dial_results_wait_for_actual_outcome_and_survive_initial_retry() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let voice = speech();
+    let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+    let engine = engine(configuration(), services, Arc::clone(&voice));
+    let LinkEffect::Connect(cli) = engine
+        .operation("1000", operation(LinkAction::Transceive, "2000"))
+        .unwrap()
+    else {
+        panic!("CLI dial");
+    };
+    assert!(
+        !cli.local_operation_result(),
+        "CLI work has no RF result provenance"
+    );
+    engine
+        .run(move |host| {
+            host.runtime
+                .node("1000")
+                .unwrap()
+                .links()
+                .cancel_connect(cli);
+            Ok(())
+        })
+        .unwrap();
+    let effect = engine
+        .digit_effect(
+            "1000",
+            DigitOutcome::Operation(operation(LinkAction::PermanentTransceive, "2000")),
+        )
+        .unwrap();
+    assert!(
+        voice.opened.lock().unwrap().is_empty(),
+        "request acceptance is not completion"
+    );
+    crate::fixture::PEER_DIAL_RESULT.store(1, Ordering::Release);
+    engine
+        .background(
+            "1000".into(),
+            effect,
+            engine.revision.load(Ordering::Acquire),
+            true,
+        )
+        .unwrap();
+    wait_for(&engine, || engine.jobs.lock().unwrap().is_empty());
+    let now_ms = engine.elapsed_ms();
+    let retry = engine
+        .run(move |host| {
+            let node = host.runtime.node("1000").unwrap();
+            let work = node.work().unwrap();
+            Ok(node.links().take_retry(now_ms, work).unwrap())
+        })
+        .unwrap();
+    engine
+        .spawn_dial(
+            "1000".into(),
+            Dial::Retry(retry),
+            engine.revision.load(Ordering::Acquire),
+            None,
+            false,
+        )
+        .unwrap();
+    wait_for(&engine, || engine.jobs.lock().unwrap().is_empty());
+    assert!(
+        engine
+            .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
+            .unwrap()
+    );
+    assert!(
+        voice
+            .opened
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|text| text == "Requested operation is unavailable"),
+        "a failed RF dial needs a generic local outcome"
+    );
+    assert!(
+        voice
+            .opened
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|text| text == "Command completed"),
+        "initial retry success retains the RF operation result"
+    );
+    assert!(engine.stop());
+}
+
+#[test]
+fn initial_permanent_result_source_survives_host_publication_failures() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for (phone_origin, retire_after_failure) in [(false, false), (true, false), (true, true)] {
+        let voice = speech();
+        let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+        let (services, peers) =
+            crate::services::tests::timed_dial_fixture_with_bind_failures(services, 2);
+        let engine = engine(configuration(), services, voice);
+        let caller = phone_origin.then(|| admit(&engine));
+        let request = if let Some((source, reply, _)) = &caller {
+            source_operation(
+                &engine,
+                source,
+                reply,
+                LinkAction::PermanentTransceive,
+                "2000",
+            )
+        } else {
+            operation(LinkAction::PermanentTransceive, "2000")
+        };
+        let effect = engine
+            .digit_effect("1000", DigitOutcome::Operation(request))
+            .unwrap();
+        let revision = engine.revision.load(Ordering::Acquire);
+        assert!(engine.effect("1000".into(), effect, revision).is_err());
+        assert_eq!(
+            peers.lock().unwrap().len(),
+            1,
+            "provider dial actually succeeded"
+        );
+        if retire_after_failure {
+            let source = caller.as_ref().unwrap().0.clone();
+            let now_ms = engine.elapsed_ms();
+            engine
+                .run(move |host| {
+                    assert!(host.retire_phone(&source));
+                    let node = host.runtime.node("1000").unwrap();
+                    let work = node.work().unwrap();
+                    assert!(
+                        node.links().take_retry(now_ms, work).is_none(),
+                        "caller retirement cancels unfinished publication recovery"
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            assert!(engine.stop());
+            continue;
+        }
+        for succeeds in [false, true] {
+            let now_ms = engine.elapsed_ms();
+            let retry = engine
+                .run(move |host| {
+                    let node = host.runtime.node("1000").unwrap();
+                    let work = node.work().unwrap();
+                    Ok(node.links().take_retry(now_ms, work).unwrap())
+                })
+                .unwrap();
+            assert_eq!(
+                retry.private_reply(),
+                caller.as_ref().map(|(_, reply, _)| reply),
+                "unfinished phone work retains the exact source after failed host publication"
+            );
+            assert_eq!(
+                retry.local_operation_result(),
+                !phone_origin,
+                "unfinished RF work retains its result after failed host publication"
+            );
+            assert_eq!(
+                engine
+                    .dial("1000".into(), Dial::Retry(retry), revision)
+                    .is_ok(),
+                succeeds
+            );
+        }
+        let clock = engine.clock();
+        engine
+            .run(move |host| {
+                host.reject_peer("1000", "2000", clock.now_ms);
+                Ok(())
+            })
+            .unwrap();
+        let now_ms = engine.elapsed_ms();
+        let recovery = engine
+            .run(move |host| {
+                let node = host.runtime.node("1000").unwrap();
+                let work = node.work().unwrap();
+                Ok(node.links().take_retry(now_ms, work).unwrap())
+            })
+            .unwrap();
+        assert!(recovery.private_reply().is_none());
+        assert!(
+            !recovery.local_operation_result(),
+            "completed work never grants authority to recovery"
+        );
+        drop(recovery);
+        assert!(engine.stop());
+    }
+}
+
+#[test]
+fn phone_macro_dial_outcome_is_generic_but_macro_stopped_stays_private() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let voice = speech();
+    let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+    let (services, peers) = crate::services::tests::timed_dial_fixture(services);
+    let config = format!(
+        "{}\n[dtmf_macro connect]\ntrigger=*95\nprotected=no\ncommands=*32000#\n",
+        configuration()
+    );
+    let engine = engine(config, services, voice);
+    let now_ms = engine.elapsed_ms();
+    let rf = engine
+        .run(move |host| {
+            for digit in "*95".chars() {
+                host.runtime.digit(
+                    "1000",
+                    rpt_advanced_core::runtime::dtmf::DigitEvent::Digit { digit, now_ms },
+                );
+            }
+            Ok(host
+                .runtime
+                .node("1000")
+                .unwrap()
+                .links()
+                .advance_macros(now_ms)
+                .remove(0))
+        })
+        .unwrap();
+    let LinkEffect::Connect(rf) = engine.digit_effect("1000", rf).unwrap() else {
+        panic!("RF macro dial");
+    };
+    assert!(
+        !rf.local_operation_result(),
+        "RF macro announcements remain out of scope"
+    );
+    engine
+        .run(move |host| {
+            host.runtime
+                .node("1000")
+                .unwrap()
+                .links()
+                .cancel_connect(rf);
+            Ok(())
+        })
+        .unwrap();
+    let (source, reply, state) = admit(&engine);
+    let origin = source.clone();
+    let target = reply.clone();
+    let now_ms = engine.elapsed_ms();
+    let outcome = engine
+        .run(move |host| {
+            let node = host.runtime.node("1000").unwrap();
+            for digit in "*95".chars() {
+                assert!(
+                    node.links()
+                        .phone_digit(&origin, digit, now_ms, target.clone())
+                        .is_none()
+                );
+            }
+            Ok(node.links().advance_macros(now_ms).remove(0))
+        })
+        .unwrap();
+    let effect = engine.digit_effect("1000", outcome).unwrap();
+    engine
+        .background(
+            "1000".into(),
+            effect,
+            engine.revision.load(Ordering::Acquire),
+            false,
+        )
+        .unwrap();
+    wait_for(&engine, || state.lock().unwrap().audio.len() >= 480);
+    assert!(
+        engine
+            .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
+            .unwrap()
+    );
+    assert!(
+        peers
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|peer| peer.lock().unwrap().prepared.is_empty()),
+        "generic LOCAL outcome never reaches an ordinary peer"
+    );
+    engine
+        .digit_effect("1000", DigitOutcome::MacroStopped { reply: Some(reply) })
+        .unwrap();
+    wait_for(&engine, || state.lock().unwrap().audio.len() >= 640);
+    assert!(
+        !engine
+            .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
+            .unwrap(),
+        "macro-stopped details remain private after generic outcome drains"
+    );
+    assert!(engine.stop());
+}
 
 #[test]
 fn attached_phone_preserves_ordinary_ota_connect_and_permanent_retry() {

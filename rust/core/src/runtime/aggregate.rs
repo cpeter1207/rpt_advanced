@@ -1539,6 +1539,45 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &spoken,
         )
     }
+    /// Prepare a fixed node outcome only for an authenticated private call.
+    pub fn prepare_phone_operation_result(
+        &mut self,
+        local: &str,
+        result: crate::messages::OperationResult,
+        reply: &crate::link::PeerReply,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
+        if reply.phone_source().is_none() || !reply.phone_authenticated() || reply.ended() {
+            return Err(RuntimeError::Rejected);
+        }
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let forms = node
+            .control
+            .catalog
+            .format(&Message::OperationResult { result })
+            .map_err(|_| RuntimeError::Preparation)?;
+        prepare::status_stream(
+            node.control
+                .media_session
+                .as_mut()
+                .ok_or(RuntimeError::Preparation)?
+                .as_mut(),
+            &node.status,
+            &forms.morse,
+            &forms.tts,
+        )
+    }
+    /// Queue only the fixed generic node outcome on LOCAL RF, never peer fanout.
+    pub fn queue_operation_result(
+        &mut self,
+        local: &str,
+        result: crate::messages::OperationResult,
+    ) -> Result<(), RuntimeError> {
+        self.queue_link_rejection(local, "", None, Message::OperationResult { result })
+    }
     /// Prepare credential-free authentication wording for a live private Phone token.
     /// The caller must retain its exact call owner and queue this stream only to
     /// that call. Login deliberately needs no prior mailbox authentication.

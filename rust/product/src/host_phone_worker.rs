@@ -2,7 +2,7 @@
 use super::*;
 use crate::phone::LoginInput;
 use rpt_advanced_core::{
-    messages::PhoneAuthenticationPrompt as Prompt,
+    messages::{OperationResult, PhoneAuthenticationPrompt as Prompt},
     phone_dtmf::{PhoneDtmfAction, PhoneDtmfGrammar, PhoneDtmfOptions},
 };
 
@@ -18,11 +18,7 @@ impl Host {
             .ok_or(RuntimeError::Rejected)
     }
     /// Deliver only to the original caller; preparation failure never becomes public telemetry.
-    pub(crate) fn private_phone_result(
-        &mut self,
-        reply: &PeerReply,
-        completed: bool,
-    ) -> Result<(), RuntimeError> {
+    pub(crate) fn private_phone_failure(&mut self, reply: &PeerReply) -> Result<(), RuntimeError> {
         let source = reply.phone_source().ok_or(RuntimeError::Rejected)?.clone();
         let local = self
             .phone_calls
@@ -30,19 +26,61 @@ impl Host {
             .ok_or(RuntimeError::Rejected)?
             .to_owned();
         self.current_private_phone(&local, reply)?;
-        let result = self.prepare_login_prompt(
-            &source,
-            reply,
-            if completed {
-                Prompt::Completed
-            } else {
-                Prompt::Failed
-            },
-        );
+        let result = self.prepare_login_prompt(&source, reply, Prompt::Failed);
         if result.is_err() {
             self.retire_phone(&source);
         }
         result
+    }
+    /// Mirror only a typed, credential-free node outcome. An explicit caller
+    /// remains exact-source; RF-origin outcomes go only to currently attached calls.
+    pub(crate) fn node_operation_result(
+        &mut self,
+        local: &str,
+        reply: Option<&PeerReply>,
+        outcome: OperationResult,
+    ) -> Result<(), RuntimeError> {
+        let targets = if let Some(reply) = reply {
+            self.current_private_phone(local, reply)?;
+            vec![(
+                reply.phone_source().ok_or(RuntimeError::Rejected)?.clone(),
+                reply.clone(),
+            )]
+        } else {
+            self.phone_calls.attachments(local)
+        };
+        #[cfg(test)]
+        super::tests::phone::before_operation_result();
+        for (source, target) in targets {
+            // Attachment enumeration and explicit requests both retain exact call authority.
+            let delivery = self
+                .phone_calls
+                .local(&source, &target)
+                .ok_or(RuntimeError::Rejected)
+                .and_then(|bound| self.current_private_phone(bound, &target))
+                .and_then(|()| {
+                    self.runtime
+                        .prepare_phone_operation_result(local, outcome, &target)
+                })
+                .and_then(|stream| {
+                    self.phone_calls
+                        .queue_reply(&source, &target, stream)
+                        .map_err(|_| RuntimeError::Rejected)
+                });
+            if let Err(error) = delivery {
+                self.retire_phone(&source);
+                if reply.is_some() {
+                    return Err(error);
+                }
+                self.services
+                    .scheduler_notice("node operation result: private preparation failed");
+            }
+        }
+        if self.runtime.queue_operation_result(local, outcome).is_err() {
+            self.services
+                .scheduler_notice("node operation result: local RF preparation failed");
+        }
+        Ok(())
     }
     pub(super) fn start_private_phone(
         &mut self,
@@ -219,14 +257,16 @@ impl Host {
                             .runtime
                             .document()
                             .phone_local_attachment_allowed(source.account(), target);
-                    let result = if !permitted {
-                        Prompt::Failed
-                    } else if self.attach_phone(source, reply, target, clock).is_ok() {
-                        Prompt::Completed
+                    if !permitted {
+                        self.prepare_login_prompt(source, reply, Prompt::Failed)?;
                     } else {
-                        Prompt::Unavailable
-                    };
-                    self.prepare_login_prompt(source, reply, result)?;
+                        let outcome = if self.attach_phone(source, reply, target, clock).is_ok() {
+                            OperationResult::Completed
+                        } else {
+                            OperationResult::Unavailable
+                        };
+                        self.node_operation_result(&local, Some(reply), outcome)?;
+                    }
                     false
                 }
                 PhoneDtmfAction::SelectTarget(target) => {
@@ -267,7 +307,7 @@ impl Host {
                 _ => true,
             };
             if unavailable {
-                self.prepare_login_prompt(source, reply, Prompt::Unavailable)?;
+                self.node_operation_result(&local, Some(reply), OperationResult::Unavailable)?;
             }
         }
         Ok(())

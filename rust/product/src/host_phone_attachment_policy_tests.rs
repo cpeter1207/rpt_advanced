@@ -389,7 +389,7 @@ fn prepared_phone_attachment_uses_a_typed_slot_and_preserves_private_ownership()
 }
 
 #[test]
-fn phone_attachment_rejects_unknown_transmit_transport_without_losing_either_owner() {
+fn phone_attachment_reuses_ordinary_transport_without_losing_either_owner() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -411,18 +411,93 @@ fn phone_attachment_rejects_unknown_transmit_transport_without_losing_either_own
         finish_prompt(&mut host, &source, &reply);
         host.reconcile_private_collections(clock());
         let result = host.attach_phone(&source, &reply, "1000", clock());
-        assert_eq!(
+        assert!(
             result.is_ok(),
-            !mode.transmits(),
-            "phone programme requires proven timed egress only for transmitting destinations"
+            "authorized attachment reuses the ordinary negotiated transport"
         );
-        assert_eq!(
-            host.phone_calls.attachments("1000").len(),
-            usize::from(!mode.transmits())
-        );
+        assert_eq!(host.phone_calls.attachments("1000").len(), 1);
         assert!(!reply.ended() && reply.phone_authenticated());
         assert_eq!(host.peers.len(), 1);
         assert_eq!(ordinary.lock().unwrap().drops, 0);
+        assert!(host.stop(20));
+        await_private_drop(&state);
+    }
+}
+
+#[test]
+fn rf_operation_results_reach_only_current_attached_phone() {
+    use rpt_advanced_core::messages::OperationResult;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut host, _) = policy_host(
+        "1000",
+        "attach_local_nodes=1000\n",
+        "phone_allow_accounts=provider\n",
+    );
+    let (phone, state) = crate::link::session::tests::phone_source_peer_at_rate(8000);
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    finish_prompt(&mut host, &source, &reply);
+    host.authenticate_phone(&source, &reply, "100", "1234", clock())
+        .unwrap();
+    finish_prompt(&mut host, &source, &reply);
+    host.attach_phone(&source, &reply, "1000", clock()).unwrap();
+    for result in [OperationResult::Completed, OperationResult::Unavailable] {
+        host.node_operation_result("1000", None, result).unwrap();
+        finish_prompt(&mut host, &source, &reply);
+    }
+    host.phone_calls.detach_media(&source, &reply);
+    host.node_operation_result("1000", None, OperationResult::Completed)
+        .unwrap();
+    assert!(
+        host.take_phone_reply(&source, &reply).unwrap().is_none(),
+        "an authenticated but detached call does not receive RF operation results"
+    );
+    assert!(probe_public_phone_media(&mut host, "1000"));
+    assert!(host.stop(20));
+    await_private_drop(&state);
+}
+
+#[test]
+fn retired_attachment_snapshot_cannot_suppress_rf_operation_result() {
+    use rpt_advanced_core::messages::OperationResult;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for explicit_caller in [false, true] {
+        let (mut host, _) = policy_host(
+            "1000",
+            "attach_local_nodes=1000\n",
+            "phone_allow_accounts=provider\n",
+        );
+        let (phone, state) = crate::link::session::tests::phone_source_peer_at_rate(8000);
+        let call = phone.identity().call_id().unwrap();
+        host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+        let source = host.phone_source(call).unwrap().clone();
+        let reply = host.phone_reply(&source).unwrap();
+        finish_prompt(&mut host, &source, &reply);
+        host.authenticate_phone(&source, &reply, "100", "1234", clock())
+            .unwrap();
+        finish_prompt(&mut host, &source, &reply);
+        host.attach_phone(&source, &reply, "1000", clock()).unwrap();
+        let retired = reply.clone();
+        BEFORE_OPERATION_RESULT
+            .with_borrow_mut(|hook| *hook = Some(Box::new(move || retired.retire())));
+        let delivered = host.node_operation_result(
+            "1000",
+            explicit_caller.then_some(&reply),
+            OperationResult::Completed,
+        );
+        assert_eq!(delivered.is_ok(), !explicit_caller);
+        assert!(reply.ended());
+        assert_eq!(
+            probe_public_phone_media(&mut host, "1000"),
+            !explicit_caller,
+            "RF-origin delivery survives a retired listener; retired explicit authority stays private"
+        );
         assert!(host.stop(20));
         await_private_drop(&state);
     }

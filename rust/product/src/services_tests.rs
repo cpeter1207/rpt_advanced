@@ -1449,9 +1449,18 @@ type TimedFixturePeers = std::sync::Arc<
     std::sync::Mutex<Vec<std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>>>,
 >;
 pub(crate) fn timed_dial_fixture(original: HostServices) -> (HostServices, TimedFixturePeers) {
+    timed_dial_fixture_with_bind_failures(original, 0)
+}
+
+/// Fail only the first requested host-publication bindings after successful dials.
+pub(crate) fn timed_dial_fixture_with_bind_failures(
+    original: HostServices,
+    failures: usize,
+) -> (HostServices, TimedFixturePeers) {
     type Shared = std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>;
     struct Context {
         original: HostServices,
+        bind_failures: std::sync::atomic::AtomicUsize,
         peers: std::sync::Arc<std::sync::Mutex<Vec<Shared>>>,
     }
     unsafe extern "C" fn dial(
@@ -1487,6 +1496,14 @@ pub(crate) fn timed_dial_fixture(original: HostServices) -> (HostServices, Timed
             context.original.0.peer_destroy.unwrap()(context.original.0.context, original_peer);
         }
         let (handle, state) = crate::link::session::tests::timed_dial_handle();
+        state.lock().unwrap().fail_bind = context
+            .bind_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok();
         context.peers.lock().unwrap().push(state);
         unsafe {
             *output = handle;
@@ -1529,6 +1546,7 @@ pub(crate) fn timed_dial_fixture(original: HostServices) -> (HostServices, Timed
     let peers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     table.context = Box::into_raw(Box::new(Context {
         original,
+        bind_failures: std::sync::atomic::AtomicUsize::new(failures),
         peers: std::sync::Arc::clone(&peers),
     }))
     .cast();

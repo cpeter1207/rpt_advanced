@@ -637,7 +637,6 @@ phone-authentication =
         [password] Enter password followed by pound
         [authenticated] Mailbox authenticated. Protected commands still require node unlock
         [unavailable] Requested operation is unavailable
-        [completed] Command completed
         [failed] Command failed
        *[retry] Login unsuccessful. Enter your mailbox number followed by pound
         }
@@ -646,7 +645,6 @@ phone-authentication =
         [password] Enter your password followed by pound
         [authenticated] Mailbox authenticated. Protected commands still require node unlock
         [unavailable] Requested operation is unavailable
-        [completed] Command completed
         [failed] Command failed
        *[retry] Login unsuccessful. Enter your mailbox number followed by pound
         }
@@ -655,7 +653,20 @@ phone-authentication =
         [password] PASSWORD POUND
         [authenticated] LOGIN OK UNLOCK SEPARATE
         [unavailable] OPERATION UNAVAILABLE
-        [completed] COMMAND COMPLETED
         [failed] COMMAND FAILED
        *[retry] LOGIN FAILED MAILBOX POUND
+        }
+
+operation-result =
+    .text = { $state ->
+        [completed] Command completed
+       *[unavailable] Requested operation is unavailable
+        }
+    .tts = { $state ->
+        [completed] Command completed
+       *[unavailable] Requested operation is unavailable
+        }
+    .morse = { $state ->
+        [completed] COMMAND COMPLETED
+       *[unavailable] OPERATION UNAVAILABLE
         }

@@ -115,6 +115,21 @@ struct DialJob {
     report: bool,
 }
 impl Dial {
+    fn pending_operation(&self) -> Option<DigitOperation> {
+        match self {
+            Self::Connect(work) => work.pending_operation(),
+            Self::Retry(work) => work.pending_operation(),
+        }
+        .cloned()
+    }
+
+    fn local_operation_result(&self) -> bool {
+        match self {
+            Self::Connect(work) => work.local_operation_result(),
+            Self::Retry(work) => work.local_operation_result(),
+        }
+    }
+
     fn timed_g711(&self) -> bool {
         match self {
             Self::Connect(work) => work.timed_g711(),
@@ -186,7 +201,7 @@ impl Engine {
                     .filter(|reply| reply.phone_source().is_some())
                 {
                     let reply = reply.clone();
-                    self.run(move |host| host.private_phone_result(&reply, false))?;
+                    self.run(move |host| host.private_phone_failure(&reply))?;
                     return Ok(LinkEffect::None);
                 }
                 let local = local.to_owned();
@@ -199,9 +214,15 @@ impl Engine {
                     .as_ref()
                     .filter(|reply| reply.phone_source().is_some())
                     .cloned();
-                let result = self.operation(local, operation);
+                let source = operation.clone();
+                let result = self.operation(local, operation).map(|mut effect| {
+                    if let LinkEffect::Connect(attempt) = &mut effect {
+                        attempt.retain_local_operation_result(&source);
+                    }
+                    effect
+                });
                 if let (Err(_), Some(reply)) = (&result, private) {
-                    let _ = self.run(move |host| host.private_phone_result(&reply, false));
+                    let _ = self.run(move |host| host.private_phone_failure(&reply));
                     Ok(LinkEffect::None)
                 } else {
                     result
@@ -231,15 +252,21 @@ impl Engine {
         let revision = self.revision.load(Ordering::Acquire);
         let peer = operation.command.node.clone();
         let reply = operation.reply.clone();
+        let source = dtmf_source.then(|| operation.clone());
         match self.operation(&local, operation) {
-            Ok(effect) => self.effect(local, effect, revision),
+            Ok(mut effect) => {
+                if let (Some(source), LinkEffect::Connect(attempt)) = (&source, &mut effect) {
+                    attempt.retain_local_operation_result(source);
+                }
+                self.effect(local, effect, revision)
+            }
             Err(error)
                 if reply
                     .as_ref()
                     .is_some_and(|reply| reply.phone_source().is_some()) =>
             {
                 let reply = reply.expect("matched private command source");
-                let _ = self.run(move |host| host.private_phone_result(&reply, false));
+                let _ = self.run(move |host| host.private_phone_failure(&reply));
                 Err(error)
             }
             Err(RuntimeError::Link(rpt_advanced_core::link::AdmissionError::Loop))
@@ -314,6 +341,9 @@ impl Engine {
         let name = local.clone();
         let remote = attempt.remote().to_owned();
         let private_reply = attempt.private_reply().cloned();
+        let pending_operation = attempt.pending_operation();
+        let local_result = attempt.local_operation_result();
+        let result_node = local.clone();
         let private_attach = private_reply.clone();
         let destination_remote = remote.clone();
         let destination = if self.current(revision) && attempt.current(self.elapsed_ms()) {
@@ -372,16 +402,50 @@ impl Engine {
                 };
                 if result.is_err() {
                     host.reject_peer(&local, &remote, clock.now_ms);
+                    if let (Some(source), Some(node)) =
+                        (pending_operation, host.runtime.node(&local))
+                    {
+                        node.links().restore_pending_operation(
+                            &remote,
+                            source,
+                            engine.elapsed_ms(),
+                            engine.current(revision),
+                        );
+                    }
                 }
                 result
             } else {
                 Err(RuntimeError::Rejected)
             }
         });
-        if let Some(reply) = private_reply {
+        if private_reply.is_some() || local_result {
             let completed = result.is_ok();
+            let private_only = matches!(
+                result,
+                Err(RuntimeError::Link(
+                    rpt_advanced_core::link::AdmissionError::Denied
+                        | rpt_advanced_core::link::AdmissionError::Stale
+                ))
+            );
+            let engine = Arc::clone(self);
             let _ = self.run_inner(true, move |host| {
-                host.private_phone_result(&reply, completed)
+                if !engine.current(revision) {
+                    return Err(RuntimeError::Rejected);
+                }
+                if private_only {
+                    return private_reply
+                        .as_ref()
+                        .map_or(Ok(()), |reply| host.private_phone_failure(reply));
+                }
+                host.node_operation_result(
+                    &result_node,
+                    private_reply.as_ref(),
+                    if completed {
+                        rpt_advanced_core::messages::OperationResult::Completed
+                    } else {
+                        rpt_advanced_core::messages::OperationResult::Unavailable
+                    },
+                )
             });
         }
         result

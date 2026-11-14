@@ -51,6 +51,7 @@ const REQUIRED_IDS: &[&str] = &[
     "remote-command-unsupported",
     "dtmf-macro-stopped",
     "phone-authentication",
+    "operation-result",
     "echo-peer-identity",
     "priority-group-selected",
     "priority-group-unavailable",
@@ -69,6 +70,11 @@ const REQUIRED_IDS: &[&str] = &[
 /// A typed built-in message request; callers cannot select arbitrary Fluent IDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message<'a> {
+    /// Non-sensitive node outcome, safe for local RF and an authorized phone.
+    OperationResult {
+        /// Fixed outcome with no account, command or credential arguments.
+        result: OperationResult,
+    },
     /// Credential-free prompt prepared exclusively for an exact private call.
     PhoneAuthentication {
         /// Login/result stage; no caller-supplied digits can enter the catalog.
@@ -200,6 +206,15 @@ pub enum Message<'a> {
     },
 }
 
+/// Fixed non-sensitive outcomes that may be presented on local RF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationResult {
+    /// The requested node operation actually completed.
+    Completed,
+    /// The requested node operation could not complete.
+    Unavailable,
+}
+
 /// Private login wording; no account, mailbox or credential arguments are accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhoneAuthenticationPrompt {
@@ -213,8 +228,6 @@ pub enum PhoneAuthenticationPrompt {
     Authenticated,
     /// The requested private route or media operation is not currently supported.
     Unavailable,
-    /// Credential-free completion of the exact caller's requested operation.
-    Completed,
     /// Credential-free failure of the exact caller's requested operation.
     Failed,
 }
@@ -771,6 +784,7 @@ impl MessageCatalog {
 impl Message<'_> {
     fn id(&self) -> &'static str {
         match self {
+            Self::OperationResult { .. } => "operation-result",
             Self::PhoneAuthentication { .. } => "phone-authentication",
             Self::DtmfMacroStopped => "dtmf-macro-stopped",
             Self::PadTestEmpty => "pad-test-empty",
@@ -810,6 +824,15 @@ impl Message<'_> {
     fn args(&self) -> FluentArgs<'_> {
         let mut args = FluentArgs::new();
         match self {
+            Self::OperationResult { result } => {
+                args.set(
+                    "state",
+                    match result {
+                        OperationResult::Completed => "completed",
+                        OperationResult::Unavailable => "unavailable",
+                    },
+                );
+            }
             Self::PhoneAuthentication { prompt } => {
                 args.set(
                     "state",
@@ -819,7 +842,6 @@ impl Message<'_> {
                         PhoneAuthenticationPrompt::Retry => "retry",
                         PhoneAuthenticationPrompt::Authenticated => "authenticated",
                         PhoneAuthenticationPrompt::Unavailable => "unavailable",
-                        PhoneAuthenticationPrompt::Completed => "completed",
                         PhoneAuthenticationPrompt::Failed => "failed",
                     },
                 );
@@ -1004,6 +1026,9 @@ fn required_sample_args(id: &str) -> FluentArgs<'static> {
     match id {
         "phone-authentication" => {
             args.set("state", "login");
+        }
+        "operation-result" => {
+            args.set("state", "completed");
         }
         "echo-peer-identity" => {
             args.set("mode", "both");

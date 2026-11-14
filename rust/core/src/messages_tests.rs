@@ -28,7 +28,6 @@ fn private_phone_authentication_forms_have_no_credential_arguments() {
         (Prompt::Retry, "LOGIN FAILED MAILBOX POUND"),
         (Prompt::Authenticated, "LOGIN OK UNLOCK SEPARATE"),
         (Prompt::Unavailable, "OPERATION UNAVAILABLE"),
-        (Prompt::Completed, "COMMAND COMPLETED"),
         (Prompt::Failed, "COMMAND FAILED"),
     ] {
         let forms = catalog
@@ -754,4 +753,42 @@ fn english_catalog_rejects_fluent_format_errors() {
 fn catalog_load_uses_missing_locale_fallback() {
     let catalog = MessageCatalog::load("fr-CA").unwrap();
     assert!(catalog.format(&Message::NoLinks).is_ok());
+}
+
+#[test]
+fn generic_operation_results_have_only_fixed_localized_wording() {
+    use super::messages::OperationResult;
+    let missing = ENGLISH.replace("operation-result =", "unused-operation-result =");
+    assert!(
+        matches!(
+            MessageCatalog::from_sources("en-US", &missing, None),
+            Err(CatalogError::InvalidEnglish)
+        ),
+        "generic result is a required catalog message"
+    );
+    let catalog = MessageCatalog::from_sources(
+        "fr-CA",
+        ENGLISH,
+        Some("operation-result =\n    .tts = Resultat\n"),
+    )
+    .unwrap();
+    for (result, text, morse) in [
+        (
+            OperationResult::Completed,
+            "Command completed",
+            "COMMAND COMPLETED",
+        ),
+        (
+            OperationResult::Unavailable,
+            "Requested operation is unavailable",
+            "OPERATION UNAVAILABLE",
+        ),
+    ] {
+        let forms = catalog
+            .format(&Message::OperationResult { result })
+            .unwrap();
+        assert_eq!(forms.text, text);
+        assert_eq!(forms.morse, morse);
+        assert_eq!(forms.tts, "Resultat");
+    }
 }

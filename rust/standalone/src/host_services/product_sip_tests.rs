@@ -422,8 +422,9 @@ fn product_call(no_mailbox: bool, voice: bool, existing: bool) {
             call_flow(sip, None, no_mailbox);
         }
     });
-    let deadline = Instant::now() + Duration::from_secs(50);
-    while !caller.is_finished() && Instant::now() < deadline {
+    // Keep the synthetic remote alive for the bounded caller scenario, including
+    // its finite LOCAL operation results; an independent cutoff can starve return audio.
+    while !caller.is_finished() {
         if let Some(remote) = remote.as_mut() {
             remote.pump();
         }

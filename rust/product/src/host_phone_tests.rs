@@ -40,10 +40,17 @@ fn mailbox_host() -> Host {
 
 thread_local! {
     static BEFORE_EVENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_OPERATION_RESULT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 pub(crate) fn before_event() {
     let callback = BEFORE_EVENT.with_borrow_mut(Option::take);
     if let Some(callback) = callback {
+        callback();
+    }
+}
+
+pub(crate) fn before_operation_result() {
+    if let Some(callback) = BEFORE_OPERATION_RESULT.with_borrow_mut(Option::take) {
         callback();
     }
 }
@@ -447,9 +454,17 @@ fn private_completion_rejects_foreign_or_unauthenticated_tokens_and_closes_only_
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
     assert!(host.current_private_phone("1000", &reply).is_err());
-    assert!(host.private_phone_result(&reply, true).is_err());
+    assert!(host.private_phone_failure(&reply).is_err());
     assert!(
-        host.private_phone_result(&PeerSignals::new().reply_target(), false)
+        host.node_operation_result(
+            "1000",
+            Some(&reply),
+            rpt_advanced_core::messages::OperationResult::Completed
+        )
+        .is_err()
+    );
+    assert!(
+        host.private_phone_failure(&PeerSignals::new().reply_target())
             .is_err()
     );
     assert!(host.phone_source(call).is_some());
@@ -458,9 +473,18 @@ fn private_completion_rejects_foreign_or_unauthenticated_tokens_and_closes_only_
     assert!(host.current_private_phone("9999", &reply).is_err());
     let foreign = PeerSignals::for_phone(source.clone());
     assert!(foreign.authenticate_phone());
+    assert!(host.private_phone_failure(&foreign.reply_target()).is_err());
     assert!(
-        host.private_phone_result(&foreign.reply_target(), false)
-            .is_err()
+        host.node_operation_result(
+            "1000",
+            Some(&foreign.reply_target()),
+            rpt_advanced_core::messages::OperationResult::Unavailable
+        )
+        .is_err()
+    );
+    assert!(
+        !probe_public_phone_media(&mut host, "1000"),
+        "unauthenticated or foreign sources cannot enqueue public results"
     );
     assert!(
         reply.phone_authenticated(),
@@ -482,7 +506,7 @@ fn private_completion_rejects_foreign_or_unauthenticated_tokens_and_closes_only_
         host.queue_phone_reply(&source, &reply, Box::new(Empty))
             .unwrap();
     }
-    assert!(host.private_phone_result(&reply, false).is_err());
+    assert!(host.private_phone_failure(&reply).is_err());
     assert!(reply.ended() && host.phone_source(call).is_none());
     assert!(state.lock().unwrap().bound_radio.is_none());
     assert!(host.stop(20));
@@ -1280,3 +1304,68 @@ mod attachment_policy;
 
 #[path = "host_phone_site_tests.rs"]
 mod site_reports;
+
+/// Generic node outcomes are the only private-call wording admitted to local RF.
+#[test]
+fn node_operation_results_reach_local_rf_and_exact_phone_only() {
+    use rpt_advanced_core::phone_dtmf::PhoneDtmfAction;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for completed in [true, false] {
+        let (mut host, speech) = driven_mailbox_host();
+        let (phone, state) = crate::link::session::tests::phone_peer();
+        let call = phone.identity().call_id().unwrap();
+        host.incoming_peer(phone, "203.0.113.9", private_clock(&host))
+            .unwrap();
+        let source = host.phone_source(call).unwrap().clone();
+        let reply = host.phone_reply(&source).unwrap();
+        host.authenticate_phone(&source, &reply, "100", "1234", private_clock(&host))
+            .unwrap();
+        while host.take_phone_reply(&source, &reply).unwrap().is_some() {}
+        assert!(
+            !probe_public_phone_media(&mut host, "1000"),
+            "authentication stays private"
+        );
+        if completed {
+            host.immediate(
+                "1000",
+                LinkEffect::PrivateDetach {
+                    remotes: Vec::new(),
+                    reply: reply.clone(),
+                },
+                private_clock(&host),
+            )
+            .unwrap();
+        } else {
+            host.private_phone_actions(
+                &source,
+                &reply,
+                vec![PhoneDtmfAction::SelectTarget("unsupported".into())],
+                private_clock(&host),
+            )
+            .unwrap();
+        }
+        assert!(host.take_phone_reply(&source, &reply).unwrap().is_some());
+        assert!(
+            probe_public_phone_media(&mut host, "1000"),
+            "generic completion/unavailability must reach LOCAL RF"
+        );
+        let expected = if completed {
+            "Command completed"
+        } else {
+            "Requested operation is unavailable"
+        };
+        assert!(
+            speech
+                .opened
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|text| text == expected)
+        );
+        assert!(state.lock().unwrap().texts.is_empty());
+        assert!(state.lock().unwrap().digits.is_empty());
+        assert!(host.stop(private_clock(&host).now_ms + 1));
+    }
+}

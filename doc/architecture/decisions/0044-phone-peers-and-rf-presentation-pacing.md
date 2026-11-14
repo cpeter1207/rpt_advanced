@@ -1713,3 +1713,40 @@ fixture, mix-minus and private-status checks, return audio, and ordinary-link
 survival after phone BYE. Its simulated 48-kHz device uses absolute 20-ms
 deadlines so callback work is included in the frame budget. Missed slots advance
 the source coordinate and are skipped, never replayed as a catch-up burst.
+
+### Non-sensitive node operation outcomes
+
+The owner-requested generic completed/unavailable responses have a distinct
+typed message catalog entry with no caller-supplied arguments. Only this
+constrained outcome may be mirrored to LOCAL RF and an exact authenticated
+phone caller. RF-origin node operations also return that outcome to currently
+attached authenticated calls. Existing status producers, bounded private reply
+outboxes and local status delivery are reused; no PCM queue or peer fanout is
+added. Failure to prepare RF output does not discard a valid private reply.
+
+Authentication, mailbox/PIN prompts, policy denials, stopped macros and detailed
+status retain their existing private or source-scoped routes. Phone tokens still
+cannot enter public telemetry. Caller and generation checks precede outcome
+delivery; actual dial/attachment completion, not accepted work, determines the
+outcome. Unfinished RF dial attempts retain only existing source-operation
+custody through initial retries; CLI, scheduled work, linked-peer commands and
+established-link recovery do not gain generic local acknowledgments.
+Authorized phone macro-expanded node dials receive the same fixed actual outcome;
+macro-stopped and authorization details stay private. RF macro expansions remain
+outside the new generic acknowledgment route.
+
+Core admission precedes the host's final peer preparation and graph publication.
+The dial owner borrows existing pending-source custody across that boundary.
+If publication fails, ordinary rejection runs first; only a matching surviving
+permanent retry may regain the same source record, after current generation,
+call and macro-permit checks. Retired source authority cancels that unfinished
+retry. Successful final publication discards the borrowed record, so later
+established-link recovery retains no phone authority or RF result provenance.
+
+The combined synthetic call fixture observes each finite LOCAL operation result
+through actual radio callback progress and PTT-off quiet before measuring new
+phone speech. Authentication and detailed status remain private; a completed
+result cannot satisfy the later speech-output assertion. The synthetic remote
+is serviced until its bounded caller completes, rather than stopping at an
+independent cutoff before return audio is requested. Qualification commands
+retain an outer process watchdog; this changes no production or protocol timer.
