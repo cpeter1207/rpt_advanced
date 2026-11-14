@@ -1687,3 +1687,22 @@ No SIP reason/header/URI, account/caller identity, authentication material,
 DTMF, or audio is logged. Repeated events are coalesced per category; no
 per-packet logging is added. This changes neither signaling nor attachment
 policy and cannot retrospectively explain an earlier unrecorded disconnect.
+
+### Ordinary-link phone attachment, 2026-11-14
+
+Explicit authenticated phone attachment reuses the shared phone ingress ring,
+DSP, radio-clocked mixer and existing ordinary peer egress. A transmitting
+ordinary link is not ineligible merely because it lacks the optional timed
+G.711 capability. Its negotiated codec, control owner, ASL text, temporary or
+permanent lifecycle and provider remain unchanged. No reconnect, codec forcing,
+provider format query or new clock is required for this route.
+
+The shared queue's generation retirement, phone source qualification, private
+commands, DTMF suppression and local DAC presentation fences remain in place.
+Prepared egress retains its existing application age and stream checks; the
+synchronous PCM fallback admits only locally current phone spans without
+changing ordinary-only unclocked traffic. This does not promise expiry or recall
+of audio already accepted into an ordinary network provider's own storage or
+reliable retransmission queue. The earlier restricted-transport eligibility
+policy is superseded; the P12 local DAC presentation requirement is unchanged.
+Explicitly timed/private handles retain their existing provider contract.

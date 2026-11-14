@@ -273,18 +273,8 @@ fn prepared(
     let phone_attachments = phones
         .as_ref()
         .map_or_else(Vec::new, |(phones, _)| phones.attachments(local));
-    // Existing unknown-codec calls keep their owners; refuse only the new
-    // phone attachment instead of allowing legacy custody of phone programme.
-    if !phone_attachments.is_empty()
-        && peers.iter().any(|peer| {
-            peer.local == local
-                && !peer.control.ended()
-                && (peer.mode.transmits() || peer.group.is_some())
-                && !peer.control.timed_g711_egress()
-        })
-    {
-        return Err(RuntimeError::Rejected);
-    }
+    // Authorized phone programme joins the ordinary shared mixer and negotiated
+    // peer path. Transport-specific timed custody is not an attachment policy.
     static NEXT_TEXT_STATION: AtomicU64 = AtomicU64::new(1);
     let text_generation = NEXT_TEXT_STATION.fetch_add(1, Ordering::Relaxed);
     let mut text_readers = Vec::new();

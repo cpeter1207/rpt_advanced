@@ -28,7 +28,7 @@ pub struct EgressObservation {
     pub blocked: u64,
     /// Expired media duration expressed at the 48 kHz native rate.
     pub expired_native_samples: u64,
-    /// Native samples refused by queue capacity or unsupported phone egress.
+    /// Native samples refused by queue capacity or invalid phone provenance.
     pub rejected_native_samples: u64,
     /// Maximum observed oldest queued or pending media age.
     pub maximum_queue_age_ns: u64,
@@ -267,25 +267,6 @@ impl Outbound {
     pub(super) fn step(&mut self, io: &mut PeerIo, now_ms: u64) -> Result<Option<u64>, Error> {
         if io.timed_g711_egress() && self.timed_clock.is_none() {
             return Err(Error::Admission);
-        }
-        // A monitor/parrot policy change cannot bypass graph admission.
-        // Refuse only tainted media; keep this ordinary peer/control owner alive.
-        if io.identity().call_id().is_none()
-            && !io.timed_g711_egress()
-            && self
-                .queue
-                .peek_span()
-                .is_some_and(|span| span.span.phone_expires_ns != u64::MAX)
-        {
-            if let Some(read) = self.queue.read_span(&mut self.native) {
-                self.retired_rejections =
-                    self.retired_rejections.saturating_add(read.frames as u64);
-                self.statistics
-                    .rejected
-                    .fetch_add(read.frames as u64, Ordering::Relaxed);
-            }
-            self.discard_media(io)?;
-            return Ok(Some(now_ms.saturating_mul(1_000_000)));
         }
         if !io.prepared_media() {
             self.pcm_step(io, now_ms)?;
@@ -799,17 +780,35 @@ impl Outbound {
         }
         let mut real = 0;
         let mut consumed = 0;
-        // Legacy reads may span several source records. Inspect each record
-        // before conversion rather than letting an ordinary prefix hide a cap.
+        // Synchronous hosts keep their ordinary unclocked behavior. Qualified
+        // phone spans share this converter, but stale/cancelled input cannot
+        // enter it or leave retained history behind an ordinary prefix.
+        let now = now_ms.saturating_mul(1_000_000);
         while consumed < BLOCK {
+            if self.queue.peek_span().is_none() {
+                break;
+            }
+            #[cfg(test)]
+            tests::before_read();
             let Some(read) = self
                 .queue
                 .read_span(&mut self.native[real..real + BLOCK - consumed])
             else {
+                // A successful peek followed by cancellation is not an idle
+                // drain. Retire local history and preserve the successor span.
+                self.discard_media(io)?;
+                real = 0;
                 break;
             };
             consumed += read.frames;
-            if read.span.phone_expires_ns != u64::MAX {
+            if read.span.phone_expires_ns != u64::MAX
+                && (now >= read.span.phone_expires_ns
+                    || read
+                        .span
+                        .born_ns
+                        .is_none_or(|born| born > now || now >= born.saturating_add(AGE_NS))
+                    || !self.current(read.span.stream))
+            {
                 self.retired_rejections =
                     self.retired_rejections.saturating_add(read.frames as u64);
                 self.statistics
@@ -1388,7 +1387,7 @@ mod tests {
         );
     }
     #[test]
-    fn unsupported_ordinary_transport_refuses_phone_span_but_keeps_ordinary_media() {
+    fn ordinary_transport_carries_authorized_phone_spans_with_existing_media() {
         for (prepared, prefix) in [(false, 0), (true, 0), (false, 480)] {
             let (mut io, state) =
                 crate::link::session::tests::peer_with_egress(48000, prepared, prepared);
@@ -1412,32 +1411,152 @@ mod tests {
                 },
                 &vec![0.25; 960 - prefix],
             );
-            outbound.step(&mut io, 0).unwrap();
+            for now in [0, 20, 40] {
+                outbound.step(&mut io, now).unwrap();
+            }
             {
                 let state = state.lock().unwrap();
                 assert!(
-                    state.audio.is_empty() && state.prepared.is_empty(),
-                    "unproven egress cannot accept phone programme through either legacy path"
+                    state
+                        .audio
+                        .iter()
+                        .filter(|sample| (**sample - 0.25).abs() < 0.01)
+                        .count()
+                        + state
+                            .prepared
+                            .iter()
+                            .flat_map(|packet| &packet.0)
+                            .filter(|byte| **byte == 25)
+                            .count()
+                        > 128,
+                    "the phone contribution, not merely an ordinary prefix, must cross the ordinary send path"
+                );
+                assert!(
+                    state.timed_deadlines.is_empty(),
+                    "no provider capability is forced"
                 );
             }
-            assert_eq!(
-                outbound.statistics.snapshot().rejected_native_samples,
-                (960 - prefix) as u64
-            );
+            assert_eq!(outbound.statistics.snapshot().rejected_native_samples, 0);
             writer.write(
                 AudioSpan {
                     source_start: 960,
-                    born_ns: Some(20_000_000),
+                    born_ns: Some(60_000_000),
                     ..AudioSpan::default()
                 },
                 &[0.25; 960],
             );
-            outbound.step(&mut io, 20).unwrap();
-            outbound.step(&mut io, 40).unwrap();
+            outbound.step(&mut io, 60).unwrap();
+            outbound.step(&mut io, 80).unwrap();
             let state = state.lock().unwrap();
             assert!(
                 !state.audio.is_empty() || !state.prepared.is_empty(),
-                "ordinary traffic remains available after refusing phone programme"
+                "ordinary traffic remains available after mixed phone programme"
+            );
+        }
+    }
+    #[test]
+    fn ordinary_pcm_cancellation_discards_retained_tail_and_accumulated_prefix() {
+        for prefix in [0, 480] {
+            let (mut io, state) = peer_with_egress(8000, false, false);
+            let domain = rpt_advanced_core::link::RetirementDomain::default();
+            let source = rpt_advanced_core::link::PeerSignals::new().reply_target();
+            source.bind_retirement_domain(&domain);
+            let (mut writer, reader) = LinkAudioQueue::new(BLOCK * 3, 4).unwrap().into_endpoints();
+            assert!(writer.bind_retirement_domain(&domain));
+            let mut outbound = Outbound::new(8000, reader).unwrap();
+            let span = AudioSpan {
+                born_ns: Some(0),
+                phone_expires_ns: 500_000_000,
+                ..AudioSpan::default()
+            };
+            assert_eq!(writer.write(span, &[0.25; BLOCK]), 0);
+            outbound.step(&mut io, 0).unwrap();
+            let emitted = state.lock().unwrap().audio.len();
+            assert!(emitted > 0, "prime actual converter history");
+            if prefix != 0 {
+                assert_eq!(writer.write(AudioSpan::default(), &vec![0.5; prefix]), 0);
+            }
+            assert_eq!(
+                writer.write_revocable(span, &vec![0.25; BLOCK - prefix], domain.revision()),
+                0
+            );
+            let successor = AudioSpan {
+                source_start: (BLOCK * 2) as u64,
+                ..AudioSpan::default()
+            };
+            assert_eq!(writer.write(successor, &[0.75; BLOCK]), 0);
+            let retire: Box<dyn FnOnce()> = Box::new(move || source.retire());
+            BEFORE_READ.with(|slot| {
+                *slot.borrow_mut() = Some(if prefix == 0 {
+                    retire
+                } else {
+                    Box::new(move || BEFORE_READ.with(|slot| *slot.borrow_mut() = Some(retire)))
+                })
+            });
+            outbound.step(&mut io, 20).unwrap();
+            assert_eq!(
+                state.lock().unwrap().audio.len(),
+                emitted,
+                "cancellation cannot drain retained phone PCM or an accumulated prefix"
+            );
+            assert_eq!(
+                outbound.queue.peek_span().unwrap().span,
+                successor,
+                "cancelled admission cannot substitute the following ordinary span"
+            );
+            outbound.step(&mut io, 40).unwrap();
+            assert!(
+                state.lock().unwrap().audio[emitted..]
+                    .iter()
+                    .any(|value| (*value - 0.75).abs() < 0.01)
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_pcm_rejects_invalid_phone_age_without_rejecting_unclocked_radio() {
+        for (born, expires, now, retired_stream) in [
+            (None, 500_000_000, 100, false),
+            (Some(200_000_000), 500_000_000, 100, false),
+            (Some(0), 500_000_000, 250, false),
+            (Some(0), 50_000_000, 100, false),
+            (Some(0), 500_000_000, 100, true),
+        ] {
+            let (mut io, state) = peer_with_egress(48000, false, false);
+            let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
+            let mut outbound = Outbound::new(48000, reader).unwrap();
+            if retired_stream {
+                let clock = Arc::new(SourceClock::default());
+                clock.restart();
+                outbound.bind_clock(clock);
+            }
+            writer.write(
+                AudioSpan {
+                    born_ns: born,
+                    phone_expires_ns: expires,
+                    ..AudioSpan::default()
+                },
+                &[0.25; 960],
+            );
+            outbound.step(&mut io, now).unwrap();
+            assert!(state.lock().unwrap().audio.is_empty());
+            assert_eq!(outbound.statistics.snapshot().rejected_native_samples, 960);
+            writer.write(AudioSpan::default(), &[0.5; 960]);
+            outbound.step(&mut io, now + 20).unwrap();
+            let state = state.lock().unwrap();
+            assert!(
+                state
+                    .audio
+                    .iter()
+                    .filter(|sample| (**sample - 0.5).abs() < 0.01)
+                    .count()
+                    > 128
+            );
+            assert!(
+                !state
+                    .audio
+                    .iter()
+                    .any(|sample| (*sample - 0.25).abs() < 0.01)
             );
         }
     }

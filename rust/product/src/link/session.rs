@@ -117,7 +117,6 @@ pub(crate) use observation::describe as describe_peer_observation;
 pub struct PeerControl {
     callsign: String,
     can_forward_text: bool,
-    timed_g711_egress: bool,
     text_identity: Arc<TextIdentity>,
     egress: Arc<EgressStatistics>,
     commands: Producer<Command>,
@@ -144,10 +143,6 @@ impl PeerControl {
     /// Copied per-connection capability; does not borrow the serial I/O owner.
     pub fn can_forward_text(&self) -> bool {
         self.can_forward_text
-    }
-    /// Immutable proof of the restricted, deadline-safe ordinary transport.
-    pub(crate) fn timed_g711_egress(&self) -> bool {
-        self.timed_g711_egress
     }
     /// Immutable authenticated callsign for protocol-specific announcements.
     pub fn callsign(&self) -> &str {
@@ -643,7 +638,6 @@ impl PeerSession {
         let control = PeerControl {
             callsign: io.callsign().to_owned(),
             can_forward_text: io.can_forward_text(),
-            timed_g711_egress: io.timed_g711_egress(),
             text_identity: Arc::clone(&text_identity),
             egress: outbound.statistics.clone(),
             commands,

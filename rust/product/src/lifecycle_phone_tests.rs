@@ -919,3 +919,114 @@ fn private_collection_real_engine_reconciles_loss_without_clearing_new_input() {
 
 #[path = "lifecycle_phone_remote_tests.rs"]
 mod radio_status;
+
+#[test]
+fn attached_phone_preserves_ordinary_ota_connect_and_permanent_retry() {
+    use crate::link::session::SerialSession;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for (action, target, retry) in [
+        (LinkAction::Transceive, "2000", false),
+        (LinkAction::PermanentTransceive, "3000", true),
+    ] {
+        // Independent attached-call cases keep this deterministically stepped
+        // source out of an unrelated preceding graph's asynchronous retirement.
+        let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+        let engine = engine(configuration(), services, speech());
+        let (mut calls, mut session, _state, source, reply) =
+            crate::phone::tests::controlled_source_session_mode(8000, false);
+        calls.attach(&source, &reply, "1000").unwrap();
+        engine
+            .run(move |host| {
+                crate::host::tests::phone::install_controlled_source(host, calls);
+                Ok(())
+            })
+            .unwrap();
+        let map = rpt_advanced_core::command::DtmfCommandMap::standard();
+        let prefix = &map
+            .mappings()
+            .iter()
+            .find(|mapping| mapping.action == action)
+            .unwrap()
+            .digits;
+        let digits = format!("*{prefix}{target}#");
+        let now_ms = engine.elapsed_ms();
+        let operation = engine
+            .run(move |host| {
+                let operation = digits
+                    .chars()
+                    .filter_map(|digit| {
+                        host.runtime.digit(
+                            "1000",
+                            rpt_advanced_core::runtime::dtmf::DigitEvent::Digit { digit, now_ms },
+                        )
+                    })
+                    .find_map(|outcome| match outcome {
+                        DigitOutcome::Operation(operation) => Some(operation),
+                        _ => None,
+                    })
+                    .expect("ordinary OTA collector completes independently");
+                assert!(
+                    operation.reply.is_none(),
+                    "OTA does not acquire the private caller token"
+                );
+                Ok(operation)
+            })
+            .unwrap();
+        let LinkEffect::Connect(attempt) = engine.operation("1000", operation).unwrap() else {
+            panic!("ordinary OTA dial");
+        };
+        let attempt = Dial::Connect(attempt);
+        assert!(
+            !attempt.timed_g711(),
+            "ordinary negotiated codec is preserved"
+        );
+        crate::fixture::PEER_DIAL_RESULT.store(usize::from(retry), Ordering::Release);
+        let result = engine.dial(
+            "1000".into(),
+            attempt,
+            engine.revision.load(Ordering::Acquire),
+        );
+        if retry {
+            assert!(result.is_err());
+            let now_ms = engine.elapsed_ms();
+            let retry = engine
+                .run(move |host| {
+                    let node = host.runtime.node("1000").unwrap();
+                    let work = node.work().unwrap();
+                    Ok(node.links().take_retry(now_ms, work).unwrap())
+                })
+                .unwrap();
+            assert!(retry.private_reply().is_none() && !retry.timed_g711());
+            engine
+                .dial(
+                    "1000".into(),
+                    Dial::Retry(retry),
+                    engine.revision.load(Ordering::Acquire),
+                )
+                .unwrap();
+        } else {
+            result.unwrap();
+        }
+        assert!(
+            engine
+                .run(move |host| Ok(host
+                    .status_text("1000")?
+                    .contains(&format!("{target}: transceive"))))
+                .unwrap()
+        );
+        session.step(engine.elapsed_ms()).unwrap();
+        engine.pump(engine.clock(), false).unwrap();
+        assert!(reply.phone_authenticated() && !reply.ended());
+        let current = source.clone();
+        let owner = reply.clone();
+        assert!(
+            engine
+                .run(move |host| Ok(host.phone_reply(&current).as_ref() == Some(&owner)))
+                .unwrap()
+        );
+        drop(session);
+        assert!(engine.stop());
+    }
+}
