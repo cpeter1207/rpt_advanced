@@ -299,7 +299,7 @@ fn sequential_login_prompts_wait_for_each_field_without_public_audio_or_credenti
     await_prompt(&mut host, 2);
     assert_eq!(
         speech.opened.lock().unwrap()[1],
-        "Enter your password followed by pound"
+        "Enter your passcode followed by pound"
     );
     assert!(!reply.phone_authenticated());
     std::thread::sleep(Duration::from_millis(3010));
@@ -322,7 +322,7 @@ fn sequential_login_prompts_wait_for_each_field_without_public_audio_or_credenti
         speech.opened.lock().unwrap().as_slice(),
         [
             "Enter your mailbox number followed by pound",
-            "Enter your password followed by pound",
+            "Enter your passcode followed by pound",
             "Mailbox authenticated. Protected commands still require node unlock",
         ]
     );

@@ -642,7 +642,7 @@ phone-authentication =
         }
     .tts = { $state ->
         [login] Enter your mailbox number followed by pound
-        [password] Enter your password followed by pound
+        [password] Enter your passcode followed by pound
         [authenticated] Mailbox authenticated. Protected commands still require node unlock
         [unavailable] Requested operation is unavailable
         [failed] Command failed
