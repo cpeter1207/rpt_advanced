@@ -55,12 +55,14 @@ pub(crate) fn before_operation_result() {
     }
 }
 
+// Keep real-time worker timeout fixtures short; default and overridden timing
+// are independently checked with deterministic timestamps below.
 fn driven_mailbox_host() -> (Host, Arc<crate::media::text::tests::SpeechFixture>) {
     let speech = Arc::new(crate::media::text::tests::SpeechFixture::default());
     let configuration = document(
         "usb",
         &format!(
-            "[speech]\nvoice=voice.onnx\nlevel_db=-6\n{}",
+            "[speech]\nvoice=voice.onnx\nlevel_db=-6\n{}inter_digit_timeout_ms=3000\n",
             mailbox_configuration("1000")
         ),
     );
@@ -204,7 +206,7 @@ fn private_event_and_timeout_reply_pressure_retire_only_the_original_call() {
 }
 
 #[test]
-fn real_three_second_login_pause_resets_privately_before_the_next_digit() {
+fn configured_three_second_login_pause_resets_privately_before_the_next_digit() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -720,7 +722,7 @@ fn real_mailbox_verification_keeps_prompts_private_and_does_not_unlock_node_comm
     assert!(
         "*804#"
             .chars()
-            .filter_map(|digit| links.phone_digit(&source, digit, 10, reply.clone()))
+            .filter_map(|digit| links.phone_digit(&source, digit, 10, reply.clone(), 3000))
             .next()
             .is_none(),
         "mailbox login never grants node unlock"
@@ -728,7 +730,7 @@ fn real_mailbox_verification_keeps_prompts_private_and_does_not_unlock_node_comm
     assert!(
         "*70#"
             .chars()
-            .filter_map(|digit| links.phone_digit(&source, digit, 10, reply.clone()))
+            .filter_map(|digit| links.phone_digit(&source, digit, 10, reply.clone(), 3000))
             .any(|outcome| matches!(outcome, DigitOutcome::Operation(_))),
         "unprotected commands are available after login"
     );
@@ -1368,4 +1370,61 @@ fn node_operation_results_reach_local_rf_and_exact_phone_only() {
         assert!(state.lock().unwrap().digits.is_empty());
         assert!(host.stop(private_clock(&host).now_ms + 1));
     }
+}
+
+#[test]
+fn account_interdigit_timing_reaches_private_login_and_command_grammar() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = Host::start(
+        document(
+            "usb",
+            &format!(
+                "{}inter_digit_timeout_ms=15000\n",
+                mailbox_configuration("1000")
+            ),
+        ),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let (phone, _) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    assert_eq!(
+        host.phone_calls
+            .inter_digit_timeout_ms(&source, &reply)
+            .unwrap(),
+        15000
+    );
+    host.phone_calls
+        .login_digit(&source, &reply, '7', 0)
+        .unwrap();
+    assert!(host.phone_calls.login_timeouts(14999).is_empty());
+    assert_eq!(host.phone_calls.login_timeouts(15000).len(), 1);
+    host.authenticate_phone(&source, &reply, "100", "1234", clock())
+        .unwrap();
+    for (index, digit) in "*312".chars().enumerate() {
+        assert!(
+            host.phone_calls
+                .actions(&source, &reply, digit, index as u64 * 11000)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        host.phone_calls
+            .actions(&source, &reply, '#', 44000)
+            .unwrap(),
+        [rpt_advanced_core::phone_dtmf::PhoneDtmfAction::Attach(
+            Some("12".into())
+        )]
+    );
+    assert!(!reply.ended());
+    assert!(host.stop(20));
 }

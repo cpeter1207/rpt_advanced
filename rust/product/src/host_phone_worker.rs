@@ -100,6 +100,14 @@ impl Host {
         let grammar = PhoneDtmfGrammar::new(
             &map,
             PhoneDtmfOptions {
+                inter_digit_timeout_ms: rpt_advanced_core::config::PhoneAccountSettings::resolve(
+                    self.runtime.document(),
+                    source.account(),
+                )
+                .value
+                .ok_or(RuntimeError::Rejected)?
+                .inter_digit_timeout_ms
+                .into(),
                 default_command_target: Some(local.to_owned()),
                 ..PhoneDtmfOptions::default()
             },
@@ -122,6 +130,11 @@ impl Host {
                 continue;
             }
             let result = if reply.phone_authenticated() {
+                if let Some(local) = self.phone_calls.local(&source, &reply)
+                    && let Some(node) = self.runtime.node(local)
+                {
+                    node.links().phone_input_activity(&source, &reply, now_ms);
+                }
                 self.phone_calls
                     .actions(&source, &reply, digit, now_ms)
                     .map_err(|_| RuntimeError::Rejected)
@@ -180,11 +193,16 @@ impl Host {
         // pending reload. The old generation is already revoked by its owner.
         if !self.runtime.reload_pending() {
             for local in self.phone_calls.media_refresh_nodes() {
-                if self.refresh_inputs(&local, clock, true).is_err() {
-                    self.services
-                        .scheduler_notice("phone attachment: media preparation failed");
-                    for (source, reply) in self.phone_calls.attachments(&local) {
-                        self.phone_calls.detach_media(&source, &reply);
+                match self.refresh_inputs(&local, clock, true) {
+                    // The retired generation stays revoked. Preserve only the
+                    // authorized intent for the next ordinary pump to retry.
+                    Ok(()) | Err(RuntimeError::Busy) => {}
+                    Err(_) => {
+                        self.services
+                            .scheduler_notice("phone attachment: media preparation failed");
+                        for (source, reply) in self.phone_calls.attachments(&local) {
+                            self.phone_calls.detach_media(&source, &reply);
+                        }
                     }
                 }
             }
@@ -278,11 +296,18 @@ impl Host {
                     }
                 }
                 PhoneDtmfAction::NodeDigit { target, digit } if target == local => {
+                    let timeout_ms = self
+                        .phone_calls
+                        .inter_digit_timeout_ms(source, reply)
+                        .map_err(|_| RuntimeError::Rejected)?;
                     let node = self.runtime.node(&local).ok_or(RuntimeError::MissingNode)?;
-                    if let Some(outcome) =
-                        node.links()
-                            .phone_digit(source, digit, clock.now_ms, reply.clone())
-                    {
+                    if let Some(outcome) = node.links().phone_digit(
+                        source,
+                        digit,
+                        clock.now_ms,
+                        reply.clone(),
+                        timeout_ms,
+                    ) {
                         if matches!(outcome, DigitOutcome::RemoteCandidate(_)) {
                             // Legacy remote selection has no private-origin/reply profile.
                             node.links().clear_source_input(reply);

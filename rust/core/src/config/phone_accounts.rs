@@ -39,6 +39,8 @@ pub struct PhoneAccountSettings {
     pub registration_interval_s: u16,
     /// Absolute authentication timeout in milliseconds, from 1 through 120000.
     pub authentication_timeout_ms: u32,
+    /// Maximum pause within phone digit input, in milliseconds, from 1 through 60000.
+    pub inter_digit_timeout_ms: u32,
 }
 
 impl PhoneAccountSettings {
@@ -60,6 +62,7 @@ impl fmt::Debug for PhoneAccountSettings {
             .field("register", &self.register)
             .field("registration_interval_s", &self.registration_interval_s)
             .field("authentication_timeout_ms", &self.authentication_timeout_ms)
+            .field("inter_digit_timeout_ms", &self.inter_digit_timeout_ms)
             .finish_non_exhaustive()
     }
 }
@@ -71,6 +74,7 @@ fn default_value(key: &str) -> Option<&'static str> {
         "protocol" => Some("iax"),
         "registration_interval_s" => Some("300"),
         "authentication_timeout_ms" => Some("30000"),
+        "inter_digit_timeout_ms" => Some("10000"),
         "local_node" | "server" | "username" | "secrets_file" => Some("account unavailable"),
         _ => None,
     }
@@ -119,6 +123,7 @@ fn value_valid(key: &str, value: &str) -> bool {
         "protocol" => matches!(value, "iax" | "sip"),
         "registration_interval_s" => number(value, 65535).is_some(),
         "authentication_timeout_ms" => number(value, 120000).is_some(),
+        "inter_digit_timeout_ms" => number(value, 60000).is_some(),
         "local_node" => NodeId::new(value).is_ok(),
         "server" => server_valid(value),
         "secrets_file" => {
@@ -203,6 +208,9 @@ pub(super) fn resolve_section(
             authentication_timeout_ms: field("authentication_timeout_ms")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30000),
+            inter_digit_timeout_ms: field("inter_digit_timeout_ms")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10000),
         })
     };
     let value = prepare();

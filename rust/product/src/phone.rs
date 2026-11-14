@@ -85,6 +85,7 @@ struct Call {
     mailbox: Option<PhoneMailbox>,
     attempts: u8,
     login_deadline_ms: u64,
+    inter_digit_timeout_ms: u64,
     replies: VecDeque<PrivatePhoneReply>,
 }
 
@@ -107,10 +108,10 @@ impl LoginCollector {
     fn clear(&mut self) {
         *self = Self::default();
     }
-    fn tick(&mut self, now_ms: u64) -> Option<LoginInput> {
+    fn tick(&mut self, now_ms: u64, timeout_ms: u64) -> Option<LoginInput> {
         if self
             .last_ms
-            .is_some_and(|last| now_ms.saturating_sub(last) >= 3000)
+            .is_some_and(|last| now_ms.saturating_sub(last) >= timeout_ms)
         {
             self.clear();
             return Some(LoginInput::Retry);
@@ -236,6 +237,7 @@ impl PhoneCalls {
             mailbox: None,
             attempts: 0,
             login_deadline_ms: now_ms.saturating_add(60_000),
+            inter_digit_timeout_ms: 10_000,
             replies,
         });
         Ok(source)
@@ -277,6 +279,7 @@ impl PhoneCalls {
         let (session, control) = PrivatePhoneSession::prepare(io, reply.clone())?;
         worker.attach_private(session).map_err(|_| Error::Thread)?;
         call.owner = Some(control);
+        call.inter_digit_timeout_ms = grammar.inter_digit_timeout_ms();
         call.grammar = Some(grammar);
         Ok(())
     }
@@ -431,6 +434,14 @@ impl PhoneCalls {
             ))
         })
     }
+    /// Captured account timing for this exact current call, independent of node policy.
+    pub(crate) fn inter_digit_timeout_ms(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+    ) -> Result<u64, Error> {
+        Ok(self.current(source, reply)?.inter_digit_timeout_ms)
+    }
     pub(crate) fn login_digit(
         &mut self,
         source: &PhoneSource,
@@ -439,7 +450,7 @@ impl PhoneCalls {
         now_ms: u64,
     ) -> Result<Option<LoginInput>, Error> {
         let call = self.current(source, reply)?;
-        let expired = call.login.tick(now_ms);
+        let expired = call.login.tick(now_ms, call.inter_digit_timeout_ms);
         Ok(call.login.digit(digit, now_ms).or(expired))
     }
     /// Login timeout clears its partial credentials privately, never replaying them.
@@ -447,7 +458,12 @@ impl PhoneCalls {
         self.calls
             .iter_mut()
             .filter_map(|call| {
-                if call.mailbox.is_none() && call.login.tick(now_ms).is_some() {
+                if call.mailbox.is_none()
+                    && call
+                        .login
+                        .tick(now_ms, call.inter_digit_timeout_ms)
+                        .is_some()
+                {
                     Some((call.source.clone(), call.signals.reply_target()))
                 } else {
                     None

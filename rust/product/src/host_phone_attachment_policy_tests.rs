@@ -867,3 +867,166 @@ fn phone_rearm_stale_redirect_cannot_reach_a_same_named_successor() {
         "stale redirect reached successor: drops={dropped}, marker={marker}, peers={peer_count}"
     );
 }
+
+#[test]
+fn phone_rearm_retains_attachment_after_ordinary_detach() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for survivor in [false, true] {
+        let (mut host, _) = policy_host(
+            "1000",
+            "attach_local_nodes=1000\n",
+            "phone_allow_accounts=provider\n",
+        );
+        let _departing = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+        if survivor {
+            attach(&mut host, "4000", LinkAction::Transceive, Mode::TRANSCEIVE);
+        }
+        let (phone, state) = crate::link::session::tests::phone_source_peer_at_rate(8000);
+        state.lock().unwrap().continuous_async = true;
+        let id = phone.identity().call_id().unwrap();
+        host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+        let source = host.phone_source(id).unwrap().clone();
+        let reply = host.phone_reply(&source).unwrap();
+        finish_prompt(&mut host, &source, &reply);
+        host.authenticate_phone(&source, &reply, "100", "1234", clock())
+            .unwrap();
+        finish_prompt(&mut host, &source, &reply);
+        host.reconcile_private_collections(clock());
+        host.attach_phone(&source, &reply, "1000", clock()).unwrap();
+        pump_until(&mut host, |host| {
+            host.runtime
+                .node("1000")
+                .unwrap()
+                .status(10)
+                .retiring
+                .is_none()
+        });
+        let departed = host
+            .peers
+            .iter()
+            .find(|peer| peer.remote == "3000")
+            .unwrap()
+            .control
+            .reply_target();
+        let surviving = host
+            .peers
+            .iter()
+            .find(|peer| peer.remote == "4000")
+            .map(|peer| peer.control.reply_target());
+        host.detach("1000", "3000", 10);
+        pump_until(&mut host, |_| departed.ended());
+        let generation = host
+            .runtime
+            .node("1000")
+            .unwrap()
+            .status(10)
+            .active
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(crate::link::session::tests::Input::Gap(160));
+        pump_until(&mut host, |host| {
+            host.phone_calls.media_refresh_nodes() == ["1000"]
+        });
+        host.reconcile_private_collections(clock());
+        let retained = host.phone_calls.attachments("1000") == [(source.clone(), reply.clone())];
+        let replaced = host.runtime.node("1000").unwrap().status(10).active != Some(generation);
+        let same_survivor = host
+            .peers
+            .iter()
+            .find(|peer| peer.remote == "4000")
+            .map(|peer| peer.control.reply_target())
+            == surviving;
+        let authenticated = reply.phone_authenticated() && !reply.ended();
+        assert!(host.stop(20));
+        await_private_drop(&state);
+        assert!(
+            retained && replaced && same_survivor && authenticated,
+            "ordinary detach broke phone rearm: survivor={survivor}, retained={retained}, replaced={replaced}, same_survivor={same_survivor}, authenticated={authenticated}"
+        );
+    }
+}
+
+#[test]
+fn phone_rearm_retains_attachment_after_callback_busy() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut host, _) = policy_host(
+        "1000",
+        "attach_local_nodes=1000\n",
+        "phone_allow_accounts=provider\n",
+    );
+    let (phone, state) = crate::link::session::tests::phone_source_peer_at_rate(8000);
+    state.lock().unwrap().continuous_async = true;
+    let id = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    let source = host.phone_source(id).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    finish_prompt(&mut host, &source, &reply);
+    host.authenticate_phone(&source, &reply, "100", "1234", clock())
+        .unwrap();
+    finish_prompt(&mut host, &source, &reply);
+    host.reconcile_private_collections(clock());
+    host.attach_phone(&source, &reply, "1000", clock()).unwrap();
+    pump_until(&mut host, |host| {
+        host.runtime
+            .node("1000")
+            .unwrap()
+            .status(10)
+            .retiring
+            .is_none()
+    });
+    let lease = Arc::clone(
+        &host
+            .leases
+            .iter()
+            .find(|(name, _)| name == "1000")
+            .unwrap()
+            .1,
+    );
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    let generation = host
+        .runtime
+        .node("1000")
+        .unwrap()
+        .status(10)
+        .active
+        .unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(crate::link::session::tests::Input::Gap(160));
+    pump_until(&mut host, |host| {
+        host.phone_calls.media_refresh_nodes() == ["1000"]
+    });
+    let held = owners.1.acquire().unwrap();
+    host.reconcile_private_collections(clock());
+    let retained = host.phone_calls.attachments("1000") == [(source.clone(), reply.clone())];
+    let old_unchanged = host.runtime.node("1000").unwrap().status(10).active == Some(generation);
+    let still_retired = host.phone_calls.media_refresh_nodes() == ["1000"];
+    drop(held);
+    if retained {
+        host.reconcile_private_collections(clock());
+        pump_until(&mut host, |host| {
+            drop(owners.0.acquire());
+            drop(owners.1.acquire());
+            let status = host.runtime.node("1000").unwrap().status(10);
+            status.active != Some(generation) && status.retiring.is_none()
+        });
+    }
+    let authenticated = reply.phone_authenticated() && !reply.ended();
+    lease.lock().unwrap().owners = Some(owners);
+    assert!(host.stop(20));
+    await_private_drop(&state);
+    assert!(
+        retained && old_unchanged && still_retired && authenticated,
+        "callback Busy detached authorized intent: retained={retained}, old_unchanged={old_unchanged}, still_retired={still_retired}, authenticated={authenticated}"
+    );
+}

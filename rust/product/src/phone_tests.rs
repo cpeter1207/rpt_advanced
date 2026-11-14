@@ -98,14 +98,17 @@ fn login_collection_bounds_digits_and_time_without_replaying_credentials() {
         assert!(!collector.pin_phase && !collector.invalid && collector.last_ms.is_none());
     }
     let mut collector = LoginCollector::default();
-    assert!(collector.tick(u64::MAX).is_none());
+    assert!(collector.tick(u64::MAX, 3000).is_none());
     collector.digit('1', 1);
-    assert!(collector.tick(3000).is_none());
-    assert!(matches!(collector.tick(3001), Some(LoginInput::Retry)));
+    assert!(collector.tick(3000, 3000).is_none());
+    assert!(matches!(
+        collector.tick(3001, 3000),
+        Some(LoginInput::Retry)
+    ));
     assert!(collector.mailbox.is_empty());
     collector.digit('1', 10);
     assert!(
-        collector.tick(0).is_none(),
+        collector.tick(0, 3000).is_none(),
         "clock rollback cannot finish credentials"
     );
 }
@@ -130,13 +133,16 @@ fn login_completed_field_waits_for_password_but_partial_digits_still_expire() {
         collector.digit(digit, 10);
     }
     assert!(
-        collector.tick(10_000).is_none(),
+        collector.tick(10_000, 3000).is_none(),
         "listening to the second prompt is not an interdigit timeout"
     );
     assert_eq!(collector.mailbox, "100");
     assert!(collector.digit('1', 10_001).is_none());
-    assert!(collector.tick(13_000).is_none());
-    assert!(matches!(collector.tick(13_001), Some(LoginInput::Retry)));
+    assert!(collector.tick(13_000, 3000).is_none());
+    assert!(matches!(
+        collector.tick(13_001, 3000),
+        Some(LoginInput::Retry)
+    ));
     assert!(collector.mailbox.is_empty() && collector.pin.is_empty() && !collector.pin_phase);
 }
 
@@ -159,14 +165,14 @@ fn private_input_helpers_preserve_bounds_and_retire_authenticated_ended_owners()
             .unwrap()
             .is_none()
     );
-    assert!(calls.login_timeouts(2999).is_empty());
+    assert!(calls.login_timeouts(9999).is_empty());
     assert_eq!(
-        calls.login_timeouts(3000),
+        calls.login_timeouts(10000),
         [(source.clone(), reply.clone())]
     );
     calls.login_digit(&source, &reply, '1', 0).unwrap();
     assert!(matches!(
-        calls.login_digit(&source, &reply, '2', 3000).unwrap(),
+        calls.login_digit(&source, &reply, '2', 10000).unwrap(),
         Some(LoginInput::Retry)
     ));
     calls
@@ -660,7 +666,7 @@ fn private_collection_dirty_tracking_uses_actual_grammar_transitions() {
     calls.actions(&source, &reply, '!', 1).unwrap();
     calls.reconcile_collections(|_, _, _| panic!("outer discard is still collecting"));
     assert!(
-        calls.grammar_timeouts(3001).is_empty(),
+        calls.grammar_timeouts(10001).is_empty(),
         "silent discard expiry"
     );
     calls.reconcile_collections(|_, _, _| {
@@ -798,4 +804,32 @@ fn phone_attachment_rearm_waits_for_the_serial_source_cut_after_reset() {
         "a reset cannot churn rejected generations"
     );
     assert!(!reply.ended());
+}
+
+#[test]
+fn slow_login_digits_keep_credentials_private_and_keep_absolute_admission_deadline() {
+    let mut collector = LoginCollector::default();
+    for (index, digit) in "100#".chars().enumerate() {
+        assert!(collector.tick(index as u64 * 4000, 10000).is_none());
+        collector.digit(digit, index as u64 * 4000);
+    }
+    assert!(collector.tick(30000, 10000).is_none());
+    collector.digit('7', 30000);
+    assert!(collector.tick(39999, 10000).is_none());
+    assert!(matches!(
+        collector.tick(40000, 10000),
+        Some(LoginInput::Retry)
+    ));
+    assert!(collector.mailbox.is_empty() && collector.pin.is_empty());
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    calls.login_digit(&source, &reply, '7', 59000).unwrap();
+    assert!(calls.login_timeouts(60000).is_empty());
+    assert_eq!(calls.expire_authentication(60000), [reply.clone()]);
+    assert!(reply.ended());
 }

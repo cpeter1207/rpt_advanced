@@ -269,6 +269,7 @@ pub struct DtmfCommands {
     peer_source: bool,
     pad: Option<PadTestResult>,
     digit_deadline: Option<u64>,
+    inter_digit_timeout_ms: u64,
     admin_unlock_hash: String,
     admin_lock_hash: String,
     admin_timeout_ms: u64,
@@ -307,6 +308,7 @@ impl DtmfCommands {
             peer_source: false,
             pad: None,
             digit_deadline: None,
+            inter_digit_timeout_ms: 3000,
             admin_unlock_hash: String::new(),
             admin_lock_hash: String::new(),
             admin_timeout_ms: 300_000,
@@ -320,6 +322,11 @@ impl DtmfCommands {
             pending_remote: Weak::new(),
         }
     }
+    /// Apply only to the independently owned source collector, never the radio publisher.
+    pub(super) fn set_inter_digit_timeout_ms(&mut self, timeout_ms: u64) {
+        self.inter_digit_timeout_ms = timeout_ms;
+    }
+
     /// Borrow the final remapped command namespace during candidate preparation.
     pub(crate) fn command_map(&self) -> &DtmfCommandMap {
         &self.map
@@ -498,7 +505,7 @@ impl DtmfCommands {
         }
         self.digit_deadline = match event {
             DigitEvent::Digit { digit, now_ms } if "0123456789ABCD*".contains(digit) => {
-                Some(now_ms.saturating_add(3000))
+                Some(now_ms.saturating_add(self.inter_digit_timeout_ms))
             }
             _ => None,
         };
@@ -559,7 +566,10 @@ impl DtmfCommands {
         {
             return Some(DigitOutcome::Regenerate(digit));
         }
-        let Some(text) = self.collector.feed(digit, now_ms) else {
+        let Some(text) =
+            self.collector
+                .feed_with_timeout(digit, now_ms, self.inter_digit_timeout_ms)
+        else {
             return self
                 .collector
                 .remote_candidate()
@@ -722,6 +732,21 @@ impl DtmfCommands {
     pub(super) fn remote_collecting(&self) -> bool {
         self.collector.active() && self.collector.remote_family()
     }
+    /// Outer phone quote/prefix keys count as activity without entering node syntax.
+    /// Do not create collection or revive input already due for the normal sweep.
+    pub(super) fn phone_input_activity(&mut self, now_ms: u64) {
+        if !self.collecting() {
+            return;
+        }
+        if let Some(deadline) = self
+            .digit_deadline
+            .as_mut()
+            .filter(|deadline| now_ms < **deadline)
+        {
+            *deadline = (*deadline).max(now_ms.saturating_add(self.inter_digit_timeout_ms));
+        }
+    }
+
     /// Expire only this origin's pending command, without ending remote selection.
     pub(super) fn expire(&mut self, now_ms: u64) -> Option<DigitOutcome> {
         if self

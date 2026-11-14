@@ -7,6 +7,7 @@ fn grammar() -> PhoneDtmfGrammar {
     PhoneDtmfGrammar::new(
         &DtmfCommandMap::standard(),
         PhoneDtmfOptions {
+            inter_digit_timeout_ms: 3000,
             telephone_egress: true,
             manual_admission: true,
             ..PhoneDtmfOptions::default()
@@ -509,4 +510,58 @@ fn phone_collection_state_distinguishes_idle_target_quote_and_silent_discard_tim
     grammar.cancel();
     assert!(!grammar.collecting());
     assert_eq!(grammar.selected_target(), None);
+}
+
+#[test]
+fn phone_default_allows_touchscreen_interdigit_pauses() {
+    let mut parser =
+        PhoneDtmfGrammar::new(&DtmfCommandMap::standard(), PhoneDtmfOptions::default()).unwrap();
+    for (index, digit) in "*31234#".chars().enumerate() {
+        let result = parser.digit(digit, index as u64 * 4_000);
+        if digit == '#' {
+            assert_eq!(result, vec![Action::Attach(Some("1234".into()))]);
+        } else {
+            assert!(
+                result.is_empty(),
+                "partial phone command must survive a four-second gap"
+            );
+        }
+    }
+}
+
+#[test]
+fn phone_configured_gap_preserves_quotes_then_discards_only_partial_input() {
+    for timeout in [1, 15000, 60000] {
+        let mut parser = PhoneDtmfGrammar::new(
+            &DtmfCommandMap::standard(),
+            PhoneDtmfOptions {
+                inter_digit_timeout_ms: timeout,
+                default_command_target: Some("1000".into()),
+                ..PhoneDtmfOptions::default()
+            },
+        )
+        .unwrap();
+        for digit in "*4#".chars() {
+            parser.digit(digit, 0);
+        }
+        for digit in "**".chars() {
+            parser.digit(digit, 10);
+        }
+        assert!(parser.tick(10 + timeout - 1).is_empty());
+        assert_eq!(
+            parser.digit('#', 10 + timeout - 1),
+            [Action::NodeDigit {
+                target: "1000".into(),
+                digit: '#'
+            }]
+        );
+        assert_eq!(parser.selected_target(), Some("1000"));
+        for digit in "**".chars() {
+            parser.digit(digit, 100000);
+        }
+        assert_eq!(parser.tick(100000 + timeout), [Action::CollectionDiscarded]);
+        assert!(!parser.collecting());
+        assert_eq!(parser.selected_target(), Some("1000"));
+        assert!(parser.tick(200000).is_empty());
+    }
 }

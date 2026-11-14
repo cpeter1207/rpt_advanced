@@ -1138,3 +1138,103 @@ fn ordinary_input_transfer_preserves_priming_and_rejects_a_late_set_mismatch() {
         );
     }
 }
+
+#[test]
+fn ordinary_input_transfer_omits_only_terminal_slots_without_reclassifying_survivors() {
+    struct Input {
+        signals: Arc<PeerSignals>,
+        marker: usize,
+        end_on_policy: Option<Arc<PeerSignals>>,
+    }
+    impl PeerInput for Input {
+        fn source_rate(&self) -> u32 {
+            48000
+        }
+        fn signals(&self) -> &PeerSignals {
+            &self.signals
+        }
+        fn receive_policy(&self) -> ReceivePolicy {
+            if let Some(signals) = &self.end_on_policy {
+                signals.end();
+            }
+            ReceivePolicy::Peer
+        }
+        fn available(&self) -> u64 {
+            0
+        }
+        fn render(&mut self, _: &mut [f32]) -> Option<usize> {
+            None
+        }
+    }
+    fn slot(index: usize, signals: Arc<PeerSignals>, marker: usize) -> AudioPeer<Input> {
+        let (output, _) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+        AudioPeer::new(
+            PeerIdentity::from_operator(&(200 + index).to_string()).unwrap(),
+            Mode::TRANSCEIVE,
+            Input {
+                signals,
+                marker,
+                end_on_policy: None,
+            },
+            output,
+            960,
+            100,
+        )
+        .unwrap()
+    }
+    for live_omission in [None, Some(0), Some(2), Some(4)] {
+        for end_after_validation in [false, true] {
+            let signals: Vec<_> = (0..5).map(|_| Arc::new(PeerSignals::new())).collect();
+            let (mut old, _old_dispatch) = LinkAudio::new(
+                (0..5).map(|i| slot(i, signals[i].clone(), i + 1)).collect(),
+                960,
+            )
+            .unwrap();
+            for index in [0, 2, 4] {
+                if live_omission != Some(index) {
+                    signals[index].end();
+                }
+            }
+            let (mut next, _next_dispatch) = LinkAudio::new(
+                [1, 3]
+                    .into_iter()
+                    .map(|i| slot(i, signals[i].clone(), 0))
+                    .collect(),
+                960,
+            )
+            .unwrap();
+            if end_after_validation {
+                // The last pair's existing policy query ends the already validated
+                // first survivor. Publication must not re-filter it by live state.
+                next.peers[1].input.end_on_policy = Some(signals[1].clone());
+            }
+            let admitted = next.retain_ordinary_inputs(&mut old);
+            assert_eq!(
+                admitted,
+                live_omission.is_none(),
+                "live omission={live_omission:?}"
+            );
+            if admitted {
+                assert_eq!(
+                    next.peers
+                        .iter()
+                        .map(|p| p.input.marker)
+                        .collect::<Vec<_>>(),
+                    [2, 4]
+                );
+                assert_eq!(
+                    old.peers.iter().map(|p| p.input.marker).collect::<Vec<_>>(),
+                    [1, 0, 3, 0, 5]
+                );
+                assert_eq!(next.peers[0].ended(), end_after_validation);
+            } else {
+                assert_eq!(
+                    old.peers.iter().map(|p| p.input.marker).collect::<Vec<_>>(),
+                    [1, 2, 3, 4, 5],
+                    "whole-set refusal cannot move earlier owners"
+                );
+                assert!(next.peers.iter().all(|p| p.input.marker == 0));
+            }
+        }
+    }
+}

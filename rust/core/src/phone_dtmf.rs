@@ -6,6 +6,8 @@ use std::{fmt, mem};
 /// Prepared phone-only grammar choices, independent of call authentication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhoneDtmfOptions {
+    /// Phone-only inactivity tolerance; resolved account values are 1 through 60000 ms.
+    pub inter_digit_timeout_ms: u64,
     /// Existing configured local NodeId for phone-only `*4#`; None keeps pure syntax unchanged.
     pub default_command_target: Option<String>,
     /// A separate telephone egress exists; false never echoes reverse-call digits.
@@ -21,6 +23,7 @@ pub struct PhoneDtmfOptions {
 impl Default for PhoneDtmfOptions {
     fn default() -> Self {
         Self {
+            inter_digit_timeout_ms: 10_000,
             default_command_target: None,
             telephone_egress: false,
             manual_admission: false,
@@ -85,7 +88,7 @@ enum Collection {
 
 /// Pure collection state, owned by one future call generation.
 ///
-/// Collection uses the existing three-second inactivity timeout and 127-symbol
+/// Collection uses the configured phone inactivity timeout and 127-symbol
 /// bound (excluding the initiating star). Explicit node targets remain at most
 /// 63 decimal digits. The call owner must authorize every emitted request.
 pub struct PhoneDtmfGrammar {
@@ -141,6 +144,11 @@ impl PhoneDtmfGrammar {
             collection: Collection::Idle,
             last_ms: 0,
         })
+    }
+
+    /// Snapshot shared by login and the exact phone origin's destination collector.
+    pub fn inter_digit_timeout_ms(&self) -> u64 {
+        self.options.inter_digit_timeout_ms
     }
 
     /// Feed one decoded DTMF symbol with a monotonic timestamp in milliseconds.
@@ -249,10 +257,10 @@ impl PhoneDtmfGrammar {
         output
     }
 
-    /// Apply the existing three-second collection timeout without replaying quotes.
+    /// Apply phone collection inactivity without replaying unfinished quotes.
     pub fn tick(&mut self, now_ms: u64) -> Vec<PhoneDtmfAction> {
         if !matches!(self.collection, Collection::Idle)
-            && now_ms.saturating_sub(self.last_ms) >= 3000
+            && now_ms.saturating_sub(self.last_ms) >= self.options.inter_digit_timeout_ms
         {
             self.finish()
         } else {

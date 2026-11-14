@@ -207,7 +207,7 @@ fn private_radio_status_copied_operation_retains_exact_collector_through_actual_
                 .chars()
                 .filter_map(|digit| {
                     node.links()
-                        .phone_digit(&source, digit, clock.now_ms, reply.clone())
+                        .phone_digit(&source, digit, clock.now_ms, reply.clone(), 3000)
                 })
                 .find_map(|outcome| match outcome {
                     DigitOutcome::Operation(operation) => Some(operation),
@@ -552,7 +552,7 @@ fn private_radio_operation(
                 .chars()
                 .filter_map(|digit| {
                     node.links()
-                        .phone_digit(&source, digit, now_ms, reply.clone())
+                        .phone_digit(&source, digit, now_ms, reply.clone(), 3000)
                 })
                 .find_map(|outcome| match outcome {
                     DigitOutcome::Operation(operation) => Some(operation),

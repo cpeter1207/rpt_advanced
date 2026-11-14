@@ -22,6 +22,7 @@ fn phone_account_defaults_and_explicit_settings() {
     assert_eq!(settings.protocol, PhoneAccountProtocol::Iax);
     assert_eq!(settings.registration_interval_s, 300);
     assert_eq!(settings.authentication_timeout_ms, 30_000);
+    assert_eq!(settings.inter_digit_timeout_ms, 10_000);
     let explicit = resolve_phone_accounts(&account(
         "enabled=yes\nprotocol=sip\nregister=yes\nregistration_interval_s=65535\nauthentication_timeout_ms=120000",
     ));
@@ -260,4 +261,30 @@ fn single_phone_account_resolution_uses_canonical_defaults_and_validation() {
             .value
             .is_none()
     );
+}
+
+#[test]
+fn phone_interdigit_option_is_recognized_without_changing_authentication_policy() {
+    let resolved = resolve_phone_accounts(&account("inter_digit_timeout_ms=15000"));
+    assert!(resolved.warnings.is_empty());
+    assert_eq!(resolved.value[0].authentication_timeout_ms, 30_000);
+}
+
+#[test]
+fn phone_interdigit_config_bounds_and_warning_defaults() {
+    for (value, expected, warns) in [
+        ("1", 1, false),
+        ("15000", 15000, false),
+        ("60000", 60000, false),
+        ("0", 10000, true),
+        ("60001", 10000, true),
+        ("-1", 10000, true),
+        ("1.5", 10000, true),
+        ("", 10000, true),
+    ] {
+        let resolved = resolve_phone_accounts(&account(&format!("inter_digit_timeout_ms={value}")));
+        assert_eq!(resolved.value[0].inter_digit_timeout_ms, expected);
+        assert_eq!(!resolved.warnings.is_empty(), warns);
+        assert_eq!(resolved.value[0].authentication_timeout_ms, 30000);
+    }
 }

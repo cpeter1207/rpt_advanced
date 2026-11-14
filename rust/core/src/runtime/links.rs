@@ -555,7 +555,7 @@ impl NodeLinkControl {
                     return Err(AdmissionError::Denied);
                 }
                 return Ok(if destination == &self.local {
-                    self.source_digit(source, *digit, now_ms, reply)
+                    self.source_digit(source, *digit, now_ms, reply, 3000)
                         .map_or(LinkEffect::None, LinkEffect::Digit)
                 } else {
                     LinkEffect::ForwardDigits(self.manager.relay_digit(remote, &message))
@@ -653,7 +653,7 @@ impl NodeLinkControl {
         if reply.ended() || !self.manager.remote_digit(remote, digit, &self.policy) {
             return None;
         }
-        self.source_digit(remote, digit, now_ms, reply)
+        self.source_digit(remote, digit, now_ms, reply, 3000)
     }
     /// Collect only an admitted private call's selected-node commands. No link
     /// membership or RF attachment is created, and idle phone digits never regenerate.
@@ -664,6 +664,7 @@ impl NodeLinkControl {
         digit: char,
         now_ms: u64,
         reply: PeerReply,
+        inter_digit_timeout_ms: u64,
     ) -> Option<DigitOutcome> {
         if !self.admitting
             || !reply.phone_authenticated()
@@ -672,9 +673,37 @@ impl NodeLinkControl {
         {
             return None;
         }
-        self.source_digit(&source.call_id().to_string(), digit, now_ms, reply)
-            .filter(|outcome| !matches!(outcome, DigitOutcome::Regenerate(_)))
+        self.source_digit(
+            &source.call_id().to_string(),
+            digit,
+            now_ms,
+            reply,
+            inter_digit_timeout_ms,
+        )
+        .filter(|outcome| !matches!(outcome, DigitOutcome::Regenerate(_)))
     }
+    /// Count an actual phone key consumed by its outer grammar as private input
+    /// activity. This never creates a collector, forwards a symbol or renews a grant.
+    pub fn phone_input_activity(
+        &mut self,
+        source: &crate::link::PhoneSource,
+        reply: &PeerReply,
+        now_ms: u64,
+    ) {
+        if !self.admitting
+            || reply.ended()
+            || !reply.phone_authenticated()
+            || reply.phone_source() != Some(source)
+        {
+            return;
+        }
+        for (_, actual, commands) in &mut self.peer_commands {
+            if actual == reply {
+                commands.phone_input_activity(now_ms);
+            }
+        }
+    }
+
     /// Inspect only this exact reply's collector while node admission is open.
     /// This is not call-registry admission: the caller must separately validate
     /// the actual live source. An absent collector is idle, never a new grant.
@@ -714,6 +743,7 @@ impl NodeLinkControl {
         digit: char,
         now_ms: u64,
         reply: PeerReply,
+        inter_digit_timeout_ms: u64,
     ) -> Option<DigitOutcome> {
         self.retain_peer_commands(now_ms);
         let index = if let Some(index) = self
@@ -741,6 +771,9 @@ impl NodeLinkControl {
                 .push((origin.into(), reply.clone(), self.commands.for_source()));
             self.peer_commands.len() - 1
         };
+        self.peer_commands[index]
+            .2
+            .set_inter_digit_timeout_ms(inter_digit_timeout_ms);
         self.peer_commands[index]
             .2
             .feed(DigitEvent::Digit { digit, now_ms })

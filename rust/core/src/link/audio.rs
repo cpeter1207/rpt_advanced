@@ -762,45 +762,57 @@ impl<P: PeerInput> LinkAudio<P> {
         self
     }
 
-    /// Move an unchanged ordinary receive set into a prepared graph at a guarded
-    /// publication cut. No callbacks may hold either graph. Exact source signals,
-    /// routing settings and the complete ordered set are checked before any swap.
-    /// Private inputs and new outgoing queues are deliberately never transferred.
+    /// Move surviving ordinary inputs into a prepared graph at a guarded cut.
+    /// No callbacks may hold either graph. Exact source signals and settings are
+    /// validated for the whole ordered set before any swap. Only terminal old
+    /// slots may be omitted; private inputs and outgoing queues never transfer.
     pub fn retain_ordinary_inputs(&mut self, previous: &mut Self) -> bool {
         let ordinary = |peer: &&AudioPeer<P>| peer.phone.is_none();
-        let next = self.peers.iter().filter(ordinary);
-        let old = previous.peers.iter().filter(ordinary);
-        if next.clone().count() != old.clone().count()
-            || !next.zip(old).all(|(next, old)| {
-                let same_group = match (&next.group, &old.group) {
-                    (None, None) => true,
-                    (Some((a, sa)), Some((b, sb))) => sa == sb && Arc::ptr_eq(&a.active, &b.active),
-                    _ => false,
+        let same_source = |next: &AudioPeer<P>, old: &AudioPeer<P>| {
+            next.identity == old.identity && std::ptr::eq(next.input.signals(), old.input.signals())
+        };
+        let mut old = previous.peers.iter().filter(ordinary);
+        for next in self.peers.iter().filter(ordinary) {
+            let matched = loop {
+                let Some(old) = old.next() else {
+                    return false;
                 };
-                next.identity == old.identity
-                    && next.mode == old.mode
-                    && next.kerchunk_samples == old.kerchunk_samples
-                    && next.audio.len() == old.audio.len()
-                    && same_group
-                    && std::ptr::eq(next.input.signals(), old.input.signals())
-                    && next.input.source_rate() == old.input.source_rate()
-                    && next.input.receive_policy() == old.input.receive_policy()
-                    && !old.ended()
-            })
-        {
+                if same_source(next, old) {
+                    break old;
+                }
+                if !old.ended() {
+                    return false;
+                }
+            };
+            let same_group = match (&next.group, &matched.group) {
+                (None, None) => true,
+                (Some((a, sa)), Some((b, sb))) => sa == sb && Arc::ptr_eq(&a.active, &b.active),
+                _ => false,
+            };
+            if next.mode != matched.mode
+                || next.kerchunk_samples != matched.kerchunk_samples
+                || next.audio.len() != matched.audio.len()
+                || !same_group
+                || next.input.source_rate() != matched.input.source_rate()
+                || next.input.receive_policy() != matched.input.receive_policy()
+            {
+                return false;
+            }
+        }
+        if old.any(|peer| !peer.ended()) {
             return false;
         }
-        for (next, old) in self
+        let mut old = previous
             .peers
             .iter_mut()
-            .filter(|peer| peer.phone.is_none())
-            .zip(
-                previous
-                    .peers
-                    .iter_mut()
-                    .filter(|peer| peer.phone.is_none()),
-            )
-        {
+            .filter(|peer| peer.phone.is_none());
+        for next in self.peers.iter_mut().filter(|peer| peer.phone.is_none()) {
+            // Identity is immutable. Do not reclassify live/ended state between
+            // validation and transfer: an independently ending survivor is safe.
+            let old = old
+                .by_ref()
+                .find(|old| same_source(next, old))
+                .expect("validated ordinary source");
             std::mem::swap(&mut next.input, &mut old.input);
             std::mem::swap(&mut next.receive, &mut old.receive);
             std::mem::swap(&mut next.audio, &mut old.audio);

@@ -59,7 +59,7 @@ fn clearing_phone_mode_preserves_unrelated_and_same_call_replacement_collectors(
         for digit in "*7".chars() {
             assert!(
                 links
-                    .phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone())
+                    .phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone(), 3000)
                     .is_none()
             );
         }
@@ -70,7 +70,7 @@ fn clearing_phone_mode_preserves_unrelated_and_same_call_replacement_collectors(
         let outcomes: Vec<_> = "0#"
             .chars()
             .filter_map(|digit| {
-                links.phone_digit(reply.phone_source().unwrap(), digit, 2, reply.clone())
+                links.phone_digit(reply.phone_source().unwrap(), digit, 2, reply.clone(), 3000)
             })
             .collect();
         assert_eq!(outcomes.len(), usize::from(index != 0));
@@ -123,7 +123,7 @@ fn clearing_one_phone_macro_cancels_only_its_delayed_steps_and_retains_unlock() 
         assert!(signal.authenticate_phone());
         let reply = signal.reply_target();
         for digit in "*8001234#*95".chars() {
-            links.phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone());
+            links.phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone(), 3000);
         }
     }
     assert_eq!(links.advance_macros(1).len(), 2);
@@ -136,7 +136,13 @@ fn clearing_one_phone_macro_cancels_only_its_delayed_steps_and_retains_unlock() 
     let operation = "*804"
         .chars()
         .filter_map(|digit| {
-            links.phone_digit(first.phone_source().unwrap(), digit, 2002, first.clone())
+            links.phone_digit(
+                first.phone_source().unwrap(),
+                digit,
+                2002,
+                first.clone(),
+                3000,
+            )
         })
         .next()
         .unwrap();
@@ -177,7 +183,7 @@ fn phone_pending_connect_and_initial_retry_end_with_the_actual_call() {
         let mut operation = None;
         for digit in format!("*{prefix}2000#").chars() {
             if let Some(DigitOutcome::Operation(request)) =
-                links.phone_digit(&source, digit, 1, reply.clone())
+                links.phone_digit(&source, digit, 1, reply.clone(), 3000)
             {
                 operation = Some(request);
             }
@@ -258,7 +264,7 @@ fn phone_grammar_macro_keeps_private_source_through_dispatch_and_retirement() {
     for digit in "*95".chars() {
         assert!(
             links
-                .phone_digit(&source, digit, 1, reply.clone())
+                .phone_digit(&source, digit, 1, reply.clone(), 3000)
                 .is_none()
         );
     }
@@ -275,7 +281,7 @@ fn phone_grammar_macro_keeps_private_source_through_dispatch_and_retirement() {
                     assert_eq!(target, "1000");
                     assert!(
                         links
-                            .phone_digit(&source, digit, 10, reply.clone())
+                            .phone_digit(&source, digit, 10, reply.clone(), 3000)
                             .is_none()
                     );
                 }
@@ -318,7 +324,7 @@ fn phone_grammar_macro_keeps_private_source_through_dispatch_and_retirement() {
     assert!(replacement_signals.authenticate_phone());
     assert!(
         links
-            .phone_digit(&replacement, '*', 2011, reply.clone())
+            .phone_digit(&replacement, '*', 2011, reply.clone(), 3000)
             .is_none()
     );
     assert!(links.peer_commands.is_empty());
@@ -335,7 +341,11 @@ fn phone_commands_keep_exact_private_source_and_retire_without_link_admission() 
     let signals = crate::link::PeerSignals::for_phone(source.clone());
     let reply = signals.reply_target();
     let mut links = links();
-    assert!(links.phone_digit(&source, '*', 1, reply.clone()).is_none());
+    assert!(
+        links
+            .phone_digit(&source, '*', 1, reply.clone(), 3000)
+            .is_none()
+    );
     let mut unverified = operation(LinkAction::Status, "");
     unverified.reply = Some(reply.clone());
     unverified.origin = Some(call.to_string());
@@ -347,17 +357,19 @@ fn phone_commands_keep_exact_private_source_and_retire_without_link_admission() 
     assert!(signals.authenticate_phone());
     assert!(
         links
-            .phone_digit(&replacement, '*', 1, reply.clone())
+            .phone_digit(&replacement, '*', 1, reply.clone(), 3000)
             .is_none()
     );
     assert!(
-        links.phone_digit(&source, '5', 1, reply.clone()).is_none(),
+        links
+            .phone_digit(&source, '5', 1, reply.clone(), 3000)
+            .is_none(),
         "command-only calls cannot regenerate RF digits"
     );
     let mut outcome = None;
     for digit in "*70#".chars() {
         outcome = links
-            .phone_digit(&source, digit, 2, reply.clone())
+            .phone_digit(&source, digit, 2, reply.clone(), 3000)
             .or(outcome);
     }
     let Some(DigitOutcome::Operation(operation)) = outcome else {
@@ -366,12 +378,16 @@ fn phone_commands_keep_exact_private_source_and_retire_without_link_admission() 
     assert_eq!(operation.reply, Some(reply.clone()));
     assert_eq!(operation.origin.as_deref(), Some(call.to_string().as_str()));
     assert!(links.manager().snapshot().is_empty());
-    assert!(links.phone_digit(&source, '*', 2, reply.clone()).is_none());
+    assert!(
+        links
+            .phone_digit(&source, '*', 2, reply.clone(), 3000)
+            .is_none()
+    );
     assert!(!links.peer_commands.is_empty());
     signals.end();
     links.retire_source(&reply);
     assert!(links.peer_commands.is_empty());
-    assert!(links.phone_digit(&source, '*', 3, reply).is_none());
+    assert!(links.phone_digit(&source, '*', 3, reply, 3000).is_none());
     let mut host = NodeHost::new(generation(1));
     assert!(matches!(
         links.command(operation, host.control().work().unwrap(), 3, false),
@@ -382,7 +398,7 @@ fn phone_commands_keep_exact_private_source_and_retire_without_link_admission() 
     links.close();
     assert!(
         links
-            .phone_digit(&replacement, '*', 4, fresh.reply_target())
+            .phone_digit(&replacement, '*', 4, fresh.reply_target(), 3000)
             .is_none()
     );
     assert!(links.manager().snapshot().is_empty());
@@ -406,7 +422,7 @@ fn mailbox_login_never_unlocks_administration_or_enables_legacy_private_forwardi
     for digit in "*804".chars() {
         assert!(
             links
-                .phone_digit(&source, digit, 1, reply.clone())
+                .phone_digit(&source, digit, 1, reply.clone(), 3000)
                 .is_none(),
             "mailbox authentication is not an admin grant"
         );
@@ -428,7 +444,7 @@ fn mailbox_login_never_unlocks_administration_or_enables_legacy_private_forwardi
         ),
         "a private call cannot fall back to trusted local origin"
     );
-    assert!(links.phone_digit(&source, '!', 3, reply).is_none());
+    assert!(links.phone_digit(&source, '!', 3, reply, 3000).is_none());
 }
 
 #[test]
@@ -3170,7 +3186,7 @@ fn phone_collection_query_is_exact_read_only_and_preserves_unlock() {
         let source = reply.phone_source().unwrap();
         assert_eq!(links.phone_collection_pending(source, &reply), Some(false));
         for digit in "*8001234#*7".chars() {
-            links.phone_digit(source, digit, 1, reply.clone());
+            links.phone_digit(source, digit, 1, reply.clone(), 3000);
         }
         assert_eq!(links.phone_collection_pending(source, &reply), Some(true));
     }
@@ -3199,7 +3215,7 @@ fn phone_collection_query_is_exact_read_only_and_preserves_unlock() {
     assert!(
         "*804"
             .chars()
-            .filter_map(|digit| { links.phone_digit(source, digit, 2, first.clone()) })
+            .filter_map(|digit| { links.phone_digit(source, digit, 2, first.clone(), 3000) })
             .any(|outcome| matches!(outcome, DigitOutcome::Operation(_))),
         "inspection and cancellation preserve the exact source's unlock"
     );
@@ -3238,7 +3254,7 @@ fn private_collection_expiry_notifies_silent_completion_once() {
     for digit in "*7".chars() {
         assert!(
             links
-                .phone_digit(&source, digit, 1, reply.clone())
+                .phone_digit(&source, digit, 1, reply.clone(), 3000)
                 .is_none()
         );
     }
@@ -3294,7 +3310,7 @@ fn remote_operation_custody_keeps_only_outstanding_exact_source_collectors() {
             .chars()
             .filter_map(|digit| {
                 if phone {
-                    links.phone_digit(&source, digit, 1, reply.clone())
+                    links.phone_digit(&source, digit, 1, reply.clone(), 3000)
                 } else {
                     links.peer_digit("2000", digit, 1, reply.clone())
                 }
@@ -3360,7 +3376,7 @@ fn remote_operation_custody_never_overrides_exact_retirement_or_reconfiguration(
         "*652#"
             .chars()
             .filter_map(|digit| {
-                links.phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone())
+                links.phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone(), 3000)
             })
             .find_map(|outcome| match outcome {
                 DigitOutcome::Operation(operation) => Some(operation),
@@ -3419,13 +3435,13 @@ fn remote_operation_custody_does_not_extend_a_private_source_grant() {
     for digit in "*8001234#".chars() {
         assert!(
             links
-                .phone_digit(&source, digit, 1, reply.clone())
+                .phone_digit(&source, digit, 1, reply.clone(), 3000)
                 .is_none()
         );
     }
     let collect = |links: &mut NodeLinkControl, text: &str, now_ms| {
         text.chars()
-            .filter_map(|digit| links.phone_digit(&source, digit, now_ms, reply.clone()))
+            .filter_map(|digit| links.phone_digit(&source, digit, now_ms, reply.clone(), 3000))
             .find_map(|outcome| match outcome {
                 DigitOutcome::Operation(operation) => Some(operation),
                 _ => None,
@@ -3481,12 +3497,12 @@ fn phone_timed_transport_intent_survives_recovery_without_private_authority() {
                 .digits;
             format!("*{prefix}2000#")
                 .chars()
-                .filter_map(
-                    |digit| match links.phone_digit(&source, digit, 1, reply.clone()) {
+                .filter_map(|digit| {
+                    match links.phone_digit(&source, digit, 1, reply.clone(), 3000) {
                         Some(DigitOutcome::Operation(request)) => Some(request),
                         _ => None,
-                    },
-                )
+                    }
+                })
                 .next()
                 .unwrap()
         } else {
@@ -3524,4 +3540,86 @@ fn phone_timed_transport_intent_survives_recovery_without_private_authority() {
             assert_eq!(links.finish_retry(retry, true, now + 1), Ok(true));
         }
     }
+}
+
+#[test]
+fn phone_timing_is_private_and_ordinary_peer_still_expires_at_three_seconds() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        1,
+        1,
+    )
+    .unwrap();
+    let phone = PeerSignals::for_phone(source.clone());
+    assert!(phone.authenticate_phone());
+    let reply = phone.reply_target();
+    let mut links = links();
+    let ordinary = PeerSignals::new();
+    for digit in "*312".chars() {
+        links.phone_digit(&source, digit, 0, reply.clone(), 10000);
+        links.source_digit("ordinary", digit, 0, ordinary.reply_target(), 3000);
+    }
+    let expired = links.expire_peer_digits(3000);
+    assert_eq!(expired.len(), 1);
+    assert!(
+        matches!(&expired[0], DigitOutcome::Operation(op) if op.reply == Some(ordinary.reply_target()) && op.command.node == "12")
+    );
+    assert_eq!(links.phone_collection_pending(&source, &reply), Some(true));
+    assert!(
+        links
+            .phone_digit(&source, '3', 4000, reply.clone(), 10000)
+            .is_none()
+    );
+    assert!(links.expire_peer_digits(13999).is_empty());
+    let expired = links.expire_peer_digits(14000);
+    assert!(
+        matches!(&expired[..], [DigitOutcome::Operation(op)] if op.reply == Some(reply.clone()) && op.command.node == "123")
+    );
+    assert_eq!(links.phone_collection_pending(&source, &reply), Some(false));
+    assert!(!reply.ended());
+}
+
+#[test]
+fn phone_outer_activity_does_not_create_revive_or_touch_other_collectors() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        1,
+        1,
+    )
+    .unwrap();
+    let signals = PeerSignals::for_phone(source.clone());
+    let reply = signals.reply_target();
+    let mut links = links();
+    links.phone_input_activity(&source, &reply, 0);
+    assert!(links.peer_commands.is_empty());
+    signals.authenticate_phone();
+    links.phone_input_activity(&source, &reply, 0);
+    assert!(links.peer_commands.is_empty());
+    for digit in "*7".chars() {
+        links.phone_digit(&source, digit, 0, reply.clone(), 10000);
+    }
+    let foreign = PeerSignals::for_phone(source.clone());
+    foreign.authenticate_phone();
+    links.phone_input_activity(&source, &foreign.reply_target(), 9999);
+    // Activity at the inclusive expiry boundary must leave collection due.
+    links.phone_input_activity(&source, &reply, 10000);
+    links.expire_peer_digits(10000);
+    assert_eq!(links.phone_collection_pending(&source, &reply), Some(false));
+    for digit in "*7".chars() {
+        links.phone_digit(&source, digit, 20000, reply.clone(), 10000);
+    }
+    links.phone_input_activity(&source, &reply, 25000);
+    links.phone_input_activity(&source, &reply, 21000);
+    links.expire_peer_digits(34999);
+    assert_eq!(links.phone_collection_pending(&source, &reply), Some(true));
+    links.expire_peer_digits(35000);
+    assert_eq!(links.phone_collection_pending(&source, &reply), Some(false));
+    signals.end();
+    links.phone_input_activity(&source, &reply, 40000);
 }

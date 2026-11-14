@@ -117,7 +117,7 @@ fn source_operation(
                 .chars()
                 .filter_map(|digit| {
                     node.links()
-                        .phone_digit(&source, digit, now_ms, reply.clone())
+                        .phone_digit(&source, digit, now_ms, reply.clone(), 3000)
                 })
                 .find_map(|outcome| match outcome {
                     DigitOutcome::Operation(operation)
@@ -627,7 +627,7 @@ fn private_site_report_and_rejected_message_preserve_unrelated_rf_macro() {
                 .chars()
                 .filter_map(|digit| {
                     node.links()
-                        .phone_digit(&source, digit, clock.now_ms, owner.clone())
+                        .phone_digit(&source, digit, clock.now_ms, owner.clone(), 3000)
                 })
                 .collect();
             assert!(
@@ -796,7 +796,7 @@ fn private_collection_real_engine_respects_quotes_cancellation_and_actual_timeou
         engine
             .pump(
                 RuntimeClock {
-                    now_ms: if expiry { 3001 } else { 4 },
+                    now_ms: if expiry { 10001 } else { 4 },
                     ..clock
                 },
                 false,
@@ -1172,7 +1172,7 @@ fn phone_macro_dial_outcome_is_generic_but_macro_stopped_stays_private() {
             for digit in "*95".chars() {
                 assert!(
                     node.links()
-                        .phone_digit(&origin, digit, now_ms, target.clone())
+                        .phone_digit(&origin, digit, now_ms, target.clone(), 3000)
                         .is_none()
                 );
             }
@@ -1324,4 +1324,76 @@ fn attached_phone_preserves_ordinary_ota_connect_and_permanent_retry() {
         drop(session);
         assert!(engine.stop());
     }
+}
+
+#[test]
+fn slow_phone_quote_keys_refresh_the_exact_destination_collection() {
+    use crate::link::session::{SerialSession, tests::Input};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+    let engine = engine(configuration(), services, speech());
+    let (calls, mut session, state, source, reply) =
+        crate::phone::tests::controlled_source_session_mode(8000, false);
+    engine
+        .run(move |host| {
+            crate::host::tests::phone::install_controlled_source(host, calls);
+            Ok(())
+        })
+        .unwrap();
+    for (now_ms, text) in [(1, "*4#*7"), (4001, "*"), (8001, "*"), (10001, "")] {
+        state
+            .lock()
+            .unwrap()
+            .input
+            .extend(text.bytes().map(Input::Digit));
+        session.step(now_ms).unwrap();
+        engine
+            .pump(
+                RuntimeClock {
+                    now_ms,
+                    ..engine.clock()
+                },
+                false,
+            )
+            .unwrap();
+    }
+    let proof_source = source.clone();
+    let proof_reply = reply.clone();
+    assert_eq!(
+        engine
+            .run(move |host| Ok(host
+                .runtime
+                .node("1000")
+                .unwrap()
+                .links()
+                .phone_collection_pending(&proof_source, &proof_reply)))
+            .unwrap(),
+        Some(true),
+        "quote controls are actual phone input, not an idle destination"
+    );
+    state.lock().unwrap().input.push_back(Input::Digit(b'#'));
+    session.step(12001).unwrap();
+    engine
+        .pump(
+            RuntimeClock {
+                now_ms: 12001,
+                ..engine.clock()
+            },
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .run(move |host| Ok(host
+                .runtime
+                .node("1000")
+                .unwrap()
+                .links()
+                .phone_collection_pending(&source, &reply)))
+            .unwrap(),
+        Some(false)
+    );
+    assert!(engine.stop());
 }

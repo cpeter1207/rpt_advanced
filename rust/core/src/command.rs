@@ -308,6 +308,16 @@ pub struct CommandCollector {
 impl CommandCollector {
     /// Feed one DTMF character or `\0` as the timeout tick.
     pub fn feed(&mut self, digit: char, now_ms: u64) -> Option<String> {
+        self.feed_with_timeout(digit, now_ms, 3000)
+    }
+
+    /// Use an origin-specific inactivity limit; ordinary callers retain three seconds.
+    pub(crate) fn feed_with_timeout(
+        &mut self,
+        digit: char,
+        now_ms: u64,
+        timeout_ms: u64,
+    ) -> Option<String> {
         let remote = self.active && self.remote_family();
         if digit == '*' && !remote {
             self.digits.clear();
@@ -319,7 +329,7 @@ impl CommandCollector {
             return None;
         }
         let mut finish =
-            digit == '#' || (digit == '\0' && now_ms.wrapping_sub(self.last_ms) >= 3000);
+            digit == '#' || (digit == '\0' && now_ms.wrapping_sub(self.last_ms) >= timeout_ms);
         if digit != '\0' && digit != '#' {
             if !(digit.is_ascii_digit() || matches!(digit, 'A'..='D') || digit == '*')
                 || self.digits.len() == 127

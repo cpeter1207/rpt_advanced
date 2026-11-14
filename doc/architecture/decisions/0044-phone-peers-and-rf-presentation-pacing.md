@@ -1768,3 +1768,36 @@ transport-connection acknowledgment after that redirect, plus existing dispatche
 quiescence. Old ring identity alone is not an acknowledgment of a new graph.
 Reload and ordinary topology changes retain their current replacement semantics.
 No new PCM queue, provider API, playout target or source-age rule is introduced.
+
+An ordinary peer already detached from host ownership may leave a terminal slot
+in the current audio graph until the next publication. Phone rearm may omit only
+those terminal slots while retaining every matching survivor in order. The full
+set and immutable source identities are validated before any move; a survivor
+ending concurrently does not change the validated mapping. Callback-busy refresh
+retains authorized attachment intent for the next ordinary pump, without making
+the revoked phone generation usable. Hard preparation errors still detach media.
+
+
+## Phone-only inter-digit tolerance — 2026-11-14
+
+A phone account resolves `inter_digit_timeout_ms` (default 10000, valid 1–60000).
+Malformed values warn and fall back through the ordinary account schema. The
+existing private startup snapshots the value for the call, sharing it across
+mailbox/PIN collection, phone grammar, and that exact source's destination node
+collector. Ordinary radio and peer collectors retain three seconds. Explicit
+terminators and unambiguous commands still complete immediately; inactivity
+keeps existing finish/discard semantics, including private quote cleanup.
+
+This is an input accessibility tolerance, not authentication or call lifetime.
+The absolute 60-second login admission window, attempt count, node unlock expiry,
+transport authentication settings and call retirement remain separate. A digit
+timeout alone does not detach or hang up an authenticated caller. Existing
+operation or private-prompt preparation failures may still retire a call through
+the existing worker error path. No credential or digit logging is added.
+
+Quote-control keys consumed by the outer grammar refresh only the matching
+already-active, unexpired node collector. They never become node symbols, create
+collection, renew authorization, or touch another source. This ensures slow
+quoted terminators do not lose their destination while every actual key remains
+within the configured gap. Inclusive expiry and rollback cannot revive or
+shorten that existing deadline.
