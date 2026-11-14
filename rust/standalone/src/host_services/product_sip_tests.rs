@@ -2,6 +2,8 @@
 use super::*;
 use crate::phone::media::{G711, G711Codec};
 use std::collections::BTreeMap;
+#[path = "product_sip_vox_tests.rs"]
+mod vox;
 
 struct Caller {
     sip: UdpSocket,
@@ -11,6 +13,7 @@ struct Caller {
     to: String,
     sequence: u16,
     timestamp: u32,
+    keepalive: bool,
 }
 
 fn fields(packet: &[u8]) -> (String, BTreeMap<String, String>) {
@@ -75,6 +78,7 @@ impl Caller {
             to: "<sip:fixture-user@127.0.0.1>".into(),
             sequence: 0,
             timestamp: 0,
+            keepalive: false,
         };
         let mut packet = [0; 8192];
         if registered.is_none() {
@@ -143,11 +147,29 @@ impl Caller {
             }
         }
     }
-    fn prompt(&self, codec: &mut G711Codec, stage: &str) -> Vec<f32> {
+    fn audio(&mut self, codec: &mut G711Codec, pcm: &[f32; 160]) {
+        let mut encoded = [0; 160];
+        codec.encode(pcm, &mut encoded).unwrap();
+        let mut wire = [0; 172];
+        wire[0] = 0x80;
+        wire[2..4].copy_from_slice(&self.sequence.to_be_bytes());
+        wire[4..8].copy_from_slice(&self.timestamp.to_be_bytes());
+        wire[8..12].copy_from_slice(&19u32.to_be_bytes());
+        wire[12..].copy_from_slice(&encoded);
+        self.rtp.send_to(&wire, self.media).unwrap();
+        self.sequence = self.sequence.wrapping_add(1);
+        self.timestamp = self.timestamp.wrapping_add(160);
+    }
+    fn prompt(&mut self, codec: &mut G711Codec, stage: &str) -> Vec<f32> {
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut last_tone = Instant::now();
         let mut result = Vec::new();
+        let mut next_audio = Instant::now();
         loop {
+            if self.keepalive && Instant::now() >= next_audio {
+                self.audio(codec, &[0.0; 160]);
+                next_audio += Duration::from_millis(20);
+            }
             self.service();
             let mut wire = [0; 2048];
             if let Ok((length, source)) = self.rtp.recv_from(&mut wire) {
@@ -180,7 +202,7 @@ impl Caller {
                 .iter()
                 .position(|value| value == digit)
                 .unwrap() as u8;
-            self.timestamp += 320;
+            self.timestamp = self.timestamp.wrapping_add(320);
             // A complete event plus its redundant end must yield one private digit.
             for flags in [10, 0x8a, 0x8a] {
                 let mut wire = [0u8; 16];
@@ -245,16 +267,22 @@ fn call_flow(sip: UdpSocket, registered: Option<SocketAddr>, login_only: bool) {
 
 #[test]
 fn real_product_private_sip_call_authenticates_and_returns_status_without_radio_output() {
-    product_call(false);
+    product_call(false, false);
 }
 #[test]
 fn real_product_zero_mailbox_sip_call_prompts_and_hangs_up_without_radio_output() {
-    product_call(true);
+    product_call(true, false);
 }
-fn product_call(no_mailbox: bool) {
+#[test]
+fn real_product_sip_call_connects_remote_and_transmits_voice() {
+    product_call(false, true);
+}
+fn product_call(no_mailbox: bool, voice: bool) {
     const CHILD: &str = "RPTADV_TEST_REAL_SIP_PHONE_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
-        let test = if no_mailbox {
+        let test = if voice {
+            "host_services::product_phone_tests::sip::real_product_sip_call_connects_remote_and_transmits_voice"
+        } else if no_mailbox {
             "host_services::product_phone_tests::sip::real_product_zero_mailbox_sip_call_prompts_and_hangs_up_without_radio_output"
         } else {
             "host_services::product_phone_tests::sip::real_product_private_sip_call_authenticates_and_returns_status_without_radio_output"
@@ -278,6 +306,7 @@ fn product_call(no_mailbox: bool) {
     fs::write(&secret, "fixture-secret\n").unwrap();
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
     let sip = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut remote = voice.then(vox::Remote::new);
     let configuration = format!(
         "[general]\nnode_enabled=yes\n[desk]\nradio_channel=fixture\nduplex=full\n[morse]\nspeed_wpm=40\nfrequency_hz=800\nlevel_db=-6\n[phone_account office]\nlocal_node=desk\nenabled=yes\nprotocol=sip\nserver={}\nusername=fixture-user\nsecrets_file=phone.secret\nregister=yes\n{}",
         sip.local_addr().unwrap(),
@@ -287,6 +316,18 @@ fn product_call(no_mailbox: bool) {
             include_str!("../../../product/src/tests/fixtures/phone_mailbox.conf")
         }
     );
+    let configuration = if let Some(remote) = remote.as_ref() {
+        let path = directory.join("nodes.conf");
+        fs::write(
+            &path,
+            format!("[extnodes]\n2000=radio@{}/2000,127.0.0.1\n", remote.address),
+        )
+        .unwrap();
+        configuration.replace("[desk]", &format!("[1000]\nlink_lookup_method=file\nlink_static_directory_file={}\nphone_allow_accounts=office", path.display()))
+            .replace("local_node=desk", "local_node=1000\nattach_local_nodes=1000")
+    } else {
+        configuration
+    };
     let accounts = AccountPreparer::default()
         .prepare(
             &directory.join("rpt_advanced.conf"),
@@ -320,9 +361,24 @@ fn product_call(no_mailbox: bool) {
         crate::phone::registration::Worker::from_provider(provider_ref.sip_provider().unwrap())
             .unwrap();
     worker.prepare(&accounts).unwrap().commit().unwrap();
-    let caller = thread::spawn(move || call_flow(sip, None, no_mailbox));
+    if let Some(remote) = remote.as_mut() {
+        runtime.enable_listener(&mut remote.server).unwrap();
+    }
+    let observation = remote
+        .as_ref()
+        .map(|remote| Arc::clone(&remote.observation));
+    let caller = thread::spawn(move || {
+        if let Some(observation) = observation {
+            vox::call(sip, observation);
+        } else {
+            call_flow(sip, None, no_mailbox);
+        }
+    });
     let deadline = Instant::now() + Duration::from_secs(50);
     while !caller.is_finished() && Instant::now() < deadline {
+        if let Some(remote) = remote.as_mut() {
+            remote.pump();
+        }
         while let Some(receipt) = worker.incoming() {
             runtime
                 .incoming_sip(receipt)
@@ -331,9 +387,20 @@ fn product_call(no_mailbox: bool) {
         thread::sleep(Duration::from_millis(1));
     }
     let result = caller.join();
+    if result.is_ok() {
+        if let Some(remote) = remote.as_mut() {
+            // Ending the private caller must not disconnect its established node link.
+            let until = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < until {
+                remote.pump();
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
     worker.stop().unwrap();
     runtime.stop().unwrap();
-    assert_foreground_stopped();
+    assert_radio_stopped(voice);
+    drop(remote);
     fs::remove_dir_all(directory).unwrap();
     result.unwrap();
 }

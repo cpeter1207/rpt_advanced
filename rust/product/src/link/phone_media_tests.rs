@@ -193,17 +193,23 @@ fn prepared_phone_media_rejects_old_source_prefixes_unknown_age_and_wrong_epoch(
     assert!(!input.active());
     assert_eq!(input.available(), 0);
     assert!(!input.shared.reply.ended());
-    for time in [
-        None,
-        Some(birth(9)),
-        Some(SourceBirth {
-            host_clock_epoch: 8,
-            born_ns: 10,
-        }),
+    for (time, start) in [
+        (None, 0),
+        (Some(birth(9)), 160),
+        (
+            Some(SourceBirth {
+                host_clock_epoch: 8,
+                born_ns: 10,
+            }),
+            0,
+        ),
     ] {
         let (mut ingress, input, _) = prepare(reply(), 8000, None).unwrap();
         adopt(&mut ingress, 0, reference());
-        assert_eq!(ingress.audio(0, &[0.25; 160], time), Ok(160));
+        if start != 0 {
+            assert_eq!(ingress.audio(0, &[0.25; 160], Some(birth(10))), Ok(160));
+        }
+        assert_eq!(ingress.audio(start, &[0.25; 160], time), Ok(160));
         assert_eq!(input.available(), 0);
         assert!(!input.active());
         assert!(!input.shared.reply.ended());
@@ -982,4 +988,34 @@ fn voiced_phone_preserves_the_qualified_dsp_tail_after_source_gate_closes() {
         previous_qualified = qualified;
     }
     assert!(observed_tail);
+}
+
+#[test]
+fn prepared_phone_media_drains_pre_cut_jitter_prefix_without_chasing_a_new_admission() {
+    let (mut ingress, input, shared) = prepare(reply(), 8000, None).unwrap();
+    adopt(&mut ingress, 160, reference());
+    for start in [160, 320, 480] {
+        assert_eq!(ingress.audio(start, &[0.75; 160], Some(birth(9))), Ok(160));
+        assert!(
+            input.active(),
+            "a known pre-cut prefix must not move or retire the fresh cut"
+        );
+        assert_eq!(input.available(), 0);
+        assert_eq!(ingress.cursor, None);
+        assert_eq!(ingress.admission.now_ns, 10);
+    }
+    assert_eq!(ingress.audio(640, &[0.25; 160], Some(birth(11))), Ok(160));
+    assert_eq!(input.available(), 160);
+    assert_eq!(
+        shared.bound(640).unwrap().not_after_ns,
+        11,
+        "retain actual birth"
+    );
+    assert_eq!(ingress.cursor, Some(800));
+    assert_eq!(ingress.audio(800, &[0.75; 160], Some(birth(9))), Ok(160));
+    assert!(
+        !input.active(),
+        "stale input after admitted PCM is still a discontinuity"
+    );
+    assert!(!shared.reply.ended());
 }

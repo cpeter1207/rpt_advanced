@@ -153,7 +153,7 @@ impl Host {
         }
     }
     /// Prepare a typed graph attachment while retaining the existing private
-    /// call owner. Operator activation remains gated by the VOX/timing milestone.
+    /// call owner, current attachment policy and proven egress timing.
     pub fn attach_phone(
         &mut self,
         source: &PhoneSource,
@@ -219,15 +219,14 @@ impl Host {
                             .runtime
                             .document()
                             .phone_local_attachment_allowed(source.account(), target);
-                    self.prepare_login_prompt(
-                        source,
-                        reply,
-                        if permitted {
-                            Prompt::Unavailable
-                        } else {
-                            Prompt::Failed
-                        },
-                    )?;
+                    let result = if !permitted {
+                        Prompt::Failed
+                    } else if self.attach_phone(source, reply, target, clock).is_ok() {
+                        Prompt::Completed
+                    } else {
+                        Prompt::Unavailable
+                    };
+                    self.prepare_login_prompt(source, reply, result)?;
                     false
                 }
                 PhoneDtmfAction::SelectTarget(target) => {

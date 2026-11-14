@@ -27,6 +27,7 @@ struct RadioPump {
 }
 static RADIO: Mutex<Option<RadioPump>> = Mutex::new(None);
 static PUBLIC_OUTPUT: AtomicUsize = AtomicUsize::new(0);
+static LAST_PTT: AtomicBool = AtomicBool::new(false);
 static RADIO_TURNS: AtomicUsize = AtomicUsize::new(0);
 static RADIO_JOIN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
@@ -88,6 +89,7 @@ unsafe extern "C" fn activate(
                     + usize::from(keyed != 0),
                 Ordering::Relaxed,
             );
+            LAST_PTT.store(keyed != 0, Ordering::Release);
             RADIO_TURNS.fetch_add(1, Ordering::Relaxed);
             first += 960;
             thread::sleep(Duration::from_millis(20));
@@ -117,7 +119,19 @@ pub(crate) fn configure_foreground_fixture(host: &mut HostServicesOwner) {
     }
 }
 
+unsafe extern "C" fn bind_simulated_radio(
+    _: *mut c_void,
+    peer: *mut c_void,
+    radio: *mut c_void,
+) -> i32 {
+    if peer.is_null() || radio.is_null() || RADIO.lock().unwrap().is_none() {
+        -1
+    } else {
+        0
+    }
+}
 fn install_simulated_radio(host: &mut HostServicesOwner) {
+    host.descriptor.peer_bind_radio = Some(bind_simulated_radio);
     host.descriptor.radio_activate = Some(activate);
     host.descriptor.radio_ready = Some(ready);
     host.descriptor.radio_quiesce = Some(quiesce);
@@ -125,6 +139,9 @@ fn install_simulated_radio(host: &mut HostServicesOwner) {
 
 /// This assertion runs inside the child after the real foreground has joined owners.
 pub(crate) fn assert_foreground_stopped() {
+    assert_radio_stopped(false);
+}
+fn assert_radio_stopped(voiced: bool) {
     assert!(
         RADIO_TURNS.load(Ordering::Acquire) > 0,
         "enabled radio must service actual callback turns"
@@ -139,11 +156,11 @@ pub(crate) fn assert_foreground_stopped() {
         "physical fixture callback pump drained"
     );
     assert_eq!(
-        PUBLIC_OUTPUT.load(Ordering::Acquire),
-        0,
-        "REGISTER-only fixture must never key or emit radio audio"
+        PUBLIC_OUTPUT.load(Ordering::Acquire) > 0,
+        voiced,
+        "only the authorized voice fixture may key or emit radio audio"
     );
-    eprintln!("foreground SIP fixture stopped with no radio output");
+    eprintln!("foreground SIP fixture stopped; authorized voice output: {voiced}");
 }
 
 struct Admission<'a> {

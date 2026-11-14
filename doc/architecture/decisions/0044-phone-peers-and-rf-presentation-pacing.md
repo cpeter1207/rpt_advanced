@@ -1647,3 +1647,30 @@ A retry after the caller retires still selects the restricted catalog, while
 its completion and loss notifications obey the existing ordinary link policy.
 Generic dials remain unchanged. Graph admission for unknown existing egress
 and operator attachment activation remain the following controlled increment.
+
+### Controlled incoming phone VOX attachment
+
+Authenticated phone *3 now invokes the existing typed attachment preparation
+after both exact account/node policy checks. It retains one private owner and
+the existing source-rate classifier, source ring, graph and egress owners.
+Unknown ordinary transmitting or group destinations refuse the new attachment,
+without dropping their existing owners. A final per-span legacy guard discards
+phone-capped media before conversion, including when an ordinary prefix and
+phone suffix share a read. Its bounded consumption and rejection accounting
+preserve ordinary traffic after refusal; monitor/parrot policy cannot bypass it.
+
+A fresh admission keeps its immutable time cut while draining known same-epoch
+pre-cut jitter prefixes that have not entered its ring. It never changes their
+birth or feeds them to classification. Once any PCM is admitted, stale input
+still retires the generation; unknown birth/epoch and gaps retain the same
+retirement behavior. This avoids repeatedly replacing a graph just to chase
+the real provider's retained jitter tail.
+
+The composed loopback fixture uses literal SIP/RTP, actual private login and
+DTMF commands, the explicit restricted ordinary IAX dial, actual providers and
+shared product graph. Only physical radio I/O/binding is substituted. It checks
+silence before authority/attachment, speech-qualified remote and local output,
+quiet closure, destination mix-minus, attached private-command isolation, the
+known remote return pattern and SIP hangup without ending the established
+ordinary node link. This is controlled integration evidence, not physical RF,
+NAT media, receive-window scheduling, arbitrary-codec or older-host qualification.

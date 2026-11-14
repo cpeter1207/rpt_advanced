@@ -366,7 +366,9 @@ fn prepared_phone_attachment_uses_a_typed_slot_and_preserves_private_ownership()
         .unwrap();
     finish_prompt(&mut host, &source, &reply);
     host.reconcile_private_collections(clock());
-    host.attach_phone(&source, &reply, "1000", clock()).unwrap();
+    feed(&mut host, &source, &reply, "*3#");
+    finish_prompt(&mut host, &source, &reply);
+    host.reconcile_private_collections(clock());
     assert_eq!(host.phone_calls.attachments("1000").len(), 1);
     assert!(host.peers.is_empty(), "phone has no public node identity");
     assert!(host.phone_calls.media_refresh_nodes().is_empty());
@@ -384,4 +386,44 @@ fn prepared_phone_attachment_uses_a_typed_slot_and_preserves_private_ownership()
     assert!(reply.ended());
     assert!(host.stop(20));
     await_private_drop(&state);
+}
+
+#[test]
+fn phone_attachment_rejects_unknown_transmit_transport_without_losing_either_owner() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for mode in [Mode::TRANSCEIVE, Mode::MONITOR] {
+        let (mut host, _) = policy_host(
+            "1000",
+            "attach_local_nodes=1000\n",
+            "phone_allow_accounts=provider\n",
+        );
+        let ordinary = attach(&mut host, "3000", LinkAction::Transceive, mode);
+        let (phone, state) = crate::link::session::tests::phone_source_peer_at_rate(8000);
+        let id = phone.identity().call_id().unwrap();
+        host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+        let source = host.phone_source(id).unwrap().clone();
+        let reply = host.phone_reply(&source).unwrap();
+        finish_prompt(&mut host, &source, &reply);
+        host.authenticate_phone(&source, &reply, "100", "1234", clock())
+            .unwrap();
+        finish_prompt(&mut host, &source, &reply);
+        host.reconcile_private_collections(clock());
+        let result = host.attach_phone(&source, &reply, "1000", clock());
+        assert_eq!(
+            result.is_ok(),
+            !mode.transmits(),
+            "phone programme requires proven timed egress only for transmitting destinations"
+        );
+        assert_eq!(
+            host.phone_calls.attachments("1000").len(),
+            usize::from(!mode.transmits())
+        );
+        assert!(!reply.ended() && reply.phone_authenticated());
+        assert_eq!(host.peers.len(), 1);
+        assert_eq!(ordinary.lock().unwrap().drops, 0);
+        assert!(host.stop(20));
+        await_private_drop(&state);
+    }
 }

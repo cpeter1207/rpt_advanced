@@ -270,6 +270,21 @@ fn prepared(
     if remote_commands.is_some() && !services.remote_control_available() {
         return Err(RuntimeError::Preparation);
     }
+    let phone_attachments = phones
+        .as_ref()
+        .map_or_else(Vec::new, |(phones, _)| phones.attachments(local));
+    // Existing unknown-codec calls keep their owners; refuse only the new
+    // phone attachment instead of allowing legacy custody of phone programme.
+    if !phone_attachments.is_empty()
+        && peers.iter().any(|peer| {
+            peer.local == local
+                && !peer.control.ended()
+                && (peer.mode.transmits() || peer.group.is_some())
+                && !peer.control.timed_g711_egress()
+        })
+    {
+        return Err(RuntimeError::Rejected);
+    }
     static NEXT_TEXT_STATION: AtomicU64 = AtomicU64::new(1);
     let text_generation = NEXT_TEXT_STATION.fetch_add(1, Ordering::Relaxed);
     let mut text_readers = Vec::new();
@@ -335,7 +350,7 @@ fn prepared(
     }
     let phone_clock_epoch = phones.as_ref().map_or(0, |(_, epoch)| *epoch);
     if let Some((phones, _)) = phones {
-        for (source, reply) in phones.attachments(local) {
+        for (source, reply) in phone_attachments {
             // A graph replacement is an explicit media cut, never a transfer
             // of the private call handle or revival of the previous generation.
             phones

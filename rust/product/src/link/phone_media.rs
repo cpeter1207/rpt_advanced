@@ -260,15 +260,23 @@ impl Ingress {
         if !self.shared.active() {
             return Ok(samples.len());
         }
-        let Some(birth) = birth.filter(|birth| {
-            birth.host_clock_epoch == self.admission.host_clock_epoch
-                && birth.born_ns >= self.admission.now_ns
-        }) else {
+        let Some(birth) =
+            birth.filter(|birth| birth.host_clock_epoch == self.admission.host_clock_epoch)
+        else {
             // Treat lost timing like source loss, not a later fatal cursor jump.
             // Only the control owner may prepare a newly qualified generation.
             self.retire();
             return Ok(samples.len());
         };
+        if birth.born_ns < self.admission.now_ns {
+            // Jitter may still release a known pre-cut prefix after adoption.
+            // Admit none of it and keep the immutable cut until fresh PCM arrives.
+            // Once PCM has entered this generation, stale input is a real loss.
+            if self.cursor.is_some() {
+                self.retire();
+            }
+            return Ok(samples.len());
+        }
         if start < self.minimum_frame {
             return Ok(samples.len().min((self.minimum_frame - start) as usize));
         }

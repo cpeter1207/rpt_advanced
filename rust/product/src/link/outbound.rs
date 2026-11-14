@@ -28,7 +28,7 @@ pub struct EgressObservation {
     pub blocked: u64,
     /// Expired media duration expressed at the 48 kHz native rate.
     pub expired_native_samples: u64,
-    /// Newest samples rejected by the bounded native queue.
+    /// Native samples refused by queue capacity or unsupported phone egress.
     pub rejected_native_samples: u64,
     /// Maximum observed oldest queued or pending media age.
     pub maximum_queue_age_ns: u64,
@@ -267,6 +267,25 @@ impl Outbound {
     pub(super) fn step(&mut self, io: &mut PeerIo, now_ms: u64) -> Result<Option<u64>, Error> {
         if io.timed_g711_egress() && self.timed_clock.is_none() {
             return Err(Error::Admission);
+        }
+        // A monitor/parrot policy change cannot bypass graph admission.
+        // Refuse only tainted media; keep this ordinary peer/control owner alive.
+        if io.identity().call_id().is_none()
+            && !io.timed_g711_egress()
+            && self
+                .queue
+                .peek_span()
+                .is_some_and(|span| span.span.phone_expires_ns != u64::MAX)
+        {
+            if let Some(read) = self.queue.read_span(&mut self.native) {
+                self.retired_rejections =
+                    self.retired_rejections.saturating_add(read.frames as u64);
+                self.statistics
+                    .rejected
+                    .fetch_add(read.frames as u64, Ordering::Relaxed);
+            }
+            self.discard_media(io)?;
+            return Ok(Some(now_ms.saturating_mul(1_000_000)));
         }
         if !io.prepared_media() {
             self.pcm_step(io, now_ms)?;
@@ -778,7 +797,30 @@ impl Outbound {
         if now_ms < self.next_audio_ms {
             return Ok(());
         }
-        let real = BLOCK - self.queue.read(&mut self.native);
+        let mut real = 0;
+        let mut consumed = 0;
+        // Legacy reads may span several source records. Inspect each record
+        // before conversion rather than letting an ordinary prefix hide a cap.
+        while consumed < BLOCK {
+            let Some(read) = self
+                .queue
+                .read_span(&mut self.native[real..real + BLOCK - consumed])
+            else {
+                break;
+            };
+            consumed += read.frames;
+            if read.span.phone_expires_ns != u64::MAX {
+                self.retired_rejections =
+                    self.retired_rejections.saturating_add(read.frames as u64);
+                self.statistics
+                    .rejected
+                    .fetch_add(read.frames as u64, Ordering::Relaxed);
+                self.discard_media(io)?;
+                real = 0;
+            } else {
+                real += read.frames;
+            }
+        }
         self.next_audio_ms = if real == 0 || !self.sent {
             now_ms
         } else {
@@ -1045,7 +1087,7 @@ mod tests {
     }
     #[test]
     fn phone_cap_follows_older_input_into_a_retained_codec_packet_and_retry() {
-        let (mut io, state) = peer_with_egress(48000, true, true);
+        let (mut io, state) = crate::link::session::tests::phone_source_peer_at_rate(48000);
         {
             let mut state = state.lock().unwrap();
             state.encode_unit = Some(1440);
@@ -1121,7 +1163,7 @@ mod tests {
     }
     #[test]
     fn phone_cap_follows_a_codec_tail_without_new_source_frames() {
-        let (mut io, state) = peer_with_egress(48000, true, true);
+        let (mut io, state) = crate::link::session::tests::phone_source_peer_at_rate(48000);
         {
             let mut state = state.lock().unwrap();
             state.encode_unit = Some(960);
@@ -1148,7 +1190,7 @@ mod tests {
     #[test]
     fn phone_cap_releases_old_receipts_during_continuing_fresh_speech() {
         for rate in [8000, 48000] {
-            let (mut io, state) = peer_with_egress(rate, true, true);
+            let (mut io, state) = crate::link::session::tests::phone_source_peer_at_rate(rate);
             state.lock().unwrap().encode_unit = Some(rate as usize / 50);
             let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
             let mut outbound = Outbound::new(rate, reader).unwrap();
@@ -1178,7 +1220,7 @@ mod tests {
 
     #[test]
     fn phone_cap_keeps_the_actual_filtered_marker_across_the_input_boundary() {
-        let (mut io, state) = peer_with_egress(8000, true, true);
+        let (mut io, state) = crate::link::session::tests::phone_source_peer_at_rate(8000);
         state.lock().unwrap().encode_unit = Some(160);
         let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
         let mut outbound = Outbound::new(8000, reader).unwrap();
@@ -1344,5 +1386,59 @@ mod tests {
             0,
             "expiry cannot stand in for successful tail drain"
         );
+    }
+    #[test]
+    fn unsupported_ordinary_transport_refuses_phone_span_but_keeps_ordinary_media() {
+        for (prepared, prefix) in [(false, 0), (true, 0), (false, 480)] {
+            let (mut io, state) =
+                crate::link::session::tests::peer_with_egress(48000, prepared, prepared);
+            let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
+            let mut outbound = Outbound::new(48000, reader).unwrap();
+            if prefix != 0 {
+                writer.write(
+                    AudioSpan {
+                        born_ns: Some(0),
+                        ..AudioSpan::default()
+                    },
+                    &vec![0.5; prefix],
+                );
+            }
+            writer.write(
+                AudioSpan {
+                    source_start: prefix as u64,
+                    born_ns: Some(0),
+                    phone_expires_ns: 500_000_000,
+                    ..AudioSpan::default()
+                },
+                &vec![0.25; 960 - prefix],
+            );
+            outbound.step(&mut io, 0).unwrap();
+            {
+                let state = state.lock().unwrap();
+                assert!(
+                    state.audio.is_empty() && state.prepared.is_empty(),
+                    "unproven egress cannot accept phone programme through either legacy path"
+                );
+            }
+            assert_eq!(
+                outbound.statistics.snapshot().rejected_native_samples,
+                (960 - prefix) as u64
+            );
+            writer.write(
+                AudioSpan {
+                    source_start: 960,
+                    born_ns: Some(20_000_000),
+                    ..AudioSpan::default()
+                },
+                &[0.25; 960],
+            );
+            outbound.step(&mut io, 20).unwrap();
+            outbound.step(&mut io, 40).unwrap();
+            let state = state.lock().unwrap();
+            assert!(
+                !state.audio.is_empty() || !state.prepared.is_empty(),
+                "ordinary traffic remains available after refusing phone programme"
+            );
+        }
     }
 }
