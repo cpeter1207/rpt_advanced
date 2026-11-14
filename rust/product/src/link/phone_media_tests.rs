@@ -862,6 +862,7 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
         )
         .unwrap();
         controller.bind_phone_retirement(&mut control, domain);
+        mixer = mixer.with_phone_clock(7);
         let mut native = 0;
         let mut voice = false;
         let mut remote_audio = false;
@@ -912,7 +913,11 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
                 }
                 final_voice = metadata.active;
                 let mut output = [0.0; 480];
-                while public_reader.read_span(&mut output).is_some() {
+                while let Some(read) = public_reader.read_span(&mut output) {
+                    assert_ne!(read.span.phone_expires_ns, 0);
+                    assert!(
+                        read.span.phone_expires_ns <= 500_000_010 + block_index as u64 * 20_000_000
+                    );
                     remote_audio |= output.iter().any(|value| value.abs() > 0.01);
                 }
                 native += 480;

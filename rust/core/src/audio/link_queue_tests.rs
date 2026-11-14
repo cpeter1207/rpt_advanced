@@ -211,8 +211,10 @@ fn revocable_queue_keeps_unmarked_fifo_and_discards_late_marked_publication() {
     );
     #[cfg(target_pointer_width = "64")]
     {
-        assert_eq!(std::mem::size_of::<super::QueuedSpan>(), 64);
-        assert_eq!(std::mem::size_of::<super::LinkAudioConsumer>(), 112);
+        // The original-receipt deadline is one scalar in the existing span;
+        // retirement still adds no separate pending owner/allocation.
+        assert_eq!(std::mem::size_of::<super::QueuedSpan>(), 64 + 8);
+        assert_eq!(std::mem::size_of::<super::LinkAudioConsumer>(), 112 + 8);
     }
     eprintln!(
         "queue_owner_bytes descriptor={} old_descriptor={} consumer={}",

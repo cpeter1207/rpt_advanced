@@ -17,6 +17,9 @@ const BLOCK: usize = 960;
 const AGE_NS: u64 = 200_000_000;
 const BLOCK_NS: u64 = 20_000_000;
 
+#[path = "outbound_receipt.rs"]
+mod receipt;
+
 /// Connection-lifetime egress counters; observations may straddle an owner turn.
 pub struct EgressObservation {
     /// Prepared packets accepted by the provider, not necessarily sent yet.
@@ -71,6 +74,7 @@ struct Pending {
     end_timestamp: u32,
     deadline: Option<u32>,
     expires: u64,
+    born_ns: u64,
     stream: u64,
 }
 struct Conversion {
@@ -100,6 +104,7 @@ struct EncoderClock {
     wire_frames: u64,
     source_end: u64,
     input_frames: u64,
+    tail_cap: u64,
     drained: bool,
 }
 
@@ -119,6 +124,7 @@ pub(super) struct Outbound {
     reset_encoder: bool,
     pending: Option<Pending>,
     conversion: Option<Conversion>,
+    receipts: receipt::History,
     anchor: Option<Anchor>,
     clock: Option<Arc<SourceClock>>,
     private: bool,
@@ -150,6 +156,7 @@ impl Outbound {
             reset_encoder: true,
             pending: None,
             conversion: None,
+            receipts: receipt::History::default(),
             anchor: None,
             clock: None,
             private: false,
@@ -240,6 +247,7 @@ impl Outbound {
     fn discard(&mut self) -> Result<(), Error> {
         self.pending = None;
         self.conversion = None;
+        self.receipts = receipt::History::default();
         self.pcm_used = 0;
         self.pcm_position = 0;
         self.encoder = None;
@@ -288,7 +296,7 @@ impl Outbound {
         let oldest = self
             .pending
             .as_ref()
-            .map(|pending| pending.expires.saturating_sub(AGE_NS))
+            .map(|pending| pending.born_ns)
             .or_else(|| self.encoder.as_ref().map(|encoder| encoder.born_ns))
             .or_else(|| {
                 self.conversion
@@ -356,7 +364,8 @@ impl Outbound {
             };
             if read.span.born_ns.is_none_or(|born| {
                 now >= born.saturating_add(AGE_NS) || (self.private && born > now)
-            }) || !self.current(read.span.stream)
+            }) || now >= read.span.phone_expires_ns
+                || !self.current(read.span.stream)
             {
                 self.statistics
                     .expired
@@ -468,6 +477,8 @@ impl Outbound {
                 drained: false,
             });
         }
+        self.receipts
+            .record(span.source_start, count, span.phone_expires_ns);
         self.conversion.as_mut().expect("conversion origin").next =
             span.source_start.wrapping_add(count as u64);
         self.unkey_ns = Some(now.saturating_add(BLOCK_NS));
@@ -517,6 +528,7 @@ impl Outbound {
                 wire_frames: 0,
                 source_end: 0,
                 input_frames: 0,
+                tail_cap: u64::MAX,
                 drained: false,
             });
         } else {
@@ -606,7 +618,23 @@ impl Outbound {
         let origin = encoder.origin_ns
             + u128::from(encoder.wire_frames) * 1_000_000_000 / u128::from(self.rate);
         let born = encoder.born_ns;
-        let expires = born.saturating_add(AGE_NS);
+        let conversion = self.conversion.as_ref().expect("conversion origin");
+        let cap = if source_frames == 0 {
+            // A nonempty codec tail still belongs to previously accounted
+            // source audio; zero new frames cannot renew that receipt cap.
+            encoder.tail_cap
+        } else {
+            self.receipts.packet(
+                encoder.origin_ns,
+                result.source_start_frames,
+                u64::from(source_frames),
+                self.rate,
+                conversion.span.source_start,
+                conversion.next,
+            )
+        };
+        encoder.tail_cap = cap;
+        let expires = born.saturating_add(AGE_NS).min(cap);
         let stream = encoder.stream;
         encoder.wire_frames = encoder
             .wire_frames
@@ -666,9 +694,8 @@ impl Outbound {
             let elapsed = io.elapsed_ms();
             let reference = self.private_clock.ok_or(Error::Admission)?.reference();
             let remaining = (reference.host_clock_epoch != 0)
-                .then(|| reference.now_ns.checked_sub(born))
+                .then(|| expires.checked_sub(reference.now_ns))
                 .flatten()
-                .and_then(|age| AGE_NS.checked_sub(age))
                 .map(|remaining| (remaining / 1_000_000) as u32);
             let Some(deadline) = remaining
                 .filter(|remaining| *remaining != 0)
@@ -692,6 +719,7 @@ impl Outbound {
             end_timestamp,
             deadline,
             expires,
+            born_ns: born,
             stream,
         });
         Ok(())
@@ -700,7 +728,7 @@ impl Outbound {
         if self
             .pending
             .as_ref()
-            .is_some_and(|pending| !self.current(pending.stream))
+            .is_some_and(|pending| now >= pending.expires || !self.current(pending.stream))
         {
             return self.discard_media(io);
         }
@@ -727,7 +755,7 @@ impl Outbound {
                 return self.discard_media(io);
             }
             if status == 0 {
-                let age = now.saturating_sub(pending.expires.saturating_sub(AGE_NS));
+                let age = now.saturating_sub(pending.born_ns);
                 self.statistics.ages[(age / 1_000_000).min(200) as usize]
                     .fetch_add(1, Ordering::Relaxed);
                 self.statistics.accepted.fetch_add(1, Ordering::Relaxed);
@@ -1010,5 +1038,191 @@ mod tests {
         outbound.sent = true;
         outbound.pcm_step(&mut io, 20).unwrap();
         assert!(outbound.sent, "unfinished drain must not publish unkey");
+    }
+    #[test]
+    fn phone_cap_follows_older_input_into_a_retained_codec_packet_and_retry() {
+        let (mut io, state) = peer_with_egress(48000, true, true);
+        {
+            let mut state = state.lock().unwrap();
+            state.encode_unit = Some(1440);
+            state.prepared_result = 1;
+        }
+        let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(48000, reader).unwrap();
+        writer.write(
+            AudioSpan {
+                born_ns: Some(100_000_000),
+                ..AudioSpan::default()
+            },
+            &[0.25; 960],
+        );
+        outbound.step(&mut io, 100).unwrap();
+        assert!(
+            outbound.pending.is_none(),
+            "the existing codec retains a partial packet"
+        );
+        writer.write(
+            AudioSpan {
+                source_start: 960,
+                born_ns: Some(120_000_000),
+                phone_expires_ns: 150_000_000,
+                ..AudioSpan::default()
+            },
+            &[0.5; 960],
+        );
+        outbound.step(&mut io, 120).unwrap();
+        assert_eq!(outbound.pending.as_ref().unwrap().expires, 150_000_000);
+        let packet = state.lock().unwrap().prepared[0].clone();
+        outbound.step(&mut io, 130).unwrap();
+        assert_eq!(state.lock().unwrap().prepared, [packet.clone(), packet]);
+        assert_eq!(outbound.pending.as_ref().unwrap().expires, 150_000_000);
+        outbound.step(&mut io, 150).unwrap();
+        assert!(outbound.pending.is_none());
+        assert_eq!(
+            state.lock().unwrap().prepared.len(),
+            2,
+            "expiry cannot reach the provider"
+        );
+    }
+
+    #[test]
+    fn phone_cap_is_the_same_immutable_private_provider_deadline() {
+        let (mut io, state) = crate::link::session::tests::phone_source_peer();
+        {
+            let mut state = state.lock().unwrap();
+            state.encode_unit = Some(160);
+            state.prepared_result = 1;
+        }
+        let clock = SourceTimeClock::new(std::time::Instant::now()).unwrap();
+        let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
+        let mut outbound = Outbound::private(8000, reader).unwrap();
+        outbound.bind_private_clock(clock).unwrap();
+        for index in 0..2 {
+            let born = clock.reference().now_ns;
+            writer.write(
+                AudioSpan {
+                    source_start: index * 960,
+                    born_ns: Some(born),
+                    phone_expires_ns: born + 40_000_000,
+                    ..AudioSpan::default()
+                },
+                &[0.25; 960],
+            );
+            outbound.step(&mut io, index * 20).unwrap();
+        }
+        let first = state.lock().unwrap().timed_deadlines[0];
+        assert!(first <= 40, "provider sees the shorter original-age budget");
+        outbound.step(&mut io, 41).unwrap();
+        assert_eq!(state.lock().unwrap().timed_deadlines, [first, first]);
+    }
+    #[test]
+    fn phone_cap_follows_a_codec_tail_without_new_source_frames() {
+        let (mut io, state) = peer_with_egress(48000, true, true);
+        {
+            let mut state = state.lock().unwrap();
+            state.encode_unit = Some(960);
+            state.encoded_bytes = Some(7);
+            state.encode_tail = 1;
+        }
+        let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(48000, reader).unwrap();
+        writer.write(
+            AudioSpan {
+                born_ns: Some(100_000_000),
+                phone_expires_ns: 150_000_000,
+                ..AudioSpan::default()
+            },
+            &[0.25; 960],
+        );
+        outbound.step(&mut io, 100).unwrap();
+        state.lock().unwrap().prepared_result = 1;
+        outbound.step(&mut io, 120).unwrap();
+        assert_eq!(outbound.pending.as_ref().unwrap().source_frames, 0);
+        assert_eq!(outbound.pending.as_ref().unwrap().expires, 150_000_000);
+    }
+
+    #[test]
+    fn phone_cap_releases_old_receipts_during_continuing_fresh_speech() {
+        for rate in [8000, 48000] {
+            let (mut io, state) = peer_with_egress(rate, true, true);
+            state.lock().unwrap().encode_unit = Some(rate as usize / 50);
+            let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
+            let mut outbound = Outbound::new(rate, reader).unwrap();
+            for index in 0..40 {
+                let now = 100 + index * 20;
+                writer.write(
+                    AudioSpan {
+                        source_start: index * 960,
+                        born_ns: Some(now * 1_000_000),
+                        phone_expires_ns: (now + 500) * 1_000_000,
+                        ..AudioSpan::default()
+                    },
+                    &[0.25; 960],
+                );
+                outbound.step(&mut io, now).unwrap();
+                outbound.step(&mut io, now).unwrap();
+            }
+            let state = state.lock().unwrap();
+            assert!(state.prepared.len() >= 38);
+            assert_eq!(
+                state.encoder_resets, 1,
+                "first cap must not pin a continuing stream"
+            );
+            assert_eq!(outbound.statistics.snapshot().expired_native_samples, 0);
+        }
+    }
+
+    #[test]
+    fn phone_cap_keeps_the_actual_filtered_marker_across_the_input_boundary() {
+        let (mut io, state) = peer_with_egress(8000, true, true);
+        state.lock().unwrap().encode_unit = Some(160);
+        let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(8000, reader).unwrap();
+        let mut marker = [0.0; 960];
+        marker[959] = 1.0;
+        writer.write(
+            AudioSpan {
+                born_ns: Some(100_000_000),
+                phone_expires_ns: 150_000_000,
+                ..AudioSpan::default()
+            },
+            &marker,
+        );
+        outbound.step(&mut io, 100).unwrap();
+        for index in 1..=2 {
+            writer.write(
+                AudioSpan {
+                    source_start: index * 960,
+                    born_ns: Some((100 + index * 20) * 1_000_000),
+                    phone_expires_ns: 800_000_000,
+                    ..AudioSpan::default()
+                },
+                &[0.0; 960],
+            );
+            if index == 2 {
+                state.lock().unwrap().prepared_result = 1;
+            }
+            outbound.step(&mut io, 100 + index * 20).unwrap();
+            if index == 1 {
+                outbound.step(&mut io, 121).unwrap();
+            }
+        }
+        assert!(
+            outbound.encoded[..outbound.pending.as_ref().unwrap().bytes]
+                .iter()
+                .any(|byte| *byte != 0),
+            "the actual released FIR carries the preceding marker into this packet"
+        );
+        assert_eq!(outbound.pending.as_ref().unwrap().expires, 150_000_000);
+    }
+    #[test]
+    fn phone_cap_includes_the_last_real_frame_at_a_fractional_origin_boundary() {
+        let mut history = receipt::History::default();
+        history.record(1, 959, 500_000_000);
+        history.record(960, 1, 150_000_000);
+        assert_eq!(
+            history.packet(source_ns(1), 0, 960, 48000, 1, 961),
+            150_000_000
+        );
     }
 }

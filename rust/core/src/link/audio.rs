@@ -283,6 +283,7 @@ pub struct AudioPeer<P: PeerInput> {
     group_index: Option<usize>,
     reported_active: bool,
     rf_contributor: bool,
+    phone_bound: Option<SourceTimeBound>,
 }
 impl<P: PeerInput> AudioPeer<P> {
     /// Prepare a public protocol peer; private calls require their exact source token.
@@ -355,6 +356,7 @@ impl<P: PeerInput> AudioPeer<P> {
             group_index: None,
             reported_active: false,
             rf_contributor: false,
+            phone_bound: None,
         })
     }
     fn ended(&self) -> bool {
@@ -379,6 +381,7 @@ impl<P: PeerInput> AudioPeer<P> {
 /// Fixed prepared peer set retained until its generation is detached and reclaimed.
 pub struct LinkAudio<P: PeerInput> {
     retirement: RetirementDomain,
+    phone_clock_epoch: u64,
     peer_source_active: bool,
     rf_programme: RfProgrammeMetadata,
     text: Option<Box<dyn LocalTextInput>>,
@@ -690,6 +693,7 @@ impl<P: PeerInput> LinkAudio<P> {
         Ok((
             Self {
                 retirement,
+                phone_clock_epoch: 0,
                 peer_source_active: false,
                 rf_programme: RfProgrammeMetadata::default(),
                 text: None,
@@ -752,6 +756,12 @@ impl<P: PeerInput> LinkAudio<P> {
                 })
         })
     }
+    /// Bind the already shared host clock identity during off-audio preparation.
+    pub fn with_phone_clock(mut self, epoch: u64) -> Self {
+        self.phone_clock_epoch = epoch;
+        self
+    }
+
     /// Render RF and publish one prepared pre-access-tone peer-audio block for the dispatcher.
     /// Terminal peers contribute neither PCM nor key state, even before reclamation.
     pub fn process(
@@ -840,6 +850,7 @@ impl<P: PeerInput> LinkAudio<P> {
             let active = !peer.ended() && (audio_active || peer.input.signals().radio_keyed());
             peer.active = active;
             peer.rf_contributor = count != 0 && render_attempted && audio_active && active;
+            peer.phone_bound = age_bound;
             let selected = peer.group_index.is_none_or(|group| {
                 peer.group
                     .as_ref()
@@ -1002,9 +1013,37 @@ impl<P: PeerInput> LinkAudio<P> {
                     })
             })
             .count();
+        // Two minima qualify every mix-minus destination in linear time,
+        // excluding its own phone without rescanning all sources per peer.
+        // Zero is an expired cap when a contributing phone has unknown timing.
+        let mut phone_caps = [(usize::MAX, u64::MAX); 2];
+        for (index, peer) in self.peers.iter().enumerate() {
+            let selected = peer.group_index.is_none_or(|group| {
+                peer.group
+                    .as_ref()
+                    .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
+            });
+            if peer.phone.is_some() && peer.active && peer.mode.forwards() && selected {
+                let expires = peer
+                    .phone_bound
+                    .filter(|bound| {
+                        self.phone_clock_epoch != 0
+                            && bound.host_clock_epoch == self.phone_clock_epoch
+                    })
+                    .and_then(|bound| bound.not_after_ns.checked_add(500_000_000))
+                    .unwrap_or(0);
+                let candidate = (index, expires);
+                if phone_caps[0].0 == usize::MAX || expires < phone_caps[0].1 {
+                    phone_caps[1] = phone_caps[0];
+                    phone_caps[0] = candidate;
+                } else if phone_caps[1].0 == usize::MAX || expires < phone_caps[1].1 {
+                    phone_caps[1] = candidate;
+                }
+            }
+        }
         // Track activity even when both blocks are in flight. Dropped callbacks
         // remain source-time gaps and cannot hide a new destination burst.
-        for (route, peer) in self.routing.iter_mut().zip(&self.peers) {
+        for (index, (route, peer)) in self.routing.iter_mut().zip(&self.peers).enumerate() {
             route.activity_edge = peer.input.signals().activity_edge();
             let selected = peer.group_index.is_none_or(|group| {
                 peer.group
@@ -1048,6 +1087,12 @@ impl<P: PeerInput> LinkAudio<P> {
             route.span.source_start = source.sample;
             route.span.stream = source.stream;
             route.span.born_ns = source.born_ns;
+            let (owner, expires) = phone_caps[usize::from(phone_caps[0].0 == index)];
+            route.span.phone_expires_ns = if owner == usize::MAX {
+                u64::MAX
+            } else {
+                expires
+            };
         }
         let Ok(mut block) = self.recycled.pop() else {
             self.status.dropped.fetch_add(1, Ordering::Relaxed);

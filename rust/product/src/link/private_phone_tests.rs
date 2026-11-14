@@ -2416,6 +2416,7 @@ fn private_queued_only_expired_span_is_consumed_in_one_owner_turn() {
                 source_start: 0,
                 stream: source.ingress(),
                 born_ns: Some(0),
+                phone_expires_ns: u64::MAX,
             },
             &[0.25; 480],
         ),
@@ -2570,6 +2571,7 @@ fn prepared_phone_media_returns_programme_through_the_existing_timed_egress_owne
         source_start: 0,
         stream: 7,
         born_ns: Some(clock.reference().now_ns),
+        phone_expires_ns: u64::MAX,
     };
     assert_eq!(programme.write(span, &[0.25; 1920]), 0);
     state.lock().unwrap().prepared_result = 1;
@@ -2643,6 +2645,7 @@ fn prepared_phone_programme_yields_to_private_prompt_then_resumes_without_new_en
         source_start: 0,
         stream: 7,
         born_ns: Some(clock.reference().now_ns),
+        phone_expires_ns: u64::MAX,
     };
     programme.write(span, &[0.75; 1920]);
     state.lock().unwrap().prepared_result = 1;
@@ -2667,11 +2670,13 @@ fn prepared_phone_programme_yields_to_private_prompt_then_resumes_without_new_en
         "private reply wins over blocked programme"
     );
     assert!(state.lock().unwrap().encoder_resets > resets);
-    for now in (30..200).step_by(10) {
-        session.step(now).unwrap();
-        if session.programme {
-            break;
-        }
+    // Source media expiry and idle completion use the retained real clock,
+    // not the synthetic step argument. Wait on the completion condition so a
+    // fast test run cannot finish all steps before the 20-ms tail deadline.
+    let deadline = Instant::now() + std::time::Duration::from_millis(180);
+    while !session.programme && Instant::now() < deadline {
+        session.step(clock.reference().now_ns / 1_000_000).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
     }
     assert!(
         session.programme,
@@ -2711,6 +2716,7 @@ fn prepared_phone_programme_retirement_after_selection_cancels_the_pending_send(
             source_start: 0,
             stream: 7,
             born_ns: Some(clock.reference().now_ns),
+            phone_expires_ns: u64::MAX,
         },
         &[0.25; 1920],
     );
@@ -2746,6 +2752,7 @@ fn prepared_phone_programme_drains_a_short_final_packet_on_existing_idle_deadlin
             source_start: 0,
             stream: 7,
             born_ns: Some(clock.reference().now_ns),
+            phone_expires_ns: u64::MAX,
         },
         &[0.25; 960],
     );

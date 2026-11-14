@@ -254,7 +254,7 @@ fn prepared(
     local: &str,
     settings: &ResolvedNodeSettings,
     peers: &[PeerOwner],
-    phones: Option<&mut PhoneCalls>,
+    phones: Option<(&mut PhoneCalls, u64)>,
     worker: &mut MediaWorker,
     text: &mut TextExecutor,
     services: HostServices,
@@ -333,7 +333,8 @@ fn prepared(
             },
         ));
     }
-    if let Some(phones) = phones {
+    let phone_clock_epoch = phones.as_ref().map_or(0, |(_, epoch)| *epoch);
+    if let Some((phones, _)) = phones {
         for (source, reply) in phones.attachments(local) {
             // A graph replacement is an explicit media cut, never a transfer
             // of the private call handle or revival of the previous generation.
@@ -374,7 +375,9 @@ fn prepared(
     let (mut audio, dispatcher) =
         LinkAudio::new_in_domain(audio, MAXIMUM_FRAMES, retirement.clone())
             .map_err(|_| RuntimeError::Preparation)?;
-    audio = audio.with_text(Box::new(TextMix(text_readers)));
+    audio = audio
+        .with_phone_clock(phone_clock_epoch)
+        .with_text(Box::new(TextMix(text_readers)));
     let regeneration = if settings.dtmf_regeneration.enabled {
         let (writer, reader) = InboundRing::open(48000, InboundPolicy::Media)
             .map_err(|_| RuntimeError::Preparation)?;
@@ -995,7 +998,7 @@ impl Host {
                 local,
                 settings,
                 &self.peers,
-                Some(&mut self.phone_calls),
+                Some((&mut self.phone_calls, self.peer_io.source_clock_epoch())),
                 media_worker(&mut self.media_workers, local)?,
                 &mut self.text,
                 self.services,
@@ -1739,7 +1742,7 @@ impl Host {
                     .find(|peer| peer.local == local && peer.remote == remote)
                 {
                     if let Err(command) = peer.control.send(command) {
-                        pending.push((remote, command));
+                        pending.push((remote, *command));
                     }
                 } else {
                     control.awaiting.retain(|(name, _)| name != &remote);

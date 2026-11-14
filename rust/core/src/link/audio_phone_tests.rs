@@ -5,10 +5,12 @@ struct PhoneInput {
     signals: PeerSignals,
     reply: PeerReply,
     policy: ReceivePolicy,
+    age: Option<SourceTimeBound>,
+    public: bool,
 }
 impl PeerInput for PhoneInput {
     fn phone_reply(&self) -> Option<&PeerReply> {
-        Some(&self.reply)
+        (!self.public).then_some(&self.reply)
     }
     fn source_rate(&self) -> u32 {
         48000
@@ -21,6 +23,12 @@ impl PeerInput for PhoneInput {
     }
     fn available(&self) -> u64 {
         16000
+    }
+    fn render_timed_block(&mut self, output: &mut [f32]) -> Option<RenderedPeerBlock> {
+        self.render(output).map(|real| RenderedPeerBlock {
+            real,
+            age_bound: self.age,
+        })
     }
     fn render(&mut self, output: &mut [f32]) -> Option<usize> {
         output.fill(0.25);
@@ -52,6 +60,8 @@ fn input(reply: PeerReply) -> PhoneInput {
         signals,
         reply,
         policy: ReceivePolicy::Phone,
+        age: None,
+        public: false,
     }
 }
 
@@ -388,4 +398,90 @@ fn typed_phone_mixer_ignores_other_node_retirement_between_destinations() {
     let mut received = [0.0; 4];
     assert_eq!(readers[1].read(&mut received), 0);
     assert_eq!(received, [0.25; 4]);
+}
+
+#[test]
+fn phone_fanout_keeps_original_deadline_excludes_self_and_never_advances_it_on_partial_read() {
+    for second_epoch in [Some(7), Some(8), None] {
+        let mut peers = Vec::new();
+        let mut readers = Vec::new();
+        for index in 0..3 {
+            let source = source(7, 9 + index, 13);
+            let reply = reply(source.clone(), true);
+            let mut input = input(reply.clone());
+            input.age = if index == 0 {
+                Some(SourceTimeBound {
+                    host_clock_epoch: 7,
+                    not_after_ns: 100_000_000,
+                })
+            } else {
+                second_epoch.map(|host_clock_epoch| SourceTimeBound {
+                    host_clock_epoch,
+                    not_after_ns: 200_000_000,
+                })
+            };
+            input.public = index == 2;
+            let (writer, reader) = LinkAudioQueue::new(16, 4).unwrap().into_endpoints();
+            readers.push(reader);
+            peers.push(if index == 2 {
+                AudioPeer::new(
+                    PeerIdentity::from_operator("2000").unwrap(),
+                    Mode::TRANSCEIVE,
+                    input,
+                    writer,
+                    4,
+                    0,
+                )
+                .unwrap()
+            } else {
+                AudioPeer::for_phone(&source, &reply, Mode::TRANSCEIVE, input, writer, 4).unwrap()
+            });
+        }
+        let domain = RetirementDomain::default();
+        let (links, mut dispatcher) = LinkAudio::new_in_domain(peers, 4, domain.clone()).unwrap();
+        let mut links = links.with_phone_clock(7);
+        let (mut controller, mut control) = NodeController::new(
+            ControllerSettings::default(),
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        controller.bind_phone_retirement(&mut control, domain);
+        links
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0; 4],
+                SourcePosition {
+                    generation: 1,
+                    sample: 0,
+                    stream: 1,
+                    born_ns: Some(400_000_000),
+                },
+            )
+            .unwrap();
+        dispatcher.dispatch(3);
+        let second_cap = if second_epoch == Some(7) {
+            700_000_000
+        } else {
+            0
+        };
+        for (reader, expected) in
+            readers
+                .iter_mut()
+                .zip([second_cap, 600_000_000, second_cap.min(600_000_000)])
+        {
+            let first = reader.read_span(&mut [0.0; 2]).unwrap();
+            let tail = reader.read_span(&mut [0.0; 2]).unwrap();
+            assert_eq!(first.span.phone_expires_ns, expected);
+            assert_eq!(tail.span.phone_expires_ns, expected);
+            assert_eq!(
+                first.span.born_ns,
+                Some(400_000_000),
+                "native egress allowance is unchanged"
+            );
+            assert!(tail.span.born_ns > first.span.born_ns);
+        }
+    }
 }

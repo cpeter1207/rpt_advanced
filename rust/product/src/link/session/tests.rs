@@ -48,14 +48,14 @@ pub(crate) struct State {
     pub(crate) bad_observe_size: bool,
     pub(crate) bad_observe_version: bool,
     encoded_calls: usize,
-    encoded_bytes: Option<usize>,
+    pub(crate) encoded_bytes: Option<usize>,
     encode_position: u64,
     pub(crate) encode_unit: Option<usize>,
     pub(crate) g711_partial_flush: bool,
     encode_full: bool,
     encode_failure: bool,
     encode_pending: Vec<f32>,
-    encode_tail: usize,
+    pub(crate) encode_tail: usize,
     tail_remaining: usize,
     tail_calls: usize,
     pub(crate) prepared: Vec<(Vec<u8>, u32)>,
@@ -2124,6 +2124,7 @@ fn timed_span(sample: u64, born_ms: u64) -> rpt_advanced_core::audio::AudioSpan 
         source_start: sample,
         stream: 1,
         born_ns: Some(born_ms * 1_000_000),
+        phone_expires_ns: u64::MAX,
     }
 }
 
@@ -3495,10 +3496,12 @@ fn fatal_io_and_full_events_end_ingress_but_advisory_failure_does_not() {
             .unwrap();
     }
     assert!(matches!(
-        control.send(Command::Text {
-            text: c"D 2000 1000 1 2".into(),
-            advisory: false
-        }),
+        control
+            .send(Command::Text {
+                text: c"D 2000 1000 1 2".into(),
+                advisory: false
+            })
+            .map_err(|command| *command),
         Err(Command::Text { .. })
     ));
     session.step(0).unwrap();

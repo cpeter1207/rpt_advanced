@@ -1582,3 +1582,30 @@ the existing packet-birth slots. Unknown, underflowed or unavailable mapping
 takes the existing source-gap path. This proves a socket-ingress not-after
 bound, not NIC, wire or remote capture time. It adds no packet/PCM queue,
 wall-clock mapping, receiver task or provider ABI.
+
+### Original phone deadline in prepared network egress
+
+The prepared graph validates the phone source clock against the existing peer
+I/O clock identity, which shares the native source clock's Host origin. The
+single render records each phone's original receipt bound; two minima compute
+all mix-minus destination caps in linear time while excluding each destination's
+own source. The span gains one eight-byte immutable deadline: original receipt
+plus 500 ms. Unknown timing is already expired; ordinary-only spans remain uncapped.
+Partial reads keep that deadline unchanged while advancing the existing native
+birth. The native 200-ms egress allowance remains separate and unchanged.
+
+The existing Outbound owner keeps compact deadline-only 20-ms buckets covering
+its 200-ms retention allowance and filter/boundary overlap. Actual codec source
+counts locate each packet; the released fixed SWR filter-size 16/cutoff 1 profile's conservative
+support margin includes hidden FIR history and rounded phase. The interval is
+rounded outward. Overwritten/missing bounds fail closed; zero-new-source codec
+tails keep their preceding real-source cap. Fresh continuing input releases old
+caps instead of pinning the first deadline forever. No PCM buffer, DSP, provider
+ABI or thread is added. Pending packet expiry and private provider submission
+use the same shorter deadline, retained unchanged under backpressure.
+
+Operator attachment remains guarded. Ordinary IAX provider custody still needs
+the existing timed G.711 token/retirement integration, including legacy ACK
+transition and the lifetime-sticky mode. Application expiry alone is not proof
+of that downstream provider boundary; unsupported negotiated destinations must
+not fall back to legacy phone transmission.

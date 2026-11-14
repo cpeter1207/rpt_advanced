@@ -693,6 +693,7 @@ impl PrivatePhoneSession {
                             } else {
                                 Some(now_ms.saturating_mul(1_000_000))
                             },
+                            phone_expires_ns: u64::MAX,
                         },
                         &self.pcm[..count],
                     );

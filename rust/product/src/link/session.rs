@@ -160,11 +160,12 @@ impl PeerControl {
     pub(crate) fn inbound_policy(&self) -> InboundPolicy {
         self.observer.policy()
     }
-    /// Queue bounded work, returning ownership to the caller when full.
-    pub fn send(&mut self, command: Command) -> Result<(), Command> {
+    /// Queue bounded off-audio control work, returning ownership when full.
+    /// Only refusal boxes the retained command; successful publication allocates nothing.
+    pub fn send(&mut self, command: Command) -> Result<(), Box<Command>> {
         self.commands
             .push(command)
-            .map_err(|rtrb::PushError::Full(command)| command)?;
+            .map_err(|rtrb::PushError::Full(command)| Box::new(command))?;
         self.wake.notify();
         Ok(())
     }
@@ -398,6 +399,11 @@ unsafe extern "C" fn retained_step<S: SerialSession>(context: *mut c_void) -> i3
     }
 }
 impl PeerIoWorker {
+    /// Same prepared host origin used by source sinks and native source clocks.
+    pub(crate) fn source_clock_epoch(&self) -> u64 {
+        self.source_clock.reference().host_clock_epoch
+    }
+
     /// Prepare the owner; a poll thread starts only for a synchronous host.
     pub fn start(epoch: Instant) -> std::io::Result<Self> {
         let source_clock = SourceTimeClock::new(epoch)

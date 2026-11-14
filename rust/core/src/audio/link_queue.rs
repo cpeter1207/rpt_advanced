@@ -14,7 +14,7 @@ pub enum LinkQueueError {
 }
 
 /// Immutable origin of a contiguous native-rate PCM span.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioSpan {
     /// Configuration generation that admitted these samples.
     pub generation: u64,
@@ -26,6 +26,22 @@ pub struct AudioSpan {
     pub stream: u64,
     /// Immutable monotonic source time; absent until the native clock is observed.
     pub born_ns: Option<u64>,
+    /// Immutable total-age deadline for contributing phone media, in the same
+    /// host epoch as born_ns. MAX is ordinary-only; zero is unavailable timing.
+    /// Partial reads advance native birth but never this original-receipt cap.
+    pub phone_expires_ns: u64,
+}
+impl Default for AudioSpan {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            burst: 0,
+            source_start: 0,
+            stream: 0,
+            born_ns: None,
+            phone_expires_ns: u64::MAX,
+        }
+    }
 }
 
 /// One read never crosses a source span, even when later audio is already queued.

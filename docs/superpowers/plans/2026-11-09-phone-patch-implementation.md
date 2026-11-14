@@ -401,3 +401,16 @@ media and refused-prefix backlog regressions preserve age; cached readiness
 cannot move the cut without a real empty probe. Missing mapping becomes the
 existing source gap. Mixed fanout original-age deadline and operator activation
 remain separate, with the existing 200-ms egress and 500-ms total caps distinct.
+
+#### Prepared fanout/codec source deadline checkpoint
+
+Carry the immutable original receipt plus 500 ms cap through the existing queue and
+codec packet source accounting, while preserving native 200-ms egress timing.
+Validate host epoch, own-source exclusion, partial reads, older input joining a
+retained packet, actual FIR tail, zero-source codec tail, outward endpoint
+rounding, immutable private provider retry and continuing fresh speech.
+
+The next controlled prerequisite is ordinary G.711 IAX timed custody using the
+released provider. Sticky transition/legacy ACK/unkey and actual negotiated
+codec support must be qualified before operator attachment activation. No
+non-G.711 production support or hardware qualification is claimed here.
