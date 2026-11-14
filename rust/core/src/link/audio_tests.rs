@@ -1011,3 +1011,130 @@ pub(crate) mod phone_parrot;
 
 #[path = "audio_rf_tests.rs"]
 mod rf;
+
+#[test]
+fn ordinary_input_transfer_preserves_priming_and_rejects_a_late_set_mismatch() {
+    struct Buffered {
+        signals: Arc<PeerSignals>,
+        remaining: usize,
+        rendered: usize,
+    }
+    impl PeerInput for Buffered {
+        fn source_rate(&self) -> u32 {
+            48000
+        }
+        fn signals(&self) -> &PeerSignals {
+            &self.signals
+        }
+        fn available(&self) -> u64 {
+            self.remaining as u64
+        }
+        fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+            let count = output.len().min(self.remaining);
+            output[..count].fill(0.25);
+            output[count..].fill(0.0);
+            self.remaining -= count;
+            self.rendered += count;
+            Some(count)
+        }
+    }
+    fn slot(name: &str, signals: Arc<PeerSignals>, remaining: usize) -> AudioPeer<Buffered> {
+        let (output, _) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+        AudioPeer::new(
+            PeerIdentity::from_operator(name).unwrap(),
+            Mode::TRANSCEIVE,
+            Buffered {
+                signals,
+                remaining,
+                rendered: 0,
+            },
+            output,
+            960,
+            100,
+        )
+        .unwrap()
+    }
+    for mismatch in [false, true] {
+        let first = Arc::new(PeerSignals::new());
+        let second = Arc::new(PeerSignals::new());
+        first.publish_pcm();
+        second.publish_pcm();
+        let (mut old, mut dispatch) = LinkAudio::new(
+            vec![
+                slot("200", first.clone(), 14400),
+                slot("300", second.clone(), 14400),
+            ],
+            960,
+        )
+        .unwrap();
+        let (mut controller, _) = NodeController::new(
+            ControllerSettings::default(),
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        for _ in 0..4 {
+            old.process(
+                &mut controller,
+                false,
+                &mut [0.0; 960],
+                SourcePosition::default(),
+            )
+            .unwrap();
+            dispatch.dispatch(1);
+        }
+        assert_eq!(old.peers[0].input.rendered, 3840);
+        assert!(old.peers[0].input.remaining < 12480);
+        let (mut next, _next_dispatch) = LinkAudio::new(
+            vec![
+                slot("200", first.clone(), 0),
+                slot(
+                    "300",
+                    if mismatch {
+                        Arc::new(PeerSignals::new())
+                    } else {
+                        second.clone()
+                    },
+                    0,
+                ),
+            ],
+            960,
+        )
+        .unwrap();
+        assert_eq!(next.retain_ordinary_inputs(&mut old), !mismatch);
+        if mismatch {
+            assert_eq!(
+                old.peers[0].input.remaining, 10560,
+                "late mismatch cannot move an earlier input"
+            );
+            assert_eq!(old.peers[0].input.rendered, 3840);
+            assert_eq!(next.peers[0].input.remaining, 0);
+        } else {
+            assert_eq!(
+                next.peers[0].input.rendered, 3840,
+                "processor/source history moves intact"
+            );
+            next.process(
+                &mut controller,
+                false,
+                &mut [0.0; 960],
+                SourcePosition::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                next.peers[0].input.rendered, 4800,
+                "primed source must not wait for260ms again"
+            );
+            assert_eq!(
+                old.peers[0].input.remaining, 0,
+                "retired placeholder holds no PCM"
+            );
+        }
+        drop(next);
+        assert!(
+            !first.ended() && !second.ended(),
+            "candidate drop cannot end the producer"
+        );
+    }
+}

@@ -1750,3 +1750,21 @@ result cannot satisfy the later speech-output assertion. The synthetic remote
 is serviced until its bounded caller completes, rather than stopping at an
 independent cutoff before return audio is requested. Qualification commands
 retain an outer process watchdog; this changes no production or protocol timer.
+
+## Preserve ordinary input across phone rearm — 2026-11-14
+
+A legitimate phone source gap still retires that phone media generation. Its
+subsequent phone-only graph refresh preserves unchanged ordinary source owners
+instead of replacing their inbound rings and restarting the 260 ms receive target.
+Preparation holds only read-only reservations for those existing rings. At the
+existing null-publication, hazard-free adapter cut, the complete ordinary source
+set is validated before moving its unique consumer, processing graph and receive
+history. A rejected or callback-busy candidate cannot change those live owners.
+
+The serial ordinary producer, partially accepted input and source/DTMF state stay
+in place. Only its outgoing queue is redirected, retaining the existing discard
+of old mixed phone history. Retirement waits for the exact runtime-graph and
+transport-connection acknowledgment after that redirect, plus existing dispatcher
+quiescence. Old ring identity alone is not an acknowledgment of a new graph.
+Reload and ordinary topology changes retain their current replacement semantics.
+No new PCM queue, provider API, playout target or source-age rule is introduced.

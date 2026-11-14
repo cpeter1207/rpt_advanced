@@ -596,7 +596,9 @@ fn stopping_reclaims_unprotected_current_before_protected_retired_and_never_free
 
 #[test]
 fn stopped_generation_transfer_rejects_invalid_candidates_and_restores_only_live_callbacks() {
-    for case in ["stopped", "retired", "same_id", "settings", "success"] {
+    for case in [
+        "stopped", "retired", "same_id", "settings", "refused", "success",
+    ] {
         let drops = Arc::new(AtomicUsize::new(0));
         let mut host = NodeHost::new(generation(1, &drops));
         let (mut control, mut rx, _) = host.split();
@@ -611,13 +613,19 @@ fn stopped_generation_transfer_rejects_invalid_candidates_and_restores_only_live
             candidate.settings.receive_maximum += 1;
         }
         let mut transferred = false;
-        let result = control.publish_transferring(candidate, 1, |_, _, _, _| transferred = true);
+        let result = control.publish_transferring(candidate, 1, |_, _, _, _| {
+            if case == "refused" {
+                return false;
+            }
+            transferred = true;
+            true
+        });
         assert_eq!(
             result,
             match case {
                 "stopped" => Err(LifecycleError::Stopped),
                 "retired" => Err(LifecycleError::RetirementPending),
-                "same_id" | "settings" => Err(LifecycleError::InvalidGeneration),
+                "same_id" | "settings" | "refused" => Err(LifecycleError::InvalidGeneration),
                 _ => Ok(()),
             }
         );

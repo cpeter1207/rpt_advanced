@@ -451,6 +451,19 @@ impl<A: Send, C: Send> Runtime<A, C> {
         prepared: PreparedAdapter<A, C>,
         now_ms: u64,
     ) -> Result<u64, RuntimeError> {
+        self.replace_adapter_transferring(local, prepared, now_ms, |_, _| true)
+    }
+
+    /// Preserve selected unique adapter owners at the existing callback-free cut.
+    /// The transfer must validate its entire set before mutation, returning false
+    /// without changes on mismatch. After validation it performs infallible moves.
+    pub fn replace_adapter_transferring(
+        &mut self,
+        local: &str,
+        prepared: PreparedAdapter<A, C>,
+        now_ms: u64,
+        transfer: impl FnOnce(&mut A, &mut A) -> bool,
+    ) -> Result<u64, RuntimeError> {
         self.reclaim();
         if self.stopping {
             return Err(RuntimeError::Busy);
@@ -499,10 +512,17 @@ impl<A: Send, C: Send> Runtime<A, C> {
         node.host
             .control()
             .publish_transferring(candidate, now_ms, |old_rx, old_tx, new_rx, new_tx| {
+                if !transfer(&mut old_tx.adapter, &mut new_tx.adapter) {
+                    return false;
+                }
                 std::mem::swap(old_rx, new_rx);
                 std::mem::swap(&mut old_tx.controller, &mut new_tx.controller);
+                true
             })
-            .map_err(|_| RuntimeError::Busy)?;
+            .map_err(|error| match error {
+                super::LifecycleError::InvalidGeneration => RuntimeError::Preparation,
+                _ => RuntimeError::Busy,
+            })?;
         let mut next = ControlState {
             generation,
             adapter: prepared.control,

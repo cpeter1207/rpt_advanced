@@ -3666,3 +3666,54 @@ fn source_phone_admission_requires_timed_egress_capability() {
     assert!(unsafe { services.inspect_peer(handle) }.is_ok());
     drop(unsafe { Box::from_raw(handle.cast::<Shared>()) });
 }
+
+#[test]
+fn outbound_only_redirect_keeps_ordinary_pending_source_and_acknowledges_exact_graph() {
+    use rpt_advanced_core::audio::LinkAudioQueue;
+    for invalid in [false, true] {
+        let (io, _state) = peer(48000);
+        let (_, output) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+        let (mut session, mut control) =
+            PeerSession::prepare(io, output, "1000", "2000", true).unwrap();
+        let observer = session.inbound.observer();
+        while session.inbound.write(&[0.125; 4096]).unwrap() != 0 {}
+        let occupancy = observer.observe().unwrap().available_samples;
+        session.pending_pcm[7..15].fill(0.375);
+        session.pending_input = Some(PendingInput::Audio { next: 7, len: 15 });
+        session.source_dirty = true;
+        session.source_finish = Some(91);
+        let (_, output) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+        let connection = control.connection_generation();
+        control
+            .send(Command::RedirectOutbound {
+                generation: 42,
+                connection: connection + u64::from(invalid),
+                outbound: output,
+            })
+            .ok()
+            .unwrap();
+        let result = session.step_inner(0);
+        if invalid {
+            assert_eq!(result, Err(Error::Admission));
+            assert!(
+                control.event().is_none(),
+                "wrong connection cannot acknowledge adoption"
+            );
+        } else {
+            result.unwrap();
+            assert!(matches!(control.event(), Some(Event::OutboundRedirected {
+                generation: 42, connection: actual
+            }) if actual == connection));
+        }
+        assert!(observer.same_generation(&session.inbound.observer()));
+        assert_eq!(observer.observe().unwrap().available_samples, occupancy);
+        assert!(matches!(
+            session.pending_input,
+            Some(PendingInput::Audio { next: 7, len: 15 })
+        ));
+        assert_eq!(&session.pending_pcm[7..15], &[0.375; 8]);
+        assert!(session.source_dirty);
+        assert_eq!(session.source_finish, Some(91));
+        assert!(!observer.signals().ended());
+    }
+}

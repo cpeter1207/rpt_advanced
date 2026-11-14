@@ -762,6 +762,55 @@ impl<P: PeerInput> LinkAudio<P> {
         self
     }
 
+    /// Move an unchanged ordinary receive set into a prepared graph at a guarded
+    /// publication cut. No callbacks may hold either graph. Exact source signals,
+    /// routing settings and the complete ordered set are checked before any swap.
+    /// Private inputs and new outgoing queues are deliberately never transferred.
+    pub fn retain_ordinary_inputs(&mut self, previous: &mut Self) -> bool {
+        let ordinary = |peer: &&AudioPeer<P>| peer.phone.is_none();
+        let next = self.peers.iter().filter(ordinary);
+        let old = previous.peers.iter().filter(ordinary);
+        if next.clone().count() != old.clone().count()
+            || !next.zip(old).all(|(next, old)| {
+                let same_group = match (&next.group, &old.group) {
+                    (None, None) => true,
+                    (Some((a, sa)), Some((b, sb))) => sa == sb && Arc::ptr_eq(&a.active, &b.active),
+                    _ => false,
+                };
+                next.identity == old.identity
+                    && next.mode == old.mode
+                    && next.kerchunk_samples == old.kerchunk_samples
+                    && next.audio.len() == old.audio.len()
+                    && same_group
+                    && std::ptr::eq(next.input.signals(), old.input.signals())
+                    && next.input.source_rate() == old.input.source_rate()
+                    && next.input.receive_policy() == old.input.receive_policy()
+                    && !old.ended()
+            })
+        {
+            return false;
+        }
+        for (next, old) in self
+            .peers
+            .iter_mut()
+            .filter(|peer| peer.phone.is_none())
+            .zip(
+                previous
+                    .peers
+                    .iter_mut()
+                    .filter(|peer| peer.phone.is_none()),
+            )
+        {
+            std::mem::swap(&mut next.input, &mut old.input);
+            std::mem::swap(&mut next.receive, &mut old.receive);
+            std::mem::swap(&mut next.audio, &mut old.audio);
+            std::mem::swap(&mut next.active, &mut old.active);
+            std::mem::swap(&mut next.duration, &mut old.duration);
+            std::mem::swap(&mut next.reported_active, &mut old.reported_active);
+        }
+        true
+    }
+
     /// Render RF and publish one prepared pre-access-tone peer-audio block for the dispatcher.
     /// Terminal peers contribute neither PCM nor key state, even before reclamation.
     pub fn process(

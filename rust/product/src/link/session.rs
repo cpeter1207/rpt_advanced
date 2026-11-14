@@ -50,6 +50,15 @@ pub enum Command {
         /// Original body, never synthesized peer PCM or control text.
         body: Arc<str>,
     },
+    /// Replace only outgoing mixed history, preserving this connection's live ingress.
+    RedirectOutbound {
+        /// Exact accepted runtime graph, filled by control before serial submission.
+        generation: u64,
+        /// Immutable transport connection, not an ordinary ring generation.
+        connection: u64,
+        /// Unique replacement native outbound consumer.
+        outbound: LinkAudioConsumer,
+    },
     /// Prepared replacement generation endpoints; the old ingress becomes terminal.
     Redirect {
         /// Unique replacement inbound producer.
@@ -72,6 +81,13 @@ pub enum Event {
     RemoteUnkey(u64),
     /// Replacement ingress is installed; control may acknowledge old-generation detachment.
     Redirected(InboundObserver),
+    /// Outgoing ownership changed successfully for exactly this graph and connection.
+    OutboundRedirected {
+        /// Runtime graph supplied by the serialized control owner.
+        generation: u64,
+        /// Immutable transport connection that performed the adoption.
+        connection: u64,
+    },
 }
 
 /// Whether the remote `app_rpt` negotiated explicit radio key controls.
@@ -155,6 +171,14 @@ impl PeerControl {
     /// Capture this exact inbound endpoint for source-addressed command replies.
     pub fn reply_target(&self) -> rpt_advanced_core::link::PeerReply {
         self.observer.signals().reply_target()
+    }
+    /// Read-only reservation for the unique consumer's guarded graph transfer.
+    pub(crate) fn inbound_observer(&self) -> InboundObserver {
+        self.observer.clone()
+    }
+    /// Immutable transport identity, independent of graph and ring generations.
+    pub(crate) fn connection_generation(&self) -> u64 {
+        self.text_identity.connection
     }
     /// Preserve the protocol's immutable ring policy when preparing a generation.
     pub(crate) fn inbound_policy(&self) -> InboundPolicy {
@@ -1009,6 +1033,22 @@ impl PeerSession {
                     if !advisory {
                         result?;
                     }
+                }
+                Command::RedirectOutbound {
+                    generation,
+                    connection,
+                    outbound,
+                } => {
+                    if generation == 0 || connection != self.text_identity.connection {
+                        return Err(Error::Admission);
+                    }
+                    // Keep existing discard/reset of old mixed phone egress. Ingress,
+                    // its partly accepted PCM and source/DTMF state are untouched.
+                    self.outbound.redirect(outbound)?;
+                    self.event(Event::OutboundRedirected {
+                        generation,
+                        connection,
+                    })?;
                 }
                 Command::Redirect {
                     inbound,

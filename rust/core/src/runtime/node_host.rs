@@ -389,7 +389,7 @@ impl<R: Send, T: Send> NodeControl<'_, R, T> {
         &mut self,
         mut generation: RuntimeGeneration<R, T>,
         now_ms: u64,
-        transfer: impl FnOnce(&mut R, &mut T, &mut R, &mut T),
+        transfer: impl FnOnce(&mut R, &mut T, &mut R, &mut T) -> bool,
     ) -> Result<(), LifecycleError> {
         if self.store.stopping {
             return Err(LifecycleError::Stopped);
@@ -413,14 +413,20 @@ impl<R: Send, T: Send> NodeControl<'_, R, T> {
                 .store(ptr::from_mut(old.as_mut()), Ordering::SeqCst);
             return Err(LifecycleError::CallbacksActive);
         }
-        // No callback can now enter or retain the old state. Internal callers only
-        // perform infallible swaps, leaving valid placeholders in retired storage.
-        transfer(
+        // No callback can enter or retain old state. Validate the complete transfer
+        // before any mutation; refusal restores publication and leaves owners intact.
+        // Successful callers use only infallible swaps with inert retired placeholders.
+        if !transfer(
             old.receive.get_mut(),
             old.transmit.get_mut(),
             generation.receive.get_mut(),
             generation.transmit.get_mut(),
-        );
+        ) {
+            self.shared
+                .active
+                .store(ptr::from_mut(old.as_mut()), Ordering::SeqCst);
+            return Err(LifecycleError::InvalidGeneration);
+        }
         self.publish_prepared(generation, now_ms)
     }
 

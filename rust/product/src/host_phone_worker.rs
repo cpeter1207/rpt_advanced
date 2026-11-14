@@ -180,7 +180,7 @@ impl Host {
         // pending reload. The old generation is already revoked by its owner.
         if !self.runtime.reload_pending() {
             for local in self.phone_calls.media_refresh_nodes() {
-                if self.refresh(&local, clock).is_err() {
+                if self.refresh_inputs(&local, clock, true).is_err() {
                     self.services
                         .scheduler_notice("phone attachment: media preparation failed");
                     for (source, reply) in self.phone_calls.attachments(&local) {
