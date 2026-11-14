@@ -289,25 +289,62 @@ a real outgoing call. Linked-peer isolation, outgoing Asterisk composition and t
 full PR/platform/coverage gate remain separate unfinished requirements.
 
 
-## Integration with current incoming repair — 2026-11-14
+## Integration with current incoming repair (2026-11-14)
 
-The isolated combined branch starts from73b0ea0 and replays only outgoing
-checkpoints027f10c,88bf26c,47a8453,2fe0620,9cceedb and43c856f. The equivalent
+The isolated combined branch starts from 73b0ea0 and replays only outgoing
+checkpoints 027f10c, 88bf26c, 47a8453, 2fe0620, 9cceedb and 43c856f. The equivalent
 SIP source-gap repair is already in this base and is not applied again. The
 ordinary receive-owner transfer, terminal omission and callback-Busy retry,
 operation results, and captured ten-second phone digit tolerance are retained.
 Outgoing calls still have media-only authority and no incoming collector.
 
-Initial combined verification passes four core role tests and232 product phone
-tests, compiles the standalone test harness and builds exact product/SIP DSOs in
-an isolated provider directory. Audio and timing owners reviewed the union. The cross-branch result-audience regression reproduced and is repaired:
-implicit RF operation results must select authenticated incoming recipients,
-not every media-authorized attachment. Otherwise the incoming-only delivery
-check correctly rejects, but then incorrectly retires, an outgoing callee.
-Only the implicit result list now retains authenticated recipients. Shared
-attachment enumeration remains broad for media ownership and cleanup. The new
-actual-host regression and existing exact incoming/stale-recipient cases pass
-in integrated-result-green.log after the recorded behavioral RED.
+Audio and timing owners reviewed the union. The cross-branch result-audience
+regression reproduced and was repaired: the prior implicit RF-result mirroring
+must not retire a media-only callee as an invalid private recipient. The exact
+host regression and existing incoming/stale-recipient cases pass after the
+recorded behavioral RED. This is historical checkpoint behavior: the subsequent
+source-only DTMF-result requirement supersedes mirroring and must be integrated
+before selecting this outgoing checkpoint for deployment.
 
-This checkpoint remains under integration verification. No live call, deployment,
-public publication, physical acceptance or full pull-request gate is implied.
+Actual combined ProductRuntime wire evidence passes: outgoing two-way calling
+in 39.42 seconds, explicit incoming attachment/VOX in 53.18 seconds, and attachment
+to an already-connected ordinary IAX peer in 48.19 seconds. The outgoing fixture
+covers refusal/reuse, answer/ACK on the offered socket, callee speech to RF,
+known local audio back to the callee, no login/control authority, exact local
+hangup, remote BYE and reuse. The C ABI probe passes. All three composed paths
+also pass in the standalone full-suite run. Radio hardware remains simulated.
+
+Combined regression evidence:
+
+- Core: 799 unit and 94 integration tests pass.
+- Product: the full run passes 858 cases, with one existing load experiment
+  ignored, and finds two stale ABI-layout assertions. The test-only correction
+  explicitly preserves the old complete 424-byte prefix and current 432-byte
+  table, rejects every partial tail, and verifies missing callbacks are null.
+  Both corrected cases, all ten host phone-capability cases, and all five
+  product integrations then pass. Production code is unchanged by this repair.
+- Standalone: 319 library and two binary unit tests, 30 integrations and one
+  doctest pass. Asterisk: 66 tests pass. Peer support: 13 unit and 82 integration
+  tests pass. SIP adapter: 13 tests pass.
+- All-target Clippy with warnings denied, warning-free rustdoc and formatting
+  pass for the six affected packages.
+
+The reviewed test-only aea640d reconnect coverage is included with its exact 113
+added lines and no removals: paced authenticated attachment, connect, disconnect
+and reconnect preserve the exact call, attachment and private source. It is
+positive coverage, not a reproduced or repaired live reconnect defect.
+
+Evidence is retained in .work/integrated-result-red.log,
+integrated-result-green.log, integrated-outgoing-wire.log,
+integrated-incoming-pair.log, integrated-full-core-product.log,
+integrated-prefix-green.log, integrated-standalone-full.log and
+integrated-host-strict.log. The full core/product invocation records exit 101
+for the two stale assertions; the targeted correction and later jobs record
+exit zero. Passed groups were not needlessly rerun after the test-only repair.
+
+This is a local reviewed recovery checkpoint, not a full pull-request/platform/
+coverage pass. Source-only DTMF results, native staging, destination/cost approval
+and controlled manual acceptance remain before a live outgoing call. Radio DTMF
+telephone initiation/hangup, linked-peer isolation and outgoing Asterisk
+composition remain separate unfinished work. No live call, deployment or public
+publication was performed by this integration.
