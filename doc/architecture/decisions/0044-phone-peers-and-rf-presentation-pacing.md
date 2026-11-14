@@ -1511,3 +1511,7 @@ preempt programme and finish their finite tail before programme resumes.
 Original span birth/deadline metadata remains with the queue. The generation's
 existing retirement token also guards copied conversion and blocked native sends.
 This bridge alone does not authorize attachment, implement VOX or qualify RF.
+
+Programme return drains its retained SRC/codec tail at the existing source-idle
+deadline; successful finite private prompts still use explicit completion.
+G.711 silence-tail padding and original-age deadlines remain with the same owner.

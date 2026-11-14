@@ -2729,3 +2729,46 @@ fn prepared_phone_programme_retirement_after_selection_cancels_the_pending_send(
     assert_eq!(state.lock().unwrap().prepared.len(), sent);
     assert!(!reply.ended());
 }
+
+#[test]
+fn prepared_phone_programme_drains_a_short_final_packet_on_existing_idle_deadline() {
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    let clock = SourceTimeClock::new(Instant::now()).unwrap();
+    session.set_source_clock(clock);
+    state.lock().unwrap().encode_unit = Some(160);
+    let mut input = control.prepare_media(None).unwrap();
+    let mut output = input.take_output().unwrap();
+    session.step(0).unwrap();
+    output.write(
+        AudioSpan {
+            generation: 1,
+            burst: 1,
+            source_start: 0,
+            stream: 7,
+            born_ns: Some(clock.reference().now_ns),
+        },
+        &[0.25; 960],
+    );
+    session.step(1).unwrap();
+    assert!(
+        state.lock().unwrap().prepared.is_empty(),
+        "short SRC/codec tail is retained"
+    );
+    let deadline = Instant::now() + std::time::Duration::from_millis(150);
+    while state.lock().unwrap().prepared.is_empty() && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        session.step(2).unwrap();
+    }
+    let state = state.lock().unwrap();
+    assert_eq!(
+        state.prepared.len(),
+        1,
+        "remote unkey completes the short packet"
+    );
+    assert_eq!(state.prepared[0].0.len(), 160);
+    assert!(
+        state.timed_deadlines[0] < 200,
+        "tail retains original birth"
+    );
+    assert!(input.active() && !reply.ended());
+}

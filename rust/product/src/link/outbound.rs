@@ -380,10 +380,16 @@ impl Outbound {
         if next.is_some_and(|deadline| deadline <= now) {
             return Ok(next);
         }
+        // Programme ends at the existing source-idle deadline. Finite private
+        // prompts still require their explicit successful playback completion.
+        if self.programme_guard.is_some() && self.unkey_ns.is_some_and(|end| now >= end) {
+            self.finish_private();
+        }
         if self.private && !self.private_finishing {
             return Ok(next
                 .into_iter()
                 .chain(oldest.map(|born| born.saturating_add(AGE_NS)))
+                .chain(self.unkey_ns.filter(|_| self.programme_guard.is_some()))
                 .min());
         }
         if let Some(deadline) = self.unkey_ns.filter(|deadline| now >= *deadline) {
