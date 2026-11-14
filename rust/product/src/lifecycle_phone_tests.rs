@@ -1397,3 +1397,108 @@ fn slow_phone_quote_keys_refresh_the_exact_destination_collection() {
     );
     assert!(engine.stop());
 }
+
+#[test]
+fn phone_grammar_connect_disconnect_reconnect_keeps_exact_source() {
+    use crate::link::session::tests::Input;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+    let (services, _peers) = crate::services::tests::timed_dial_fixture(services);
+    let voice = speech();
+    let configuration = configuration()
+        .replace("[1000]", "[1000]\nphone_allow_accounts=provider")
+        .replace(
+            "[phone_account provider]",
+            "[phone_account provider]\nattach_local_nodes=1000",
+        );
+    let engine = engine(configuration, services, Arc::clone(&voice));
+    let (phone, state) = crate::link::session::tests::phone_source_peer();
+    state.lock().unwrap().continuous_async = true;
+    let call = phone.identity().call_id().unwrap();
+    let clock = engine.clock();
+    let (source, reply) = engine
+        .run(move |host| {
+            host.incoming_peer(phone, "203.0.113.9", clock)?;
+            let source = host.phone_source(call).unwrap().clone();
+            let reply = host.phone_reply(&source).unwrap();
+            host.authenticate_phone(&source, &reply, "100", "1234", clock)?;
+            Ok((source, reply))
+        })
+        .unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend("*3#".bytes().map(Input::Digit));
+    wait_for(&engine, || {
+        voice
+            .opened
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|text| text == "Command completed")
+    });
+    let exact_source = source.clone();
+    let exact_reply = reply.clone();
+    assert!(
+        engine
+            .run(move |host| {
+                Ok(crate::host::tests::phone::has_phone_attachment(
+                    host,
+                    &exact_source,
+                    &exact_reply,
+                ))
+            })
+            .unwrap()
+    );
+    assert!(reply.phone_authenticated(), "authorized after attachment");
+    // Space commands while the real private owner consumes each finite reply.
+    // This does not claim physical RF/audio callback validation.
+    let pace = || {
+        let until = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < until {
+            engine.pump(engine.clock(), false).unwrap();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    pace();
+    for (digits, expected) in [
+        ("*4#*32000**#", "2000: transceive"),
+        ("*12000**#", "no active links"),
+        ("*33000**#", "3000: transceive"),
+    ] {
+        state
+            .lock()
+            .unwrap()
+            .input
+            .extend(digits.bytes().map(Input::Digit));
+        wait_for(&engine, || {
+            engine
+                .run(move |host| Ok(host.status_text("1000")?.contains(expected)))
+                .unwrap()
+        });
+        pace();
+        assert!(reply.phone_authenticated(), "authorized after {expected}");
+    }
+    assert!(
+        engine
+            .run(move |host| {
+                Ok(host.phone_reply(&source).as_ref() == Some(&reply)
+                    && crate::host::tests::phone::has_phone_attachment(host, &source, &reply))
+            })
+            .unwrap()
+    );
+    assert!(state.lock().unwrap().digits.is_empty());
+    assert!(state.lock().unwrap().texts.is_empty());
+    assert!(
+        voice
+            .opened
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|text| !text.contains("1234") && !text.contains('*') && !text.contains('#'))
+    );
+    assert!(engine.stop());
+}

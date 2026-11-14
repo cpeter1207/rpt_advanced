@@ -1687,3 +1687,11 @@ fn rf_operation_results_do_not_retire_or_privately_prompt_an_outgoing_callee() {
     assert!(reply.ended() && !claim.current());
     assert!(host.stop(20));
 }
+
+/// Inspect exact attachment custody without exposing the private call registry.
+pub(crate) fn has_phone_attachment(host: &Host, source: &PhoneSource, reply: &PeerReply) -> bool {
+    host.phone_calls
+        .attachments("1000")
+        .iter()
+        .any(|(actual, owner)| actual == source && owner == reply)
+}
