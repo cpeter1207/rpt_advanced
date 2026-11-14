@@ -170,6 +170,7 @@ fn asynchronous_phone_link_commands_deliver_privately_without_public_connect_or_
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_write = Some(write);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let (services, timed_peers) = crate::services::tests::timed_dial_fixture(services);
     let engine = engine(configuration(), services, Arc::clone(&voice));
     let (source, reply, state) = admit(&engine);
     let operation = source_operation(&engine, &source, &reply, LinkAction::Transceive, "2000");
@@ -273,6 +274,14 @@ fn asynchronous_phone_link_commands_deliver_privately_without_public_connect_or_
             .unwrap()
     );
     assert_eq!(PUBLIC_SAMPLES.load(Ordering::Acquire), 0);
+    assert!(
+        timed_peers
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|peer| peer.lock().unwrap().prepared.is_empty()),
+        "private command completion never reaches the actual timed remote egress"
+    );
     assert!(state.lock().unwrap().texts.is_empty());
     assert!(state.lock().unwrap().digits.is_empty());
     // Positive control uses the unchanged ordinary public event route and same audio owners.
@@ -339,6 +348,7 @@ fn retirement_during_async_dial_cannot_attach_or_reply_to_a_replacement_mailbox_
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_dial = Some(dial);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let (services, _timed_peers) = crate::services::tests::timed_dial_fixture(services);
     let engine = engine(configuration(), services, Arc::clone(&voice));
     let (source, reply, _old_state) = admit(&engine);
     let operation = source_operation(&engine, &source, &reply, LinkAction::Transceive, "2000");
@@ -412,6 +422,7 @@ fn initial_private_retry_completes_privately_then_transport_loss_uses_ordinary_p
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_ready = Some(ready);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let (services, _timed_peers) = crate::services::tests::timed_dial_fixture(services);
     let engine = engine(configuration(), services, Arc::clone(&voice));
     let (source, reply, state) = admit(&engine);
     let operation = source_operation(
@@ -514,6 +525,10 @@ fn initial_private_retry_completes_privately_then_transport_loss_uses_ordinary_p
     assert!(
         ordinary_retry.private_reply().is_none(),
         "completed commands retain ordinary recovery after their caller leaves"
+    );
+    assert!(
+        ordinary_retry.timed_g711(),
+        "transport intent survives without private authorization"
     );
     drop(ordinary_retry);
     assert!(

@@ -1631,3 +1631,19 @@ Mini path; ordinary reliable control remains serviced by the existing executor.
 This increment supports fresh restricted dials only, not transitions of existing
 unknown-codec/legacy-PCM calls. Outbound selection, retry transport intent, and
 operator attachment activation remain separately gated.
+### Timed ordinary owner and retry transport intent
+
+A restricted ordinary handle binds the existing I/O source clock before its
+serial owner can encode. All media for that handle uses the existing timed
+G.711 callback for the rest of its lifetime, including ordinary-only programme.
+Its idle completion pads the final short G.711 packet through the same encoder,
+then suppresses the legacy empty Voice marker. Finite private prompts still
+require their explicit successful completion. No second encoder or queue is added.
+
+Phone-originated remote dial selection is explicit at lifecycle dispatch.
+Permanent link/retry records retain only the restricted-transport bit through
+recovery; they retain no PhoneSource, mailbox authority or private reply token.
+A retry after the caller retires still selects the restricted catalog, while
+its completion and loss notifications obey the existing ordinary link policy.
+Generic dials remain unchanged. Graph admission for unknown existing egress
+and operator attachment activation remain the following controlled increment.

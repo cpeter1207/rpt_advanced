@@ -54,6 +54,7 @@ impl Mode {
 pub(super) struct Attached {
     pub name: String,
     pub mode: Mode,
+    timed_g711: bool,
     pub permanent: bool,
     pub ended: bool,
     pub routes: Vec<Route>,
@@ -76,6 +77,7 @@ impl Attached {
 struct Retry {
     name: String,
     mode: Mode,
+    timed_g711: bool,
     automatic: bool,
     paused: bool,
     due: u64,
@@ -94,6 +96,7 @@ struct TopologyEvidence(Vec<(String, char)>);
 pub struct RetryAttempt {
     name: String,
     mode: Mode,
+    timed_g711: bool,
     serial: u64,
     generation: u64,
 }
@@ -121,6 +124,11 @@ pub struct LinkStatus {
     pub topology_blocked: bool,
 }
 impl RetryAttempt {
+    /// Retained transport policy only; it grants no private caller authority.
+    pub fn timed_g711(&self) -> bool {
+        self.timed_g711
+    }
+
     /// Destination identity for external directory and dial operations.
     pub fn name(&self) -> &str {
         &self.name
@@ -234,6 +242,7 @@ impl LinkManager {
         self.peers.push(Attached {
             name: name.into(),
             mode,
+            timed_g711: false,
             permanent,
             ended: false,
             routes: Vec::new(),
@@ -242,6 +251,15 @@ impl LinkManager {
         });
         self.revision = self.revision.wrapping_add(1);
         self.refresh_group_selections();
+    }
+    /// Mark only an already admitted/retained route; never create authority or a link.
+    pub(crate) fn require_timed_g711(&mut self, name: &str) {
+        for peer in self.peers.iter_mut().filter(|peer| peer.name == name) {
+            peer.timed_g711 = true;
+        }
+        for retry in self.retries.iter_mut().filter(|retry| retry.name == name) {
+            retry.timed_g711 = true;
+        }
     }
     fn refresh_group_selections(&self) {
         let mut groups = Vec::<(String, GroupMemberSelection)>::new();
@@ -394,6 +412,7 @@ impl LinkManager {
                 self.retries.push(Retry {
                     name: peer.name,
                     mode: peer.mode,
+                    timed_g711: peer.timed_g711,
                     automatic: true,
                     paused: false,
                     due: now_ms,
@@ -429,6 +448,7 @@ impl LinkManager {
         self.retries.push(Retry {
             name: name.into(),
             mode,
+            timed_g711: false,
             automatic: true,
             paused: false,
             due: now_ms,
@@ -452,6 +472,7 @@ impl LinkManager {
         self.retries.push(Retry {
             name: name.into(),
             mode,
+            timed_g711: false,
             automatic: true,
             paused: false,
             due: now_ms,
@@ -486,6 +507,7 @@ impl LinkManager {
         self.retries.push(Retry {
             name: name.into(),
             mode,
+            timed_g711: false,
             automatic: true,
             paused: false,
             due: 0,
@@ -510,6 +532,7 @@ impl LinkManager {
         Some(RetryAttempt {
             name: retry.name.clone(),
             mode: retry.mode,
+            timed_g711: retry.timed_g711,
             serial: self.serial,
             generation: self.generation,
         })
@@ -545,6 +568,9 @@ impl LinkManager {
         let group = self.retries[index].group.clone();
         let member = self.retries[index].group_member.clone();
         self.publish(&attempt.name, attempt.mode, automatic, group, member);
+        if attempt.timed_g711 {
+            self.require_timed_g711(&attempt.name);
+        }
         Ok(())
     }
     /// Release a dial token, retrying failures at 1, 2, 4...300 seconds.
@@ -747,6 +773,7 @@ impl LinkManager {
             self.retries.push(Retry {
                 name: peer.name,
                 mode: peer.mode,
+                timed_g711: peer.timed_g711,
                 automatic: true,
                 paused: true,
                 due: 0,
@@ -772,6 +799,7 @@ impl LinkManager {
             self.retries.push(Retry {
                 name: peer.name,
                 mode: peer.mode,
+                timed_g711: peer.timed_g711,
                 automatic: peer.permanent,
                 paused: true,
                 due: 0,

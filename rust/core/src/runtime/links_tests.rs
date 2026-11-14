@@ -3454,3 +3454,74 @@ fn remote_operation_custody_does_not_extend_a_private_source_grant() {
     links.expire_peer_digits(103);
     assert!(links.peer_commands.is_empty());
 }
+
+#[test]
+fn phone_timed_transport_intent_survives_recovery_without_private_authority() {
+    use crate::link::{PhoneAccountId, PhoneSource};
+    for phone in [false, true] {
+        let mut links = links();
+        let source = PhoneSource::new(
+            PhoneAccountId::new("provider").unwrap(),
+            3,
+            "aabbccddeeff00112233445566778899".parse().unwrap(),
+            4,
+            5,
+        )
+        .unwrap();
+        let signals = crate::link::PeerSignals::for_phone(source.clone());
+        assert!(signals.authenticate_phone());
+        let reply = signals.reply_target();
+        let request = if phone {
+            let map = DtmfCommandMap::standard();
+            let prefix = &map
+                .mappings()
+                .iter()
+                .find(|item| item.action == LinkAction::PermanentTransceive)
+                .unwrap()
+                .digits;
+            format!("*{prefix}2000#")
+                .chars()
+                .filter_map(
+                    |digit| match links.phone_digit(&source, digit, 1, reply.clone()) {
+                        Some(DigitOutcome::Operation(request)) => Some(request),
+                        _ => None,
+                    },
+                )
+                .next()
+                .unwrap()
+        } else {
+            operation(LinkAction::PermanentTransceive, "2000")
+        };
+        let mut host = NodeHost::new(generation(1));
+        let LinkEffect::Connect(attempt) = links
+            .command(request, host.control().work().unwrap(), 2, true)
+            .unwrap()
+        else {
+            panic!("connect attempt");
+        };
+        assert_eq!(attempt.timed_g711(), phone);
+        assert_eq!(
+            links.finish_connect_at(attempt, true, 3, None, |_| None),
+            Ok(true)
+        );
+        links.retire_source(&reply);
+        reply.retire();
+        for now in [10, 20] {
+            links.manager.end("2000");
+            links.manager.reclaim("2000", now);
+            let retry = links
+                .take_retry(now, host.control().work().unwrap())
+                .unwrap();
+            assert!(
+                retry.private_reply().is_none(),
+                "transport intent must not retain caller authority"
+            );
+            assert_eq!(
+                retry.timed_g711(),
+                phone,
+                "restricted catalog intent survives transport loss"
+            );
+            assert_eq!(links.finish_retry(retry, true, now + 1), Ok(true));
+        }
+    }
+}

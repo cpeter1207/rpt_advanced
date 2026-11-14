@@ -1442,3 +1442,98 @@ fn maintenance_text_rejects_invalid_spans_and_bounds_the_complete_reply() {
         }
     }
 }
+
+// Upgrade only explicit lifecycle fixtures to the existing prepared serial peer
+// implementation. The original dial/cancellation and ready failures still run.
+type TimedFixturePeers = std::sync::Arc<
+    std::sync::Mutex<Vec<std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>>>,
+>;
+pub(crate) fn timed_dial_fixture(original: HostServices) -> (HostServices, TimedFixturePeers) {
+    type Shared = std::sync::Arc<std::sync::Mutex<crate::link::session::tests::State>>;
+    struct Context {
+        original: HostServices,
+        peers: std::sync::Arc<std::sync::Mutex<Vec<Shared>>>,
+    }
+    unsafe extern "C" fn dial(
+        context: *mut c_void,
+        destination: *const c_char,
+        destination_length: usize,
+        local: *const c_char,
+        local_length: usize,
+        maximum_frames: usize,
+        current: abi::rptadv_current_v1,
+        current_context: *mut c_void,
+        output: *mut *mut c_void,
+    ) -> i32 {
+        let context = unsafe { &*context.cast::<Context>() };
+        let mut original_peer = ptr::null_mut();
+        let status = unsafe {
+            context.original.0.peer_dial.unwrap()(
+                context.original.0.context,
+                destination,
+                destination_length,
+                local,
+                local_length,
+                maximum_frames,
+                current,
+                current_context,
+                &mut original_peer,
+            )
+        };
+        if status != 0 {
+            return status;
+        }
+        unsafe {
+            context.original.0.peer_destroy.unwrap()(context.original.0.context, original_peer);
+        }
+        let (handle, state) = crate::link::session::tests::timed_dial_handle();
+        context.peers.lock().unwrap().push(state);
+        unsafe {
+            *output = handle;
+        }
+        0
+    }
+    unsafe extern "C" fn ready(context: *mut c_void, peer: *mut c_void) -> i32 {
+        let context = unsafe { &*context.cast::<Context>() };
+        unsafe { context.original.0.peer_ready.unwrap()(context.original.0.context, peer) }
+    }
+    let (template, _) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    let (phone, _) = crate::link::session::tests::phone_source_peer();
+    let mut table = original.0;
+    macro_rules! copy { ($($field:ident),*) => { $(table.$field = template.services.0.$field;)* }; }
+    copy!(
+        peer_rate,
+        peer_info,
+        peer_bind_radio,
+        peer_read,
+        peer_send_text,
+        peer_send_human_text,
+        peer_send_digit,
+        peer_write,
+        peer_destroy,
+        peer_step_attach,
+        peer_step_stop,
+        peer_step_detach,
+        peer_observe,
+        peer_prepare_audio,
+        peer_reset_encoder,
+        peer_send_prepared,
+        peer_elapsed_ms,
+        peer_step_wake,
+        peer_set_deadline
+    );
+    table.peer_send_prepared_timed = phone.services.0.peer_send_prepared_timed;
+    table.peer_dial = Some(dial);
+    table.peer_dial_timed_g711 = Some(dial);
+    table.peer_ready = Some(ready);
+    let peers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    table.context = Box::into_raw(Box::new(Context {
+        original,
+        peers: std::sync::Arc::clone(&peers),
+    }))
+    .cast();
+    (
+        unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap(),
+        peers,
+    )
+}

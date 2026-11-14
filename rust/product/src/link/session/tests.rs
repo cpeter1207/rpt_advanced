@@ -1441,6 +1441,18 @@ pub(crate) fn peer_with_egress(
 pub(crate) fn source_peer() -> (PeerIo, Shared) {
     make_peer(8000, true, true, true, true, false)
 }
+/// Fresh state for the explicit timed-route host fixture, before product adoption.
+pub(crate) fn timed_dial_handle() -> (*mut c_void, Shared) {
+    let state = Arc::new(Mutex::new(State {
+        rate: 8000,
+        continuous_async: true,
+        capabilities: 143,
+        encode_unit: Some(160),
+        ..State::default()
+    }));
+    (Box::into_raw(Box::new(Arc::clone(&state))).cast(), state)
+}
+
 pub(crate) fn phone_source_peer() -> (PeerIo, Shared) {
     phone_source_peer_at_rate(8000)
 }
@@ -2090,6 +2102,7 @@ fn egress_host_contract_and_asterisk_pcm() {
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_ready),
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_feedback_bind),
         std::mem::offset_of!(abi::rptadv_host_services_v10, peer_send_prepared_timed),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_timed_g711),
         std::mem::size_of_val(&table),
     ];
     for length in boundary..=std::mem::size_of_val(&table) {

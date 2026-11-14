@@ -792,7 +792,7 @@ impl SerialSession for PrivatePhoneSession {
         self.epoch = Some(epoch);
     }
     fn set_source_clock(&mut self, clock: SourceTimeClock) {
-        if self.outbound.bind_private_clock(clock).is_err() {
+        if self.outbound.bind_timed_clock(clock).is_err() {
             self.stop();
             return;
         }

@@ -33,6 +33,11 @@ pub struct RetryWork {
     work: GenerationWork,
 }
 impl RetryWork {
+    /// Transport-only restriction retained independently from private caller authority.
+    pub fn timed_g711(&self) -> bool {
+        self.attempt.timed_g711()
+    }
+
     /// Exact private caller of an unfinished initial attempt; established recovery has none.
     pub fn private_reply(&self) -> Option<&PeerReply> {
         pending_phone_reply(self.pending_source.as_ref())
@@ -55,6 +60,11 @@ impl RetryWork {
     }
 }
 impl ConnectAttempt {
+    /// A private phone's initial dial selects the explicit timed G.711 route.
+    pub fn timed_g711(&self) -> bool {
+        self.private_reply().is_some()
+    }
+
     /// Retain the actual private caller through external dialing and completion delivery.
     pub fn private_reply(&self) -> Option<&PeerReply> {
         pending_phone_reply(self.pending_source.as_ref())
@@ -1144,6 +1154,13 @@ impl NodeLinkControl {
                 reservation,
                 topology_blocked || (result.is_ok() && (answered || attempt.permanent)),
             );
+        }
+        if attempt.timed_g711()
+            && (result == Ok(true)
+                || topology_blocked
+                || (result == Ok(false) && attempt.permanent))
+        {
+            self.manager.require_timed_g711(&attempt.remote);
         }
         if result == Ok(true) {
             self.pending_source_retries

@@ -2008,7 +2008,7 @@ impl Drop for PeerIo {
 
 #[cfg(test)]
 #[path = "services_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "services_history_tests.rs"]

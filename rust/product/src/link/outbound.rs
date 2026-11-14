@@ -129,7 +129,7 @@ pub(super) struct Outbound {
     clock: Option<Arc<SourceClock>>,
     private: bool,
     private_finishing: bool,
-    private_clock: Option<SourceTimeClock>,
+    timed_clock: Option<SourceTimeClock>,
     programme_guard: Option<PeerReply>,
     next_audio_ms: u64,
     unkey_ns: Option<u64>,
@@ -161,7 +161,7 @@ impl Outbound {
             clock: None,
             private: false,
             private_finishing: false,
-            private_clock: None,
+            timed_clock: None,
             programme_guard: None,
             next_audio_ms: 0,
             unkey_ns: None,
@@ -184,16 +184,16 @@ impl Outbound {
                 || self.conversion.as_ref().is_some_and(|value| !value.drained)
                 || self.encoder.as_ref().is_some_and(|value| !value.drained));
     }
-    pub(super) fn bind_private_clock(&mut self, clock: SourceTimeClock) -> Result<(), Error> {
+    pub(super) fn bind_timed_clock(&mut self, clock: SourceTimeClock) -> Result<(), Error> {
         let epoch = clock.reference().host_clock_epoch;
         if epoch == 0
             || self
-                .private_clock
+                .timed_clock
                 .is_some_and(|old| old.reference().host_clock_epoch != epoch)
         {
             return Err(Error::Admission);
         }
-        self.private_clock = Some(clock);
+        self.timed_clock = Some(clock);
         Ok(())
     }
     /// Drop staged media before serial retirement, including when no next PCM arrives.
@@ -265,6 +265,9 @@ impl Outbound {
     }
     /// Return an absolute source/expiry wake. Each call handles at most one media item.
     pub(super) fn step(&mut self, io: &mut PeerIo, now_ms: u64) -> Result<Option<u64>, Error> {
+        if io.timed_g711_egress() && self.timed_clock.is_none() {
+            return Err(Error::Admission);
+        }
         if !io.prepared_media() {
             self.pcm_step(io, now_ms)?;
             return Ok(Some(self.next_audio_ms.saturating_mul(1_000_000)));
@@ -277,7 +280,7 @@ impl Outbound {
             return Ok(None);
         }
         let now = if self.private {
-            let reference = self.private_clock.ok_or(Error::Admission)?.reference();
+            let reference = self.timed_clock.ok_or(Error::Admission)?.reference();
             if reference.host_clock_epoch == 0 {
                 return Err(Error::Admission);
             }
@@ -436,6 +439,7 @@ impl Outbound {
             // while waiting for writable, but never retain it indefinitely.
             let expires = deadline.saturating_add(AGE_NS);
             if !self.private
+                && self.timed_clock.is_none()
                 && self.sent
                 && now < expires
                 && !io.send_prepared(&[], 0, self.idle_timestamp)?
@@ -557,11 +561,11 @@ impl Outbound {
             );
             return self.discard_media(io);
         }
-        // Released private G.711 requires complete 160-frame packets. Complete
+        // Released timed G.711 requires complete 160-frame packets. Complete
         // the retained finite tail with PCM silence before asking the codec to
         // flush; encoded-byte padding would not represent codec silence.
-        let padding = if self.private && self.rate == 8000 && flush {
-            if !self.private_finishing
+        let padding = if self.timed_clock.is_some() && self.rate == 8000 && flush {
+            if (self.private && !self.private_finishing)
                 || self.pcm_position != self.pcm_used
                 || !self.conversion.as_ref().is_some_and(|value| value.drained)
             {
@@ -688,11 +692,11 @@ impl Outbound {
         let end_timestamp = anchor.call_ms.wrapping_add(
             (end_origin as i128 - anchor.source_ns as i128).div_euclid(1_000_000) as u32,
         );
-        let deadline = if self.private {
+        let deadline = if self.timed_clock.is_some() {
             // The native floor MUST precede the original host clock reference.
             // Birth was stamped by this same retained worker clock at rendering.
             let elapsed = io.elapsed_ms();
-            let reference = self.private_clock.ok_or(Error::Admission)?.reference();
+            let reference = self.timed_clock.ok_or(Error::Admission)?.reference();
             let remaining = (reference.host_clock_epoch != 0)
                 .then(|| expires.checked_sub(reference.now_ns))
                 .flatten()
@@ -1096,7 +1100,7 @@ mod tests {
         let clock = SourceTimeClock::new(std::time::Instant::now()).unwrap();
         let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
         let mut outbound = Outbound::private(8000, reader).unwrap();
-        outbound.bind_private_clock(clock).unwrap();
+        outbound.bind_timed_clock(clock).unwrap();
         for index in 0..2 {
             let born = clock.reference().now_ns;
             writer.write(
@@ -1223,6 +1227,122 @@ mod tests {
         assert_eq!(
             history.packet(source_ns(1), 0, 960, 48000, 1, 961),
             150_000_000
+        );
+    }
+    #[test]
+    fn ordinary_timed_g711_keeps_deadline_and_expires_without_legacy_empty_voice() {
+        let (mut io, state) = crate::link::session::tests::phone_source_peer();
+        {
+            let mut state = state.lock().unwrap();
+            state.encode_unit = Some(160);
+            state.prepared_result = 1;
+        }
+        let clock = SourceTimeClock::new(std::time::Instant::now()).unwrap();
+        let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(8000, reader).unwrap();
+        outbound.bind_timed_clock(clock).unwrap();
+        let born = clock.reference().now_ns;
+        writer.write(
+            AudioSpan {
+                born_ns: Some(born),
+                phone_expires_ns: born + 100_000_000,
+                ..AudioSpan::default()
+            },
+            &[0.25; 1920],
+        );
+        for now in 0..5 {
+            outbound.step(&mut io, now * 20).unwrap();
+        }
+        let deadline = *state
+            .lock()
+            .unwrap()
+            .timed_deadlines
+            .first()
+            .expect("ordinary restricted peer uses the timed provider path");
+        outbound.step(&mut io, 101).unwrap();
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .timed_deadlines
+                .iter()
+                .all(|value| *value == deadline),
+            "retry keeps its original deadline"
+        );
+        state.lock().unwrap().prepared_result = 0;
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(150);
+        while std::time::Instant::now() < until {
+            outbound
+                .step(&mut io, clock.reference().now_ns / 1_000_000)
+                .unwrap();
+            if outbound.unkey_ns.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        assert!(
+            outbound.unkey_ns.is_none(),
+            "expiry leaves no pending idle marker"
+        );
+        let state = state.lock().unwrap();
+        assert!(
+            state.prepared.iter().all(|packet| packet.0.len() == 160),
+            "timed G.711 uses padded media packets, never legacy empty voice"
+        );
+        assert_eq!(
+            state.prepared.len(),
+            state.timed_deadlines.len(),
+            "no untimed send after opt-in"
+        );
+    }
+    #[test]
+    fn ordinary_timed_g711_accepts_a_short_padded_tail_before_idle_completes() {
+        let (mut io, state) = crate::link::session::tests::phone_source_peer();
+        state.lock().unwrap().encode_unit = Some(160);
+        let clock = SourceTimeClock::new(std::time::Instant::now()).unwrap();
+        let (mut writer, reader) = LinkAudioQueue::new(960, 4).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(8000, reader).unwrap();
+        outbound.bind_timed_clock(clock).unwrap();
+        let born = clock.reference().now_ns;
+        writer.write(
+            AudioSpan {
+                born_ns: Some(born),
+                phone_expires_ns: born + 500_000_000,
+                ..AudioSpan::default()
+            },
+            &[0.25; 480],
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(150);
+        loop {
+            outbound
+                .step(&mut io, clock.reference().now_ns / 1_000_000)
+                .unwrap();
+            if !state.lock().unwrap().prepared.is_empty() && outbound.unkey_ns.is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "live short tail did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        let state = state.lock().unwrap();
+        assert_eq!(state.prepared.len(), 1);
+        assert_eq!(
+            state.prepared[0].0.len(),
+            160,
+            "the live 10-ms source must finish as one padded 20-ms G.711 packet"
+        );
+        assert_eq!(
+            state.timed_deadlines.len(),
+            1,
+            "tail acceptance uses the same timed provider path"
+        );
+        assert!(state.audio.is_empty());
+        assert_eq!(
+            outbound.statistics.snapshot().expired_native_samples,
+            0,
+            "expiry cannot stand in for successful tail drain"
         );
     }
 }

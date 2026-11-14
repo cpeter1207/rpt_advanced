@@ -607,7 +607,7 @@ impl PeerSession {
         }
         let outbound = Outbound::new(io.rate(), outbound)?;
         let source = io.source_media();
-        if source && io.rate() != 8000 {
+        if (source || io.timed_g711_egress()) && io.rate() != 8000 {
             return Err(Error::UnsupportedFormat);
         }
         let (inbound, _input) = InboundRing::open(
@@ -1242,6 +1242,9 @@ impl SerialSession for PeerSession {
     }
     fn set_source_clock(&mut self, clock: SourceTimeClock) {
         self.source_time_clock = Some(clock);
+        if self.io.timed_g711_egress() && self.outbound.bind_timed_clock(clock).is_err() {
+            self.stop.store(true, Ordering::Release);
+        }
     }
 }
 

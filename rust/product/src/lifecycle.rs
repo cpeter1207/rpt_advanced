@@ -115,6 +115,13 @@ struct DialJob {
     report: bool,
 }
 impl Dial {
+    fn timed_g711(&self) -> bool {
+        match self {
+            Self::Connect(work) => work.timed_g711(),
+            Self::Retry(work) => work.timed_g711(),
+        }
+    }
+
     fn private_reply(&self) -> Option<&rpt_advanced_core::link::PeerReply> {
         match self {
             Self::Connect(work) => work.private_reply(),
@@ -318,11 +325,19 @@ impl Engine {
             .ok()
             .filter(|_| self.current(revision) && attempt.current(self.elapsed_ms()))
             .and_then(|destination| {
-                self.services
-                    .dial(&destination, &local, crate::host::MAXIMUM_FRAMES, || {
-                        self.current(revision) && attempt.current(self.elapsed_ms())
-                    })
-                    .ok()
+                let current = || self.current(revision) && attempt.current(self.elapsed_ms());
+                if attempt.timed_g711() {
+                    self.services.dial_timed_g711(
+                        &destination,
+                        &local,
+                        crate::host::MAXIMUM_FRAMES,
+                        current,
+                    )
+                } else {
+                    self.services
+                        .dial(&destination, &local, crate::host::MAXIMUM_FRAMES, current)
+                }
+                .ok()
             });
         let engine = Arc::clone(self);
         let result = self.run_inner(true, move |host| {
