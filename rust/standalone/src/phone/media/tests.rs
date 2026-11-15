@@ -203,8 +203,14 @@ async fn socket_receipt_floor_requires_real_empty_probe_and_never_dequeues_on_ca
     )
     .await
     .unwrap();
+    let codec = AudioCodec::load(AudioProfile::Mulaw).unwrap();
     let mut output = [0; 160];
-    assert!(endpoint.try_receive(&mut output).unwrap().is_none());
+    assert!(
+        endpoint
+            .try_receive(&mut output, &|packet| codec.inspect(packet))
+            .unwrap()
+            .is_none()
+    );
     let first = endpoint.receipt_floor;
     let mut packet = [0xa5; 172];
     packet[..12].copy_from_slice(&[0x80, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 19]);
@@ -212,20 +218,38 @@ async fn socket_receipt_floor_requires_real_empty_probe_and_never_dequeues_on_ca
         .send_to(&packet, endpoint.local_addr().unwrap())
         .unwrap();
     // No reactor yield: the kernel has data but Tokio has not observed it.
-    assert!(endpoint.try_receive(&mut output).unwrap().is_none());
+    assert!(
+        endpoint
+            .try_receive(&mut output, &|packet| codec.inspect(packet))
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(endpoint.receipt_floor, first);
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    let (_, receipt) = endpoint.try_receive(&mut output).unwrap().unwrap();
+    let (_, receipt) = endpoint
+        .try_receive(&mut output, &|packet| codec.inspect(packet))
+        .unwrap()
+        .unwrap();
     assert_eq!(receipt, first);
     assert_eq!(
         output, [0xa5; 160],
         "the cached-readiness probe was nonconsuming"
     );
-    assert!(endpoint.try_receive(&mut output).unwrap().is_none());
+    assert!(
+        endpoint
+            .try_receive(&mut output, &|packet| codec.inspect(packet))
+            .unwrap()
+            .is_none()
+    );
     let drained = endpoint.receipt_floor;
     assert!(drained > first);
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    assert!(endpoint.try_receive(&mut output).unwrap().is_none());
+    assert!(
+        endpoint
+            .try_receive(&mut output, &|packet| codec.inspect(packet))
+            .unwrap()
+            .is_none()
+    );
     let idle = endpoint.receipt_floor;
     assert!(
         idle > drained,
@@ -235,7 +259,14 @@ async fn socket_receipt_floor_requires_real_empty_probe_and_never_dequeues_on_ca
         .send_to(&packet, endpoint.local_addr().unwrap())
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    assert_eq!(endpoint.try_receive(&mut output).unwrap().unwrap().1, idle);
+    assert_eq!(
+        endpoint
+            .try_receive(&mut output, &|packet| codec.inspect(packet))
+            .unwrap()
+            .unwrap()
+            .1,
+        idle
+    );
 }
 
 #[test]
@@ -547,6 +578,7 @@ async fn both_negotiated_receive_event_clocks_are_retained_and_tx_uses_only_matc
         let sdp = event_profile_sdp(payloads, &maps, peer.local_addr().unwrap().port());
         let media = MediaDescription::parse_answer(sdp.as_bytes()).unwrap();
         assert_eq!(media.digit_capabilities(), if mixed_only { 512 } else { 0 });
+        let codec = AudioCodec::load(media.codec).unwrap();
         let mut endpoint = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), media, 55, 1)
             .await
             .unwrap();
@@ -561,7 +593,7 @@ async fn both_negotiated_receive_event_clocks_are_retained_and_tx_uses_only_matc
                 peer.send_to(&wire, local).await.unwrap();
                 let event = tokio::time::timeout(
                     std::time::Duration::from_secs(1),
-                    endpoint.receive(&mut output),
+                    endpoint.receive(&mut output, |packet| codec.inspect(packet)),
                 )
                 .await
                 .unwrap()
@@ -767,5 +799,61 @@ fn ilbc_answers_keep_mode_thirty_and_directional_payload_identity() {
             MediaDescription::parse_answer(answer.replace("iLBC/8000", "iLBC/16000").as_bytes())
                 .is_err()
         );
+    }
+}
+
+#[tokio::test]
+async fn native_partial_units_and_inspector_faults_never_adopt_or_overwrite() {
+    for profile in [AudioProfile::Gsm, AudioProfile::L16Wideband] {
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut codec = AudioCodec::load(profile).unwrap();
+        let shape = profile.parameters();
+        let mut encoded = vec![0; shape.packet_bytes];
+        codec
+            .encode(&vec![0.125; shape.packet_frames as usize], &mut encoded)
+            .unwrap();
+        let mut endpoint = RtpEndpoint::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            MediaDescription {
+                remote: peer.local_addr().unwrap(),
+                codec: profile,
+                receive_payload: profile.payload(),
+                send_payload: profile.payload(),
+                telephone_events: [None; 2],
+            },
+            1,
+            0,
+        )
+        .await
+        .unwrap();
+        let mut wire = vec![0x80, profile.payload(), 0, 1, 0, 0, 0, 0, 0, 0, 0, 77];
+        wire.extend_from_slice(&encoded);
+        let mut output = vec![0x55; shape.packet_bytes];
+        assert_eq!(
+            endpoint.receive_wire(&wire, &mut output, &|_| Err(MediaError::Codec)),
+            Err(MediaError::Codec)
+        );
+        assert_eq!(endpoint.source, None);
+        assert!(output.iter().all(|byte| *byte == 0x55));
+        assert_eq!(
+            endpoint.receive_wire(&wire[..wire.len() - 1], &mut output, &|packet| codec
+                .inspect(packet)),
+            Err(MediaError::InvalidPacket)
+        );
+        assert_eq!(endpoint.source, None);
+        assert!(output.iter().all(|byte| *byte == 0x55));
+        wire[11] = 88;
+        assert_eq!(
+            endpoint.receive_wire(&wire, &mut output, &|packet| codec.inspect(packet)),
+            Ok(RtpEvent::Audio {
+                sequence: 1,
+                timestamp: 0,
+                ssrc: 88,
+                length: shape.packet_bytes,
+                span: shape.packet_frames,
+            })
+        );
+        assert_eq!(endpoint.source, Some(88));
+        assert_eq!(output, encoded);
     }
 }

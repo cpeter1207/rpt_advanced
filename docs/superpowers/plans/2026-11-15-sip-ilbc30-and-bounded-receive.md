@@ -33,12 +33,12 @@
 
 **Interfaces:** Add `AudioCodec::inspect(&self, packet: &[u8]) -> Result<u32, MediaError>` and crate-local RX capacity accessors. Require a call-local `Fn(&[u8]) -> Result<u32, MediaError>` on `RtpEndpoint::receive`, `try_receive`, and `receive_wire`. Extend `RtpEvent::Audio` with actual `length: usize` and `span: u32`; no stored callback or default validation bypass.
 
-- [ ] Add `bounded_receive_accepts_complete_native_units_through_thirty_ms`: real existing profiles decode10/20/30ms where native units permit; GSM20ms succeeds and partial/40ms fails; every over-ceiling/empty/partial input fails. Existing TX output lengths remain unchanged.
-- [ ] Add real RTP receive tests for accepted10/30ms spans, unchanged output/SSRC on invalid payload and provider-error classification. Observe behavioral RED before implementation.
-- [ ] Prepare decoder maxima from floor(rate*30/1000/native_unit)*native_unit and corresponding bytes, retaining fixed encoder configuration. Inspect before latch/copy. Decode actual prefix through existing native recovery; swap only L16's actual prefix.
-- [ ] Allocate selected RX maxima in Media, retain existing jitter loss unit, pass actual inspected span/payload to put and actual returned length/span to decode. Reject impossible shapes without altering source-credit semantics.
-- [ ] Extend existing source-credit fixtures for mixed10/30ms packets, refusal, overlap, loss, original birth and bounded retirement. Execute targeted GREEN plus unchanged fixed-TX/finite/transport controls.
-- [ ] Commit the independently verified receive change; update ADR0044 at the existing packet boundary.
+- [x] Add `bounded_receive_accepts_complete_native_units_through_thirty_ms`: real existing profiles decode10/20/30ms where native units permit; GSM20ms succeeds and partial/40ms fails; every over-ceiling/empty/partial input fails. Existing TX output lengths remain unchanged.
+- [x] Add real RTP receive tests for accepted10/30ms spans, unchanged output/SSRC on invalid payload and provider-error classification. Observe behavioral RED before implementation.
+- [x] Prepare decoder maxima from floor(rate*30/1000/native_unit)*native_unit and corresponding bytes, retaining fixed encoder configuration. Inspect before latch/copy. Decode actual prefix through existing native recovery; swap only L16's actual prefix.
+- [x] Allocate selected RX maxima in Media, retain existing jitter loss unit, pass actual inspected span/payload to put and actual returned length/span to decode. Reject impossible shapes without altering source-credit semantics.
+- [x] Extend existing source-credit fixtures for mixed10/30ms packets, refusal, overlap, loss, original birth and bounded retirement. Execute targeted GREEN plus unchanged fixed-TX/finite/transport controls.
+- [x] Commit the independently verified receive change; update ADR0044 at the existing packet boundary.
 
 ### Task2: Negotiate and carry iLBC30
 
@@ -85,3 +85,23 @@ failure was substituted for these assertions. Log SHA256:
 Production remains identical to the frozen baseline at this recovery point.
 Native malformed-unit and provider-fault inspector rows, actual returned span/
 length, and untouched output suffix still need the mandatory inspector seam.
+
+
+### Task1 focused receive qualification
+
+The first focused run passed framing3, provider-fault1, profile8 and transport1,
+then failed one adapted test row: its PCMA fixture had accidentally changed the
+original unnegotiated PT0 negative into negotiated PT8. Restoring PT0 changed no
+production behavior or artifact cache. That failed receipt is preserved as
+receive-green-first.log, SHA256
+`f8f42b653f63b4dd4fb2bbcbbad6966a7f812320574c9f82d45480f25709ef90`.
+
+The corrected receive-green-retry.log completed RUN_EXIT0: framing3,
+provider-fault1, profile8, transport1, media15, call-media13, pre-latch inspector1,
+finite3 and formatting passed. The source-credit cases include 10/30 ms input,
+refused prefixes, both signed offsets, retained birth and exact PCM/gap counts.
+Independent source review covered the three production files before execution.
+This is a local recovery checkpoint, not full aggregate/native/coverage or wire
+qualification of the new receive path. Task2 iLBC/SDP tests remain intentionally
+RED and unimplemented. Frozen Batch A replay, including the separately observed
+PCMA strict-window boundary failure, remains separate.

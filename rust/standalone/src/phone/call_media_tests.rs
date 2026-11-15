@@ -711,3 +711,75 @@ async fn variable_source_spans_keep_original_birth_across_refused_prefixes() {
         drop(media);
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn variable_packet_offsets_preserve_exact_gap_overlap_and_birth() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    for offset in [-40_i32, 40] {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut media = fixture_media(&sender, jitter).await;
+        let target = media.endpoint.local_addr().unwrap();
+        let now = 1_000_000_000;
+        let start = (1_u64 << 32) + 1000;
+        let mut sink = Sink {
+            credit: 240,
+            ..Sink::default()
+        };
+        sender
+            .send_to(&packet(1, 1000, 0, &[0xa5; 80]), target)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert_eq!(read(&mut media, &mut sink, now), 0);
+        sender
+            .send_to(&packet(2, (1080 + offset) as u32, 0, &[0xb5; 240]), target)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert_eq!(read(&mut media, &mut sink, now + 10_000_000), 0);
+        let first_birth = media.births[0].expect("first10ms packet admitted").1;
+        let second_birth = media.births[1].expect("second30ms packet admitted").1;
+        assert!(first_birth <= now && second_birth <= now + 10_000_000);
+        assert_eq!(read(&mut media, &mut sink, now + 40_000_000), 1);
+        assert_eq!(sink.audio, [(start, 80, first_birth)]);
+        sink.audio.clear();
+        sink.pcm.clear();
+        sink.credit = 0;
+        assert_eq!(read(&mut media, &mut sink, now + 60_000_000), 2);
+        if offset > 0 {
+            sink.credit = 40;
+            assert_eq!(read(&mut media, &mut sink, now + 70_000_000), 1);
+            assert_eq!(sink.gaps, [(start + 80, 0), (start + 80, 40)]);
+            assert!(sink.audio.is_empty());
+            sink.credit = 50;
+            assert_eq!(read(&mut media, &mut sink, now + 80_000_000), 2);
+            sink.credit = 240;
+            assert_eq!(read(&mut media, &mut sink, now + 90_000_000), 1);
+            assert_eq!(
+                sink.audio,
+                [
+                    (start + 120, 50, second_birth),
+                    (start + 170, 190, second_birth)
+                ]
+            );
+        } else {
+            sink.credit = 50;
+            assert_eq!(read(&mut media, &mut sink, now + 70_000_000), 2);
+            sink.credit = 240;
+            assert_eq!(read(&mut media, &mut sink, now + 80_000_000), 1);
+            assert!(sink.gaps.is_empty());
+            assert_eq!(
+                sink.audio,
+                [
+                    (start + 80, 0, second_birth),
+                    (start + 80, 50, second_birth),
+                    (start + 130, 150, second_birth)
+                ]
+            );
+        }
+        let mut expected = [0.0; 240];
+        media.codec.decode(&[0xb5; 240], &mut expected).unwrap();
+        assert_eq!(sink.pcm, expected[if offset < 0 { 40 } else { 0 }..]);
+        assert_eq!(media.source_end, Some(start + (80 + offset + 240) as u64));
+        drop(media);
+    }
+}

@@ -75,6 +75,26 @@ static int32_t decode(void *handle, const uint8_t *packet, size_t bytes, float *
     return status;
 }
 
+/** Preserve native inspection except for one explicit status or result fault. */
+static int32_t inspect(void *handle, const uint8_t *packet, size_t bytes,
+                       rptadv_codec_packet_info_v1 *result) {
+    if (fault("inspect_malformed"))
+        return RPTADV_CODEC_MALFORMED;
+    if (fault("inspect_error"))
+        return RPTADV_CODEC_FAILED;
+    int32_t status = canonical->inspect(handle, packet, bytes, result);
+    assert(status == RPTADV_CODEC_COMPLETE);
+    if (fault("inspect_zero"))
+        result->frames = 0;
+    if (fault("inspect_span"))
+        --result->frames;
+    if (fault("inspect_bound"))
+        result->frames = 241;
+    if (fault("inspect_mode"))
+        ++result->mode;
+    return status;
+}
+
 /** Observe cleanup without replacing the released provider's ownership. */
 static void destroy(void *handle) {
     if (handle != NULL) {
@@ -106,6 +126,7 @@ const rptadv_codec_descriptor_v1_table *rptadv_codec_descriptor_v1(void) {
     descriptor.open_decoder = open_decoder;
     descriptor.encode = encode;
     descriptor.decode = decode;
+    descriptor.inspect = inspect;
     descriptor.destroy = destroy;
     if (fault("null_table"))
         return NULL;

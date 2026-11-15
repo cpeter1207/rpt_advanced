@@ -5,6 +5,10 @@ use rpt_advanced_standalone::phone::media::{
 };
 use std::net::SocketAddr;
 
+fn inspect_g711(packet: &[u8]) -> Result<u32, MediaError> {
+    rpt_advanced_standalone::phone::media::AudioCodec::load(AudioProfile::Mulaw)?.inspect(packet)
+}
+
 fn offer(payload: &str, attributes: &str) -> String {
     format!(
         "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 42000 RTP/AVP {payload}\r\n{attributes}"
@@ -143,11 +147,13 @@ async fn rtp_socket_preserves_packet_order_and_original_source_clock() {
         peer.send_to(&wire[..172], local).await.unwrap();
         let mut payload = [0; 160];
         assert_eq!(
-            transport.receive(&mut payload).await.unwrap(),
+            transport.receive(&mut payload, inspect_g711).await.unwrap(),
             RtpEvent::Audio {
                 sequence,
                 timestamp: 160,
-                ssrc: 7
+                ssrc: 7,
+                length: 160,
+                span: 160
             }
         );
         assert_eq!(payload, [0xff; 160]);
@@ -208,7 +214,13 @@ async fn telephone_events_are_bounded_and_end_repetitions_are_deduplicated() {
             160,
         ];
         peer.send_to(&packet, local).await.unwrap();
-        assert_eq!(transport.receive(&mut [0; 160]).await.unwrap(), expected);
+        assert_eq!(
+            transport
+                .receive(&mut [0; 160], inspect_g711)
+                .await
+                .unwrap(),
+            expected
+        );
     }
     // Unknown event and wrong codec payload fail closed, not as speech.
     for payload in [
@@ -217,7 +229,7 @@ async fn telephone_events_are_bounded_and_end_repetitions_are_deduplicated() {
     ] {
         peer.send_to(&payload, local).await.unwrap();
         assert_eq!(
-            transport.receive(&mut [0; 160]).await,
+            transport.receive(&mut [0; 160], inspect_g711).await,
             Err(MediaError::InvalidPacket)
         );
     }
@@ -416,9 +428,12 @@ async fn receive_packet(
     peer.send_to(wire, transport.local_addr().unwrap())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), transport.receive(output))
-        .await
-        .unwrap()
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        transport.receive(output, inspect_g711),
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -429,7 +444,7 @@ async fn rtp_rejects_bad_framing_without_accepting_a_source_or_overwriting_audio
         vec![0; 2048],
         vec![0; 2049],
         wrong_version,
-        packet(0, 160, 7, &[0xff; 159]),
+        packet(0, 160, 7, &[]),
         packet(0, 160, 7, &[0xff; 161]),
     ];
     for payload in [vec![], vec![0], vec![2]] {
@@ -456,7 +471,9 @@ async fn rtp_rejects_bad_framing_without_accepting_a_source_or_overwriting_audio
             Ok(RtpEvent::Audio {
                 sequence: 1,
                 timestamp: 320,
-                ssrc: 8
+                ssrc: 8,
+                length: 160,
+                span: 160
             })
         );
         assert_eq!(output, [0xff; 160]);
@@ -477,7 +494,9 @@ async fn rtp_strips_valid_padding_and_keeps_the_first_valid_source() {
             Ok(RtpEvent::Audio {
                 sequence: 1,
                 timestamp: 160,
-                ssrc: 7
+                ssrc: 7,
+                length: 160,
+                span: 160
             })
         );
         assert_eq!(output, [0xd5; 160]);
@@ -504,7 +523,9 @@ async fn rtp_strips_valid_padding_and_keeps_the_first_valid_source() {
         Ok(RtpEvent::Audio {
             sequence: 1,
             timestamp: 480,
-            ssrc: 7
+            ssrc: 7,
+            length: 160,
+            span: 160
         })
     );
     assert_eq!(output, [0xff; 160]);

@@ -2259,3 +2259,27 @@ under different clock mappings. Mixed-clock event transmission and RTCP clock-
 switch signaling are not implemented. In-band fallback is permitted by RFC4733,
 but an event-only IVR need not recognize it. Outgoing callee digits retain their
 existing lack of controller-command authority.
+
+
+### Bounded native SIP receive units
+
+Receive packet shape is independent of the selected fixed transmit packet.
+The selected decoder is prepared for complete native coding units through a
+30 ms local ceiling. GSM remains one 20 ms coding unit under that ceiling.
+Encoder configuration and paced transmit size are unchanged. This receive
+checkpoint does not yet add iLBC or change the SDP packet-time policy.
+
+The RTP owner requires a call-local framing inspection before copying payload
+or adopting SSRC. Native Malformed is discardable peer input; other provider
+failures and impossible successful span/mode/length reports remain terminal
+codec failures. Inspection does not advance decoder or concealment history.
+The existing jitter owner retains actual encoded length and inspected PCM span;
+playout decodes only those prefixes through the existing recovery operation.
+L16 swaps only the actual payload prefix in its prepared scratch.
+
+The same retained PCM/gap credit, signed overlap handling, original receipt
+birth and retirement rules apply to 10/20/30 ms receive spans. There is no new
+queue, callback owner, provider ABI, converter or decoder per packet. Only the
+selected codec contexts remain live; startup bidirectional probes are temporary.
+The worst supported L16/16k receive payload is 960 bytes and 480 PCM frames.
+This is an implementation ceiling, not a claim to accept every RTP packetization.

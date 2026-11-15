@@ -74,9 +74,17 @@ fn exercise_fault(fault: &str) {
                 assert_eq!(encoded, Ok(()));
                 assert_eq!(packet, [silence; 160]);
             }
+            let inspected = codec.inspect(&[silence; 160]);
+            if fault == "inspect_malformed" {
+                assert_eq!(inspected, Err(MediaError::InvalidPacket));
+            } else if fault.starts_with("inspect_") {
+                assert_eq!(inspected, Err(MediaError::Codec), "{fault}");
+            } else {
+                assert_eq!(inspected, Ok(160));
+            }
             let mut pcm = [1.0; 160];
             let decoded = codec.decode(&[silence; 160], &mut pcm);
-            if matches!(fault, "decode_error" | "decoded_frames") {
+            if matches!(fault, "decode_error" | "decoded_frames") || fault.starts_with("inspect_") {
                 assert_eq!(decoded, Err(MediaError::Codec), "{fault}");
             } else {
                 assert_eq!(decoded, Ok(()));
@@ -149,6 +157,12 @@ fn codec_rejects_provider_faults_and_reclaims_partial_construction() {
         "packet_frames",
         "decode_error",
         "decoded_frames",
+        "inspect_malformed",
+        "inspect_error",
+        "inspect_zero",
+        "inspect_span",
+        "inspect_bound",
+        "inspect_mode",
     ] {
         let mut command = Command::new("timeout");
         command

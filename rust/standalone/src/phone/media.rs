@@ -94,7 +94,7 @@ pub struct AudioParameters {
     pub rtp_clock_hz: u32,
     /// PCM samples represented by one transmit packet.
     pub packet_frames: u32,
-    /// Maximum encoded bytes in the selected packet profile.
+    /// Encoded bytes represented by one fixed transmit packet.
     pub packet_bytes: usize,
 }
 impl AudioProfile {
@@ -486,7 +486,7 @@ fn complete_dtmf_range(value: &str) -> bool {
 pub enum RtpEvent {
     /// Duplicate telephone event, with no newly actionable transition.
     None,
-    /// One complete encoded packet in the selected 20 ms profile.
+    /// One inspected complete-unit encoded packet within the local receive ceiling.
     Audio {
         /// Original wrapping packet sequence number.
         sequence: u16,
@@ -494,6 +494,10 @@ pub enum RtpEvent {
         timestamp: u32,
         /// Original synchronization source.
         ssrc: u32,
+        /// Actual encoded payload bytes copied into the receive workspace.
+        length: usize,
+        /// Native inspected PCM frames, independent of RTP clock ticks.
+        span: u32,
     },
     /// Telephone event onset or first end, independently of audio admission.
     Digit {
@@ -707,13 +711,17 @@ impl RtpEndpoint {
             .map_err(|_| MediaError::Network)
     }
     /// Receive a source-filtered packet without reordering it before jitter.
-    pub async fn receive(&mut self, output: &mut [u8]) -> Result<RtpEvent, MediaError> {
+    pub async fn receive(
+        &mut self,
+        output: &mut [u8],
+        inspect: impl Fn(&[u8]) -> Result<u32, MediaError>,
+    ) -> Result<RtpEvent, MediaError> {
         loop {
             self.socket
                 .readable()
                 .await
                 .map_err(|_| MediaError::Network)?;
-            if let Some((event, _)) = self.try_receive(output)? {
+            if let Some((event, _)) = self.try_receive(output, &inspect)? {
                 return Ok(event);
             }
         }
@@ -724,6 +732,7 @@ impl RtpEndpoint {
     pub(crate) fn try_receive(
         &mut self,
         output: &mut [u8],
+        inspect: &impl Fn(&[u8]) -> Result<u32, MediaError>,
     ) -> Result<Option<(RtpEvent, Instant)>, MediaError> {
         let mut wire = [0; 2048];
         let mut attempted = false;
@@ -748,13 +757,18 @@ impl RtpEndpoint {
         }
         match result {
             Ok(length) => self
-                .receive_wire(&wire[..length], output)
+                .receive_wire(&wire[..length], output, inspect)
                 .map(|event| Some((event, self.receipt_floor))),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(MediaError::Socket(error.raw_os_error().unwrap_or(0))),
         }
     }
-    fn receive_wire(&mut self, wire: &[u8], output: &mut [u8]) -> Result<RtpEvent, MediaError> {
+    fn receive_wire(
+        &mut self,
+        wire: &[u8],
+        output: &mut [u8],
+        inspect: &impl Fn(&[u8]) -> Result<u32, MediaError>,
+    ) -> Result<RtpEvent, MediaError> {
         use webrtc_util::marshal::Unmarshal;
         if wire.len() == 2048 {
             return Err(MediaError::InvalidPacket);
@@ -773,16 +787,17 @@ impl RtpEndpoint {
             payload = &payload[..payload.len() - padding];
         }
         let event = if header.payload_type == self.media.receive_payload {
-            if payload.len() != self.media.codec.parameters().packet_bytes
-                || output.len() < payload.len()
-            {
+            if output.len() < payload.len() {
                 return Err(MediaError::InvalidPacket);
             }
+            let span = inspect(payload)?;
             output[..payload.len()].copy_from_slice(payload);
             RtpEvent::Audio {
                 sequence: header.sequence_number,
                 timestamp: header.timestamp,
                 ssrc: header.ssrc,
+                length: payload.len(),
+                span,
             }
         } else if let Some(event) = self
             .media

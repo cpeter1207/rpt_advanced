@@ -72,6 +72,7 @@ async fn bounded_rtp_receive_does_not_latch_an_invalid_source_or_overwrite_outpu
     .await
     .unwrap();
     let target = endpoint.local_addr().unwrap();
+    let codec = AudioCodec::load(AudioProfile::Mulaw).unwrap();
     let mut output = [0x55; 240];
     for (index, length) in [241, 80, 240].into_iter().enumerate() {
         let ssrc: u32 = if index == 0 { 77 } else { 88 };
@@ -79,18 +80,22 @@ async fn bounded_rtp_receive_does_not_latch_an_invalid_source_or_overwrite_outpu
         wire.extend_from_slice(&ssrc.to_be_bytes());
         wire.extend(std::iter::repeat_n(0xa5, length));
         peer.send_to(&wire, target).await.unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(1), endpoint.receive(&mut output))
-            .await
-            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            endpoint.receive(&mut output, |packet| codec.inspect(packet)),
+        )
+        .await
+        .unwrap();
         if index == 0 {
             assert_eq!(result, Err(MediaError::InvalidPacket));
             assert_eq!(output, [0x55; 240]);
         } else {
             assert!(
-                matches!(result, Ok(RtpEvent::Audio { ssrc: 88, .. })),
+                matches!(result, Ok(RtpEvent::Audio { ssrc: 88, length: actual, span, .. }) if actual == length && span as usize == length),
                 "{length}: {result:?}"
             );
             assert!(output[..length].iter().all(|value| *value == 0xa5));
+            assert!(output[length..].iter().all(|value| *value == 0x55));
         }
     }
 }

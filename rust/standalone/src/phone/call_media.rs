@@ -130,10 +130,12 @@ impl Media {
                 std::ptr::from_ref(jitter).cast(),
                 profile.pcm_rate_hz,
                 profile.packet_frames,
-                profile.packet_bytes,
+                codec.receive_bytes(),
             )
         }
         .map_err(|_| MediaError::Jitter)?;
+        let pcm = vec![0.0; codec.receive_frames() as usize].into_boxed_slice();
+        let packet = vec![0; codec.receive_bytes()].into_boxed_slice();
         Ok(Self {
             endpoint,
             codec,
@@ -142,8 +144,8 @@ impl Media {
             clock: None,
             births: [None; 64],
             birth_slot: 0,
-            pcm: vec![0.0; profile.packet_frames as usize].into_boxed_slice(),
-            packet: vec![0; profile.packet_bytes].into_boxed_slice(),
+            pcm,
+            packet,
             pending: None,
             offset: 0,
             source_end: None,
@@ -235,18 +237,30 @@ impl Media {
     }
     fn poll(&mut self, now: u64) -> Result<(), MediaError> {
         for _ in 0..8 {
-            match self.endpoint.try_receive(&mut self.packet) {
+            let codec = &self.codec;
+            match self
+                .endpoint
+                .try_receive(&mut self.packet, &|packet| codec.inspect(packet))
+            {
                 Ok(None) => break,
                 Ok(Some((RtpEvent::None | RtpEvent::Digit { ended: false, .. }, _))) => {}
                 Ok(Some((RtpEvent::Digit { digit, ended: true }, _))) => {
                     self.pending = Some(Pending::Digit(digit));
                     return Ok(());
                 }
-                Ok(Some((RtpEvent::Audio { timestamp, .. }, receipt))) => {
+                Ok(Some((
+                    RtpEvent::Audio {
+                        timestamp,
+                        span,
+                        length,
+                        ..
+                    },
+                    receipt,
+                ))) => {
                     let timestamp = self.timestamp(timestamp)?;
                     if self
                         .jitter
-                        .put(timestamp, self.profile.packet_frames, now, &self.packet)
+                        .put(timestamp, span, now, &self.packet[..length])
                         .map_err(|_| MediaError::Jitter)?
                         == Admission::Accepted
                     {
@@ -279,8 +293,10 @@ impl Media {
                 // cursor. Positive offsets are missing prefixes; negative ones
                 // trim samples that have already been released (as in IAX playout).
                 let span = decision.span as usize;
-                if decision.length != self.profile.packet_bytes
-                    || span != self.profile.packet_frames as usize
+                if decision.length == 0
+                    || decision.length > self.packet.len()
+                    || span == 0
+                    || span > self.pcm.len()
                 {
                     return Err(MediaError::JitterShape);
                 }
@@ -307,7 +323,8 @@ impl Media {
                 } else {
                     decision.start_offset.max(0) as u32
                 };
-                self.codec.decode(&self.packet, &mut self.pcm)?;
+                self.codec
+                    .decode(&self.packet[..decision.length], &mut self.pcm[..span])?;
                 self.pcm.copy_within(skip..span, 0);
                 if let Some((_, born)) = self
                     .births

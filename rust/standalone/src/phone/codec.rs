@@ -56,6 +56,8 @@ pub struct AudioCodec {
     profile: AudioParameters,
     encoder: Encoder,
     decoder: Decoder,
+    receive_frames: u32,
+    receive_bytes: usize,
     retained: u32,
     finishing: bool,
     silence: Box<[f32]>,
@@ -96,25 +98,40 @@ impl AudioCodec {
                 profile.packet_bytes,
             )
             .map_err(|_| MediaError::Codec)?;
+        // Receive is independently bounded in complete native coding units.
+        // GSM remains20ms under this30ms ceiling; TX retains its selected cadence.
+        let units = (profile.pcm_rate_hz / 1000 * 30) / mode.frame_samples;
+        let receive_frames = units
+            .checked_mul(mode.frame_samples)
+            .filter(|frames| *frames >= profile.packet_frames)
+            .ok_or(MediaError::Codec)?;
+        let receive_bytes = usize::try_from(
+            units
+                .checked_mul(mode.frame_bytes)
+                .ok_or(MediaError::Codec)?,
+        )
+        .map_err(|_| MediaError::Codec)?;
         let decoder = catalog
             .decoder(
                 profile.provider_profile,
                 profile.mode_id,
-                profile.packet_frames,
-                profile.packet_bytes,
+                receive_frames,
+                receive_bytes,
             )
             .map_err(|_| MediaError::Codec)?;
         Ok(Self {
             profile,
             encoder,
             decoder,
+            receive_frames,
+            receive_bytes,
             retained: 0,
             finishing: false,
             silence: vec![0.0; profile.packet_frames as usize].into_boxed_slice(),
             decode_native: vec![
                 0;
                 if codec == AudioProfile::L16Wideband {
-                    profile.packet_bytes
+                    receive_bytes
                 } else {
                     0
                 }
@@ -285,36 +302,59 @@ impl AudioCodec {
         self.finishing = false;
         Ok(())
     }
-    /// Inspect and decode the complete payload before any PCM overlap trimming.
+    /// Complete-unit receive workspace bound, independent of fixed TX framing.
+    pub(crate) fn receive_frames(&self) -> u32 {
+        self.receive_frames
+    }
+    /// Encoded receive workspace bound for the selected native profile.
+    pub(crate) fn receive_bytes(&self) -> usize {
+        self.receive_bytes
+    }
+    /// Framing-only inspection before RTP source adoption; never advances decode/PLC.
+    pub fn inspect(&self, packet: &[u8]) -> Result<u32, MediaError> {
+        if packet.is_empty() || packet.len() > self.receive_bytes {
+            return Err(MediaError::InvalidPacket);
+        }
+        let info = self.decoder.inspect(packet).map_err(|error| {
+            if error.status == Status::Malformed {
+                MediaError::InvalidPacket
+            } else {
+                MediaError::Codec
+            }
+        })?;
+        // Every currently enabled profile has fixed native coding units. A
+        // successful provider result must agree with that verified byte/PCM ratio.
+        if info.frames == 0
+            || info.frames > self.receive_frames
+            || info.mode != self.profile.mode_id
+            || u64::from(info.frames) * self.profile.packet_bytes as u64
+                != packet.len() as u64 * u64::from(self.profile.packet_frames)
+        {
+            return Err(MediaError::Codec);
+        }
+        Ok(info.frames)
+    }
+    /// Decode the actual inspected payload before any PCM overlap trimming.
     pub fn decode(&mut self, packet: &[u8], pcm: &mut [f32]) -> Result<(), MediaError> {
-        if packet.len() != self.profile.packet_bytes {
+        let frames = self.inspect(packet).map_err(|_| MediaError::Codec)? as usize;
+        if pcm.len() != frames {
             return Err(MediaError::Codec);
         }
         let packet = if self.decode_native.is_empty() {
             packet
         } else {
-            self.decode_native.copy_from_slice(packet);
-            for sample in self.decode_native.chunks_exact_mut(2) {
+            let native = &mut self.decode_native[..packet.len()];
+            native.copy_from_slice(packet);
+            for sample in native.chunks_exact_mut(2) {
                 sample.swap(0, 1);
             }
-            &self.decode_native
+            native
         };
-        let info = self
-            .decoder
-            .inspect(packet)
-            .map_err(|_| MediaError::Codec)?;
-        if packet.len() != self.profile.packet_bytes
-            || info.frames != self.profile.packet_frames
-            || info.mode != self.profile.mode_id
-            || pcm.len() != self.profile.packet_frames as usize
-        {
-            return Err(MediaError::Codec);
-        }
         let count = self
             .decoder
             .decode_recovering(packet, pcm)
             .map_err(|_| MediaError::Codec)?;
-        if count != self.profile.packet_frames as usize {
+        if count != frames {
             return Err(MediaError::Codec);
         }
         Ok(())

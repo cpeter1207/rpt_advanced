@@ -64,28 +64,36 @@ async fn fixed_profiles_preserve_packet_shape_directional_payload_and_source_clo
             assert_eq!(&wire[8..12], &0x12345678u32.to_be_bytes());
             assert_eq!(&wire[12..], &encoded);
         }
-        // A malformed size cannot admit a source or overwrite the caller's PCM packet.
+        // An empty payload cannot admit a source or overwrite the receive workspace.
         let mut received = vec![0x5a; shape.packet_bytes];
         wire[8..12].copy_from_slice(&77u32.to_be_bytes());
-        peer.send_to(&wire[..wire.len() - 1], local).await.unwrap();
+        peer.send_to(&wire[..12], local).await.unwrap();
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), endpoint.receive(&mut received))
-                .await
-                .unwrap(),
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                endpoint.receive(&mut received, |packet| codec.inspect(packet))
+            )
+            .await
+            .unwrap(),
             Err(MediaError::InvalidPacket)
         );
         assert!(received.iter().all(|byte| *byte == 0x5a));
         wire[8..12].copy_from_slice(&88u32.to_be_bytes());
         peer.send_to(&wire, local).await.unwrap();
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), endpoint.receive(&mut received))
-                .await
-                .unwrap()
-                .unwrap(),
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                endpoint.receive(&mut received, |packet| codec.inspect(packet))
+            )
+            .await
+            .unwrap()
+            .unwrap(),
             RtpEvent::Audio {
                 sequence: 0,
                 timestamp: 400,
-                ssrc: 88
+                ssrc: 88,
+                length: shape.packet_bytes,
+                span: shape.packet_frames
             }
         );
         assert_eq!(received, encoded);
