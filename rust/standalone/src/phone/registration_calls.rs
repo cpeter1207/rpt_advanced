@@ -55,6 +55,7 @@ impl Client {
         }
         let (reply, result) = std::sync::mpsc::sync_channel(1);
         let close = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicU32::new(0));
         let mut dial = Dial {
             result,
             pending: Some(OwnerCommand::Call(Command::Originate(
@@ -64,9 +65,11 @@ impl Client {
                 destination,
                 jitter,
                 Arc::clone(&close),
+                Arc::clone(&progress),
                 reply,
             ))),
             close,
+            progress,
             client: self.clone(),
             finished: false,
         };
@@ -95,6 +98,7 @@ pub(crate) struct Dial {
     result: std::sync::mpsc::Receiver<Result<Handle, Error>>,
     pending: Option<OwnerCommand>,
     close: Arc<AtomicBool>,
+    progress: Arc<AtomicU32>,
     client: Client,
     finished: bool,
 }
@@ -110,6 +114,15 @@ impl Dial {
         }
         Ok(())
     }
+    /// Actual pending SIP status only; no handle or incoming authority is exposed.
+    pub(crate) fn provisional_status(&self) -> u32 {
+        if self.finished || self.close.load(Ordering::Acquire) {
+            0
+        } else {
+            self.progress.load(Ordering::Acquire)
+        }
+    }
+
     pub(crate) fn try_complete(&mut self) -> Result<Option<Handle>, Error> {
         if self.finished {
             return Err(Error::Call);
@@ -268,6 +281,7 @@ pub(super) enum Command {
         String,
         &'static abi::rptadv_jitter_descriptor_v1,
         Arc<AtomicBool>,
+        Arc<AtomicU32>,
         Reply<Handle>,
     ),
     Prepare(
@@ -281,6 +295,7 @@ pub(super) enum Command {
     Detach(Key, Reply<()>),
 }
 struct Outgoing {
+    progress: Arc<AtomicU32>,
     local: String,
     offer: Offer,
     jitter: &'static abi::rptadv_jitter_descriptor_v1,
@@ -296,6 +311,16 @@ pub(super) struct Slot {
 }
 impl Slot {
     fn state(&mut self, observation: Observation) {
+        if let Some(outgoing) = &self.outgoing {
+            outgoing.progress.store(
+                if observation.state == 1 && (100..200).contains(&observation.sip_status) {
+                    observation.sip_status
+                } else {
+                    0
+                },
+                Ordering::Release,
+            );
+        }
         if let Some(shared) = &self.shared {
             shared.state.store(observation.state, Ordering::Release);
         }
@@ -458,11 +483,13 @@ impl Reactor {
                     )
                 };
                 let Outgoing {
+                    progress,
                     local,
                     offer,
                     jitter,
                     reply,
                 } = outgoing;
+                progress.store(0, Ordering::Release);
                 let result = async {
                     if retiring
                         || closed.load(Ordering::Acquire)
@@ -532,7 +559,16 @@ impl Reactor {
     }
     pub(super) async fn call_command(&mut self, command: Command) {
         match command {
-            Command::Originate(id, generation, local, destination, jitter, close, reply) => {
+            Command::Originate(
+                id,
+                generation,
+                local,
+                destination,
+                jitter,
+                close,
+                progress,
+                reply,
+            ) => {
                 let result = async {
                     if close.load(Ordering::Acquire) {
                         return Err(Error::Call);
@@ -575,6 +611,7 @@ impl Reactor {
                             token,
                             Slot {
                                 outgoing: Some(Outgoing {
+                                    progress,
                                     local,
                                     offer,
                                     jitter,

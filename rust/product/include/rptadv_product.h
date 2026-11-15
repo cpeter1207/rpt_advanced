@@ -280,6 +280,10 @@ struct urp_ast_link_attach {
 };
 /** Current-generation predicate used during one bounded outbound dial. */
 typedef uint32_t (*rptadv_current_v1)(void *context);
+/** Actual pending SIP status (100..199), or zero when no pending progress remains.
+ * Called only by the synchronous dial worker, never the reactor or realtime owner.
+ * The callback/context are borrowed only until the factory returns. */
+typedef void (*rptadv_phone_progress_v1)(void *context, uint32_t sip_status);
 /** One borrowed peer input event identified by the RPTADV_PEER_EVENT_* constants.
  * For GAP, data is null and count is the number of missing source-rate samples.
  * The product may defer reading another event until all of this event is
@@ -669,6 +673,17 @@ struct rptadv_host_services_v10 {
                            const char *destination, size_t destination_length,
                            size_t maximum_frames, rptadv_current_v1 current,
                            void *current_context, void **peer);
+    /** Optional complete progress-aware telephone factory. Same custody and
+     * cancellation contract as peer_dial_phone; the original factory is required.
+     * Report actual provisional status while waiting, and zero before every
+     * terminal return. Zero/100/183 are not proof of remote ringing. A null tail
+     * leaves progress unavailable, without changing the old established-only API. */
+    int (*peer_dial_phone_progress)(void *context, const char *account, size_t account_length,
+                           const char *local, size_t local_length,
+                           const char *destination, size_t destination_length,
+                           size_t maximum_frames, rptadv_current_v1 current,
+                           void *current_context, rptadv_phone_progress_v1 progress,
+                           void *progress_context, void **peer);
 };
 
 /** Exact revision of a typed site control request. */

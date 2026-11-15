@@ -56,7 +56,42 @@ pub(super) unsafe extern "C" fn dial(
     current_context: *mut c_void,
     output: *mut *mut c_void,
 ) -> i32 {
-    super::boundary(-1, || {
+    unsafe {
+        dial_progress(
+            context,
+            account,
+            account_length,
+            local,
+            local_length,
+            destination,
+            destination_length,
+            maximum_frames,
+            current,
+            current_context,
+            None,
+            std::ptr::null_mut(),
+            output,
+        )
+    }
+}
+
+/// Ordinary control/lifecycle work only; never block the reactor or radio callback.
+pub(super) unsafe extern "C" fn dial_progress(
+    context: *mut c_void,
+    account: *const std::ffi::c_char,
+    account_length: usize,
+    local: *const std::ffi::c_char,
+    local_length: usize,
+    destination: *const std::ffi::c_char,
+    destination_length: usize,
+    maximum_frames: usize,
+    current: abi::rptadv_current_v1,
+    current_context: *mut c_void,
+    progress: abi::rptadv_phone_progress_v1,
+    progress_context: *mut c_void,
+    output: *mut *mut c_void,
+) -> i32 {
+    let result = super::boundary(-1, || {
         let Some(output) = (unsafe { output.as_mut() }) else {
             return -1;
         };
@@ -115,7 +150,7 @@ pub(super) unsafe extern "C" fn dial(
         };
         loop {
             if unsafe { current(current_context) } == 0 || !account_current(context, &account) {
-                return -1;
+                break -1;
             }
             match pending.try_complete() {
                 Ok(Some(handle)) => {
@@ -123,16 +158,25 @@ pub(super) unsafe extern "C" fn dial(
                         || !account_current(context, &account)
                         || !handle.shared.live()
                     {
-                        return -1;
+                        break -1;
                     }
                     *output = Box::into_raw(Box::new(PeerHandle::Sip(handle))).cast();
-                    return 0;
+                    break 0;
                 }
-                Err(_) => return -1,
-                Ok(None) => std::thread::sleep(crate::phone::registration::SERVICE_INTERVAL),
+                Err(_) => break -1,
+                Ok(None) => {
+                    if let Some(progress) = progress {
+                        unsafe { progress(progress_context, pending.provisional_status()) };
+                    }
+                    std::thread::sleep(crate::phone::registration::SERVICE_INTERVAL);
+                }
             }
         }
-    })
+    });
+    if let Some(progress) = progress {
+        unsafe { progress(progress_context, 0) };
+    }
+    result
 }
 
 impl HostServicesOwner {

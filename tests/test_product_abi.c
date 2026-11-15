@@ -42,8 +42,10 @@ _Static_assert(offsetof(struct rptadv_host_services_v10, peer_dial_timed_g711) =
                "preserve the complete timed-egress host prefix");
 _Static_assert(offsetof(struct rptadv_host_services_v10, peer_dial_phone) == 424,
                "preserve the complete restricted-dial host prefix");
-_Static_assert(sizeof(struct rptadv_host_services_v10) == 432,
-               "the optional telephone factory extends ABI 10");
+_Static_assert(offsetof(struct rptadv_host_services_v10, peer_dial_phone_progress) == 432,
+               "preserve the complete telephone factory prefix");
+_Static_assert(sizeof(struct rptadv_host_services_v10) == 440,
+               "the optional telephone progress factory extends ABI 10");
 
 static int node(void *context, const struct rptadv_node_host_configuration *record) {
     assert(record);

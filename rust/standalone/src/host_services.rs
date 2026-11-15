@@ -140,6 +140,7 @@ impl HostServicesOwner {
             peer_send_prepared_timed: Some(peer_send_prepared_timed),
             peer_dial_timed_g711: Some(peer_dial_timed_g711),
             peer_dial_phone: Some(sip_phone::dial),
+            peer_dial_phone_progress: Some(sip_phone::dial_progress),
         });
         Ok(Self {
             context,

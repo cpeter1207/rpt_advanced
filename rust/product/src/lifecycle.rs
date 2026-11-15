@@ -232,20 +232,63 @@ impl Engine {
                 }
                 completion.outcome() == PlaybackOutcome::Succeeded
             });
+            let mut ringback: Option<rpt_advanced_core::controller::PlaybackCompletion> = None;
+            let mut ringback_failed = false;
             let io = if acknowledged && current() {
-                engine
-                    .services
-                    .dial_phone(
-                        pending.account(),
-                        pending.local(),
-                        &destination,
-                        crate::host::MAXIMUM_FRAMES,
-                        current,
-                    )
-                    .ok()
+                if report {
+                    engine
+                        .services
+                        .dial_phone_reporting(
+                            pending.account(),
+                            pending.local(),
+                            &destination,
+                            crate::host::MAXIMUM_FRAMES,
+                            (current, |status| {
+                                use rpt_advanced_core::audio::PlaybackOutcome;
+                                if status != 180 || !current() {
+                                    if let Some(completion) = ringback.take() {
+                                        completion.cancel();
+                                    }
+                                    return;
+                                }
+                                if ringback_failed
+                                    || ringback.as_ref().is_some_and(|completion| {
+                                        completion.outcome() != PlaybackOutcome::Succeeded
+                                    })
+                                {
+                                    return;
+                                }
+                                let queued = engine.queue_radio_ringback(
+                                    revision,
+                                    source_generation,
+                                    Arc::clone(&pending),
+                                );
+                                match queued {
+                                    Ok(completion) => ringback = Some(completion),
+                                    Err(_) => ringback_failed = true,
+                                }
+                            }),
+                        )
+                        .ok()
+                } else {
+                    engine
+                        .services
+                        .dial_phone(
+                            pending.account(),
+                            pending.local(),
+                            &destination,
+                            crate::host::MAXIMUM_FRAMES,
+                            current,
+                        )
+                        .ok()
+                }
             } else {
                 None
             };
+            // Stop the exact tone before serial adoption can publish answered media.
+            if let Some(completion) = ringback {
+                completion.cancel();
+            }
             let owner = Arc::clone(&engine);
             let retained = Arc::clone(&pending);
             let completed = engine.run_inner(true, move |host| {

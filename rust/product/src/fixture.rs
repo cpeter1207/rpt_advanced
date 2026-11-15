@@ -539,6 +539,7 @@ static mut HOST: crate::abi::rptadv_host_services_v10 = crate::abi::rptadv_host_
     peer_send_prepared_timed: None,
     peer_dial_timed_g711: None,
     peer_dial_phone: None,
+    peer_dial_phone_progress: None,
 };
 
 pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v10 {

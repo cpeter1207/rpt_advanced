@@ -29,3 +29,22 @@ Exact5bc baseline reproduced missing pre-dial acknowledgment in `radio-feedback-
 `radio-feedback-green-progress-red2.log` then passed all three finite-completion tests and the nine-mode real Engine matrix (39.46s): answer, refusal, spawn failure, canceled successor, independent revision change, cancellation/reload before playback, administrative and macro silence. The existing five-second factory deadline remains asserted. Only the obsolete second pre-answer RF drain was removed; the actual finite drain, exact catalog-count and no-duplicate-after-answer checks remain.
 
 Independent source review cleared the completion ownership and lifecycle delta. This checkpoint is not the complete ringing fix or full regression qualification; affected strict/full and actual wire sequencing remain pending. The later test in that same log is the intentional actual180 progress RED (0 versus180), separate from this checkpoint.
+
+## Ringing recovery checkpoint
+
+`radio-ringback-red2.log` proves the actual RF callback/decoder path completed
+its acknowledgment before INVITE, then failed at the missing LOCAL audio after
+real180. `radio-ringback-green.log` passes that same composed test in47.99s,
+including stopped ringback after200, no duplicate acknowledgment, unchanged
+two-way audio/private-digit/hangup checks, and the C ABI probe. It also passes the
+real reactor/host provisional-state and early-refusal-zero test, complete-prefix
+and all partial-tail checks, delayed progress against canceled/reloaded claims,
+and four finite receipt/cancellation cases. Runner exit0.
+
+The wire fixture moves its existing10s finite-result bound from after answer to
+the pre-INVITE wait; ordinary SIP receive bounds remain4s. Its acknowledgment
+counter baseline is captured after RF digits, so those digits cannot satisfy the
+finite acknowledgment assertion. No production timeout or speech duration changed.
+Independent final source review is clear. This is a recovery checkpoint; full
+strict/affected suite and the separately assigned continuous-RTP union remain
+pending. No native or live activation is implied.

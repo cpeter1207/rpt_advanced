@@ -400,3 +400,33 @@ fn finite_playback_completion_cannot_acknowledge_an_empty_stream() {
         crate::audio::PlaybackOutcome::Cancelled
     );
 }
+
+#[test]
+fn cancel_finite_playback_stops_an_active_tone_before_its_next_sample() {
+    use crate::audio::PlaybackOutcome;
+    let (mut planner, mut control) = TelemetryPlanner::new(MorseSettings::default(), -6);
+    let completion = PlaybackCompletion::default();
+    assert!(
+        control.queue_prepared_status(
+            PreparedMedia::new_stream(sequence_reader(&[0.25; 8], false))
+                .unwrap()
+                .with_completion(completion.clone())
+        )
+    );
+    planner.start_status();
+    assert_eq!(
+        planner
+            .status
+            .as_mut()
+            .unwrap()
+            .0
+            .render(false, &mut [0.0; 4]),
+        4
+    );
+    completion.cancel();
+    planner.poll_status();
+    assert!(planner.status.is_none());
+    assert!(planner.active.is_none());
+    control.reclaim().for_each(drop);
+    assert_eq!(completion.outcome(), PlaybackOutcome::Cancelled);
+}

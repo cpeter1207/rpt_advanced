@@ -1955,3 +1955,42 @@ later by local node name. Current actual answer/failure results use the same
 source-only local result route; job acceptance, successful cleanup and stale
 completion are not successful answers. This remains the peer-free milestone,
 not full linked-peer isolation or physical provider acceptance.
+
+
+### Radio-origin acknowledgment and provisional ringing (2026-11-15)
+
+The owner's manual test changed the radio command sequence: the finite LOCAL
+`Command completed` acknowledgment must finish before outgoing dialing starts,
+not after answer. The existing dial job now waits for the prepared status to
+return through its existing completed-media queue. A scalar receipt reports
+successful finite controller playback only after control-side reclamation;
+empty, failed, canceled, or replaced playback cannot authorize dialing. Exact
+claim/source/revision cancellation remains authoritative while waiting. This is
+not a physical DAC/RF delivery or reception certification. Administrative and
+macro submissions retain their prior silent behavior. Answer no longer repeats
+the acknowledgment; current refusal/failure retains the source-only unavailable
+result.
+
+Native SIP already supplies provisional call status. A nullable complete
+`peer_dial_phone_progress` tail extends host ABI 10 after its prior 432-byte
+complete prefix. The reactor shares only one numeric scalar on the existing
+pending owner. The established-only factory remains available, and the new
+borrowed callback executes only on its existing synchronous dial worker. It
+reports terminal zero before return, including admission refusal. No callback or
+borrowed context is retained by the reactor, and no provider ABI changes.
+
+Actual 180 selects a locally generated 440+480 Hz indication at -12 dB: two seconds
+of tone followed by four seconds of silence. Each finite cycle uses the existing
+station tone producer, status queue, and completion receipt; at most one is
+pending for the exact call. Before another cycle, serialized control rechecks the
+original source generation, Engine revision, and exact claim. Status changes,
+answer, failure and cancellation stop the exact tone, before answered media is
+adopted. There is no private/network telemetry fanout and no guessed pre-signaling
+ringing. 100/183 do not assert remote alerting; provider early-media playback is
+not introduced by this increment. An older host without the tail has no
+provisional feedback capability, rather than fabricated ringing.
+
+The source-only result routing, explicit incoming attachment, called-party
+no-login role and peer-free outgoing milestone remain unchanged. Continuous RTP
+and the separately diagnosed symmetric-media-latch repair are independent work;
+the startup-only checkpoint is not silently selected by this feedback change.

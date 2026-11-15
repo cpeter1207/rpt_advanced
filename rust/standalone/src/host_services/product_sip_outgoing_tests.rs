@@ -218,8 +218,10 @@ fn product_outgoing(radio: bool) {
         thread::sleep(Duration::from_millis(2));
     }
     runtime.publish_sip(Some(&worker), &accounts);
+    let mut before_dial_ack = 0;
     let (refused, id) = if radio {
         radio_digits(b"*600123#");
+        before_dial_ack = PUBLIC_OUTPUT.load(Ordering::Acquire);
         (0, 0)
     } else {
         let refused = next_call(&runtime);
@@ -237,7 +239,14 @@ fn product_outgoing(radio: bool) {
         assert_ne!(id, refused);
         (refused, id)
     };
-    let (invite, remote) = receive(&sip);
+    let (invite, remote) = if radio {
+        // Move the existing finite-result bound ahead of INVITE, not a guessed sleep.
+        sip.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        receive_register(&sip, &mut [0; 8192])
+            .expect("finite acknowledgment before outgoing INVITE")
+    } else {
+        receive(&sip)
+    };
     if radio {
         assert!(
             invite.starts_with(&format!("INVITE sip:00123@{} ", sip.local_addr().unwrap())),
@@ -248,17 +257,40 @@ fn product_outgoing(radio: bool) {
             (-1, 0),
             "RF command reserved the same pending owner before answer"
         );
+        assert!(
+            PUBLIC_OUTPUT.load(Ordering::Acquire) > before_dial_ack + 160,
+            "finite LOCAL acknowledgment must finish before INVITE"
+        );
+        let before = PUBLIC_OUTPUT.load(Ordering::Acquire);
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            PUBLIC_OUTPUT.load(Ordering::Acquire),
+            before,
+            "acknowledgment still producing after INVITE"
+        );
     }
     let offer =
         MediaDescription::parse(invite.split_once("\r\n\r\n").unwrap().1.as_bytes()).unwrap();
+    let before_ringing = PUBLIC_OUTPUT.load(Ordering::Acquire);
     sip.send_to(response(&invite, 180, false).as_bytes(), remote)
         .unwrap();
+    if radio {
+        let until = Instant::now() + Duration::from_secs(3);
+        while PUBLIC_OUTPUT.load(Ordering::Acquire) <= before_ringing + 160
+            && Instant::now() < until
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            PUBLIC_OUTPUT.load(Ordering::Acquire) > before_ringing + 160,
+            "actual180 must produce LOCAL ringing before answer"
+        );
+    }
     assert!(worker.incoming().is_none());
     let answer = offer.answer(rtp.local_addr().unwrap(), 99).unwrap();
     let accepted = response(&invite, 200, false).replace("Content-Length: 0\r\n\r\n", &format!(
         "Contact: <sip:called@{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
         sip.local_addr().unwrap(), answer.len(), std::str::from_utf8(&answer).unwrap()));
-    let before_answer = PUBLIC_OUTPUT.load(Ordering::Acquire);
     sip.send_to(accepted.as_bytes(), remote).unwrap();
     assert!(receive(&sip).0.starts_with("ACK "));
     sip.set_nonblocking(true).unwrap();
@@ -283,18 +315,13 @@ fn product_outgoing(radio: bool) {
         );
     }
     if radio {
-        assert!(
-            PUBLIC_OUTPUT.load(Ordering::Acquire) > before_answer,
-            "answered RF command renders its solicited LOCAL result"
+        let after_answer = PUBLIC_OUTPUT.load(Ordering::Acquire);
+        media(&mut caller, &mut codec, &[0.0; 1600], &mut returned);
+        assert_eq!(
+            PUBLIC_OUTPUT.load(Ordering::Acquire),
+            after_answer,
+            "ringback or a repeated acknowledgment continued after answer"
         );
-        let until = Instant::now() + Duration::from_secs(10);
-        while LAST_PTT.load(Ordering::Acquire) {
-            assert!(
-                Instant::now() < until,
-                "finite solicited RF result never completed"
-            );
-            media(&mut caller, &mut codec, &[0.0; 1600], &mut returned);
-        }
     }
     let before_voice = PUBLIC_OUTPUT.load(Ordering::Acquire);
     let speech: Vec<f32> =

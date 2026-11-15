@@ -719,7 +719,11 @@ fn complete_pre_remote_host_v10_prefix_has_no_remote_callbacks() {
         std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_phone),
         424
     );
-    assert_eq!(size_of_val(&table), 432);
+    assert_eq!(
+        std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_phone_progress),
+        432
+    );
+    assert_eq!(size_of_val(&table), 440);
     table.struct_size =
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind) as u32;
     assert_eq!(table.struct_size, 360);
@@ -740,6 +744,7 @@ fn complete_pre_remote_host_v10_prefix_has_no_remote_callbacks() {
     assert!(services.0.radio_remote_submit.is_none());
     assert!(services.0.radio_ready.is_none());
     assert!(services.0.peer_dial_phone.is_none());
+    assert!(services.0.peer_dial_phone_progress.is_none());
 }
 
 #[test]

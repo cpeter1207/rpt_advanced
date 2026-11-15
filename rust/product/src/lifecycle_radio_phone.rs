@@ -85,3 +85,29 @@ impl Engine {
         Ok(())
     }
 }
+
+impl Engine {
+    /// Revalidate a delayed progress record on the same serialized owner as call admission.
+    pub(super) fn queue_radio_ringback(
+        self: &Arc<Self>,
+        revision: u64,
+        generation: Option<u64>,
+        claim: Arc<crate::phone::OutgoingClaim>,
+    ) -> Result<rpt_advanced_core::controller::PlaybackCompletion, RuntimeError> {
+        let owner = Arc::clone(self);
+        self.run_inner(true, move |host| {
+            if !owner.current(revision)
+                || !claim.current()
+                || !generation.is_some_and(|generation| {
+                    host.runtime
+                        .node(claim.local())
+                        .and_then(|node| node.status(owner.clock().now_ms).active)
+                        == Some(generation)
+                })
+            {
+                return Err(RuntimeError::Rejected);
+            }
+            host.runtime.queue_phone_ringback(claim.local())
+        })
+    }
+}

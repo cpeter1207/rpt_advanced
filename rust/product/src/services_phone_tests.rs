@@ -435,3 +435,22 @@ fn outgoing_phone_factory_validates_exact_media_owner_and_final_cancellation() {
         "ordinary transport cannot become called-party media"
     );
 }
+
+#[test]
+fn phone_progress_tail_retains_established_factory_prefix_and_rejects_every_partial() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    let prior = std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_phone_progress);
+    assert_eq!(prior, 432);
+    table.struct_size = prior as u32;
+    let old = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(old.0.peer_dial_phone_progress.is_none());
+    for size in prior + 1..std::mem::size_of_val(&table) {
+        table.struct_size = size as u32;
+        assert!(
+            unsafe { HostServices::open(&table) }.is_err(),
+            "partial progress tail {size}"
+        );
+    }
+    table.struct_size = std::mem::size_of_val(&table) as u32;
+    assert!(unsafe { HostServices::open(&table) }.is_ok());
+}

@@ -1635,6 +1635,41 @@ impl<A: Send, C: Send> Runtime<A, C> {
             Err(RuntimeError::Rejected)
         }
     }
+    /// One finite LOCAL ring cycle; continuation belongs to the exact pending call.
+    /// This familiar local indication is not provider early media or proof of hearing.
+    pub fn queue_phone_ringback(
+        &mut self,
+        local: &str,
+    ) -> Result<crate::controller::PlaybackCompletion, RuntimeError> {
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let stream = node
+            .control
+            .media_session
+            .as_mut()
+            .ok_or(RuntimeError::Preparation)?
+            .register_once(crate::media::MediaSource {
+                tone: Some(crate::media::ToneSource {
+                    sequence: "440+480/2000,silence/4000".to_owned(),
+                    level_db: -12,
+                }),
+                ..crate::media::MediaSource::default()
+            })
+            .map_err(|_| RuntimeError::Preparation)?;
+        let completion = crate::controller::PlaybackCompletion::default();
+        let media = crate::controller::PreparedMedia::new_stream(stream)
+            .map_err(|_| RuntimeError::Preparation)?
+            .with_completion(completion.clone());
+        node.control.telemetry.reclaim().for_each(drop);
+        if node.control.telemetry.queue_prepared_status(media) {
+            Ok(completion)
+        } else {
+            Err(RuntimeError::Rejected)
+        }
+    }
     /// Prepare credential-free authentication wording for a live private Phone token.
     /// The caller must retain its exact call owner and queue this stream only to
     /// that call. Login deliberately needs no prior mailbox authentication.

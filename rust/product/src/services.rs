@@ -596,6 +596,8 @@ impl HostServices {
         let timed_tail = offset_of!(abi::rptadv_host_services_v10, peer_send_prepared_timed);
         let timed_dial_tail = offset_of!(abi::rptadv_host_services_v10, peer_dial_timed_g711);
         let phone_dial_tail = offset_of!(abi::rptadv_host_services_v10, peer_dial_phone);
+        let phone_progress_tail =
+            offset_of!(abi::rptadv_host_services_v10, peer_dial_phone_progress);
         if size < table_size
             && ![
                 required,
@@ -608,6 +610,7 @@ impl HostServices {
                 timed_tail,
                 timed_dial_tail,
                 phone_dial_tail,
+                phone_progress_tail,
             ]
             .contains(&size)
         {
@@ -650,6 +653,7 @@ impl HostServices {
             || (egress_count == 6 && async_count != 3)
             || (api.peer_send_prepared_timed.is_some() && egress_count != 6)
             || (api.peer_dial_timed_g711.is_some() && api.peer_send_prepared_timed.is_none())
+            || (api.peer_dial_phone_progress.is_some() && api.peer_dial_phone.is_none())
             || (api.peer_dial_phone.is_some()
                 && (api.peer_send_prepared_timed.is_none() || api.peer_read_source.is_none()))
             || (egress_count == 0 && api.peer_write.is_none())
@@ -1062,10 +1066,31 @@ impl HostServices {
         local: &str,
         destination: &str,
         maximum_frames: usize,
-        mut current: F,
+        current: F,
     ) -> Result<PeerIo, Error>
     where
         F: FnMut() -> bool,
+    {
+        self.dial_phone_reporting(
+            account,
+            local,
+            destination,
+            maximum_frames,
+            (current, |_| {}),
+        )
+    }
+    /// Optional actual SIP progress on the same borrowed dial-worker lifetime.
+    pub(crate) fn dial_phone_reporting<F, P>(
+        &self,
+        account: &PhoneAccountId,
+        local: &str,
+        destination: &str,
+        maximum_frames: usize,
+        (mut current, mut progress): (F, P),
+    ) -> Result<PeerIo, Error>
+    where
+        F: FnMut() -> bool,
+        P: FnMut(u32),
     {
         let dial = self.0.peer_dial_phone.ok_or(Error::Admission)?;
         unsafe extern "C" fn current_callback<F: FnMut() -> bool>(context: *mut c_void) -> u32 {
@@ -1074,26 +1099,51 @@ impl HostServices {
                     .unwrap_or(false),
             )
         }
+        unsafe extern "C" fn progress_callback<P: FnMut(u32)>(context: *mut c_void, status: u32) {
+            let _ = catch_unwind(AssertUnwindSafe(
+                || unsafe { &mut *context.cast::<P>() }(status),
+            ));
+        }
         let context = ptr::from_mut(&mut current).cast();
         if unsafe { current_callback::<F>(context) } == 0 {
             return Err(Error::Admission);
         }
         let mut handle = ptr::null_mut();
         let label = account.as_str();
-        let code = unsafe {
-            dial(
-                self.0.context,
-                label.as_ptr().cast(),
-                label.len(),
-                local.as_ptr().cast(),
-                local.len(),
-                destination.as_ptr().cast(),
-                destination.len(),
-                maximum_frames,
-                Some(current_callback::<F>),
-                context,
-                &mut handle,
-            )
+        let code = if let Some(reporting) = self.0.peer_dial_phone_progress {
+            unsafe {
+                reporting(
+                    self.0.context,
+                    label.as_ptr().cast(),
+                    label.len(),
+                    local.as_ptr().cast(),
+                    local.len(),
+                    destination.as_ptr().cast(),
+                    destination.len(),
+                    maximum_frames,
+                    Some(current_callback::<F>),
+                    context,
+                    Some(progress_callback::<P>),
+                    ptr::from_mut(&mut progress).cast(),
+                    &mut handle,
+                )
+            }
+        } else {
+            unsafe {
+                dial(
+                    self.0.context,
+                    label.as_ptr().cast(),
+                    label.len(),
+                    local.as_ptr().cast(),
+                    local.len(),
+                    destination.as_ptr().cast(),
+                    destination.len(),
+                    maximum_frames,
+                    Some(current_callback::<F>),
+                    context,
+                    &mut handle,
+                )
+            }
         };
         if code != 0 {
             return Err(Error::Operation);

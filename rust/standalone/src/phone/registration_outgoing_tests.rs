@@ -109,10 +109,24 @@ fn outgoing_reactor_adopts_validated_answer_without_incoming_authority() {
     assert!(invite.starts_with("INVITE sip:fixture@example.invalid "));
     let offer =
         MediaDescription::parse(invite.split_once("\r\n\r\n").unwrap().1.as_bytes()).unwrap();
+    assert_eq!(
+        dial.provisional_status(),
+        0,
+        "no invented ringing before signaling"
+    );
     socket
         .send_to(response(&invite, 180, false).as_bytes(), remote)
         .unwrap();
-    std::thread::sleep(Duration::from_millis(30));
+    let ringing_deadline = Instant::now() + Duration::from_secs(1);
+    while dial.provisional_status() != 180 && Instant::now() < ringing_deadline {
+        assert!(dial.try_complete().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        dial.provisional_status(),
+        180,
+        "real180 must cross the pending owner boundary"
+    );
     assert!(dial.try_complete().unwrap().is_none());
     assert!(
         worker.incoming().is_none(),
@@ -135,6 +149,11 @@ fn outgoing_reactor_adopts_validated_answer_without_incoming_authority() {
         std::thread::sleep(Duration::from_millis(2));
     };
     assert!(worker.incoming().is_none());
+    assert_eq!(
+        dial.provisional_status(),
+        0,
+        "answered call is no longer ringing"
+    );
     assert_eq!(handle.shared.local, "desk");
     assert!(handle.shared.live());
     {
@@ -301,8 +320,16 @@ fn bounded_originator_admission(
         } else {
             assert!(matches!(receiver.try_recv(), Ok(Command::Stop)));
             assert!(dial.try_complete().unwrap().is_none());
-            let Ok(Command::Call(calls::Command::Originate(_, _, _, _, _, close, _reply))) =
-                receiver.try_recv()
+            let Ok(Command::Call(calls::Command::Originate(
+                _,
+                _,
+                _,
+                _,
+                _,
+                close,
+                _progress,
+                _reply,
+            ))) = receiver.try_recv()
             else {
                 panic!("the exact retained originate command must be submitted once");
             };
@@ -338,7 +365,7 @@ fn host_factory_roundtrip(
     use std::{
         ffi::c_void,
         ptr,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::atomic::{AtomicBool, AtomicU32, Ordering},
     };
     // The borrowed provider lease outlives this host and every scoped callback.
     let providers = unsafe { &*ptr::from_ref(providers) };
@@ -351,10 +378,15 @@ fn host_factory_roundtrip(
     host.publish_sip(Some(worker), accounts);
     let api = host.descriptor();
     let dial = api
-        .peer_dial_phone
+        .peer_dial_phone_progress
         .expect("standalone exposes the optional telephone factory");
     let context = api.context as usize;
     let current = AtomicBool::new(true);
+    let progress = AtomicU32::new(777);
+    unsafe extern "C" fn report_progress(context: *mut c_void, status: u32) {
+        unsafe { &*context.cast::<AtomicU32>() }.store(status, Ordering::Release);
+    }
+    let progress_context = ptr::from_ref(&progress) as usize;
     unsafe extern "C" fn is_current(context: *mut c_void) -> u32 {
         u32::from(unsafe { &*context.cast::<AtomicBool>() }.load(Ordering::Acquire))
     }
@@ -373,6 +405,8 @@ fn host_factory_roundtrip(
                 960,
                 Some(is_current),
                 current_context as *mut c_void,
+                Some(report_progress),
+                progress_context as *mut c_void,
                 &mut peer,
             )
         };
@@ -381,6 +415,11 @@ fn host_factory_roundtrip(
     // A staged transaction blocks new calls but preserves the committed cohort.
     host.set_sip_dial_admission(false);
     assert_eq!(call(), (-1, 0));
+    assert_eq!(
+        progress.load(Ordering::Acquire),
+        0,
+        "early refusal clears progress too"
+    );
     host.set_sip_dial_admission(true);
     // First request validates the answered socket and existing PHONE owner.
     std::thread::scope(|scope| {
@@ -388,6 +427,15 @@ fn host_factory_roundtrip(
         let mut wire = [0; 8192];
         let (invite, remote) = receive(socket, &mut wire);
         assert!(invite.starts_with("INVITE "));
+        socket
+            .send_to(response(&invite, 180, false).as_bytes(), remote)
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while progress.load(Ordering::Acquire) != 180 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(progress.load(Ordering::Acquire), 180);
+
         let offer =
             MediaDescription::parse(invite.split_once("\r\n\r\n").unwrap().1.as_bytes()).unwrap();
         let answer = offer.answer(rtp.local_addr().unwrap(), 101).unwrap();

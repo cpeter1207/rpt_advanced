@@ -752,3 +752,69 @@ fn radio_phone_acknowledgment_precedes_factory_and_answer_never_repeats_it() {
         assert!(engine.stop());
     }
 }
+
+#[test]
+fn delayed_radio_ringing_cannot_target_a_successor_or_reloaded_generation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let configuration = active_configuration(&format!(
+        "phone_allow_accounts=provider\n{}\nprotocol=sip\nattach_local_nodes=1000\n",
+        include_str!("tests/fixtures/phone_account.conf"),
+    ));
+    let engine = super::phone::engine(
+        configuration,
+        crate::services::tests::phone_factory_fixture(|_| {}),
+        super::phone::speech(),
+    );
+    let revision = engine.revision.load(Ordering::Acquire);
+    let owner = Arc::clone(&engine);
+    let (first, generation) = engine
+        .run(move |host| {
+            let generation = host
+                .runtime
+                .node("1000")
+                .unwrap()
+                .status(owner.clock().now_ms)
+                .active;
+            let claim = host.reserve_outgoing_phone(
+                rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap(),
+                "1000",
+            )?;
+            Ok((claim, generation))
+        })
+        .unwrap();
+    let first_id = first.id();
+    let second = engine
+        .run(move |host| {
+            host.cancel_outgoing_phone("1000", first_id)?;
+            host.reserve_outgoing_phone(
+                rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap(),
+                "1000",
+            )
+        })
+        .unwrap();
+    assert!(
+        engine
+            .queue_radio_ringback(revision, generation, first)
+            .is_err()
+    );
+    assert!(
+        engine
+            .queue_radio_ringback(revision, None, Arc::clone(&second))
+            .is_err()
+    );
+    engine.revision.fetch_add(1, Ordering::AcqRel);
+    assert!(
+        engine
+            .queue_radio_ringback(revision, generation, Arc::clone(&second))
+            .is_err()
+    );
+    assert!(second.current());
+    assert!(
+        !engine
+            .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
+            .unwrap()
+    );
+    assert!(engine.stop());
+}
