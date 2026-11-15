@@ -342,7 +342,13 @@ fn drain(caller: &Caller, codec: &mut G711Codec, returned: &mut Vec<f32>) {
         returned.extend_from_slice(&pcm);
     }
 }
-fn media(caller: &mut Caller, codec: &mut G711Codec, samples: &[f32], returned: &mut Vec<f32>) {
+fn media(
+    caller: &mut Caller,
+    codec: &mut G711Codec,
+    samples: &[f32],
+    returned: &mut Vec<f32>,
+    mut linked: Option<&mut vox::Remote>,
+) {
     let mut next = Instant::now();
     for chunk in samples.chunks(160) {
         if let Some(wait) = next.checked_duration_since(Instant::now()) {
@@ -351,6 +357,9 @@ fn media(caller: &mut Caller, codec: &mut G711Codec, samples: &[f32], returned: 
         let mut pcm = [0.0; 160];
         pcm[..chunk.len()].copy_from_slice(chunk);
         caller.audio_payload(codec, &pcm, SELECTED_PAYLOAD.load(Ordering::Acquire) as u8);
+        if let Some(remote) = linked.as_mut() {
+            remote.pump();
+        }
         service(caller);
         drain(caller, codec, returned);
         next += Duration::from_millis(20);
@@ -383,32 +392,32 @@ fn radio_digits(digits: &[u8]) {
 
 #[test]
 fn actual_product_originates_two_way_phone_and_releases_the_exact_call() {
-    product_outgoing(false, false, false, G711::Mulaw);
+    product_outgoing(false, false, false, G711::Mulaw, false);
 }
 
 #[test]
 fn actual_radio_dtmf_originates_two_way_phone_and_hangs_up() {
-    product_outgoing(true, false, false, G711::Mulaw);
+    product_outgoing(true, false, false, G711::Mulaw, false);
 }
 
 #[test]
 fn actual_answer_first_utterance_reaches_rf_without_any_receiver_key() {
-    product_outgoing(false, true, false, G711::Mulaw);
+    product_outgoing(false, true, false, G711::Mulaw, false);
 }
 
 #[test]
 fn actual_rf_answer_first_utterance_reaches_rf_without_receiver_rekey() {
-    product_outgoing(true, true, false, G711::Mulaw);
+    product_outgoing(true, true, false, G711::Mulaw, false);
 }
 
 #[test]
 fn actual_answered_quiet_call_opens_symmetric_rtp_before_any_receiver_key() {
-    product_outgoing(false, true, true, G711::Mulaw);
+    product_outgoing(false, true, true, G711::Mulaw, false);
 }
 
 #[test]
 fn actual_alaw_quiet_call_sends_continuous_silence_without_receiver_key() {
-    product_outgoing(false, true, true, G711::Alaw);
+    product_outgoing(false, true, true, G711::Alaw, false);
 }
 
 // A symmetric media relay learns only the actual RTP source, never the SDP
@@ -433,27 +442,59 @@ fn latch(caller: &Caller) -> Option<SocketAddr> {
 }
 
 #[test]
+fn actual_outgoing_call_isolates_and_restores_existing_ordinary_link() {
+    product_outgoing(true, false, false, G711::Mulaw, true);
+}
+
+fn pump_linked(remote: &mut vox::Remote, duration: Duration) {
+    let until = Instant::now() + duration;
+    while Instant::now() < until {
+        remote.pump();
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn wait_linked_quiet(remote: &mut vox::Remote) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut quiet_since = Instant::now();
+    let mut public = PUBLIC_OUTPUT.load(Ordering::Acquire);
+    loop {
+        remote.pump();
+        let current = PUBLIC_OUTPUT.load(Ordering::Acquire);
+        if current != public || LAST_PTT.load(Ordering::Acquire) {
+            quiet_since = Instant::now();
+            public = current;
+        }
+        if quiet_since.elapsed() >= Duration::from_millis(750) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "finite LOCAL result must drain");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
 fn actual_radio_digits_reach_telephone_ivr_without_control_or_audio_leak() {
-    product_outgoing_with_ivr(true, true, false, G711::Mulaw, IvrMode::Events);
+    product_outgoing_with_ivr(true, true, false, G711::Mulaw, IvrMode::Events, false);
 }
 
 #[test]
 fn actual_radio_digits_use_private_inband_when_event_payload_is_absent() {
-    product_outgoing_with_ivr(true, true, false, G711::Mulaw, IvrMode::InBand);
+    product_outgoing_with_ivr(true, true, false, G711::Mulaw, IvrMode::InBand, false);
 }
 
 #[test]
 fn actual_alaw_radio_digits_reach_telephone_ivr_without_audio_leak() {
-    product_outgoing_with_ivr(true, true, false, G711::Alaw, IvrMode::Events);
+    product_outgoing_with_ivr(true, true, false, G711::Alaw, IvrMode::Events, false);
 }
 
 #[test]
 fn actual_alaw_radio_digits_use_private_inband() {
-    product_outgoing_with_ivr(true, true, false, G711::Alaw, IvrMode::InBand);
+    product_outgoing_with_ivr(true, true, false, G711::Alaw, IvrMode::InBand, false);
 }
 
-fn product_outgoing(radio: bool, immediate: bool, latching: bool, selected: G711) {
-    product_outgoing_with_ivr(radio, immediate, latching, selected, IvrMode::Disabled);
+fn product_outgoing(radio: bool, immediate: bool, latching: bool, selected: G711, isolated: bool) {
+    product_outgoing_with_ivr(radio, immediate, latching, selected, IvrMode::Disabled, isolated);
 }
 
 fn product_outgoing_with_ivr(
@@ -462,6 +503,7 @@ fn product_outgoing_with_ivr(
     latching: bool,
     selected: G711,
     ivr: IvrMode,
+    isolated: bool,
 ) {
     const CHILD: &str = "RPTADV_TEST_OUTGOING_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
@@ -473,6 +515,8 @@ fn product_outgoing_with_ivr(
             "host_services::product_phone_tests::sip::outgoing::actual_radio_digits_use_private_inband_when_event_payload_is_absent"
         } else if ivr == IvrMode::Events {
             "host_services::product_phone_tests::sip::outgoing::actual_radio_digits_reach_telephone_ivr_without_control_or_audio_leak"
+        } else if isolated {
+            "host_services::product_phone_tests::sip::outgoing::actual_outgoing_call_isolates_and_restores_existing_ordinary_link"
         } else if selected == G711::Alaw {
             "host_services::product_phone_tests::sip::outgoing::actual_alaw_quiet_call_sends_continuous_silence_without_receiver_key"
         } else if latching {
@@ -515,6 +559,7 @@ fn product_outgoing_with_ivr(
     let sip = UdpSocket::bind("127.0.0.1:0").unwrap();
     let rtp = UdpSocket::bind("127.0.0.1:0").unwrap();
     rtp.set_nonblocking(true).unwrap();
+    let mut linked = isolated.then(vox::Remote::new);
     // Admission default deliberately differs from the eligible initiating node.
     let configuration = format!(
         "[general]\nnode_enabled=yes\n[1000]\nradio_channel=fixture\nduplex=full\nphone_allow_accounts=office\n[2000]\nnode_enabled=no\n[phone_account office]\nlocal_node=2000\nattach_local_nodes=1000\nenabled=yes\nprotocol=sip\nserver={}\nusername=fixture-user\nsecrets_file=phone.secret\nregister=yes\n",
@@ -528,6 +573,23 @@ fn product_outgoing_with_ivr(
     let configuration = if immediate {
         configuration.replace("[1000]", "[1000]\nfull_duplex=yes\nsquelch_delay_ms=30")
             + "\n[radio]\nradio_duplex_mode=half\n[radio 1000]\nvad_mode=kerchunk\nvad_hang_ms=1000\n"
+    } else {
+        configuration
+    };
+    let configuration = if let Some(remote) = linked.as_ref() {
+        let path = directory.join("nodes.conf");
+        fs::write(
+            &path,
+            format!("[extnodes]\n2000=radio@{}/2000,127.0.0.1\n", remote.address),
+        )
+        .unwrap();
+        configuration.replace(
+            "[1000]",
+            &format!(
+                "[1000]\nlink_lookup_method=file\nlink_static_directory_file={}",
+                path.display()
+            ),
+        )
     } else {
         configuration
     };
@@ -575,6 +637,43 @@ fn product_outgoing_with_ivr(
         thread::sleep(Duration::from_millis(2));
     }
     runtime.publish_sip(Some(&worker), &accounts);
+    if let Some(remote) = linked.as_mut() {
+        runtime.enable_listener(&mut remote.server).unwrap();
+        let link = runtime.product_descriptor().link_command.unwrap();
+        let connecting =
+            thread::spawn(move || unsafe { link(c"1000".as_ptr(), 4, c"2000".as_ptr(), 4, 1) });
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !connecting.is_finished() && Instant::now() < deadline {
+            remote.pump();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            connecting.is_finished(),
+            "ordinary fixture connect is bounded"
+        );
+        assert_eq!(connecting.join().unwrap(), 0);
+        wait_linked_quiet(remote);
+        remote.clear_voice_observation();
+        LOCAL_INPUT.store(true, Ordering::Release);
+        pump_linked(remote, Duration::from_millis(1000));
+        LOCAL_INPUT.store(false, Ordering::Release);
+        pump_linked(remote, Duration::from_millis(500));
+        assert!(
+            remote.voiced_samples() > 160,
+            "ordinary outbound works before isolation"
+        );
+        wait_linked_quiet(remote);
+        let before = PUBLIC_OUTPUT.load(Ordering::Acquire);
+        remote.request_return();
+        pump_linked(remote, Duration::from_millis(1000));
+        assert_eq!(remote.sent_return_packets(), 15);
+        assert!(
+            PUBLIC_OUTPUT.load(Ordering::Acquire) > before + 160,
+            "ordinary inbound works before isolation"
+        );
+        wait_linked_quiet(remote);
+        PUBLIC_OUTPUT.store(0, Ordering::Release);
+    }
     let mut before_dial_ack = 0;
     let (refused, id) = if radio {
         radio_digits(b"*600123#");
@@ -625,6 +724,12 @@ fn product_outgoing_with_ivr(
             before,
             "acknowledgment still producing after INVITE"
         );
+    }
+    if let Some(remote) = linked.as_mut() {
+        // Drain only already-received pre-cut loopback packets before observing
+        // new programme. This is not a downstream network-expiry assertion.
+        remote.pump();
+        remote.clear_voice_observation();
     }
     let offer =
         MediaDescription::parse(invite.split_once("\r\n\r\n").unwrap().1.as_bytes()).unwrap();
@@ -705,7 +810,13 @@ fn product_outgoing_with_ivr(
         ALLOW_SOURCE_CUT.store(true, Ordering::Release);
     }
     if !immediate {
-        media(&mut caller, &mut codec, &[0.0; 4000], &mut returned);
+        media(
+            &mut caller,
+            &mut codec,
+            &[0.0; 4000],
+            &mut returned,
+            linked.as_mut(),
+        );
     }
     if !radio {
         assert_eq!(
@@ -716,11 +827,38 @@ fn product_outgoing_with_ivr(
     }
     if radio && !immediate {
         let after_answer = PUBLIC_OUTPUT.load(Ordering::Acquire);
-        media(&mut caller, &mut codec, &[0.0; 1600], &mut returned);
+        media(
+            &mut caller,
+            &mut codec,
+            &[0.0; 1600],
+            &mut returned,
+            linked.as_mut(),
+        );
         assert_eq!(
             PUBLIC_OUTPUT.load(Ordering::Acquire),
             after_answer,
             "ringback or a repeated acknowledgment continued after answer"
+        );
+    }
+    if let Some(remote) = linked.as_mut() {
+        remote.request_return();
+        let before = PUBLIC_OUTPUT.load(Ordering::Acquire);
+        media(
+            &mut caller,
+            &mut codec,
+            &[0.0; 8000],
+            &mut returned,
+            Some(&mut *remote),
+        );
+        assert_eq!(remote.sent_return_packets(), 15);
+        assert_eq!(
+            PUBLIC_OUTPUT.load(Ordering::Acquire),
+            before,
+            "isolated ordinary inbound cannot key or feed local RF"
+        );
+        assert!(
+            returned.iter().all(|sample| sample.abs() <= 0.01),
+            "isolated ordinary inbound cannot reach the telephone"
         );
     }
     let before_voice = PUBLIC_OUTPUT.load(Ordering::Acquire);
@@ -729,8 +867,20 @@ fn product_outgoing_with_ivr(
             .chunks_exact(12)
             .map(|bytes| f32::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32768.0)
             .collect();
-    media(&mut caller, &mut codec, &speech, &mut returned);
-    media(&mut caller, &mut codec, &[0.0; 16000], &mut returned);
+    media(
+        &mut caller,
+        &mut codec,
+        &speech,
+        &mut returned,
+        linked.as_mut(),
+    );
+    media(
+        &mut caller,
+        &mut codec,
+        &[0.0; 16000],
+        &mut returned,
+        linked.as_mut(),
+    );
     if immediate {
         assert_eq!(
             ANSWER_ACKS.load(Ordering::Acquire),
@@ -765,7 +915,13 @@ fn product_outgoing_with_ivr(
     LAST_MARKED_CUT.store(SOURCE_CUTS.load(Ordering::Acquire), Ordering::Release);
     let radio_before = PUBLIC_OUTPUT.load(Ordering::Acquire);
     caller.digits(b"*4#*70");
-    media(&mut caller, &mut codec, &[0.0; 4000], &mut returned);
+    media(
+        &mut caller,
+        &mut codec,
+        &[0.0; 4000],
+        &mut returned,
+        linked.as_mut(),
+    );
     assert_eq!(
         PUBLIC_OUTPUT.load(Ordering::Acquire),
         radio_before,
@@ -786,9 +942,21 @@ fn product_outgoing_with_ivr(
         ALLOW_SOURCE_CUT.store(true, Ordering::Release);
     }
     LOCAL_INPUT.store(true, Ordering::Release);
-    media(&mut caller, &mut codec, &[0.0; 8000], &mut returned);
+    media(
+        &mut caller,
+        &mut codec,
+        &[0.0; 8000],
+        &mut returned,
+        linked.as_mut(),
+    );
     LOCAL_INPUT.store(false, Ordering::Release);
-    media(&mut caller, &mut codec, &[0.0; 4000], &mut returned);
+    media(
+        &mut caller,
+        &mut codec,
+        &[0.0; 4000],
+        &mut returned,
+        linked.as_mut(),
+    );
     let energy: f32 = returned.iter().map(|sample| sample * sample).sum();
     let correlation = |lag: usize| {
         returned
@@ -805,6 +973,13 @@ fn product_outgoing_with_ivr(
         correlation(8) > energy * 0.5 && correlation(4) < -energy * 0.5,
         "known1kHz return pattern, not a status prompt"
     );
+    if let Some(remote) = linked.as_ref() {
+        assert_eq!(
+            remote.voiced_samples(),
+            0,
+            "neither callee nor local RF programme may reach the isolated ordinary link"
+        );
+    }
     CONTINUOUS_RTP.store(false, Ordering::Release);
     if ivr != IvrMode::Disabled {
         telephone_ivr(&mut caller, &mut codec, ivr);
@@ -827,6 +1002,28 @@ fn product_outgoing_with_ivr(
         .send_to(response(&bye, 200, false).as_bytes(), remote)
         .unwrap();
     assert!(worker.incoming().is_none());
+    if let Some(remote) = linked.as_mut() {
+        // Exact hangup restores the same transport after a fresh graph cut.
+        wait_linked_quiet(remote);
+        remote.clear_voice_observation();
+        LOCAL_INPUT.store(true, Ordering::Release);
+        pump_linked(remote, Duration::from_millis(1000));
+        LOCAL_INPUT.store(false, Ordering::Release);
+        pump_linked(remote, Duration::from_millis(500));
+        assert!(
+            remote.voiced_samples() > 160,
+            "ordinary outbound restored after exact hangup"
+        );
+        wait_linked_quiet(remote);
+        let before = PUBLIC_OUTPUT.load(Ordering::Acquire);
+        remote.request_return();
+        pump_linked(remote, Duration::from_millis(1000));
+        assert_eq!(remote.sent_return_packets(), 15);
+        assert!(
+            PUBLIC_OUTPUT.load(Ordering::Acquire) > before + 160,
+            "ordinary inbound restored after exact hangup"
+        );
+    }
     if radio {
         runtime.stop().unwrap();
         worker.stop().unwrap();
@@ -859,7 +1056,13 @@ fn product_outgoing_with_ivr(
     caller.sequence = 0;
     caller.timestamp = 0;
     // Service real source callbacks before the remote close, without a login.
-    media(&mut caller, &mut codec, &[0.0; 1600], &mut Vec::new());
+    media(
+        &mut caller,
+        &mut codec,
+        &[0.0; 1600],
+        &mut Vec::new(),
+        linked.as_mut(),
+    );
     let (_, dialog) = fields(invite.as_bytes());
     let contact = crate::phone::sip_test_registrar::header(&invite, "Contact")
         .trim_start_matches('<')

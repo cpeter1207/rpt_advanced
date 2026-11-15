@@ -44,7 +44,7 @@
 
 ### Task 3: Qualify single-call checkpoint
 **Files:** existing standalone composed fixture and ADR0044 append.
-- [ ] Extend existing actual SIP/ordinary-peer fixture with default isolation, unchanged one-call capacity, local/callee audio, ordinary control and restoration.
+- [x] Extend existing actual SIP/ordinary-peer fixture with default isolation, unchanged one-call capacity, local/callee audio, ordinary control and restoration.
 - [ ] Run affected full core/product/standalone and strict checks, record exact counts and limits.
 - [ ] Deliver exact commit/bundle to parent for separately authorized hardware milestone. Do not activate.
 

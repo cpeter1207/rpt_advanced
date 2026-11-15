@@ -71,6 +71,20 @@ impl Remote {
         assert!(self.observation.accepted.load(Ordering::Acquire));
         self.observation.voiced.store(0, Ordering::Release);
     }
+    pub fn voiced_samples(&self) -> usize {
+        self.observation.voiced.load(Ordering::Acquire)
+    }
+    pub fn request_return(&mut self) {
+        assert!(self.observation.accepted.load(Ordering::Acquire));
+        self.return_packets = 0;
+        self.next_return = Instant::now();
+        self.observation
+            .return_requested
+            .store(true, Ordering::Release);
+    }
+    pub fn sent_return_packets(&self) -> usize {
+        self.return_packets
+    }
     pub fn pump(&mut self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
