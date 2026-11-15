@@ -559,8 +559,7 @@ unsafe extern "C" fn peer_info(
                     let (account, generation) = call.generations();
                     (
                         3,
-                        51 | abi::RPTADV_PEER_FINITE_PACKET_EGRESS
-                            | if call.inband { 64 } else { 0 },
+                        51 | abi::RPTADV_PEER_FINITE_PACKET_EGRESS | call.digit_capabilities,
                         account,
                         generation,
                         call.remote.as_str(),
@@ -1425,22 +1424,21 @@ unsafe extern "C" fn peer_send_prepared_timed(
     deadline: u32,
 ) -> i32 {
     boundary(-1, || {
-        // These verified SIP profiles and private IAX use 160 encoded bytes.
-        // PCM frame counts are checked independently against the owning protocol.
-        if count != 160 || bytes.is_null() {
+        // The protocol owner validates encoded bytes independently from PCM.
+        if count > isize::MAX as usize || bytes.is_null() {
             return -1;
         }
         if let Some(shared) = unsafe { sip_phone::shared(peer) } {
-            let bytes: &[u8; 160] = unsafe { &*bytes.cast() };
             return sip_phone::media(shared, "send", |media| {
-                if frames != media.packet_frames() {
+                if frames != media.packet_frames() || count != media.packet_bytes() {
                     return Err(crate::phone::media::MediaError::Codec);
                 }
+                let bytes = unsafe { std::slice::from_raw_parts(bytes, count) };
                 media.send(bytes, timestamp, deadline)
             })
             .unwrap_or(-1);
         }
-        if frames != 160 {
+        if frames != 160 || count != 160 {
             return -1;
         }
         let Some(peer) = (unsafe { iax_peer_mut(peer) }) else {

@@ -1,4 +1,5 @@
 //! Independent wire-format contract for the native phone media boundary.
+use rpt_advanced_standalone::phone::media::TelephoneEvent;
 use rpt_advanced_standalone::phone::media::{
     AudioProfile, MediaDescription, MediaError, SendStatus, TimedAudio,
 };
@@ -22,7 +23,10 @@ fn selects_g711_and_only_explicit_8000hz_telephone_events() {
         media.remote,
         "127.0.0.1:42000".parse::<SocketAddr>().unwrap()
     );
-    assert_eq!(media.telephone_event, Some(101));
+    assert_eq!(
+        media.telephone_events,
+        [Some(TelephoneEvent::symmetric(101, 8000)), None]
+    );
     let answer = media.answer("127.0.0.1:43000".parse().unwrap(), 7).unwrap();
     let answer = std::str::from_utf8(&answer).unwrap();
     assert!(answer.contains("m=audio 43000 RTP/AVP 8 101\r\n"));
@@ -67,7 +71,7 @@ fn session_attributes_and_media_connection_are_honored() {
         media.remote,
         "127.0.0.2:42000".parse::<SocketAddr>().unwrap()
     );
-    assert_eq!(media.telephone_event, None);
+    assert_eq!(media.telephone_events, [None; 2]);
     assert!(
         MediaDescription::parse(
             offer("0", "")
@@ -87,7 +91,7 @@ async fn rtp_socket_preserves_packet_order_and_original_source_clock() {
         codec: AudioProfile::Mulaw,
         receive_payload: AudioProfile::Mulaw.payload(),
         send_payload: AudioProfile::Mulaw.payload(),
-        telephone_event: Some(101),
+        telephone_events: [Some(TelephoneEvent::symmetric(101, 8000)), None],
     };
     let mut transport = RtpEndpoint::bind(
         "127.0.0.1:0".parse().unwrap(),
@@ -159,7 +163,7 @@ async fn telephone_events_are_bounded_and_end_repetitions_are_deduplicated() {
         codec: AudioProfile::Alaw,
         receive_payload: AudioProfile::Alaw.payload(),
         send_payload: AudioProfile::Alaw.payload(),
-        telephone_event: Some(101),
+        telephone_events: [Some(TelephoneEvent::symmetric(101, 8000)), None],
     };
     let mut transport = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), description, 1, 1)
         .await
@@ -244,8 +248,8 @@ fn packet_time_and_telephone_event_ranges_are_negotiated_not_assumed() {
     assert_eq!(
         MediaDescription::parse(partial.as_bytes())
             .unwrap()
-            .telephone_event,
-        None
+            .telephone_events,
+        [None; 2]
     );
 }
 
@@ -263,7 +267,7 @@ async fn constructing_media_cannot_bypass_payload_and_endpoint_validation() {
             codec: AudioProfile::Mulaw,
             receive_payload: AudioProfile::Mulaw.payload(),
             send_payload: AudioProfile::Mulaw.payload(),
-            telephone_event: event,
+            telephone_events: [event.map(|pt| TelephoneEvent::symmetric(pt, 8000)), None],
         };
         assert!(matches!(
             RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), media, 1, 1).await,
@@ -327,7 +331,7 @@ fn g711_mapping_and_ipv6_answers_preserve_the_selected_profile() {
             let answered = MediaDescription::parse(&answer).unwrap();
             assert_eq!(answered.codec, codec);
             assert_eq!(answered.remote, "[::1]:43000".parse().unwrap());
-            assert_eq!(answered.telephone_event, None);
+            assert_eq!(answered.telephone_events, [None; 2]);
             for local in [
                 "0.0.0.0:43000",
                 "239.1.1.1:43000",
@@ -360,7 +364,7 @@ fn telephone_event_mappings_require_offered_dynamic_payloads_and_valid_ranges() 
         );
         let media = MediaDescription::parse(source.as_bytes()).unwrap();
         assert_eq!(media.codec, AudioProfile::Mulaw);
-        assert_eq!(media.telephone_event, None, "{source}");
+        assert_eq!(media.telephone_events, [None; 2], "{source}");
     }
     let media = MediaDescription::parse(
         offer(
@@ -370,7 +374,10 @@ fn telephone_event_mappings_require_offered_dynamic_payloads_and_valid_ranges() 
         .as_bytes(),
     )
     .unwrap();
-    assert_eq!(media.telephone_event, Some(101));
+    assert_eq!(
+        media.telephone_events,
+        [Some(TelephoneEvent::symmetric(101, 8000)), None]
+    );
 }
 
 async fn media_pair() -> (tokio::net::UdpSocket, RtpEndpoint) {
@@ -382,7 +389,7 @@ async fn media_pair() -> (tokio::net::UdpSocket, RtpEndpoint) {
             codec: AudioProfile::Mulaw,
             receive_payload: AudioProfile::Mulaw.payload(),
             send_payload: AudioProfile::Mulaw.payload(),
-            telephone_event: Some(101),
+            telephone_events: [Some(TelephoneEvent::symmetric(101, 8000)), None],
         },
         1,
         1,

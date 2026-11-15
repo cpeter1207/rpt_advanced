@@ -1,5 +1,6 @@
 //! Real RTP, released codec/jitter, and exact source-sink credit tests.
 use super::*;
+use crate::phone::media::TelephoneEvent;
 use crate::providers::ProviderSet;
 use std::{ffi::c_void, net::UdpSocket, ptr, time::Duration};
 
@@ -460,8 +461,11 @@ async fn outgoing_offer_keeps_one_port_selects_answer_and_discards_preanswer_pac
     let description = MediaDescription::parse(offer.description()).unwrap();
     let offered = description.remote;
     let text = std::str::from_utf8(offer.description()).unwrap();
-    assert!(text.contains("RTP/AVP 0 8 9 101"));
-    assert_eq!(description.telephone_event, Some(101));
+    assert!(text.contains("RTP/AVP 0 8 9 3 96 97 98 99 101 102"));
+    assert_eq!(
+        description.telephone_events,
+        [Some(TelephoneEvent::symmetric(101, 8000)), None]
+    );
     // This came from the temporary route before final-answer adoption, not the recipient.
     route
         .send_to(&packet(1, 100, 0, &[0xa5; 160]), offered)
@@ -533,7 +537,13 @@ async fn outgoing_offer_refuses_unoffered_events_and_uncleared_receive_backlog()
             codec: super::super::media::AudioProfile::Mulaw,
             receive_payload: super::super::media::AudioProfile::Mulaw.payload(),
             send_payload: super::super::media::AudioProfile::Mulaw.payload(),
-            telephone_event: Some(if crowded { 101 } else { 102 }),
+            telephone_events: [
+                Some(TelephoneEvent::symmetric(
+                    if crowded { 101 } else { 102 },
+                    8000,
+                )),
+                None,
+            ],
         }
         .answer(route.local_addr().unwrap(), 78)
         .unwrap();
@@ -590,7 +600,8 @@ async fn outgoing_answer_cannot_reinterpret_an_advertised_format_as_inband_fallb
             .accept(no_events.as_bytes(), jitter)
             .await
             .unwrap()
-            .inband,
+            .digit_capabilities
+            == 64,
         "genuine omission of events retains the existing inband fallback"
     );
 }

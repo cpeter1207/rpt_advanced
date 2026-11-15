@@ -2230,3 +2230,32 @@ Old hosts preserve their behavior with the bit absent; old products reject the
 unknown capability rather than silently discarding negotiated receive events.
 Only the private transmit control copy uses the new accessor. The session's
 receive policy still uses bit64, and there is no second detector or queue.
+
+### Fixed-frame SIP packet and event mappings
+
+The SIP transport validates encoded packet bytes separately from PCM frames and
+RTP ticks. GSM, G726, AAL2-G726 and both L16 rates reuse the released neutral
+codec client. RTP L16 converts the existing little-endian PCM16 provider's wire
+words to network byte order at the protocol boundary. No converter is duplicated.
+The serial egress retains one setup-sized wire buffer and one pending datagram;
+WouldBlock retains the original bytes, sequence, timestamp, marker and deadline.
+The source birth, finite true-source span and retirement rules above are unchanged.
+
+For the supported 8/16 kHz RTP clocks, SDP keeps at most one event mapping per
+clock, including independent local receive and remote transmit payload numbers.
+An incoming answer selects a matching event clock or genuinely omits events.
+An outgoing valid mixed-clock answer retains native event reception but publishes
+bit512 for synthesized in-band transmission when no matching clock was selected.
+The endpoint independently refuses mismatched-clock native event transmission.
+G722 matches 8 kHz events despite decoding to 16 kHz PCM. Valid answer payload
+renumbering does not authorize reinterpretation of an offered payload format.
+
+Native receive-event history remains bounded by the existing exact remote SSRC;
+its identity includes the negotiated event clock, raw onset and symbol. Repeated
+reports and finals within that mapping yield one completed digit. Cross-clock
+onsets are not scaled or equated, since their offsets need not share an origin.
+This is not universal deduplication of a sender encoding one physical key twice
+under different clock mappings. Mixed-clock event transmission and RTCP clock-
+switch signaling are not implemented. In-band fallback is permitted by RFC4733,
+but an event-only IVR need not recognize it. Outgoing callee digits retain their
+existing lack of controller-command authority.

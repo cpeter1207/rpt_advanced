@@ -1,5 +1,6 @@
 //! Same actual product/private source, with an independent literal SIP/RTP caller.
 use super::*;
+use crate::phone::media::TelephoneEvent;
 use crate::phone::media::{AudioCodec, AudioProfile};
 use std::collections::BTreeMap;
 #[path = "product_sip_outgoing_tests.rs"]
@@ -18,6 +19,8 @@ struct Caller {
     keepalive: bool,
     profile: AudioProfile,
     events: bool,
+    event_clock: u32,
+    event_payload: u8,
 }
 
 fn fields(packet: &[u8]) -> (String, BTreeMap<String, String>) {
@@ -95,6 +98,12 @@ impl Caller {
             keepalive: !events,
             profile,
             events,
+            event_clock: profile.parameters().rtp_clock_hz,
+            event_payload: if profile.parameters().rtp_clock_hz == 16000 {
+                102
+            } else {
+                101
+            },
         };
         let mut packet = [0; 8192];
         if registered.is_none() {
@@ -111,7 +120,10 @@ impl Caller {
             codec: profile,
             receive_payload: profile.payload(),
             send_payload: profile.payload(),
-            telephone_event: events.then_some(101),
+            telephone_events: [8000, 16000].map(|rate| {
+                (events && rate == owner.event_clock)
+                    .then_some(TelephoneEvent::symmetric(owner.event_payload, rate))
+            }),
         }
         .answer(owner.rtp.local_addr().unwrap(), 1)
         .unwrap();
@@ -149,7 +161,11 @@ impl Caller {
                 let selected =
                     crate::phone::media::MediaDescription::parse(body.as_bytes()).unwrap();
                 assert_eq!(selected.codec, profile);
-                assert_eq!(selected.telephone_event, events.then_some(101));
+                assert_eq!(
+                    selected.telephone_events,
+                    [8000, 16000].map(|rate| (events && rate == owner.event_clock)
+                        .then_some(TelephoneEvent::symmetric(owner.event_payload, rate)))
+                );
                 owner.media = SocketAddr::new(address.trim().parse().unwrap(), port);
                 owner.request("ACK", "");
                 owner.sip.set_nonblocking(true).unwrap();
@@ -176,9 +192,9 @@ impl Caller {
         self.audio_payload(codec, pcm, self.profile.payload());
     }
     fn audio_payload(&mut self, codec: &mut AudioCodec, pcm: &[f32], payload: u8) {
-        let mut encoded = [0; 160];
+        let mut encoded = vec![0; self.profile.parameters().packet_bytes];
         codec.encode(pcm, &mut encoded).unwrap();
-        let mut wire = [0; 172];
+        let mut wire = vec![0; 12 + encoded.len()];
         wire[0] = 0x80;
         wire[1] = payload;
         wire[2..4].copy_from_slice(&self.sequence.to_be_bytes());
@@ -187,7 +203,9 @@ impl Caller {
         wire[12..].copy_from_slice(&encoded);
         self.rtp.send_to(&wire, self.media).unwrap();
         self.sequence = self.sequence.wrapping_add(1);
-        self.timestamp = self.timestamp.wrapping_add(160);
+        self.timestamp = self
+            .timestamp
+            .wrapping_add(self.profile.parameters().rtp_clock_hz / 50);
     }
     fn prompt(&mut self, codec: &mut AudioCodec, stage: &str) -> Vec<f32> {
         let source_start = self.timestamp;
@@ -208,13 +226,11 @@ impl Caller {
             let mut wire = [0; 2048];
             if let Ok((length, source)) = self.rtp.recv_from(&mut wire) {
                 assert_eq!(source, self.media);
-                assert_eq!(length, 172);
+                assert_eq!(length, 12 + self.profile.parameters().packet_bytes);
                 assert_eq!(wire[0], 0x80);
                 assert_eq!(wire[1] & 0x7f, self.profile.payload());
                 let mut pcm = vec![0.0; self.profile.parameters().packet_frames as usize];
-                codec
-                    .decode(wire[12..172].try_into().unwrap(), &mut pcm)
-                    .unwrap();
+                codec.decode(&wire[12..length], &mut pcm).unwrap();
                 if pcm.iter().any(|sample| sample.abs() > 0.01) {
                     last_tone = Instant::now();
                 }
@@ -228,7 +244,7 @@ impl Caller {
                         "inband prompt waits retain a progressing RTP source clock"
                     );
                     eprintln!(
-                        "inband {stage} source timeline: {} ms, {ticks} RTP8k ticks, {} PCM Hz",
+                        "inband {stage} source timeline: {} ms, {ticks} negotiated RTP ticks, {} PCM Hz",
                         started.elapsed().as_millis(),
                         self.profile.parameters().pcm_rate_hz
                     );
@@ -284,16 +300,19 @@ impl Caller {
                 .iter()
                 .position(|value| value == digit)
                 .unwrap() as u8;
-            self.timestamp = self.timestamp.wrapping_add(320);
+            self.timestamp = self
+                .timestamp
+                .wrapping_add(self.profile.parameters().rtp_clock_hz / 25);
             // A complete event plus its redundant end must yield one private digit.
             for flags in [10, 0x8a, 0x8a] {
                 let mut wire = [0u8; 16];
                 wire[0] = 0x80;
-                wire[1] = 101;
+                wire[1] = self.event_payload;
                 wire[2..4].copy_from_slice(&self.sequence.to_be_bytes());
                 wire[4..8].copy_from_slice(&self.timestamp.to_be_bytes());
                 wire[8..12].copy_from_slice(&19u32.to_be_bytes());
-                wire[12..].copy_from_slice(&[event, flags, 0, 160]);
+                let duration = (self.event_clock / 50) as u16;
+                wire[12..].copy_from_slice(&[event, flags, (duration >> 8) as u8, duration as u8]);
                 self.rtp.send_to(&wire, self.media).unwrap();
                 self.sequence = self.sequence.wrapping_add(1);
                 thread::sleep(Duration::from_millis(10));

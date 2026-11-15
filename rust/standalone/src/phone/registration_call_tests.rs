@@ -36,7 +36,7 @@ async fn failed_native_close_before_ack_still_retires_the_product_step() {
         remote: "opaque".into(),
         source: "127.0.0.1:9999".parse().unwrap(),
         media: Mutex::new(media),
-        inband: true,
+        digit_capabilities: 64,
         pcm_rate: 8000,
         direction: Direction::Incoming,
         state: AtomicU32::new(2),

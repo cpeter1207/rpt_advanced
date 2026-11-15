@@ -4,6 +4,7 @@ use super::media::{
     TimedAudio,
 };
 use crate::abi;
+use crate::phone::media::TelephoneEvent;
 use rptadv_codec_client::CodecCatalog;
 use rptadv_jitter_client::{Admission, Jitter, Kind};
 use std::{mem::size_of, net::SocketAddr, sync::Arc};
@@ -39,7 +40,7 @@ impl Offer {
             codec: super::media::AudioProfile::Mulaw,
             receive_payload: super::media::AudioProfile::Mulaw.payload(),
             send_payload: super::media::AudioProfile::Mulaw.payload(),
-            telephone_event: Some(101),
+            telephone_events: [Some(TelephoneEvent::symmetric(101, 8000)), None],
         };
         let local = if route.is_ipv4() {
             "0.0.0.0:0"
@@ -80,6 +81,7 @@ pub(crate) struct Media {
     births: [Option<(u64, u64)>; 64],
     birth_slot: usize,
     pcm: Box<[f32]>,
+    packet: Box<[u8]>,
     pending: Option<Pending>,
     offset: usize,
     // End of source media actually credited by product, independent of jitter adaptation.
@@ -90,7 +92,7 @@ pub(crate) struct Media {
     epoch: Option<u64>,
     marker: bool,
     answer: Vec<u8>,
-    pub(crate) inband: bool,
+    pub(crate) digit_capabilities: u32,
 }
 impl Media {
     /// Prepare only the already-selected verified profile on the existing I/O runtime.
@@ -120,7 +122,7 @@ impl Media {
         jitter: &'static abi::rptadv_jitter_descriptor_v1,
         catalog: &CodecCatalog,
     ) -> Result<Self, MediaError> {
-        let inband = description.telephone_event.is_none();
+        let digit_capabilities = description.digit_capabilities();
         let profile = description.codec.parameters();
         let codec = AudioCodec::from_catalog(catalog, description.codec)?;
         let jitter = unsafe {
@@ -141,6 +143,7 @@ impl Media {
             births: [None; 64],
             birth_slot: 0,
             pcm: vec![0.0; profile.packet_frames as usize].into_boxed_slice(),
+            packet: vec![0; profile.packet_bytes].into_boxed_slice(),
             pending: None,
             offset: 0,
             source_end: None,
@@ -150,11 +153,14 @@ impl Media {
             epoch: None,
             marker: true,
             answer,
-            inband,
+            digit_capabilities,
         })
     }
     pub(crate) fn pcm_rate(&self) -> u32 {
         self.profile.pcm_rate_hz
+    }
+    pub(crate) fn packet_bytes(&self) -> usize {
+        self.profile.packet_bytes
     }
     pub(crate) fn packet_frames(&self) -> u32 {
         self.profile.packet_frames
@@ -190,7 +196,7 @@ impl Media {
     }
     pub(crate) fn send(
         &mut self,
-        bytes: &[u8; 160],
+        bytes: &[u8],
         timestamp_ms: u32,
         deadline_ms: u32,
     ) -> Result<i32, MediaError> {
@@ -228,9 +234,8 @@ impl Media {
             .ok_or(MediaError::Retired)
     }
     fn poll(&mut self, now: u64) -> Result<(), MediaError> {
-        let mut packet = [0; 160];
         for _ in 0..8 {
-            match self.endpoint.try_receive(&mut packet) {
+            match self.endpoint.try_receive(&mut self.packet) {
                 Ok(None) => break,
                 Ok(Some((RtpEvent::None | RtpEvent::Digit { ended: false, .. }, _))) => {}
                 Ok(Some((RtpEvent::Digit { digit, ended: true }, _))) => {
@@ -241,7 +246,7 @@ impl Media {
                     let timestamp = self.timestamp(timestamp)?;
                     if self
                         .jitter
-                        .put(timestamp, self.profile.packet_frames, now, &packet)
+                        .put(timestamp, self.profile.packet_frames, now, &self.packet)
                         .map_err(|_| MediaError::Jitter)?
                         == Admission::Accepted
                     {
@@ -265,7 +270,7 @@ impl Media {
         }
         let decision = self
             .jitter
-            .get(now, self.profile.packet_frames, &mut packet)
+            .get(now, self.profile.packet_frames, &mut self.packet)
             .map_err(|_| MediaError::Jitter)?;
         match decision.kind {
             Kind::NotDue => return Ok(()),
@@ -302,7 +307,7 @@ impl Media {
                 } else {
                     decision.start_offset.max(0) as u32
                 };
-                self.codec.decode(&packet, &mut self.pcm)?;
+                self.codec.decode(&self.packet, &mut self.pcm)?;
                 self.pcm.copy_within(skip..span, 0);
                 if let Some((_, born)) = self
                     .births

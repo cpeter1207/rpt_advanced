@@ -1,4 +1,4 @@
-//! Test-only independent consumer of the released 8 kHz DTMF detector ABI.
+//! Test-only independent consumer of the released negotiated-rate DTMF detector ABI.
 use std::{
     ffi::{CStr, c_char, c_void},
     mem::size_of,
@@ -29,7 +29,7 @@ pub(super) struct Decoder {
     _library: libloading::Library,
 }
 impl Decoder {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(rate: u32) -> Self {
         // SAFETY: the same released ABI-1 library is already required by product.
         let library = unsafe { libloading::Library::new("librptadvdtmf.so.1") }.unwrap();
         let api = unsafe {
@@ -53,7 +53,7 @@ impl Decoder {
         assert!(owner.api.destroy.is_some() && owner.api.process.is_some());
         // SAFETY: the selected rate creates one unique borrowed-callback owner.
         assert_eq!(
-            unsafe { owner.api.create_at_rate.unwrap()(0, 8000, &mut owner.handle) },
+            unsafe { owner.api.create_at_rate.unwrap()(0, rate, &mut owner.handle) },
             0
         );
         assert!(!owner.handle.is_null());

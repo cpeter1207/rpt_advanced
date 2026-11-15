@@ -19,7 +19,7 @@ fn profile(payload: u8, format: &str, id: u32, rate: u32, frames: u32, bytes: us
     assert_eq!(parameters.packet_bytes, bytes);
     assert_eq!(media.receive_payload, payload);
     assert_eq!(media.send_payload, payload);
-    assert_eq!(media.telephone_event, None);
+    assert_eq!(media.telephone_events, [None; 2]);
     let answer = media.answer("127.0.0.1:43000".parse().unwrap(), 7).unwrap();
     let answer = String::from_utf8(answer).unwrap();
     assert!(answer.contains(&format!("m=audio 43000 RTP/AVP {payload}\r\n")));
@@ -102,6 +102,6 @@ fn ignored_unknown_format_does_not_hide_a_reinterpreted_static_payload() {
     let source = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 42000 RTP/AVP 0 128\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:128 telephone-event/8000\r\n";
     let media = MediaDescription::parse(source.as_bytes()).unwrap();
     assert_eq!(media.receive_payload, 0);
-    assert_eq!(media.telephone_event, None);
+    assert_eq!(media.telephone_events, [None; 2]);
     assert!(MediaDescription::parse(source.replace("PCMU/8000", "L16/16000").as_bytes()).is_err());
 }
