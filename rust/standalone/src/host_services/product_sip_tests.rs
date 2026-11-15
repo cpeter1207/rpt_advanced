@@ -420,7 +420,11 @@ fn product_call_profile(
 ) {
     const CHILD: &str = "RPTADV_TEST_REAL_SIP_PHONE_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
-        let test = if profile == AudioProfile::L16Wideband && events {
+        let test = if profile == AudioProfile::Ilbc30 && events {
+            "host_services::product_phone_tests::sip::real_product_ilbc_private_call_authenticates_with_events"
+        } else if profile == AudioProfile::Ilbc30 {
+            "host_services::product_phone_tests::sip::real_product_ilbc_private_call_authenticates_inband"
+        } else if profile == AudioProfile::L16Wideband && events {
             "host_services::product_phone_tests::sip::real_product_l16_private_call_authenticates_with_matching_events"
         } else if profile == AudioProfile::L16Wideband {
             "host_services::product_phone_tests::sip::real_product_l16_private_call_authenticates_inband"
@@ -619,4 +623,48 @@ fn real_product_l16_private_call_authenticates_with_matching_events() {
 #[test]
 fn real_product_l16_private_call_authenticates_inband() {
     product_call_profile(false, false, false, AudioProfile::L16Wideband, false);
+}
+
+#[test]
+fn real_product_ilbc_private_call_authenticates_with_events() {
+    product_call_profile(false, false, false, AudioProfile::Ilbc30, true);
+}
+#[test]
+fn real_product_ilbc_private_call_authenticates_inband() {
+    product_call_profile(false, false, false, AudioProfile::Ilbc30, false);
+}
+#[test]
+fn caller_packet_clock_matches_selected_codec_frame_duration() {
+    for profile in AudioProfile::ALL {
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let mut caller = Caller {
+            sip: UdpSocket::bind("127.0.0.1:0").unwrap(),
+            rtp: UdpSocket::bind("127.0.0.1:0").unwrap(),
+            target: peer.local_addr().unwrap(),
+            media: peer.local_addr().unwrap(),
+            to: String::new(),
+            sequence: 0,
+            timestamp: 0,
+            keepalive: false,
+            profile,
+            events: true,
+            event_clock: profile.parameters().rtp_clock_hz,
+            event_payload: 101,
+        };
+        let p = profile.parameters();
+        let mut codec = AudioCodec::load(profile).unwrap();
+        let mut wire = [0; 2048];
+        for expected in [0, p.packet_frames * p.rtp_clock_hz / p.pcm_rate_hz] {
+            caller.audio(&mut codec, &vec![0.0; p.packet_frames as usize]);
+            let (length, source) = peer.recv_from(&mut wire).unwrap();
+            assert_eq!(source, caller.rtp.local_addr().unwrap());
+            assert_eq!(length, 12 + p.packet_bytes);
+            assert_eq!(
+                u32::from_be_bytes(wire[4..8].try_into().unwrap()),
+                expected,
+                "{profile:?}"
+            );
+        }
+    }
 }

@@ -119,3 +119,16 @@ The old exact-ptime30 negative was replaced by invalidptime0, since ptime is a
 preference. Its new positive/fractional cases were captured in the earlier RED.
 No dependency pin, public artifact or live installation changed. Actual30ms
 call fixtures, aggregate/native/coverage and external-peer checks remain open.
+
+
+### Caller cadence RED
+
+The next test-only selectors cover incoming native/in-band authentication and
+outgoing quiet/native-IVR/in-band-IVR calls. They are not yet executed. A minimal
+real-UDP caller test first captured the fixture's hardcoded20ms source advance:
+the existing eight profiles succeeded, then iLBC's second packet carried160 RTP
+ticks instead of its required240. ilbc-clock-red.log has Cargo101 and
+CLOCK_RED_EXIT101; wrapper0 means expected-RED collection, not a passing test.
+Compilation took13.70s, the test0.04s. Mounted source checksums were verified and
+post-format compiled-input checksums retained independently of blank launcher
+revision metadata. No production source changed in this test-only increment.

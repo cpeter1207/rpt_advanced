@@ -604,6 +604,19 @@ fn product_outgoing_with_policy(
             "host_services::product_phone_tests::sip::outgoing::actual_unlocked_phone_bypass_allows_eligible_peer_playout"
         } else if bypass_all == Some(false) {
             "host_services::product_phone_tests::sip::outgoing::actual_unlocked_phone_bypass_preserves_local_only_playout"
+        } else if selected == AudioProfile::Ilbc30 {
+            match ivr {
+                IvrMode::Disabled => {
+                    "host_services::product_phone_tests::sip::outgoing::actual_ilbc_quiet_call_preserves_thirty_ms_rtp"
+                }
+                IvrMode::Events => {
+                    "host_services::product_phone_tests::sip::outgoing::actual_ilbc_radio_digits_preserve_private_native_events"
+                }
+                IvrMode::InBand => {
+                    "host_services::product_phone_tests::sip::outgoing::actual_ilbc_radio_digits_preserve_private_inband"
+                }
+                IvrMode::MixedClock => unreachable!("no new mixed-clock iLBC fixture"),
+            }
         } else if selected == AudioProfile::L16Wideband {
             match ivr {
                 IvrMode::MixedClock => {
@@ -1659,4 +1672,31 @@ fn actual_aal2_g726_two_way_phone_preserves_quiet_rtp() {
 #[test]
 fn actual_l16_narrowband_two_way_phone_preserves_quiet_rtp() {
     product_outgoing(false, true, true, AudioProfile::L16Narrowband, false);
+}
+
+#[test]
+fn actual_ilbc_quiet_call_preserves_thirty_ms_rtp() {
+    product_outgoing(false, true, true, AudioProfile::Ilbc30, false);
+}
+#[test]
+fn actual_ilbc_radio_digits_preserve_private_native_events() {
+    product_outgoing_with_ivr(
+        true,
+        false,
+        false,
+        AudioProfile::Ilbc30,
+        IvrMode::Events,
+        true,
+    );
+}
+#[test]
+fn actual_ilbc_radio_digits_preserve_private_inband() {
+    product_outgoing_with_ivr(
+        true,
+        false,
+        false,
+        AudioProfile::Ilbc30,
+        IvrMode::InBand,
+        true,
+    );
 }
