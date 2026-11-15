@@ -58,8 +58,8 @@
 
 **Interfaces:** Test caller pacing derives1000*packet_frames/pcm_rate_hz; RTP increments derive packet_frames*rtp_clock_hz/pcm_rate_hz. Existing20ms values and exact privacy/first-utterance assertions stay unchanged.
 
-- [ ] Add incoming native-event/in-band authentication and outgoing quiet/two-way/finite/private-IVR30ms selectors, observing intended RED at the unimplemented path before repairs.
-- [ ] Run bounded actual SIP/RTP/controller cases with exact private product/SIP and official alpha4 hashes; preserve original per-case bounds and release the slot after each granted partition.
+- [x] Add incoming native-event/in-band authentication and outgoing quiet/two-way/finite/private-IVR30ms selectors, observing intended RED at the unimplemented path before repairs.
+- [x] Run bounded actual SIP/RTP/controller cases with exact private product/SIP and official alpha4 hashes; preserve original per-case bounds and release the slot after each granted partition.
 - [ ] Run focused age/finite/event/lifetime regressions, C ABI and strict checks, then coherent full suites under the existing queue. Obtain independent exact-diff review.
 - [ ] Save clean recovery commits/bundle and explicit limits: simulated endpoint shares owned codec, external/hardware/native/coverage remain separate. Do not claim full sixteen-profile parity.
 
@@ -196,3 +196,48 @@ The executable hash and unchanged private runtime/official alpha4 DSO hashes
 are retained in the receipt. This paragraph is a documentation-only addition
 after execution. Four actual iLBC cases, full aggregate/native/coverage and
 independent third-party interoperability remain unqualified.
+
+
+### Nine-profile local wire and focused checkpoint
+
+All five iLBC call fixtures now pass on clean f2f7ddf and its unchanged private
+runtime. Native-event incoming authentication/status/privacy/teardown passed in
+38.49 s. The subsequent partition passed incoming in-band authentication in
+41.11 s, outgoing quiet/cadence in 71.45 s, outgoing native IVR in 72.51 s and
+outgoing in-band IVR in 72.57 s. The latter retains the existing eighteen
+unnegotiated telephone-event packets (six keys, three reports each) as a
+negative control; their invalid-packet diagnostics are expected and preserved.
+Every simulated radio clock reported zero skipped slots. The four-case receipt
+is 1ae549df006d6cb55b517d2b19c2e60090fbf035f4ff11a6ec459d131592f1c7.
+Its complete source manifest is
+1aee7e2acd07056ddc0406a34654264ea08173183fe468c26840dfe734486c23.
+
+The first strict runner stopped before tests on an incorrect integration target
+name. The corrected runner passed 35 tests (profile 8, transport 1, fault 1,
+iLBC 4, media 15, variable receive 3, finite 3), three-package all-target Clippy
+with warnings denied, and formatting. Its log is
+99b9210d1ada94ad46498aee87f692011e2fc7165cd91026b338bead49232c50.
+An audit found its call-media filter had selected zero tests; wrapper success
+was not treated as qualification of that family. A separate no-build run
+verified selection counts of 13 call-media, 25 media-unit and 1 catalog-lifetime
+tests before executing all 39 successfully. That receipt is
+c4ca5bc744f639d4bf442dfa2a83e169fceac54be9840b2f1f73738470b82212.
+All three runs use the same exact executable
+10c2fbcc68336cc1925b922aaf296ad55e48d19a89db18b3fc3be5973521cd84.
+The earlier incorrect target and zero-selection receipts remain available.
+
+This checkpoint therefore has 74 focused tests, the scalar prompt control,
+five actual SIP/RTP/controller fixture calls and scoped strict checks. It is
+not a full aggregate, C ABI, native arm64/amd64, coverage or external-peer pass.
+The remote fixture uses the same owned codec provider, so it does not prove
+independent third-party interoperability. Normal production offers/selects all
+nine profiles through AudioProfile::ALL and prepares each in both directions
+before publication; per-call contexts remain selected-codec only. The explicit
+local receive ceiling is 30 ms, not a claim about all RTP packetizations.
+
+Twelve frozen Batch A outgoing replay cases remain open in their separate tree;
+this iLBC checkpoint does not retroactively execute them. Five conventional
+profiles (G.729, G.723, Speex 8/16 kHz and Opus) and the two legacy wire decisions
+(Dialogic ADPCM and LPC10) remain before full sixteen-profile parity. No public
+artifact, live installation or hardware operation was performed. This ledger
+addition changes documentation only after the tested source.
