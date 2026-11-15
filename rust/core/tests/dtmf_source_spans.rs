@@ -44,7 +44,7 @@ fn detect(rate: u32, partition: usize) -> (Vec<char>, Vec<std::ops::Range<i64>>)
 
 #[test]
 fn source_rate_spans_keep_qualifying_audio_across_partitions() {
-    for rate in [8_000, 48_000] {
+    for rate in [8_000, 16_000, 48_000] {
         let expected = detect(rate, rate as usize / 5);
         assert_eq!(expected.0, ['1']);
         assert_eq!(expected.1.len(), 1);
@@ -52,5 +52,5 @@ fn source_rate_spans_keep_qualifying_audio_across_partitions() {
         assert_eq!(detect(rate, 37), expected);
         assert_eq!(detect(rate, 1), expected);
     }
-    assert!(DtmfDetector::at_rate(true, 16_000).is_err());
+    assert!(DtmfDetector::at_rate(true, 12_000).is_err());
 }
