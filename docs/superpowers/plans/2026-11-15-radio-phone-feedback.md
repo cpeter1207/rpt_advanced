@@ -81,3 +81,22 @@ usize::MAX-1, and refusal without adding a port.
 core/product/standalone/Asterisk/peer-support/SIP, warning-fatal Rustdoc and fmt.
 Runner exit 0, with independent exact-source review clear. Aggregate product and
 standalone verification of the final continuous-media union remain pending.
+
+
+## Combined continuous-media recovery
+
+The selected union applies the clean net continuous-media leaf c4733fad (parent
+5bc2526) on feedback checkpoint 766b5bf. It excludes every startup-only transport
+change. The only merge conflicts were this boundary's ADR and the shared outgoing
+wire fixture: both pre-INVITE completion/actual180 ringback and immediate no-RX
+first greetings remain, while obsolete post-answer completion waits are removed.
+Independent source overlap review is clear.
+
+`radio-feedback-continuous-outgoing.log` rebuilt the exact private product and SIP
+libraries, passed the C ABI probe and all six actual-product outgoing cases in
+311.62 seconds, launcher exit0. Coverage includes administrative and real RF DTMF
+origination, both immediate-answer greetings, both negotiated codecs through
+30-second strict idle cadence, accepted source-cut recovery, no callee control or
+self-echo, actual RF return and exact local/remote hangup. The separate full
+core/product aggregate and standalone-base/host strict groups remain pending at
+this recovery checkpoint. No native or live qualification is implied.

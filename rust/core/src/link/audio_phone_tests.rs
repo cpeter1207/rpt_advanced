@@ -7,6 +7,7 @@ struct PhoneInput {
     policy: ReceivePolicy,
     age: Option<SourceTimeBound>,
     public: bool,
+    quiet: bool,
 }
 impl PeerInput for PhoneInput {
     fn phone_reply(&self) -> Option<&PeerReply> {
@@ -31,6 +32,10 @@ impl PeerInput for PhoneInput {
         })
     }
     fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+        if self.quiet {
+            output.fill(0.0);
+            return None;
+        }
         output.fill(0.25);
         Some(output.len())
     }
@@ -62,6 +67,7 @@ fn input(reply: PeerReply) -> PhoneInput {
         policy: ReceivePolicy::Phone,
         age: None,
         public: false,
+        quiet: false,
     }
 }
 
@@ -548,4 +554,136 @@ fn outgoing_phone_role_uses_existing_exact_mixer_fence_without_control_authority
     );
     assert!(links.peers[0].ended());
     assert!(!current.phone_authenticated());
+}
+
+#[test]
+fn outgoing_idle_pcm_uses_existing_route_without_rf_telemetry_or_retired_recipient() {
+    use crate::controller::{MorseSettings, PlaybackDestination, PlaybackPolicy, PreparedMedia};
+    for (is_outgoing, mode, idle_expected, retire_source) in [
+        (true, Mode::TRANSCEIVE, true, false),
+        (true, Mode::TRANSCEIVE, true, true),
+        (true, Mode::MONITOR, false, false),
+        (false, Mode::TRANSCEIVE, false, false),
+    ] {
+        let source = source(7, 9, 13);
+        let owner = if is_outgoing {
+            PeerSignals::for_outgoing_phone(source.clone())
+        } else {
+            let owner = PeerSignals::for_phone(source.clone());
+            assert!(owner.authenticate_phone());
+            owner
+        };
+        let current = owner.reply_target();
+        let mut receive = input(current.clone());
+        receive.quiet = true;
+        receive.signals.set_radio_keyed(false);
+        let (writer, mut output) = LinkAudioQueue::new(16, 4).unwrap().into_endpoints();
+        let peer = AudioPeer::for_phone(&source, &current, mode, receive, writer, 4).unwrap();
+        let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 4).unwrap();
+        let (mut controller, mut control) = NodeController::new(
+            ControllerSettings::default(),
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        // A callback gap keeps its source coordinate; no catch-up PCM is invented.
+        for tick in [0, 1, 7] {
+            let stamp = SourcePosition {
+                generation: 7,
+                sample: tick * 4,
+                stream: 9,
+                born_ns: Some(1_000_000 + tick * 83_333),
+            };
+            let mut rf = [0.0; 4];
+            assert!(
+                !links
+                    .process(&mut controller, false, &mut rf, stamp)
+                    .unwrap(),
+                "idle transport must not key RF"
+            );
+            assert_eq!(rf, [0.0; 4]);
+            assert!(!links.peer_source_active());
+            assert!(!links.routing[0].telemetry);
+            dispatcher.dispatch(1);
+            let mut sent = [1.0; 4];
+            let read = output.read_span(&mut sent);
+            assert_eq!(
+                read.is_some(),
+                idle_expected,
+                "outgoing silence must use the actual dispatcher"
+            );
+            if let Some(read) = read {
+                assert_eq!(sent, [0.0; 4]);
+                assert_eq!(
+                    (
+                        read.frames,
+                        read.span.source_start,
+                        read.span.stream,
+                        read.span.born_ns
+                    ),
+                    (4, stamp.sample, stamp.stream, stamp.born_ns)
+                );
+            }
+        }
+        // LOCAL-and-links telemetry remains excluded from every Phone destination.
+        controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
+        assert!(
+            control.queue_prepared_status(
+                PreparedMedia::new(Some(vec![0.25; 4]), "E", MorseSettings::default())
+                    .unwrap()
+                    .with_playback_policy(PlaybackPolicy {
+                        destination: PlaybackDestination::LocalAndLinks,
+                        ..Default::default()
+                    })
+            )
+        );
+        let mut rf = [0.0; 4];
+        links
+            .process(&mut controller, false, &mut rf, SourcePosition::default())
+            .unwrap();
+        assert_eq!(rf, [0.25; 4]);
+        dispatcher.dispatch(1);
+        let mut sent = [1.0; 4];
+        assert_eq!(output.read_span(&mut sent).is_some(), idle_expected);
+        if idle_expected {
+            assert_eq!(
+                sent, [0.0; 4],
+                "continuous idle route must not leak public telemetry"
+            );
+        }
+        links
+            .process(
+                &mut controller,
+                true,
+                &mut [0.5; 4],
+                SourcePosition::default(),
+            )
+            .unwrap();
+        dispatcher.dispatch(1);
+        let read = output.read_span(&mut sent);
+        assert_eq!(read.is_some(), mode.transmits());
+        if mode.transmits() {
+            assert_eq!(sent, [0.5; 4]);
+        }
+        links
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0; 4],
+                SourcePosition::default(),
+            )
+            .unwrap();
+        if retire_source {
+            links.peers[0].input.signals.end();
+            assert!(!current.ended(), "source cut does not end the call");
+        } else {
+            owner.end();
+        }
+        dispatcher.dispatch(1);
+        assert!(
+            output.read_span(&mut sent).is_none(),
+            "exact recipient or source retirement cancels queued silence"
+        );
+    }
 }

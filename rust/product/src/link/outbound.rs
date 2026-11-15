@@ -130,7 +130,7 @@ pub(super) struct Outbound {
     private: bool,
     private_finishing: bool,
     timed_clock: Option<SourceTimeClock>,
-    programme_guard: Option<PeerReply>,
+    programme_guard: Option<(PeerReply, bool)>,
     next_audio_ms: u64,
     unkey_ns: Option<u64>,
     idle_timestamp: u32,
@@ -241,8 +241,9 @@ impl Outbound {
         self.discard()?;
         Ok((old, dropped))
     }
-    pub(super) fn guard_programme(&mut self, signals: Option<PeerReply>) {
-        self.programme_guard = signals;
+    /// Keep the revocable media generation separate from the immutable call role.
+    pub(super) fn guard_programme(&mut self, signals: Option<PeerReply>, outgoing: bool) {
+        self.programme_guard = signals.map(|signals| (signals, outgoing));
     }
     fn discard(&mut self) -> Result<(), Error> {
         self.pending = None;
@@ -257,7 +258,7 @@ impl Outbound {
     fn current(&self, stream: u64) -> bool {
         self.programme_guard
             .as_ref()
-            .is_none_or(|signals| !signals.ended())
+            .is_none_or(|(signals, _)| !signals.ended())
             && self
                 .clock
                 .as_ref()
@@ -279,7 +280,7 @@ impl Outbound {
         {
             return Ok(None);
         }
-        let now = if self.private {
+        let mut now = if self.private {
             let reference = self.timed_clock.ok_or(Error::Admission)?.reference();
             if reference.host_clock_epoch == 0 {
                 return Err(Error::Admission);
@@ -288,6 +289,8 @@ impl Outbound {
         } else {
             now_ms.saturating_mul(1_000_000)
         };
+        #[cfg(test)]
+        tests::after_clock();
         self.statistics.rejected.store(
             self.retired_rejections.saturating_add(
                 self.queue
@@ -339,6 +342,10 @@ impl Outbound {
             self.private_finishing = finishing;
             return Ok(Some(now));
         }
+        let continuous_programme = self
+            .programme_guard
+            .as_ref()
+            .is_some_and(|(_, outgoing)| *outgoing);
         if let Some(pending) = &self.pending {
             if now >= pending.expires || !self.current(pending.stream) {
                 self.statistics.expired.fetch_add(
@@ -353,7 +360,9 @@ impl Outbound {
             self.prepare(io, now, false)?;
             self.send(io, now)?;
         } else if self.queue.peek_span().is_some_and(|next| {
-            self.private
+            // Shared programme keeps the existing source-clock due-time gate.
+            // Other private input retains its existing receipt validation.
+            (self.private && !continuous_programme)
                 || next.span.born_ns.is_none_or(|born| born <= now)
                 || !self.current(next.span.stream)
         }) {
@@ -365,6 +374,18 @@ impl Outbound {
                 self.discard_media(io)?;
                 return Ok(Some(now));
             };
+            if self.private && read.span.born_ns.is_some_and(|born| born > now) {
+                // The producer can publish after our first clock observation.
+                // Recheck the same immutable, validated epoch, never its birth.
+                // An invalid/backwards reference cannot advance known time and
+                // therefore cannot admit the disputed future span.
+                now = now.max(
+                    self.timed_clock
+                        .expect("validated private clock")
+                        .reference()
+                        .now_ns,
+                );
+            }
             if read.span.born_ns.is_none_or(|born| {
                 now >= born.saturating_add(AGE_NS) || (self.private && born > now)
             }) || now >= read.span.phone_expires_ns
@@ -392,16 +413,19 @@ impl Outbound {
         if next.is_some_and(|deadline| deadline <= now) {
             return Ok(next);
         }
-        // Programme ends at the existing source-idle deadline. Finite private
-        // prompts still require their explicit successful playback completion.
-        if self.programme_guard.is_some() && self.unkey_ns.is_some_and(|end| now >= end) {
+        // Incoming programme ends at the source-idle deadline. An outgoing
+        // call keeps its continuous SRC across transient empty polls; explicit
+        // retirement and the original stale cutoff still own its lifetime.
+        // Finite private prompts require their explicit playback completion.
+        let auto_finish = self.programme_guard.is_some() && !continuous_programme;
+        if auto_finish && self.unkey_ns.is_some_and(|end| now >= end) {
             self.finish_private();
         }
         if self.private && !self.private_finishing {
             return Ok(next
                 .into_iter()
                 .chain(oldest.map(|born| born.saturating_add(AGE_NS)))
-                .chain(self.unkey_ns.filter(|_| self.programme_guard.is_some()))
+                .chain(self.unkey_ns.filter(|_| auto_finish))
                 .min());
         }
         if let Some(deadline) = self.unkey_ns.filter(|deadline| now >= *deadline) {
@@ -855,13 +879,256 @@ mod tests {
     use rpt_advanced_core::audio::LinkAudioQueue;
 
     thread_local! {
+        static AFTER_CLOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
         static BEFORE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn after_clock() {
+        let hook = AFTER_CLOCK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
     }
     pub(super) fn before_read() {
         let hook = BEFORE_READ.with(|slot| slot.borrow_mut().take());
         if let Some(hook) = hook {
             hook();
+        }
+    }
+
+    #[test]
+    fn private_admission_uses_a_clock_not_older_than_the_acquired_span() {
+        for future in [false, true] {
+            let (mut io, state) = crate::link::session::tests::phone_source_peer();
+            state.lock().unwrap().encode_unit = Some(160);
+            let clock = SourceTimeClock::new(
+                std::time::Instant::now() - std::time::Duration::from_millis(20),
+            )
+            .unwrap();
+            let (mut writer, reader) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
+            let mut outbound = Outbound::private(8000, reader).unwrap();
+            outbound.bind_timed_clock(clock).unwrap();
+            assert_eq!(
+                writer.write(
+                    AudioSpan {
+                        born_ns: Some(0),
+                        ..AudioSpan::default()
+                    },
+                    &[0.0; BLOCK],
+                ),
+                0,
+            );
+            outbound.step(&mut io, 0).unwrap();
+            assert!(
+                outbound.conversion.is_some(),
+                "prime the actual retained SRC"
+            );
+            let published = Arc::new(AtomicU64::new(0));
+            let observed = Arc::clone(&published);
+            AFTER_CLOCK.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    // The real producer stamps this later sample of the SAME
+                    // clock after the consumer's first observation, before peek.
+                    let born = clock.reference().now_ns + if future { 1_000_000_000 } else { 0 };
+                    observed.store(born, Ordering::Release);
+                    assert_eq!(
+                        writer.write(
+                            AudioSpan {
+                                source_start: BLOCK as u64,
+                                born_ns: Some(born),
+                                ..AudioSpan::default()
+                            },
+                            &[0.0; BLOCK],
+                        ),
+                        0,
+                    );
+                }));
+            });
+            outbound.step(&mut io, 0).unwrap();
+            assert_eq!(
+                outbound.conversion.is_some(),
+                !future,
+                "a later valid clocked publication is not a future source"
+            );
+            assert_eq!(
+                outbound.statistics.snapshot().expired_native_samples,
+                if future { BLOCK as u64 } else { 0 },
+            );
+            if let Some(conversion) = &outbound.conversion {
+                assert_eq!(
+                    conversion.born_ns,
+                    published.load(Ordering::Acquire)
+                        + (conversion.source_ns(8000) - source_ns(BLOCK as u64)) as u64,
+                    "mapping must preserve the original producer birth"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn outgoing_programme_keeps_its_src_across_the_existing_idle_deadline() {
+        use rpt_advanced_core::link::{PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource};
+        for outgoing in [true, false] {
+            let source = PhoneSource::new(
+                PhoneAccountId::new("office").unwrap(),
+                1,
+                PhoneCallId::new([1; 16]).unwrap(),
+                1,
+                1,
+            )
+            .unwrap();
+            let owner = if outgoing {
+                PeerSignals::for_outgoing_phone(source)
+            } else {
+                let owner = PeerSignals::for_phone(source);
+                assert!(owner.authenticate_phone());
+                owner
+            };
+            let (mut io, state) = crate::link::session::tests::phone_source_peer();
+            state.lock().unwrap().encode_unit = Some(160);
+            let clock = SourceTimeClock::new(std::time::Instant::now()).unwrap();
+            let (mut writer, reader) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
+            let mut outbound = Outbound::private(8000, reader).unwrap();
+            outbound.bind_timed_clock(clock).unwrap();
+            let reply = owner.reply_target();
+            assert_eq!(reply.phone_outgoing(), outgoing);
+            // Production uses an ordinary ring-generation guard, independent
+            // of the immutable call role. Do not substitute the call identity.
+            let generation = PeerSignals::new();
+            outbound.guard_programme(Some(generation.reply_target()), reply.phone_outgoing());
+            assert_eq!(
+                writer.write(
+                    AudioSpan {
+                        born_ns: Some(clock.reference().now_ns),
+                        ..AudioSpan::default()
+                    },
+                    &[0.0; BLOCK],
+                ),
+                0,
+            );
+            outbound.step(&mut io, 0).unwrap();
+            assert!(
+                outbound.encoder.is_some(),
+                "real codec has a retained prefix"
+            );
+            let resets = state.lock().unwrap().encoder_resets;
+            // Exercise the exact existing deadline with the serial owner first,
+            // before the next real callback's queue publication at that boundary.
+            let due = outbound.unkey_ns.unwrap();
+            while clock.reference().now_ns < due {
+                std::thread::sleep(std::time::Duration::from_nanos(
+                    due - clock.reference().now_ns.min(due),
+                ));
+            }
+            let wake = outbound.step(&mut io, 20).unwrap();
+            assert_eq!(
+                outbound.private_finishing, !outgoing,
+                "a continuous outgoing route must not become a finite burst"
+            );
+            if outgoing {
+                assert!(
+                    wake.is_none_or(|next| next > clock.reference().now_ns),
+                    "continuous idle must not requeue an already expired wake"
+                );
+                assert!(!outbound.conversion.as_ref().unwrap().drained);
+                assert_eq!(
+                    writer.write(
+                        AudioSpan {
+                            source_start: BLOCK as u64,
+                            born_ns: Some(clock.reference().now_ns),
+                            ..AudioSpan::default()
+                        },
+                        &[0.0; BLOCK],
+                    ),
+                    0,
+                );
+                outbound.step(&mut io, 20).unwrap();
+                assert_eq!(state.lock().unwrap().encoder_resets, resets);
+                assert_eq!(outbound.statistics.snapshot().accepted, 1);
+                assert_eq!(outbound.statistics.snapshot().expired_native_samples, 0);
+                assert_eq!(
+                    writer.write(
+                        AudioSpan {
+                            source_start: (2 * BLOCK) as u64,
+                            born_ns: Some(clock.reference().now_ns),
+                            ..AudioSpan::default()
+                        },
+                        &[0.25; BLOCK],
+                    ),
+                    0,
+                );
+                generation.end();
+                assert!(
+                    reply.phone_media_authorized(),
+                    "only the media generation ended"
+                );
+                outbound.step(&mut io, 21).unwrap();
+                outbound.step(&mut io, 21).unwrap();
+                assert_eq!(
+                    outbound.statistics.snapshot().accepted,
+                    1,
+                    "outgoing continuity cannot bypass the retired ring"
+                );
+                assert!(outbound.conversion.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn outgoing_programme_waits_for_the_existing_source_clock_due_time() {
+        for retire in [false, true] {
+            let epoch = std::time::Instant::now();
+            let source_clock = Arc::new(SourceClock::new(epoch));
+            source_clock.restart();
+            assert_eq!(source_clock.advance(BLOCK).born_ns, None);
+            source_clock.observe();
+            let stamp = source_clock.advance(BLOCK);
+            let due = stamp.born_ns.unwrap();
+            let clock = SourceTimeClock::new(epoch).unwrap();
+            assert!(
+                due > clock.reference().now_ns,
+                "actual mapping predicts the next callback"
+            );
+            let (mut io, state) = crate::link::session::tests::phone_source_peer();
+            state.lock().unwrap().encode_unit = Some(160);
+            let (mut writer, reader) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
+            let mut outbound = Outbound::private(8000, reader).unwrap();
+            outbound.bind_timed_clock(clock).unwrap();
+            outbound.bind_clock(source_clock);
+            let generation = rpt_advanced_core::link::PeerSignals::new();
+            outbound.guard_programme(Some(generation.reply_target()), true);
+            let span = AudioSpan {
+                source_start: stamp.sample,
+                stream: stamp.stream,
+                born_ns: Some(due),
+                ..AudioSpan::default()
+            };
+            assert_eq!(writer.write(span, &[0.0; BLOCK]), 0);
+            let wake = outbound.step(&mut io, 0).unwrap();
+            assert_eq!(
+                outbound.queue.peek_span().map(|read| read.span),
+                Some(span),
+                "a real source-clock due time must wait, not discard or renew"
+            );
+            assert_eq!(wake, Some(due));
+            assert_eq!(outbound.statistics.snapshot().expired_native_samples, 0);
+            if retire {
+                generation.end();
+                outbound.step(&mut io, 0).unwrap();
+                assert!(outbound.queue.peek_span().is_none());
+                assert!(outbound.conversion.is_none());
+                assert_eq!(outbound.statistics.snapshot().accepted, 0);
+            } else {
+                while clock.reference().now_ns < due {
+                    std::thread::sleep(std::time::Duration::from_nanos(
+                        due - clock.reference().now_ns.min(due),
+                    ));
+                }
+                outbound.step(&mut io, 20).unwrap();
+                assert_eq!(outbound.conversion.as_ref().unwrap().span, span);
+                assert_eq!(outbound.statistics.snapshot().expired_native_samples, 0);
+            }
         }
     }
 

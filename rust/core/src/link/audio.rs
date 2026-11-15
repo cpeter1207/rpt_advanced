@@ -1129,8 +1129,13 @@ impl<P: PeerInput> LinkAudio<P> {
                         && (receiving || forwarding_sources > own_source)));
             route.broadcast = !ended && peer.mode.transmits() && selected;
             route.telemetry = peer.phone.is_none() && peer.input.signals().telemetry_allowed();
+            // An exact outgoing phone receives clocked idle PCM through its
+            // existing sender. Keep mix eligibility separate so idle silence
+            // cannot enable a source, key RF, or include public telemetry.
             let eligible = route.target != 0
                 && (route.enabled
+                    || (route.broadcast
+                        && peer.phone.as_ref().is_some_and(PeerReply::phone_outgoing))
                     || (route.telemetry
                         && route.broadcast
                         && self.reply_output[..count]

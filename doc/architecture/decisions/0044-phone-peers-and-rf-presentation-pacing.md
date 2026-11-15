@@ -1991,6 +1991,62 @@ not introduced by this increment. An older host without the tail has no
 provisional feedback capability, rather than fabricated ringing.
 
 The source-only result routing, explicit incoming attachment, called-party
-no-login role and peer-free outgoing milestone remain unchanged. Continuous RTP
-and the separately diagnosed symmetric-media-latch repair are independent work;
-the startup-only checkpoint is not silently selected by this feedback change.
+no-login role and peer-free outgoing milestone remain unchanged. The combined
+candidate also includes the separately qualified continuous-media path below;
+the startup-only checkpoint is not selected.
+
+### Outgoing continuous G.711 media (2026-11-15)
+
+An exact live outgoing Phone recipient remains eligible for the node's
+existing clocked mix-minus output while idle. Mix enablement, source
+selection, recipient retirement, and public-telemetry exclusion are unchanged:
+an idle route publishes zero PCM, not a newly enabled source. Transport
+silence cannot key RF or grant incoming-mailbox authority.
+
+The existing dispatcher, revocable output queue, serial private owner, SRC,
+negotiated G.711 encoder and sole RTP socket carry those samples. There is no
+startup-only datagram, second silence scheduler, PCM queue, thread, or RTP
+stream. The current negotiated 8 kHz, 160-sample packet contract supplies
+20 ms packets with the same SSRC, sequence space and source timestamps as
+programme audio. Existing source cuts, deadlines and recipient retirement
+remain authoritative; a late callback is not a license to restamp or burst
+old programme.
+
+Callcentric's [device guidance](https://www.callcentric.com/support/device/other)
+disables silence suppression; its [AC-211 example](https://www.callcentric.com/support/device/telco-ac-211)
+uses 20 ms packets. A
+symmetric-RTP loopback fixture reproduced the preceding dependency on local
+RX; a startup-only experiment opened that initial path but then suppressed
+idle RTP. The continuous regression therefore exercises both negotiated
+G.711 profiles through thirty seconds of quiet output before the unchanged
+first greeting, without any receiver key or local RF output. This is bounded
+transport evidence, not a claimed NAT timeout or physical-provider acceptance.
+
+Private sender admission may observe a concurrent publication after its first
+clock sample. Only when a span appears newer than that observation does it
+resample the same immutable clock before applying the unchanged source-age,
+future-birth and retirement checks. Original receipt and deadline values are
+never renewed; invalid or backwards observations cannot advance known time.
+
+An outgoing continuous route does not declare a finite burst complete merely
+because its bounded queue is empty at the old source-idle deadline. The same
+role predicate excludes that expired deadline from its wake selection. Explicit
+finite playback completion, call/source retirement and the original stale
+cutoff remain unchanged; incoming programme retains its existing idle finish.
+
+Ordinary shared programme and continuous outgoing Phone media use the existing
+source-clock front-of-queue due-time gate. A mapped callback point slightly ahead of a
+poll remains in its original bounded queue until that original due time; it is
+not discarded or restamped. Private replies retain their fresh-receipt future
+rejection. A retired generation still drains immediately, and the original age
+cutoff governs retained conversion while waiting. This reuses the ordinary
+sender's existing wake selection rather than adding another scheduler.
+
+Healthy-generation wire checks require consecutive 160-sample RTP timestamps.
+An accepted source gap, concealment, reset or control cut may retire the phone
+generation; its existing marked restart must retain sequence/SSRC and advance
+source time, not replay retired samples. The synthetic test observes exact
+accepted callback credit rather than accepting any marker as proof. Its
+post-DTMF healthy interval continues real incoming zero RTP, since abruptly
+stopping an established source would instead test network loss. These tests
+preserve the existing reset-marker convention, not a new general marker policy.

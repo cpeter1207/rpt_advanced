@@ -579,6 +579,7 @@ impl PrivatePhoneSession {
         self.spare_output = Some(self.outbound.exchange(queue)?);
         self.outbound.guard_programme(
             wanted.then(|| self.media.as_ref().expect("active programme").guard()),
+            self.reply.phone_outgoing(),
         );
         self.programme = wanted;
         Ok(())

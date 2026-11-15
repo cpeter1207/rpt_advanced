@@ -150,10 +150,14 @@ impl Caller {
         }
     }
     fn audio(&mut self, codec: &mut G711Codec, pcm: &[f32; 160]) {
+        self.audio_payload(codec, pcm, 0);
+    }
+    fn audio_payload(&mut self, codec: &mut G711Codec, pcm: &[f32; 160], payload: u8) {
         let mut encoded = [0; 160];
         codec.encode(pcm, &mut encoded).unwrap();
         let mut wire = [0; 172];
         wire[0] = 0x80;
+        wire[1] = payload;
         wire[2..4].copy_from_slice(&self.sequence.to_be_bytes());
         wire[4..8].copy_from_slice(&self.timestamp.to_be_bytes());
         wire[8..12].copy_from_slice(&19u32.to_be_bytes());

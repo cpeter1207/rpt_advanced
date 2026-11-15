@@ -26,18 +26,30 @@ struct RadioPump {
     worker: thread::JoinHandle<()>,
 }
 static RADIO: Mutex<Option<RadioPump>> = Mutex::new(None);
+static RADIO_METADATA: Mutex<abi::rptadv_radio_metadata_v1> = Mutex::new(None);
+static LINKED_OUTPUT_TURNS: AtomicUsize = AtomicUsize::new(0);
+unsafe extern "C" fn capture_radio_metadata(
+    _: *mut c_void,
+    _: *mut c_void,
+    callback: abi::rptadv_radio_metadata_v1,
+) -> i32 {
+    *RADIO_METADATA.lock().unwrap() = callback;
+    0
+}
 static PUBLIC_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 static LAST_PTT: AtomicBool = AtomicBool::new(false);
 // Test-only local RF input; the existing callback scratch remains the sole PCM block.
 static LOCAL_INPUT: AtomicBool = AtomicBool::new(false);
 // ASCII DTMF or a keyed silent gap, rendered in the same existing callback scratch.
 static LOCAL_DTMF: AtomicUsize = AtomicUsize::new(0);
+// Count actual simulated receiver callbacks, not intended test commands.
+static LOCAL_RX_KEYED_TURNS: AtomicUsize = AtomicUsize::new(0);
 static RADIO_TURNS: AtomicUsize = AtomicUsize::new(0);
 static RADIO_JOIN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn activate(
-    _: *mut c_void,
-    _: *mut c_void,
+    context: *mut c_void,
+    radio: *mut c_void,
     receive: abi::rptadv_radio_receive_v3,
     receive_context: *mut c_void,
     transmit: abi::rptadv_radio_transmit_v3,
@@ -46,7 +58,25 @@ unsafe extern "C" fn activate(
     let (Some(receive), Some(transmit)) = (receive, transmit) else {
         return -1;
     };
+    // Query the same resolved policy used by product reservation. The physical
+    // fixture supplies qualified metadata, not a second classifier or delay line.
+    let mut policy: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+    policy.struct_size = size_of::<abi::rptadv_radio_control_v1>() as u32;
+    policy.abi_version = 1;
+    policy.operation = 7;
+    policy.command.struct_size = size_of_val(&policy.command) as u32;
+    policy.command.abi_version = 1;
+    policy.command.command = abi::URP_AST_COMMAND_GET_RECEIVE_POLICY;
+    assert_eq!(
+        unsafe {
+            crate::radio_host::radio_control(context, radio, &mut policy, None, ptr::null_mut())
+        },
+        0
+    );
+    let vad_mode = u32::try_from(policy.command.value).unwrap();
+    let vad_preroll_frames = policy.command.flags;
     let contexts = (receive_context as usize, transmit_context as usize);
+    let metadata_callback = *RADIO_METADATA.lock().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = Arc::clone(&stop);
     let worker = thread::spawn(move || {
@@ -59,6 +89,9 @@ unsafe extern "C" fn activate(
             let digit = LOCAL_DTMF.load(Ordering::Acquire);
             let local_voice = LOCAL_INPUT.load(Ordering::Acquire);
             let local_input = local_voice || digit != 0;
+            if local_input {
+                LOCAL_RX_KEYED_TURNS.fetch_add(1, Ordering::Relaxed);
+            }
             if let Some((row, column)) = b"123A456B789C*0#D"
                 .iter()
                 .position(|value| usize::from(*value) == digit)
@@ -86,12 +119,20 @@ unsafe extern "C" fn activate(
                 frame_count: 960,
                 raw_receiver_keyed: u32::from(local_input),
                 receiver_keyed: u32::from(local_input),
-                vad_mode: 0,
+                vad_mode,
                 rf_burst_id: u64::from(local_input),
-                vad_voice_sample_index: u64::MAX,
-                vad_preroll_frames: 0,
-                vad_voice_active: 0,
-                vad_score: 0.0,
+                vad_voice_sample_index: if vad_mode != 0 && local_input {
+                    first
+                } else {
+                    u64::MAX
+                },
+                vad_preroll_frames,
+                vad_voice_active: u32::from(vad_mode != 0 && local_input),
+                vad_score: if vad_mode != 0 && local_input {
+                    1.0
+                } else {
+                    0.0
+                },
                 status: 0,
             };
             let (mut keyed, mut ctcss) = (0, 0);
@@ -109,6 +150,16 @@ unsafe extern "C" fn activate(
                     &mut keyed,
                     &mut ctcss,
                 );
+            }
+            if let Some(metadata) = metadata_callback {
+                let mut linked = 0;
+                assert_eq!(
+                    unsafe { metadata(contexts.1 as *mut c_void, 0, &mut linked) },
+                    0
+                );
+                if linked != 0 && keyed != 0 && samples.iter().any(|sample| sample.abs() > 0.0001) {
+                    LINKED_OUTPUT_TURNS.fetch_add(1, Ordering::Relaxed);
+                }
             }
             PUBLIC_OUTPUT.fetch_add(
                 samples
@@ -179,6 +230,7 @@ unsafe extern "C" fn bind_simulated_radio(
 fn install_simulated_radio(host: &mut HostServicesOwner) {
     host.descriptor.peer_bind_radio = Some(bind_simulated_radio);
     host.descriptor.radio_activate = Some(activate);
+    host.descriptor.radio_metadata_bind = Some(capture_radio_metadata);
     host.descriptor.radio_ready = Some(ready);
     host.descriptor.radio_quiesce = Some(quiesce);
 }
