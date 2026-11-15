@@ -64,7 +64,8 @@ Files: `phone/media.rs`, `phone/codec.rs`, `phone/call_media.rs`, `host_services
 - [x] Replace the remaining fixed 160-byte receive/send signatures and 172-byte pending datagram with negotiated bounded storage allocated during setup. The batch maximum is 640 encoded bytes, not 65507 per queue slot.
 - [x] Reuse `AudioCodec` finite PCM padding, inspection and native decode. Convert only PCM16's two-byte wire order at the SIP boundary, not PCM values or provider behavior.
 - [x] Keep IAX's separate 160-byte private path unchanged when relaxing SIP host validation.
-- [x] Extend finite-tail/source-credit, OutputFull, reset/cancel, malformed-size and provider-missing tests to every new profile. Run the seven initial tests GREEN.
+- [x] Extend finite-tail/source-credit, OutputFull, reset/cancel and malformed-size tests to the new profiles. Run the initial profile tests GREEN.
+- [ ] Complete provider-missing/fault qualification for the expanded catalog as part of the final native/coverage gate; no per-provider absence injection is claimed by the local loopback tests.
 - [ ] Run actual two-way, continuous silence/first utterance, private authentication and IVR fixtures with rate-derived physical durations; retain G711/G722 and P14 controls. Run strict and independent review before the local recovery commit.
 
 Estimate: 3-5 active hours for fixed-profile plumbing/tests, plus approximately 1-2 hours for the event-policy review and qualified same-clock/mixed-answer fallback if accepted. A new suppression protocol is a separate estimate, not hidden in this range. Serial waiting, full native gates and hardware validation are additional.
