@@ -25,7 +25,22 @@ pub(crate) fn load_catalog() -> Result<CodecCatalog, MediaError> {
         },
         ProviderSelection {
             path: "librptadv_codec_spandsp.so.1".into(),
-            profiles: vec![rptadv_codec_client::ProfileId::G722],
+            profiles: vec![
+                rptadv_codec_client::ProfileId::G722,
+                rptadv_codec_client::ProfileId::G726,
+                rptadv_codec_client::ProfileId::G726Aal2,
+            ],
+        },
+        ProviderSelection {
+            path: "librptadv_codec_gsm.so.1".into(),
+            profiles: vec![rptadv_codec_client::ProfileId::GsmFr],
+        },
+        ProviderSelection {
+            path: "librptadv_codec_pcm.so.1".into(),
+            profiles: vec![
+                rptadv_codec_client::ProfileId::Pcm8,
+                rptadv_codec_client::ProfileId::Pcm16,
+            ],
         },
     ])
     .map_err(|_| MediaError::Codec)?;
@@ -44,6 +59,7 @@ pub struct AudioCodec {
     retained: u32,
     finishing: bool,
     silence: Box<[f32]>,
+    decode_native: Box<[u8]>,
 }
 
 impl AudioCodec {
@@ -95,6 +111,15 @@ impl AudioCodec {
             retained: 0,
             finishing: false,
             silence: vec![0.0; profile.packet_frames as usize].into_boxed_slice(),
+            decode_native: vec![
+                0;
+                if codec == AudioProfile::L16Wideband {
+                    profile.packet_bytes
+                } else {
+                    0
+                }
+            ]
+            .into_boxed_slice(),
         })
     }
     /// Encode exactly one complete negotiated PCM packet.
@@ -156,6 +181,21 @@ impl AudioCodec {
     // One packet per turn. PCM padding belongs here, before native finite flush,
     // because provider coding units need not equal the negotiated RTP packet.
     fn encode_packet(
+        &mut self,
+        pcm: &[f32],
+        packet: &mut [u8],
+        flush: bool,
+    ) -> Result<EncodeResult, Error> {
+        let encoded = self.encode_native_packet(pcm, packet, flush)?;
+        if !self.decode_native.is_empty() {
+            // The IAX-compatible PCM16 provider is little endian; RTP L16 is big endian.
+            for sample in packet[..encoded.encoded_bytes].chunks_exact_mut(2) {
+                sample.swap(0, 1);
+            }
+        }
+        Ok(encoded)
+    }
+    fn encode_native_packet(
         &mut self,
         pcm: &[f32],
         packet: &mut [u8],
@@ -247,6 +287,18 @@ impl AudioCodec {
     }
     /// Inspect and decode the complete payload before any PCM overlap trimming.
     pub fn decode(&mut self, packet: &[u8], pcm: &mut [f32]) -> Result<(), MediaError> {
+        if packet.len() != self.profile.packet_bytes {
+            return Err(MediaError::Codec);
+        }
+        let packet = if self.decode_native.is_empty() {
+            packet
+        } else {
+            self.decode_native.copy_from_slice(packet);
+            for sample in self.decode_native.chunks_exact_mut(2) {
+                sample.swap(0, 1);
+            }
+            &self.decode_native
+        };
         let info = self
             .decoder
             .inspect(packet)
@@ -288,6 +340,7 @@ mod tests {
     fn finite_packets_preserve_real_source_span_and_pad_pcm_before_flush() {
         for profile in AudioProfile::ALL {
             let frames = profile.parameters().packet_frames as usize;
+            let capacity = profile.parameters().packet_bytes;
             for count in [1, frames / 2, frames - 1, frames] {
                 for retained in [false, true] {
                     let mut codec = AudioCodec::load(profile).unwrap();
@@ -295,10 +348,10 @@ mod tests {
                     let pcm = vec![0.125; count];
                     let mut padded = vec![0.0; frames];
                     padded[..count].copy_from_slice(&pcm);
-                    let mut expected = [0; 160];
+                    let mut expected = vec![0; capacity];
                     reference.encode(&padded, &mut expected).unwrap();
                     if retained && count != frames {
-                        let (code, result, _) = prepare(&mut codec, &pcm, 160, false);
+                        let (code, result, _) = prepare(&mut codec, &pcm, capacity, false);
                         assert_eq!(code, 1);
                         assert_eq!(result.consumed_frames, count);
                         assert_eq!(result.encoded_bytes, 0);
@@ -308,20 +361,20 @@ mod tests {
                     } else {
                         &pcm[..]
                     };
-                    let (code, result, bytes) = prepare(&mut codec, input, 160, true);
+                    let (code, result, bytes) = prepare(&mut codec, input, capacity, true);
                     assert_eq!(code, 0, "{profile:?}/{count}/{retained}");
                     assert_eq!(result.consumed_frames, input.len());
                     assert_eq!(result.source_start_frames, 0);
                     assert_eq!(result.source_frames, count as u32);
                     assert_eq!(result.packet_frames, frames as u32);
-                    assert_eq!(result.encoded_bytes, 160);
+                    assert_eq!(result.encoded_bytes, capacity);
                     assert_eq!(bytes, expected);
                     assert!(
-                        prepare(&mut codec, &[0.25], 160, false).0 > 2,
+                        prepare(&mut codec, &[0.25], capacity, false).0 > 2,
                         "every complete finite tail rejects fresh input until reset"
                     );
                     for _ in 0..2 {
-                        let (code, empty, _) = prepare(&mut codec, &[], 160, true);
+                        let (code, empty, _) = prepare(&mut codec, &[], capacity, true);
                         assert_eq!(code, 0);
                         assert_eq!(
                             (
@@ -334,7 +387,7 @@ mod tests {
                         );
                     }
                     codec.reset_encoder().unwrap();
-                    let (code, reset, _) = prepare(&mut codec, &padded, 160, false);
+                    let (code, reset, _) = prepare(&mut codec, &padded, capacity, false);
                     assert_eq!(code, 0);
                     assert_eq!(reset.source_start_frames, 0);
                     assert_eq!(reset.source_frames, frames as u32);
@@ -346,12 +399,13 @@ mod tests {
     fn finite_multi_packet_input_preserves_unconsumed_source_until_final_packet() {
         for profile in AudioProfile::ALL {
             let frames = profile.parameters().packet_frames as usize;
+            let capacity = profile.parameters().packet_bytes;
             let mut codec = AudioCodec::load(profile).unwrap();
             let input = vec![0.125; frames * 2];
-            let (code, first, _) = prepare(&mut codec, &input, 160, true);
+            let (code, first, _) = prepare(&mut codec, &input, capacity, true);
             assert_eq!(code, 0);
             assert_eq!(first.consumed_frames, frames);
-            let (code, last, _) = prepare(&mut codec, &input[frames..], 160, true);
+            let (code, last, _) = prepare(&mut codec, &input[frames..], capacity, true);
             assert_eq!(code, 0);
             assert_eq!(
                 (
@@ -361,20 +415,21 @@ mod tests {
                 ),
                 (frames as u64, frames as u32, frames as u32)
             );
-            assert!(prepare(&mut codec, &[0.25], 160, false).0 > 2);
-            assert_eq!(prepare(&mut codec, &[], 160, true).0, 0);
+            assert!(prepare(&mut codec, &[0.25], capacity, false).0 > 2);
+            assert_eq!(prepare(&mut codec, &[], capacity, true).0, 0);
         }
     }
     #[test]
     fn finite_packet_capacity_failure_and_reset_never_consume_source() {
         for profile in AudioProfile::ALL {
             let frames = profile.parameters().packet_frames as usize;
+            let capacity = profile.parameters().packet_bytes;
             let mut codec = AudioCodec::load(profile).unwrap();
-            let (code, full, _) = prepare(&mut codec, &[0.25], 159, true);
+            let (code, full, _) = prepare(&mut codec, &[0.25], capacity - 1, true);
             assert_eq!(code, 2);
-            assert_eq!(full.required_capacity, 160);
+            assert_eq!(full.required_capacity, capacity);
             assert_eq!((full.consumed_frames, full.encoded_bytes), (0, 0));
-            let (code, tail, _) = prepare(&mut codec, &[0.25], 160, true);
+            let (code, tail, _) = prepare(&mut codec, &[0.25], capacity, true);
             assert_eq!(code, 0);
             assert_eq!(
                 (
@@ -384,11 +439,11 @@ mod tests {
                 ),
                 (0, 1, frames as u32)
             );
-            assert!(prepare(&mut codec, &[0.25], 160, false).0 > 2);
+            assert!(prepare(&mut codec, &[0.25], capacity, false).0 > 2);
             codec.reset_encoder().unwrap();
-            assert_eq!(prepare(&mut codec, &[0.25], 160, false).0, 1);
+            assert_eq!(prepare(&mut codec, &[0.25], capacity, false).0, 1);
             codec.reset_encoder().unwrap();
-            let (code, fresh, _) = prepare(&mut codec, &vec![0.125; frames], 160, false);
+            let (code, fresh, _) = prepare(&mut codec, &vec![0.125; frames], capacity, false);
             assert_eq!(code, 0);
             assert_eq!(
                 (fresh.source_start_frames, fresh.source_frames),

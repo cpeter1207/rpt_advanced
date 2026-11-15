@@ -77,9 +77,7 @@ fn both_l16_rates_are_network_endian_on_the_wire() {
 fn g726_wire_variants_differ_only_in_nibble_packing() {
     let standard = description(110, "G726-32/8000");
     let aal2 = description(111, "AAL2-G726-32/8000");
-    let pcm: Vec<_> = (0..160)
-        .map(|i| (i as f32 * 0.31).sin() * 0.2)
-        .collect();
+    let pcm: Vec<_> = (0..160).map(|i| (i as f32 * 0.31).sin() * 0.2).collect();
     let mut standard_codec = AudioCodec::load(standard.codec).unwrap();
     let mut aal2_codec = AudioCodec::load(aal2.codec).unwrap();
     let mut standard_packet = [0; 80];
@@ -92,7 +90,18 @@ fn g726_wire_variants_differ_only_in_nibble_packing() {
     }
     let mut standard_pcm = [0.0; 160];
     let mut aal2_pcm = [0.0; 160];
-    standard_codec.decode(&standard_packet, &mut standard_pcm).unwrap();
+    standard_codec
+        .decode(&standard_packet, &mut standard_pcm)
+        .unwrap();
     aal2_codec.decode(&aal2_packet, &mut aal2_pcm).unwrap();
     assert_eq!(standard_pcm, aal2_pcm);
+}
+
+#[test]
+fn ignored_unknown_format_does_not_hide_a_reinterpreted_static_payload() {
+    let source = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 42000 RTP/AVP 0 128\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:128 telephone-event/8000\r\n";
+    let media = MediaDescription::parse(source.as_bytes()).unwrap();
+    assert_eq!(media.receive_payload, 0);
+    assert_eq!(media.telephone_event, None);
+    assert!(MediaDescription::parse(source.replace("PCMU/8000", "L16/16000").as_bytes()).is_err());
 }

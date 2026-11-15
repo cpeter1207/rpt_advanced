@@ -475,5 +475,5 @@ fn advertised_profiles_have_verified_bidirectional_provider_metadata() {
                 .is_ok()
         );
     }
-    assert_eq!(catalog.profiles().count(), 3);
+    assert_eq!(catalog.profiles().count(), AudioProfile::ALL.len());
 }

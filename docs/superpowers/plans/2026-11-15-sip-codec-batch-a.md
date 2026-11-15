@@ -68,3 +68,9 @@ Files: `phone/media.rs`, `phone/codec.rs`, `phone/call_media.rs`, `host_services
 - [ ] Run actual two-way, continuous silence/first utterance, private authentication and IVR fixtures with rate-derived physical durations; retain G711/G722 and P14 controls. Run strict and independent review before the local recovery commit.
 
 Estimate: 3-5 active hours for fixed-profile plumbing/tests, plus approximately 1-2 hours for the event-policy review and qualified same-clock/mixed-answer fallback if accepted. A new suppression protocol is a separate estimate, not hidden in this range. Serial waiting, full native gates and hardware validation are additional.
+
+## Local checkpoint: profile/provider boundary only
+
+Initial7 profile tests are GREEN, plus one exact PT128-ignore/static-PT reinterpretation control; finite packet3, media unit16 and unchanged phone_media15 also pass. The first GREEN attempt found the new parser rejecting an unsupported extra PT128; its existing acceptance oracle was preserved, and the parser now ignores that extra format without allowing selected static PT reinterpretation. Receipt `.work/batch-a-checkpoint-retry.log` records the successful targeted checks. No full, strict, larger-packet transport or actual-call qualification is claimed. Outbound offers still contain only PCMU/PCMA/G722.
+
+Directional bit512 RED is separately observed before its implementation: capability563 is rejected, and both the native-RX/in-band-TX session fixture and outgoing synthesized-command fixture fail admission. All three command exit codes are101. The existing bit64 cases remain controls. Product implementation, larger RTP packets and two bounded8/16k event mappings are next; no product GREEN claim is made here.

@@ -12,6 +12,16 @@ pub enum AudioProfile {
     Alaw,
     /// RTP payload 9, 16 kHz PCM with the standard 8 kHz RTP clock.
     G722,
+    /// GSM full-rate, one standard 33-byte frame per packet.
+    Gsm,
+    /// Standard RTP G726-32 low-nibble-first packing.
+    G726,
+    /// AAL2 G726-32 high-nibble-first packing.
+    G726Aal2,
+    /// Network-order signed linear PCM at 8 kHz.
+    L16Narrowband,
+    /// Network-order signed linear PCM at 16 kHz.
+    L16Wideband,
 }
 /// Negotiated unencrypted media; no implicit SRTP downgrade.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,29 +78,50 @@ pub struct AudioParameters {
     pub packet_bytes: usize,
 }
 impl AudioProfile {
-    /// Verified SIP profiles, retaining PCMU as the outbound preference.
-    pub const ALL: [Self; 3] = [Self::Mulaw, Self::Alaw, Self::G722];
+    /// Implemented fixed-packet profiles, retaining PCMU as the preference.
+    pub const ALL: [Self; 8] = [
+        Self::Mulaw,
+        Self::Alaw,
+        Self::G722,
+        Self::Gsm,
+        Self::G726,
+        Self::G726Aal2,
+        Self::L16Narrowband,
+        Self::L16Wideband,
+    ];
     /// Current bounded packet policy, validated against the released provider.
     pub fn parameters(self) -> AudioParameters {
+        use rptadv_codec_client::ProfileId;
+        let (provider_profile, pcm_rate_hz, rtp_clock_hz, packet_bytes) = match self {
+            Self::Mulaw => (ProfileId::G711Mu, 8000, 8000, 160),
+            Self::Alaw => (ProfileId::G711A, 8000, 8000, 160),
+            Self::G722 => (ProfileId::G722, 16000, 8000, 160),
+            Self::Gsm => (ProfileId::GsmFr, 8000, 8000, 33),
+            Self::G726 => (ProfileId::G726, 8000, 8000, 80),
+            Self::G726Aal2 => (ProfileId::G726Aal2, 8000, 8000, 80),
+            Self::L16Narrowband => (ProfileId::Pcm8, 8000, 8000, 320),
+            Self::L16Wideband => (ProfileId::Pcm16, 16000, 16000, 640),
+        };
         AudioParameters {
-            provider_profile: match self {
-                Self::Mulaw => rptadv_codec_client::ProfileId::G711Mu,
-                Self::Alaw => rptadv_codec_client::ProfileId::G711A,
-                Self::G722 => rptadv_codec_client::ProfileId::G722,
-            },
+            provider_profile,
             mode_id: 0,
-            pcm_rate_hz: if self == Self::G722 { 16000 } else { 8000 },
-            rtp_clock_hz: 8000,
-            packet_frames: if self == Self::G722 { 320 } else { 160 },
-            packet_bytes: 160,
+            pcm_rate_hz,
+            rtp_clock_hz,
+            packet_frames: pcm_rate_hz / 50,
+            packet_bytes,
         }
     }
-    /// Static RTP/AVP assignment for this implemented wire profile.
+    /// Static assignment or this endpoint's default dynamic offer mapping.
     pub fn payload(self) -> u8 {
         match self {
             Self::Mulaw => 0,
             Self::Alaw => 8,
             Self::G722 => 9,
+            Self::Gsm => 3,
+            Self::G726 => 96,
+            Self::G726Aal2 => 97,
+            Self::L16Narrowband => 98,
+            Self::L16Wideband => 99,
         }
     }
     fn name(self) -> &'static str {
@@ -98,9 +129,18 @@ impl AudioProfile {
             Self::Mulaw => "PCMU",
             Self::Alaw => "PCMA",
             Self::G722 => "G722",
+            Self::Gsm => "GSM",
+            Self::G726 => "G726-32",
+            Self::G726Aal2 => "AAL2-G726-32",
+            Self::L16Narrowband | Self::L16Wideband => "L16",
         }
     }
+    fn matches_format(self, format: &str) -> bool {
+        let expected = format!("{}/{}", self.name(), self.parameters().rtp_clock_hz);
+        format == expected || format == format!("{expected}/1")
+    }
 }
+
 impl MediaDescription {
     /// Select one supported audio stream without accepting security downgrade.
     pub fn parse(source: &[u8]) -> Result<Self, MediaError> {
@@ -193,40 +233,60 @@ impl MediaDescription {
         {
             return Err(invalid);
         }
-        let codec = name
-            .formats
-            .iter()
-            .find_map(|value| match value.as_str() {
-                "0" => Some(AudioProfile::Mulaw),
-                "8" => Some(AudioProfile::Alaw),
-                "9" => Some(AudioProfile::G722),
-                _ => None,
-            })
-            .ok_or(invalid)?;
-        let expected = format!("{}/{}", codec.name(), codec.parameters().rtp_clock_hz);
-        let payload = codec.payload().to_string();
-        for attribute in attributes().filter(|a| a.key == "rtpmap") {
-            let (pt, format) = attribute
-                .value
-                .as_deref()
-                .and_then(|v| v.split_once(' '))
-                .ok_or(invalid)?;
-            if pt == payload && format != expected && format != format!("{expected}/1") {
+        let mut selected = None;
+        for value in &name.formats {
+            // Unsupported offered formats do not invalidate a usable audio stream.
+            // Answers are restricted to our advertised formats above.
+            let Some(payload) = value.parse::<u8>().ok().filter(|pt| *pt <= 127) else {
+                continue;
+            };
+            let mut mapping = None;
+            for attribute in attributes().filter(|a| a.key == "rtpmap") {
+                let (pt, format) = attribute
+                    .value
+                    .as_deref()
+                    .and_then(|v| v.split_once(' '))
+                    .ok_or(invalid)?;
+                if pt == value {
+                    if mapping.replace(format).is_some() {
+                        return Err(invalid);
+                    }
+                }
+            }
+            let codec = AudioProfile::ALL.into_iter().find(|codec| {
+                if payload < 96 {
+                    codec.payload() == payload
+                        && mapping.is_none_or(|value| codec.matches_format(value))
+                } else {
+                    mapping.is_some_and(|value| codec.matches_format(value))
+                }
+            });
+            if payload < 96
+                && AudioProfile::ALL
+                    .iter()
+                    .any(|codec| codec.payload() == payload)
+                && codec.is_none()
+            {
                 return Err(invalid);
             }
-            if answer && name.formats.iter().any(|value| value == pt) {
-                let offered = match pt {
-                    "0" => "PCMU/8000",
-                    "8" => "PCMA/8000",
-                    "9" => "G722/8000",
-                    "101" => "telephone-event/8000",
-                    _ => return Err(invalid),
+            if answer {
+                let valid = match payload {
+                    0 | 8 | 9 => codec.is_some_and(|codec| codec.payload() == payload),
+                    101 => matches!(
+                        mapping,
+                        Some("telephone-event/8000" | "telephone-event/8000/1")
+                    ),
+                    _ => false,
                 };
-                if format != offered && format != format!("{offered}/1") {
+                if !valid {
                     return Err(invalid);
                 }
             }
+            if selected.is_none() {
+                selected = codec.map(|codec| (codec, payload));
+            }
         }
+        let (codec, payload) = selected.ok_or(invalid)?;
         let telephone_event = attributes().filter(|a| a.key == "rtpmap").find_map(|a| {
             let (pt, format) = a.value.as_deref()?.split_once(' ')?;
             let number = pt.parse::<u8>().ok()?;
@@ -247,23 +307,38 @@ impl MediaDescription {
         Ok(Self {
             remote: SocketAddr::new(ip, port),
             codec,
-            receive_payload: codec.payload(),
-            send_payload: codec.payload(),
+            receive_payload: payload,
+            send_payload: payload,
             telephone_event,
         })
     }
     /// Answer the selected stream at a local media address.
     pub fn answer(&self, local: SocketAddr, session: u64) -> Result<Vec<u8>, MediaError> {
-        Self::describe(local, session, &[self.codec], self.telephone_event)
+        Self::describe(
+            local,
+            session,
+            &[(self.codec, self.receive_payload)],
+            self.telephone_event,
+        )
     }
     /// Offer the composition-verified profiles and the fixed telephone-event map.
     pub(crate) fn offer(local: SocketAddr, session: u64) -> Result<Vec<u8>, MediaError> {
-        Self::describe(local, session, &AudioProfile::ALL, Some(101))
+        // Batch A remains unadvertised until its call-control/wire qualification.
+        Self::describe(
+            local,
+            session,
+            &[
+                (AudioProfile::Mulaw, 0),
+                (AudioProfile::Alaw, 8),
+                (AudioProfile::G722, 9),
+            ],
+            Some(101),
+        )
     }
     fn describe(
         local: SocketAddr,
         session: u64,
-        codecs: &[AudioProfile],
+        codecs: &[(AudioProfile, u8)],
         event: Option<u8>,
     ) -> Result<Vec<u8>, MediaError> {
         if local.ip().is_unspecified() || local.ip().is_multicast() || local.port() == 0 {
@@ -272,15 +347,15 @@ impl MediaDescription {
         let family = if local.is_ipv4() { "IP4" } else { "IP6" };
         let mut formats = codecs
             .iter()
-            .map(|codec| codec.payload().to_string())
+            .map(|(_, payload)| payload.to_string())
             .collect::<Vec<_>>()
             .join(" ");
         let mut attributes = codecs
             .iter()
-            .map(|codec| {
+            .map(|(codec, payload)| {
                 format!(
                     "a=rtpmap:{} {}/{}\r\n",
-                    codec.payload(),
+                    payload,
                     codec.name(),
                     codec.parameters().rtp_clock_hz
                 )
