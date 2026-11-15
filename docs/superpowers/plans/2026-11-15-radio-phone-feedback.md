@@ -14,9 +14,9 @@ Current lifecycle.rs calls dial_phone before radio_phone_result and reports Comp
 
 - [x] Behavioral RED: actual RF request must emit its finite acknowledgment before the factory is entered; no duplicate Completed on answer. Retain administrative/macro silence and current refusal/cancellation/revision checks.
 - [x] Reuse prepared status and its existing completed-media return path for a scalar completion receipt. Failed/canceled/reloaded acknowledgment cannot launch a stale call. No PCM copy or guessed timing.
-- [ ] Focused GREEN and independent review; checkpoint acknowledgment separately.
-- [ ] Prove actual180 progress reaches a bounded LOCAL tone source and stops on answer/failure/cancel/reload. Check complete existing interfaces before selecting a nullable sized progress extension; preserve old complete-prefix rejection rules and both hosts.
-- [ ] Actual wire sequence: acknowledgment finishes before INVITE,180 produces ringback before200, answer ends ringback and does not repeat acknowledgment. Wrong/stale progress cannot affect a successor.
+- [x] Focused GREEN and independent review; checkpoint acknowledgment separately.
+- [x] Prove actual 180 progress reaches a bounded LOCAL tone source and stops on answer/failure/cancel/reload. Check complete existing interfaces before selecting a nullable sized progress extension; preserve old complete-prefix rejection rules and both hosts.
+- [x] Actual wire sequence: acknowledgment finishes before INVITE,180 produces ringback before200, answer ends ringback and does not repeat acknowledgment. Wrong/stale progress cannot affect a successor.
 - [ ] Affected full suites, strict checks, independent review and verified bundle. No live/config/provider changes or public publication.
 
 ## Review focus
@@ -48,3 +48,20 @@ finite acknowledgment assertion. No production timeout or speech duration change
 Independent final source review is clear. This is a recovery checkpoint; full
 strict/affected suite and the separately assigned continuous-RTP union remain
 pending. No native or live activation is implied.
+
+
+## Aggregate fixture reconciliation
+
+The first full run passed 807 core unit tests and 94 integration tests. Product
+finished with 863 passing tests, one existing ignored case, and two primary test
+failures followed by three poisoned-lock failures. The old RF admission fixture
+waited for factory entry without driving the newly required finite acknowledgment;
+it now asserts the factory is still unentered and renders through the existing
+shared receive/transmit probe before its unchanged admission and provider deadlines.
+The exhaustive host-prefix test omitted the prior complete 432-byte table; only
+that exact boundary was added, preserving rejection of every partial tail.
+Independent source review cleared both test-only corrections. All five affected
+checks then passed in `radio-feedback-strict.log`, followed by the Asterisk, peer
+support and SIP suites. Clippy stopped on the new completion envelope reaching
+128 bytes; an allocation-free layout repair and remaining strict checks are pending.
+This does not claim an aggregate pass yet.

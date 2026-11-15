@@ -360,6 +360,13 @@ fn radio_phone_actions_use_the_existing_pending_call_and_exact_cancel() {
     engine
         .execute_digit("1000".into(), command("600123"))
         .unwrap();
+    assert!(factory.request.lock().unwrap().is_none());
+    assert!(
+        engine
+            .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
+            .unwrap(),
+        "the finite RF acknowledgment must render before factory admission"
+    );
     let deadline = Instant::now() + Duration::from_secs(3);
     while factory.request.lock().unwrap().is_none() {
         assert!(

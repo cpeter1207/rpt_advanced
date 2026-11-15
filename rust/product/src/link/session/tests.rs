@@ -2118,6 +2118,7 @@ fn egress_host_contract_and_asterisk_pcm() {
         std::mem::offset_of!(abi::rptadv_host_services_v10, peer_send_prepared_timed),
         std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_timed_g711),
         std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_phone),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_phone_progress),
         std::mem::size_of_val(&table),
     ];
     for length in boundary..=std::mem::size_of_val(&table) {
