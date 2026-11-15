@@ -148,30 +148,6 @@ fn media(caller: &mut Caller, codec: &mut G711Codec, samples: &[f32]) {
         thread::sleep(Duration::from_millis(20));
     }
 }
-/// Observe the finite authorized LOCAL result before checking unrelated phone audio.
-fn local_result(caller: &mut Caller, codec: &mut G711Codec, before: usize) -> usize {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut public = PUBLIC_OUTPUT.load(Ordering::Acquire);
-    let mut quiet_turn = RADIO_TURNS.load(Ordering::Acquire);
-    loop {
-        // Service signaling and paced silence without consuming received RTP:
-        // the later mix-minus assertion still observes every queued return.
-        media(caller, codec, &[0.0; 160]);
-        let current = PUBLIC_OUTPUT.load(Ordering::Acquire);
-        let turn = RADIO_TURNS.load(Ordering::Acquire);
-        if current != public || LAST_PTT.load(Ordering::Acquire) {
-            public = current;
-            quiet_turn = turn;
-        }
-        if public > before && turn.saturating_sub(quiet_turn) >= 38 {
-            return public;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "authorized LOCAL result must drain"
-        );
-    }
-}
 pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool) {
     let mut caller = Caller::establish(sip, None);
     caller.keepalive = true;
@@ -191,15 +167,14 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool
     );
     assert_eq!(observation.accepted.load(Ordering::Acquire), existing);
     caller.digits(b"100#");
-    caller.prompt(&mut codec, "password");
+    caller.prompt(&mut codec, "passcode");
     caller.digits(b"1234#");
     caller.prompt(&mut codec, "authenticated");
     assert_eq!(
         PUBLIC_OUTPUT.load(Ordering::Acquire),
         0,
-        "mailbox, password and authentication prompts remain private"
+        "mailbox, passcode and authentication prompts remain private"
     );
-    let mut unattached_radio = 0;
     if !existing {
         caller.digits(b"*4#*32000**#");
         let completed = caller.prompt(&mut codec, "remote connect");
@@ -207,7 +182,11 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool
             &completed,
             "-.-. --- -- -- .- -. -../-.-. --- -- .--. .-.. . - . -..",
         );
-        unattached_radio = local_result(&mut caller, &mut codec, unattached_radio);
+        assert_eq!(
+            PUBLIC_OUTPUT.load(Ordering::Acquire),
+            0,
+            "phone connect result remains private"
+        );
     }
     assert!(observation.accepted.load(Ordering::Acquire));
     media(&mut caller, &mut codec, &speech);
@@ -218,7 +197,7 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool
     );
     assert_eq!(
         PUBLIC_OUTPUT.load(Ordering::Acquire),
-        unattached_radio,
+        0,
         "dial alone does not attach phone audio to local RF"
     );
     caller.digits(if existing { b"*3#" } else { b"#*3#" });
@@ -227,7 +206,11 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool
         &completed,
         "-.-. --- -- -- .- -. -../-.-. --- -- .--. .-.. . - . -..",
     );
-    let attached_radio = local_result(&mut caller, &mut codec, unattached_radio);
+    assert_eq!(
+        PUBLIC_OUTPUT.load(Ordering::Acquire),
+        0,
+        "phone attachment result remains private"
+    );
     media(&mut caller, &mut codec, &[0.0; 4000]);
     assert_eq!(
         observation.voiced.load(Ordering::Acquire),
@@ -236,8 +219,8 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool
     );
     assert_eq!(
         PUBLIC_OUTPUT.load(Ordering::Acquire),
-        attached_radio,
-        "silence after the finite LOCAL result does not open radio VOX"
+        0,
+        "silence after the private result does not open radio VOX"
     );
     media(&mut caller, &mut codec, &speech);
     media(&mut caller, &mut codec, &[0.0; 16000]);
@@ -246,8 +229,8 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool
         "real remote must hear qualified speech"
     );
     assert!(
-        PUBLIC_OUTPUT.load(Ordering::Acquire) > attached_radio,
-        "existing local mix receives qualified voice beyond the completed LOCAL result"
+        PUBLIC_OUTPUT.load(Ordering::Acquire) > 0,
+        "existing local mix receives qualified voice without private command results"
     );
     assert!(
         !LAST_PTT.load(Ordering::Acquire),

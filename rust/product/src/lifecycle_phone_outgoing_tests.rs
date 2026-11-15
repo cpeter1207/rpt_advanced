@@ -488,3 +488,208 @@ fn radio_phone_queued_macro_hangup_expires_before_mutating_its_call() {
         "expired queued hangup changed its call: outcome={outcome:?}, retained={retained}, captured_before_release={captured_before_release}"
     );
 }
+
+#[test]
+fn radio_phone_results_follow_actual_current_outcome_not_submission_or_cleanup() {
+    #[derive(Default)]
+    struct Factory {
+        entered: AtomicBool,
+        released: AtomicBool,
+        answer: AtomicBool,
+    }
+    unsafe extern "C" fn dial(
+        context: *mut c_void,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: usize,
+        _: abi::rptadv_current_v1,
+        _: *mut c_void,
+        output: *mut *mut c_void,
+    ) -> i32 {
+        let state = unsafe { &*context.cast::<Arc<Factory>>() };
+        state.entered.store(true, Ordering::Release);
+        let until = Instant::now() + Duration::from_secs(5);
+        while !state.released.load(Ordering::Acquire) {
+            if Instant::now() >= until {
+                return -1;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Deliberately late provider answer: the existing consumer must still
+        // enforce its captured current callback and drop rejected ownership.
+        if state.answer.load(Ordering::Acquire) {
+            let (handle, _) = crate::link::session::tests::phone_dial_handle("1000");
+            unsafe {
+                *output = handle;
+            }
+            0
+        } else {
+            -1
+        }
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for mode in [
+        "answer",
+        "refusal",
+        "spawn",
+        "canceled",
+        "revision",
+        "administrative",
+        "macro",
+    ] {
+        let factory = Arc::<Factory>::default();
+        let services = crate::services::tests::phone_factory_fixture(|table| {
+            table.context = Box::into_raw(Box::new(Arc::clone(&factory))).cast();
+            table.peer_dial_phone = Some(dial);
+        });
+        let configuration = active_configuration(&format!(
+            "phone_allow_accounts=provider\nphone_outgoing_account=provider\nlink_command_phone_dial=6\nlink_command_phone_hangup=0\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n{}\nprotocol=sip\nserver=fixture.invalid:5060\nattach_local_nodes=1000\n[dtmf_macro dial]\ntrigger=*95\nprotected=no\ncommands=*600123#\n",
+            include_str!("tests/fixtures/phone_account.conf"),
+        ));
+        let voice = super::phone::speech();
+        let engine = super::phone::engine(configuration, services, Arc::clone(&voice));
+        let operation = if mode == "macro" {
+            let clock = engine.clock();
+            engine
+                .run(move |host| {
+                    for digit in "*95".chars() {
+                        host.runtime.digit(
+                            "1000",
+                            rpt_advanced_core::runtime::dtmf::DigitEvent::Digit {
+                                digit,
+                                now_ms: clock.now_ms,
+                            },
+                        );
+                    }
+                    let DigitOutcome::Operation(operation) = host
+                        .runtime
+                        .node("1000")
+                        .unwrap()
+                        .links()
+                        .advance_macros(clock.now_ms)
+                        .remove(0)
+                    else {
+                        panic!("dial macro")
+                    };
+                    Ok(operation)
+                })
+                .unwrap()
+        } else {
+            DigitOperation::new(
+                rpt_advanced_core::command::Command {
+                    action: LinkAction::PhoneDial,
+                    node: "00123".into(),
+                },
+                None,
+            )
+        };
+        FAIL_DIAL_THREAD.store(mode == "spawn", Ordering::Release);
+        let submitted = if mode == "administrative" {
+            engine.execute("1000".into(), operation)
+        } else {
+            engine.execute_digit("1000".into(), DigitOutcome::Operation(operation))
+        };
+        FAIL_DIAL_THREAD.store(false, Ordering::Release);
+        assert_eq!(submitted.is_err(), mode == "spawn", "{mode}");
+        if mode != "spawn" {
+            let until = Instant::now() + Duration::from_secs(3);
+            while !factory.entered.load(Ordering::Acquire) {
+                assert!(Instant::now() < until, "factory admission: {mode}");
+                std::thread::yield_now();
+            }
+            assert!(
+                !engine
+                    .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
+                    .unwrap(),
+                "submission is not completed: {mode}"
+            );
+            assert!(voice.opened.lock().unwrap().is_empty());
+        }
+        let successor = if mode == "canceled" {
+            engine
+                .run(|host| {
+                    host.hangup_radio_phone("1000")?;
+                    host.reserve_outgoing_phone(
+                        rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap(),
+                        "1000",
+                    )
+                })
+                .map(Some)
+                .unwrap()
+        } else {
+            None
+        };
+        if mode == "revision" {
+            assert!(
+                engine
+                    .run(|host| Ok(host.outgoing_phone_reserved("1000")))
+                    .unwrap()
+            );
+            engine.revision.fetch_add(1, Ordering::AcqRel);
+        }
+        factory.answer.store(mode != "refusal", Ordering::Release);
+        factory.released.store(true, Ordering::Release);
+        let jobs = std::mem::take(&mut *engine.jobs.lock().unwrap());
+        for job in jobs {
+            job.join().unwrap();
+        }
+        let expected = match mode {
+            "answer" => Some("Command completed"),
+            "refusal" | "spawn" => Some("Requested operation is unavailable"),
+            _ => None,
+        };
+        let rendered = engine
+            .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
+            .unwrap();
+        assert_eq!(rendered, expected.is_some(), "{mode}");
+        assert_eq!(
+            voice
+                .opened
+                .lock()
+                .unwrap()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>(),
+            "{mode}"
+        );
+        if mode == "revision" {
+            assert!(
+                !engine
+                    .run(|host| Ok(host.outgoing_phone_reserved("1000")))
+                    .unwrap(),
+                "revision alone retires the old pending call"
+            );
+            assert!(
+                engine
+                    .run(|host| Ok(
+                        crate::host::tests::phone::outgoing_media_reply(host, "1000").is_none()
+                    ))
+                    .unwrap()
+            );
+        }
+        if let Some(successor) = successor {
+            assert!(
+                successor.current(),
+                "stale outcome cannot cancel successor: {mode}"
+            );
+        }
+        if matches!(mode, "answer" | "administrative" | "macro") {
+            let reply = engine
+                .run(|host| {
+                    Ok(crate::host::tests::phone::outgoing_media_reply(host, "1000").unwrap())
+                })
+                .unwrap();
+            assert!(
+                reply.phone_media_authorized() && !reply.phone_authenticated() && !reply.ended()
+            );
+        }
+        assert!(engine.stop());
+    }
+}

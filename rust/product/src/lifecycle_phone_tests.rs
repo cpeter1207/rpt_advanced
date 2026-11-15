@@ -1115,7 +1115,7 @@ fn initial_permanent_result_source_survives_host_publication_failures() {
 }
 
 #[test]
-fn phone_macro_dial_outcome_is_generic_but_macro_stopped_stays_private() {
+fn phone_macro_dial_outcome_and_macro_stopped_stay_private() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -1190,7 +1190,7 @@ fn phone_macro_dial_outcome_is_generic_but_macro_stopped_stays_private() {
         .unwrap();
     wait_for(&engine, || state.lock().unwrap().audio.len() >= 480);
     assert!(
-        engine
+        !engine
             .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
             .unwrap()
     );
@@ -1200,7 +1200,7 @@ fn phone_macro_dial_outcome_is_generic_but_macro_stopped_stays_private() {
             .unwrap()
             .iter()
             .all(|peer| peer.lock().unwrap().prepared.is_empty()),
-        "generic LOCAL outcome never reaches an ordinary peer"
+        "private macro outcome never reaches an ordinary peer"
     );
     engine
         .digit_effect("1000", DigitOutcome::MacroStopped { reply: Some(reply) })
@@ -1210,7 +1210,7 @@ fn phone_macro_dial_outcome_is_generic_but_macro_stopped_stays_private() {
         !engine
             .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
             .unwrap(),
-        "macro-stopped details remain private after generic outcome drains"
+        "macro-stopped details remain private after private macro completion"
     );
     assert!(engine.stop());
 }

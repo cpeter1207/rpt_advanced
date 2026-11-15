@@ -108,13 +108,43 @@ fn media(caller: &mut Caller, codec: &mut G711Codec, samples: &[f32], returned: 
     }
 }
 
+fn radio_digits(digits: &[u8]) {
+    // Existing receiver clock consumes real tones and keyed gaps; no direct
+    // runtime command or second input queue stands in for the RF decoder.
+    LOCAL_DTMF.store(usize::from(b' '), Ordering::Release);
+    thread::sleep(Duration::from_millis(100));
+    for &digit in digits {
+        LOCAL_DTMF.store(usize::from(digit), Ordering::Release);
+        thread::sleep(Duration::from_millis(160));
+        LOCAL_DTMF.store(usize::from(b' '), Ordering::Release);
+        thread::sleep(Duration::from_millis(120));
+    }
+    LOCAL_DTMF.store(0, Ordering::Release);
+}
+
 #[test]
 fn actual_product_originates_two_way_phone_and_releases_the_exact_call() {
+    product_outgoing(false);
+}
+
+#[test]
+fn actual_radio_dtmf_originates_two_way_phone_and_hangs_up() {
+    product_outgoing(true);
+}
+
+fn product_outgoing(radio: bool) {
     const CHILD: &str = "RPTADV_TEST_OUTGOING_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
+        let name = if radio {
+            "host_services::product_phone_tests::sip::outgoing::actual_radio_dtmf_originates_two_way_phone_and_hangs_up"
+        } else {
+            "host_services::product_phone_tests::sip::outgoing::actual_product_originates_two_way_phone_and_releases_the_exact_call"
+        };
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "host_services::product_phone_tests::sip::outgoing::actual_product_originates_two_way_phone_and_releases_the_exact_call", "--nocapture"])
-            .env(CHILD, "1").output().unwrap();
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "outgoing product child failed:\n{}\n{}",
@@ -140,6 +170,11 @@ fn actual_product_originates_two_way_phone_and_releases_the_exact_call() {
         "[general]\nnode_enabled=yes\n[1000]\nradio_channel=fixture\nduplex=full\nphone_allow_accounts=office\n[2000]\nnode_enabled=no\n[phone_account office]\nlocal_node=2000\nattach_local_nodes=1000\nenabled=yes\nprotocol=sip\nserver={}\nusername=fixture-user\nsecrets_file=phone.secret\nregister=yes\n",
         sip.local_addr().unwrap()
     );
+    let configuration = if radio {
+        configuration.replace("[1000]", "[1000]\nlink_command_phone_dial=6\nlink_command_phone_hangup=0\nphone_outgoing_account=office") + "\n[morse]\nspeed_wpm=40\nfrequency_hz=800\nlevel_db=-6\n"
+    } else {
+        configuration
+    };
     let accounts = AccountPreparer::default()
         .prepare(
             &directory.join("rpt.conf"),
@@ -183,20 +218,37 @@ fn actual_product_originates_two_way_phone_and_releases_the_exact_call() {
         thread::sleep(Duration::from_millis(2));
     }
     runtime.publish_sip(Some(&worker), &accounts);
-    let refused = next_call(&runtime);
+    let (refused, id) = if radio {
+        radio_digits(b"*600123#");
+        (0, 0)
+    } else {
+        let refused = next_call(&runtime);
+        let (invite, remote) = receive(&sip);
+        assert!(invite.starts_with("INVITE sip:called@fixture.invalid "));
+        assert_eq!(
+            command(&runtime, abi::RPTADV_PHONE_DIAL, 0),
+            (-1, 0),
+            "one pending claim before answer"
+        );
+        sip.send_to(response(&invite, 486, false).as_bytes(), remote)
+            .unwrap();
+        assert!(receive(&sip).0.starts_with("ACK "));
+        let id = next_call(&runtime);
+        assert_ne!(id, refused);
+        (refused, id)
+    };
     let (invite, remote) = receive(&sip);
-    assert!(invite.starts_with("INVITE sip:called@fixture.invalid "));
-    assert_eq!(
-        command(&runtime, abi::RPTADV_PHONE_DIAL, 0),
-        (-1, 0),
-        "one pending claim before answer"
-    );
-    sip.send_to(response(&invite, 486, false).as_bytes(), remote)
-        .unwrap();
-    assert!(receive(&sip).0.starts_with("ACK "));
-    let id = next_call(&runtime);
-    assert_ne!(id, refused);
-    let (invite, remote) = receive(&sip);
+    if radio {
+        assert!(
+            invite.starts_with(&format!("INVITE sip:00123@{} ", sip.local_addr().unwrap())),
+            "literal telephone digits retain leading zeros"
+        );
+        assert_eq!(
+            command(&runtime, abi::RPTADV_PHONE_DIAL, 0),
+            (-1, 0),
+            "RF command reserved the same pending owner before answer"
+        );
+    }
     let offer =
         MediaDescription::parse(invite.split_once("\r\n\r\n").unwrap().1.as_bytes()).unwrap();
     sip.send_to(response(&invite, 180, false).as_bytes(), remote)
@@ -206,6 +258,7 @@ fn actual_product_originates_two_way_phone_and_releases_the_exact_call() {
     let accepted = response(&invite, 200, false).replace("Content-Length: 0\r\n\r\n", &format!(
         "Contact: <sip:called@{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
         sip.local_addr().unwrap(), answer.len(), std::str::from_utf8(&answer).unwrap()));
+    let before_answer = PUBLIC_OUTPUT.load(Ordering::Acquire);
     sip.send_to(accepted.as_bytes(), remote).unwrap();
     assert!(receive(&sip).0.starts_with("ACK "));
     sip.set_nonblocking(true).unwrap();
@@ -222,11 +275,28 @@ fn actual_product_originates_two_way_phone_and_releases_the_exact_call() {
     let mut codec = G711Codec::load(G711::Mulaw).unwrap();
     let mut returned = Vec::new();
     media(&mut caller, &mut codec, &[0.0; 4000], &mut returned);
-    assert_eq!(
-        PUBLIC_OUTPUT.load(Ordering::Acquire),
-        0,
-        "no login prompt or automatic RF output"
-    );
+    if !radio {
+        assert_eq!(
+            PUBLIC_OUTPUT.load(Ordering::Acquire),
+            0,
+            "no login prompt or automatic RF output"
+        );
+    }
+    if radio {
+        assert!(
+            PUBLIC_OUTPUT.load(Ordering::Acquire) > before_answer,
+            "answered RF command renders its solicited LOCAL result"
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        while LAST_PTT.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < until,
+                "finite solicited RF result never completed"
+            );
+            media(&mut caller, &mut codec, &[0.0; 1600], &mut returned);
+        }
+    }
+    let before_voice = PUBLIC_OUTPUT.load(Ordering::Acquire);
     let speech: Vec<f32> =
         include_bytes!("../../../product/src/tests/fixtures/phone-speech/yes-48000-s16le.pcm")
             .chunks_exact(12)
@@ -235,7 +305,7 @@ fn actual_product_originates_two_way_phone_and_releases_the_exact_call() {
     media(&mut caller, &mut codec, &speech, &mut returned);
     media(&mut caller, &mut codec, &[0.0; 16000], &mut returned);
     assert!(
-        PUBLIC_OUTPUT.load(Ordering::Acquire) > 160,
+        PUBLIC_OUTPUT.load(Ordering::Acquire) > before_voice + 160,
         "called-party speech reaches actual node RF mix through VOX"
     );
     assert!(
@@ -280,12 +350,16 @@ fn actual_product_originates_two_way_phone_and_releases_the_exact_call() {
         correlation(8) > energy * 0.5 && correlation(4) < -energy * 0.5,
         "known1kHz return pattern, not a status prompt"
     );
-    assert_eq!(
-        command(&runtime, abi::RPTADV_PHONE_HANGUP, refused),
-        (-1, 0),
-        "stale id cannot end successor"
-    );
-    assert_eq!(command(&runtime, abi::RPTADV_PHONE_HANGUP, id), (0, id));
+    if radio {
+        radio_digits(b"*0#");
+    } else {
+        assert_eq!(
+            command(&runtime, abi::RPTADV_PHONE_HANGUP, refused),
+            (-1, 0),
+            "stale id cannot end successor"
+        );
+        assert_eq!(command(&runtime, abi::RPTADV_PHONE_HANGUP, id), (0, id));
+    }
     caller.sip.set_nonblocking(false).unwrap();
     let (bye, remote) = receive(&caller.sip);
     assert!(bye.starts_with("BYE "));
@@ -294,6 +368,13 @@ fn actual_product_originates_two_way_phone_and_releases_the_exact_call() {
         .send_to(response(&bye, 200, false).as_bytes(), remote)
         .unwrap();
     assert!(worker.incoming().is_none());
+    if radio {
+        runtime.stop().unwrap();
+        worker.stop().unwrap();
+        assert_radio_stopped(true);
+        fs::remove_dir_all(directory).unwrap();
+        return;
+    }
     // This synthetic telephone reuses its socket, so discard only the ended
     // dialog's already-received packets before selecting the new offer endpoint.
     while caller.rtp.recv_from(&mut [0; 2048]).is_ok() {}

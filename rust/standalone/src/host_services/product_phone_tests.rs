@@ -30,6 +30,8 @@ static PUBLIC_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 static LAST_PTT: AtomicBool = AtomicBool::new(false);
 // Test-only local RF input; the existing callback scratch remains the sole PCM block.
 static LOCAL_INPUT: AtomicBool = AtomicBool::new(false);
+// ASCII DTMF or a keyed silent gap, rendered in the same existing callback scratch.
+static LOCAL_DTMF: AtomicUsize = AtomicUsize::new(0);
 static RADIO_TURNS: AtomicUsize = AtomicUsize::new(0);
 static RADIO_JOIN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
@@ -54,8 +56,23 @@ unsafe extern "C" fn activate(
         let mut skipped = 0u64;
         while !stopping.load(Ordering::Acquire) {
             let mut samples = [0.0; 960];
-            let local_input = LOCAL_INPUT.load(Ordering::Acquire);
-            if local_input {
+            let digit = LOCAL_DTMF.load(Ordering::Acquire);
+            let local_voice = LOCAL_INPUT.load(Ordering::Acquire);
+            let local_input = local_voice || digit != 0;
+            if let Some((row, column)) = b"123A456B789C*0#D"
+                .iter()
+                .position(|value| usize::from(*value) == digit)
+                .map(|position| (position / 4, position % 4))
+            {
+                let low = [697.0, 770.0, 852.0, 941.0][row];
+                let high = [1209.0, 1336.0, 1477.0, 1633.0][column];
+                for (index, sample) in samples.iter_mut().enumerate() {
+                    let t = (first + index as u64) as f64 / 48000.0;
+                    *sample = (0.12 * (std::f64::consts::TAU * low * t).sin()
+                        + 0.12 * (std::f64::consts::TAU * high * t).sin())
+                        as f32;
+                }
+            } else if local_voice {
                 for (index, sample) in samples.iter_mut().enumerate() {
                     *sample =
                         0.2 * ((first + index as u64) as f32 * std::f32::consts::TAU / 48.0).sin();
