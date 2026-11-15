@@ -1502,3 +1502,196 @@ fn phone_grammar_connect_disconnect_reconnect_keeps_exact_source() {
     );
     assert!(engine.stop());
 }
+
+#[test]
+fn private_command_rejections_log_one_fixed_category_without_input_or_teardown_noise() {
+    use rpt_advanced_core::link::AdmissionError;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for dispatch in 0..3 {
+        let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+        let configuration = configuration().replace("[1000]", "[1000]\nlink_deny_nodes=2000");
+        let engine = engine(configuration, services, speech());
+        let (source, reply, state) = admit(&engine);
+        clear_scheduler_notices();
+        state.lock().unwrap().input.extend(
+            "*4#*3"
+                .bytes()
+                .map(crate::link::session::tests::Input::Digit),
+        );
+        wait_for(&engine, || state.lock().unwrap().input.is_empty());
+        assert!(scheduler_notices().is_empty(), "partial input is normal");
+        let status = source_operation(&engine, &source, &reply, LinkAction::Status, "");
+        assert!(engine.operation("1000", status).is_ok());
+        assert!(scheduler_notices().is_empty(), "success is silent");
+        assert!(
+            engine
+                .operation("1000", operation(LinkAction::Transceive, "1000"))
+                .is_err()
+        );
+        assert!(
+            scheduler_notices().is_empty(),
+            "ordinary sources are unchanged"
+        );
+        for (target, category) in [("1000", "Loop"), ("2000", "Denied"), ("3000", "Stale")] {
+            let command =
+                source_operation(&engine, &source, &reply, LinkAction::Transceive, target);
+            if category == "Stale" {
+                engine
+                    .run(|host| {
+                        host.runtime.node("1000").unwrap().links().close();
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            clear_scheduler_notices();
+            match dispatch {
+                0 => assert!(engine.operation("1000", command).is_err()),
+                1 => assert!(matches!(
+                    engine.digit_effect("1000", DigitOutcome::Operation(command)),
+                    Ok(LinkEffect::None)
+                )),
+                _ => assert!(engine.execute("1000".into(), command).is_err()),
+            }
+            assert_eq!(
+                scheduler_notices(),
+                [format!("phone command rejected: {category}")]
+            );
+            assert!(scheduler_notices().iter().all(|notice| {
+                !notice.chars().any(|character| character.is_ascii_digit())
+                    && !notice.contains('*')
+                    && !notice.contains('#')
+                    && !notice.contains(&source.call_id().to_string())
+            }));
+        }
+        clear_scheduler_notices();
+        let mut stale = operation(LinkAction::Transceive, "3000");
+        stale.reply = Some(reply.clone());
+        stale.origin = Some(source.call_id().to_string());
+        reply.retire();
+        assert!(matches!(
+            engine.operation("1000", stale),
+            Err(RuntimeError::Link(AdmissionError::Stale))
+        ));
+        assert!(
+            scheduler_notices().is_empty(),
+            "expected caller teardown is silent"
+        );
+        assert!(engine.stop());
+    }
+}
+
+#[test]
+fn private_delayed_command_rejection_logs_once_and_suppresses_teardown() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for teardown in 0..5 {
+        let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+        let (services, _peers) = crate::services::tests::timed_dial_fixture(services);
+        let engine = engine(configuration(), services, speech());
+        let (source, reply, _state) = admit(&engine);
+        clear_scheduler_notices();
+        let command = source_operation(&engine, &source, &reply, LinkAction::Transceive, "2000");
+        let LinkEffect::Connect(attempt) = engine.operation("1000", command).unwrap() else {
+            panic!("private dial must be admitted before delayed rejection");
+        };
+        assert!(scheduler_notices().is_empty());
+        let revision = engine.revision.load(Ordering::Acquire);
+        match teardown {
+            0 => engine
+                .run(|host| {
+                    host.runtime.node("1000").unwrap().links().close();
+                    Ok(())
+                })
+                .unwrap(),
+            1 => engine
+                .run(|host| {
+                    host.runtime.node("1000").unwrap().links().reconfigure(
+                        rpt_advanced_core::access::AccessPolicy::new("", "2000").unwrap(),
+                        rpt_advanced_core::command::DtmfCommandMap::standard(),
+                        None,
+                    );
+                    Ok(())
+                })
+                .unwrap(),
+            2 => reply.retire(),
+            3 => {
+                engine.revision.fetch_add(1, Ordering::AcqRel);
+            }
+            _ => {}
+        }
+        let result = engine.dial("1000".into(), Dial::Connect(attempt), revision);
+        assert_eq!(result.is_ok(), teardown == 4);
+        if teardown == 0 {
+            assert_eq!(scheduler_notices(), ["phone command rejected: Stale"]);
+        } else if teardown == 1 {
+            assert_eq!(scheduler_notices(), ["phone command rejected: Denied"]);
+        } else {
+            assert!(
+                scheduler_notices().is_empty(),
+                "successful completion and expected teardown are silent"
+            );
+        }
+        assert!(engine.stop());
+    }
+}
+
+#[test]
+fn private_command_rejection_categories_never_format_error_payloads() {
+    use rpt_advanced_core::{config::ConfigError, link::AdmissionError};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+    let engine = engine(configuration(), services, speech());
+    let (_source, reply, _state) = admit(&engine);
+    let revision = engine.revision.load(Ordering::Acquire);
+    for (error, category) in [
+        (
+            RuntimeError::Config(ConfigError::Structure {
+                section: "private-section-sentinel".into(),
+                message: "private-payload-sentinel".into(),
+            }),
+            "Config",
+        ),
+        (RuntimeError::Preparation, "Preparation"),
+        (RuntimeError::Busy, "Busy"),
+        (RuntimeError::Device, "Device"),
+        (RuntimeError::Restore, "Restore"),
+        (RuntimeError::Clock, "Clock"),
+        (RuntimeError::MissingNode, "MissingNode"),
+        (RuntimeError::Rejected, "Rejected"),
+        (RuntimeError::Link(AdmissionError::Identity), "Identity"),
+        (RuntimeError::Link(AdmissionError::Invalid), "Invalid"),
+        (
+            RuntimeError::Link(AdmissionError::UnsupportedRoute),
+            "UnsupportedRoute",
+        ),
+    ] {
+        clear_scheduler_notices();
+        engine.private_command_rejected(Some(&reply), revision, &error);
+        assert_eq!(
+            scheduler_notices(),
+            [format!("phone command rejected: {category}")]
+        );
+    }
+    clear_scheduler_notices();
+    engine.private_command_rejected(None, revision, &RuntimeError::Rejected);
+    let ordinary = rpt_advanced_core::link::PeerSignals::new();
+    engine.private_command_rejected(
+        Some(&ordinary.reply_target()),
+        revision,
+        &RuntimeError::Rejected,
+    );
+    let unverified =
+        rpt_advanced_core::link::PeerSignals::for_phone(reply.phone_source().unwrap().clone());
+    engine.private_command_rejected(
+        Some(&unverified.reply_target()),
+        revision,
+        &RuntimeError::Rejected,
+    );
+    assert!(scheduler_notices().is_empty());
+    assert!(engine.stop());
+}

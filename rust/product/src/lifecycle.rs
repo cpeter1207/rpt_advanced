@@ -445,6 +445,8 @@ impl Engine {
         local: &str,
         operation: DigitOperation,
     ) -> Result<LinkEffect, RuntimeError> {
+        let revision = self.revision.load(Ordering::Acquire);
+        let private = operation.reply.clone();
         let verify = operation.command.action == LinkAction::Command && operation.digit.is_none();
         let verified = if verify {
             let name = local.to_owned();
@@ -456,7 +458,46 @@ impl Engine {
         };
         let name = local.to_owned();
         let clock = self.clock();
-        self.run(move |host| host.runtime.command(&name, operation, clock, verified))
+        let result = self.run(move |host| host.runtime.command(&name, operation, clock, verified));
+        if let Err(error) = &result {
+            self.private_command_rejected(private.as_ref(), revision, error);
+        }
+        result
+    }
+    /// Report only completed current private-command failures. Static categories
+    /// cannot expose command input, identities, configuration text or credentials.
+    fn private_command_rejected(
+        &self,
+        reply: Option<&rpt_advanced_core::link::PeerReply>,
+        revision: u64,
+        error: &RuntimeError,
+    ) {
+        use rpt_advanced_core::link::AdmissionError;
+        if !self.current(revision)
+            || reply
+                .is_none_or(|reply| reply.phone_source().is_none() || !reply.phone_authenticated())
+        {
+            return;
+        }
+        let notice = match error {
+            RuntimeError::Link(AdmissionError::Loop) => "phone command rejected: Loop",
+            RuntimeError::Link(AdmissionError::Denied) => "phone command rejected: Denied",
+            RuntimeError::Link(AdmissionError::Stale) => "phone command rejected: Stale",
+            RuntimeError::Link(AdmissionError::Identity) => "phone command rejected: Identity",
+            RuntimeError::Link(AdmissionError::Invalid) => "phone command rejected: Invalid",
+            RuntimeError::Link(AdmissionError::UnsupportedRoute) => {
+                "phone command rejected: UnsupportedRoute"
+            }
+            RuntimeError::Config(_) => "phone command rejected: Config",
+            RuntimeError::Preparation => "phone command rejected: Preparation",
+            RuntimeError::Busy => "phone command rejected: Busy",
+            RuntimeError::Device => "phone command rejected: Device",
+            RuntimeError::Restore => "phone command rejected: Restore",
+            RuntimeError::Clock => "phone command rejected: Clock",
+            RuntimeError::MissingNode => "phone command rejected: MissingNode",
+            RuntimeError::Rejected => "phone command rejected: Rejected",
+        };
+        self.services.scheduler_notice(notice);
     }
     fn effect(
         self: &Arc<Self>,
@@ -572,6 +613,9 @@ impl Engine {
                         | rpt_advanced_core::link::AdmissionError::Stale
                 ))
             );
+            if private_only && let Err(error) = &result {
+                self.private_command_rejected(private_reply.as_ref(), revision, error);
+            }
             let engine = Arc::clone(self);
             let _ = self.run_inner(true, move |host| {
                 if !engine.current(revision) {
