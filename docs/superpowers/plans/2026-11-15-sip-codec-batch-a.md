@@ -209,3 +209,14 @@ receipts. No public combined artifact or live configuration changed. This is
 eight of sixteen ordinary IAX profiles, not complete parity. iLBC30 is the next
 isolated packet-duration increment; the six remaining conventional profiles
 and two legacy wire ambiguities remain open.
+
+### Coherent full core/product aggregate
+
+`batch-a-full-core-product.log` exited0 on frozen `442819d` (runtime source
+`ed73d27`). Fresh product/SIP builds matched the exact wire-tested private DSO
+bytes before execution. Full core passed823 unit plus94 integration tests. Full
+product passed887 unit plus5 integration tests; its existing ignored load
+experiment is `host::tests::egress_load::egress_full_path_load`, invoked separately
+by `tests/peer_egress_load.py`. Product unit runtime was422.63s. Source was unchanged
+during the run; no stale16k test oracle failed. Standalone/C ABI/remaining union
+regressions and the native/coverage/package/hardware limits above remain open.
