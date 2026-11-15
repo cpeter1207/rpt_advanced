@@ -1709,7 +1709,8 @@ impl Host {
                 .map(|node| node.drain_digits())
                 .unwrap_or_default();
             for event in events {
-                if let Some(outcome) = self.runtime.digit(&local, event) {
+                let call = self.phone_calls.outgoing_telephone_id(&local);
+                if let Some(outcome) = self.runtime.digit_with_phone(&local, event, call) {
                     self.immediate(&local, LinkEffect::Digit(outcome), clock)?;
                 }
             }

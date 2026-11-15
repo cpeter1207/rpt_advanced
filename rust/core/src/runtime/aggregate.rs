@@ -2149,6 +2149,15 @@ impl<A: Send, C: Send> Runtime<A, C> {
     pub fn digit(&mut self, local: &str, event: DigitEvent) -> Option<DigitOutcome> {
         self.node(local)?.links.digit(event)
     }
+    /// Route actual local RF input with one already-answered telephone call identity.
+    pub fn digit_with_phone(
+        &mut self,
+        local: &str,
+        event: DigitEvent,
+        call: Option<u64>,
+    ) -> Option<DigitOutcome> {
+        self.node(local)?.links.digit_with_phone(event, call)
+    }
     /// Discard queued digits and partial commands on every active node after admission loss.
     pub fn discard_digits(&mut self) {
         for node in &mut self.nodes {

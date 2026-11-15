@@ -393,6 +393,17 @@ impl Engine {
         revision: u64,
     ) -> Result<LinkEffect, RuntimeError> {
         match outcome {
+            DigitOutcome::Telephone(digit) => {
+                let local = local.to_owned();
+                let owner = Arc::clone(self);
+                self.run(move |host| {
+                    if !owner.current(revision) {
+                        return Err(RuntimeError::Rejected);
+                    }
+                    host.send_radio_telephone_digit(&local, digit.call(), digit.symbol())
+                })?;
+                Ok(LinkEffect::None)
+            }
             DigitOutcome::MacroStopped { reply } => {
                 if let Some(reply) = reply
                     .as_ref()

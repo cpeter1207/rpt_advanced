@@ -20,6 +20,7 @@ pub(crate) struct State {
     pub(crate) input: VecDeque<Input>,
     pub(crate) texts: Vec<Vec<u8>>,
     pub(crate) digits: Vec<u8>,
+    pub(crate) digit_result: i32,
     pub(crate) audio: Vec<f32>,
     pub(crate) writes: Vec<usize>,
     pub(crate) fail_text: bool,
@@ -964,8 +965,11 @@ unsafe extern "C" fn text(
     if state.fail_text { -1 } else { 0 }
 }
 unsafe extern "C" fn digit(_: *mut c_void, peer: *mut c_void, digit: u8) -> i32 {
-    unsafe { state(peer) }.lock().unwrap().digits.push(digit);
-    0
+    let mut state = unsafe { state(peer) }.lock().unwrap();
+    if state.digit_result == 0 {
+        state.digits.push(digit);
+    }
+    state.digit_result
 }
 unsafe extern "C" fn human_text(
     context: *mut c_void,

@@ -226,9 +226,33 @@ pub struct PadTestResult {
     pub overflowed: bool,
 }
 
+/// One RF telephone symbol bound to an opaque admitted call, never a node alias.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TelephoneDigit {
+    call: u64,
+    symbol: char,
+}
+impl TelephoneDigit {
+    /// Exact call intent retained when this actual RF symbol was interpreted.
+    pub fn call(&self) -> u64 {
+        self.call
+    }
+    /// Completed telephone keypad symbol; never include it in diagnostics.
+    pub fn symbol(&self) -> char {
+        self.symbol
+    }
+}
+impl std::fmt::Debug for TelephoneDigit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TelephoneDigit")
+    }
+}
+
 /// Control-side interpretation; media and directory work stay outside collection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DigitOutcome {
+    /// Actual local RF input for one still-current outgoing telephone call.
+    Telephone(TelephoneDigit),
     /// Source-only failure notice; expansion and credential digits are never included.
     MacroStopped {
         /// Exact originating connection, absent only for the local RF source.
@@ -260,6 +284,15 @@ impl DigitOperation {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum TelephoneInput {
+    #[default]
+    Idle,
+    Star,
+    Quoted,
+    CommandTerminator,
+}
+
 /// Serialized command collection; authorization/peer availability stays with link control.
 pub struct DtmfCommands {
     map: DtmfCommandMap,
@@ -281,6 +314,8 @@ pub struct DtmfCommands {
     macro_permit: Option<MacroPermit>,
     macro_stopped: bool,
     pending_remote: Weak<()>,
+    telephone_call: Option<u64>,
+    telephone_input: TelephoneInput,
 }
 impl DtmfCommands {
     /// Create independent collection and authorization state with the same resolved policy.
@@ -320,6 +355,8 @@ impl DtmfCommands {
             macro_permit: None,
             macro_stopped: false,
             pending_remote: Weak::new(),
+            telephone_call: None,
+            telephone_input: TelephoneInput::Idle,
         }
     }
     /// Apply only to the independently owned source collector, never the radio publisher.
@@ -352,6 +389,7 @@ impl DtmfCommands {
         self.cancel_macro();
         self.map = map;
         self.collector = self.map.collector();
+        self.telephone_input = TelephoneInput::Idle;
         self.macros = Arc::new(macros);
         self.macro_limits = limits;
         Ok(())
@@ -468,6 +506,7 @@ impl DtmfCommands {
         )?;
         self.cancel_macro();
         self.collector = map.collector();
+        self.telephone_input = TelephoneInput::Idle;
         self.map = map;
         self.remote_access = access;
         Ok(())
@@ -489,6 +528,7 @@ impl DtmfCommands {
     pub fn select_remote(&mut self, remote: &str) {
         self.remote = remote.into();
         self.collector = self.map.collector();
+        self.telephone_input = TelephoneInput::Idle;
     }
     /// Clear selection when its peer disconnects or a scheduled route is withdrawn.
     pub fn disconnect(&mut self, remote: &str) {
@@ -496,8 +536,96 @@ impl DtmfCommands {
             self.remote.clear();
         }
     }
+    /// Interpret actual RF input while retaining the existing command collector.
+    pub fn feed_phone(&mut self, event: DigitEvent, call: Option<u64>) -> Option<DigitOutcome> {
+        let call = call.filter(|id| *id != 0 && !self.peer_source);
+        if self.telephone_call != call {
+            if matches!(
+                self.telephone_input,
+                TelephoneInput::Star | TelephoneInput::Quoted
+            ) {
+                self.feed(DigitEvent::Lost);
+            }
+            self.telephone_call = call;
+            self.telephone_input = TelephoneInput::Idle;
+        }
+        let Some(call) = call else {
+            return self.feed(event);
+        };
+        let DigitEvent::Digit { digit, now_ms } = event else {
+            return self.feed(event);
+        };
+        if !"0123456789ABCD*#".contains(digit) {
+            self.telephone_input = TelephoneInput::Idle;
+            return self.feed(event);
+        }
+        if self.telephone_input != TelephoneInput::Idle
+            && self
+                .digit_deadline
+                .is_some_and(|deadline| now_ms >= deadline)
+        {
+            self.feed(DigitEvent::Digit {
+                digit: '\0',
+                now_ms,
+            });
+        }
+        match self.telephone_input {
+            TelephoneInput::Quoted => {
+                self.telephone_input = TelephoneInput::Idle;
+                self.observe_input(event);
+                return Some(DigitOutcome::Telephone(TelephoneDigit {
+                    call,
+                    symbol: digit,
+                }));
+            }
+            TelephoneInput::Star => {
+                self.telephone_input = TelephoneInput::Idle;
+                if digit == '*' {
+                    // Only the pending one-star prefix is replaced. Existing
+                    // selected-remote and keypad modes never enter this state.
+                    self.feed(DigitEvent::Lost);
+                    self.observe_input(event);
+                    self.telephone_input = TelephoneInput::Quoted;
+                    return None;
+                }
+                return self.feed_phone_command(event);
+            }
+            TelephoneInput::CommandTerminator => {
+                self.telephone_input = TelephoneInput::Idle;
+                if digit == '#' {
+                    return self.feed(event);
+                }
+            }
+            TelephoneInput::Idle => {}
+        }
+        if !self.collector.active() && self.remote.is_empty() && self.pad.is_none() {
+            if digit == '*' {
+                self.telephone_input = TelephoneInput::Star;
+            } else {
+                self.observe_input(event);
+                return Some(DigitOutcome::Telephone(TelephoneDigit {
+                    call,
+                    symbol: digit,
+                }));
+            }
+        }
+        self.feed_phone_command(event)
+    }
+    fn feed_phone_command(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
+        let collecting = self.collector.active();
+        let outcome = self.feed(event);
+        if collecting
+            && !self.collector.active()
+            && matches!(event, DigitEvent::Digit { digit, .. } if digit != '#' && digit != '\0')
+        {
+            // Some mapped commands complete before their optional hash. That
+            // terminator belongs to the command, not to the telephone IVR.
+            self.telephone_input = TelephoneInput::CommandTerminator;
+        }
+        outcome
+    }
     /// Interpret copied events on control. Call `Lost` also after control submission rejection.
-    pub fn feed(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
+    fn observe_input(&mut self, event: DigitEvent) {
         if matches!(event, DigitEvent::Lost | DigitEvent::Digit { digit: '0'..='9' | 'A'..='D' | '*' | '#', .. })
         {
             self.cancel_macro();
@@ -509,8 +637,19 @@ impl DtmfCommands {
             }
             _ => None,
         };
+    }
+    /// Interpret copied events with the unchanged ordinary RF/peer grammar.
+    pub fn feed(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
+        self.observe_input(event);
+        if matches!(
+            event,
+            DigitEvent::Lost | DigitEvent::Unkey { .. } | DigitEvent::Digit { digit: '\0', .. }
+        ) {
+            self.telephone_input = TelephoneInput::Idle;
+        }
         if event == DigitEvent::Lost {
             self.collector = self.map.collector();
+            self.telephone_input = TelephoneInput::Idle;
             self.pad = None;
             return None;
         }

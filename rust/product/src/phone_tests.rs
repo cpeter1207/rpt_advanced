@@ -1121,3 +1121,185 @@ fn outgoing_uncertain_completion_cancels_adopted_media_on_the_existing_pump() {
     assert!(calls.cancel_outgoing("1000", old.id()).is_err());
     assert!(successor.current());
 }
+
+#[test]
+fn outgoing_telephone_digits_keep_exact_owner_and_bounded_busy_custody() {
+    use crate::link::{private_phone::PrivatePhoneSession, session::SerialSession};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (io, state) = crate::link::session::tests::phone_source_peer();
+    let local = io.local().to_owned();
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let claim = calls
+        .reserve_outgoing(io.phone_account().unwrap().clone(), &local)
+        .unwrap();
+    let source = calls.adopt_outgoing(&claim, io).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let io = calls.calls[0].io.take().unwrap();
+    let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    calls.calls[0].owner = Some(control);
+    session.set_source_clock(
+        crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
+    );
+    let forged = PeerSignals::for_phone(source.clone()).reply_target();
+    assert!(calls.send_telephone_digit(&source, &forged, '1').is_err());
+    assert!(calls.send_telephone_digit(&source, &reply, 'x').is_err());
+    state.lock().unwrap().digit_result = 1;
+    for symbol in "0123456789*#ABCD".chars() {
+        assert_eq!(calls.send_telephone_digit(&source, &reply, symbol), Ok(()));
+    }
+    assert!(calls.send_telephone_digit(&source, &reply, '9').is_err());
+    session.step(0).unwrap();
+    assert!(state.lock().unwrap().digits.is_empty());
+    assert!(
+        calls.send_telephone_digit(&source, &reply, '9').is_err(),
+        "busy must retain queue custody"
+    );
+    state.lock().unwrap().digit_result = 0;
+    session.step(10).unwrap();
+    assert_eq!(state.lock().unwrap().digits, b"0123456789*#ABCD");
+    assert!(!reply.phone_authenticated());
+    assert_eq!(calls.send_telephone_digit(&source, &reply, '9'), Ok(()));
+    calls.cancel_outgoing(&local, claim.id()).unwrap();
+    assert_eq!(session.step(20), Err(Error::Hangup));
+    assert_eq!(state.lock().unwrap().digits, b"0123456789*#ABCD");
+    let (io, successor_state) = crate::link::session::tests::phone_source_peer();
+    let successor = calls
+        .reserve_outgoing(io.phone_account().unwrap().clone(), &local)
+        .unwrap();
+    let successor_source = calls.adopt_outgoing(&successor, io).unwrap();
+    let successor_reply = calls.reply(&successor_source).unwrap();
+    assert!(
+        calls
+            .send_telephone_digit(&source, &successor_reply, '8')
+            .is_err()
+    );
+    assert!(successor_state.lock().unwrap().digits.is_empty());
+    assert!(successor.current());
+}
+
+#[test]
+fn outgoing_inband_digit_is_finite_private_provider_playback() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (io, _state) = crate::link::session::tests::phone_source_peer_inband(8000);
+    let mut calls = PhoneCalls::new(1, 1).unwrap();
+    let claim = calls
+        .reserve_outgoing(io.phone_account().unwrap().clone(), io.local())
+        .unwrap();
+    let source = calls.adopt_outgoing(&claim, io).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let mut tone = PrivatePhoneReply::telephone_digit(&reply, '5').unwrap();
+    assert!(tone.targets(&reply));
+    assert!(!reply.phone_authenticated());
+    let mut samples = Vec::new();
+    let mut block = [0.0; 960];
+    while tone.outcome() == PlaybackOutcome::Active {
+        let count = tone.render(false, &mut block);
+        samples.extend_from_slice(&block[..count]);
+        assert!(samples.len() <= 12000);
+    }
+    assert_eq!(tone.outcome(), PlaybackOutcome::Succeeded);
+    assert_eq!(samples.len(), 12000);
+    assert!(samples[..9600].iter().any(|sample| sample.abs() > 0.01));
+    assert!(samples[9600..].iter().all(|sample| *sample == 0.0));
+    let mut detector = rpt_advanced_core::audio::DtmfDetector::new(false).unwrap();
+    let mut decoded = Vec::new();
+    for block in samples.chunks_mut(960) {
+        detector.process(true, block, |symbol| decoded.push(symbol));
+    }
+    detector.process(false, &mut [0.0; 960], |symbol| decoded.push(symbol));
+    assert_eq!(decoded, ['5']);
+    let incoming = PeerSignals::for_phone(source.clone()).reply_target();
+    assert!(PrivatePhoneReply::telephone_digit(&incoming, '5').is_err());
+    let mut pending = PrivatePhoneReply::telephone_digit(&reply, '#').unwrap();
+    calls.retire(&source).unwrap();
+    assert_eq!(pending.render(false, &mut block), 0);
+    assert_eq!(pending.outcome(), PlaybackOutcome::Cancelled);
+}
+
+#[test]
+fn outgoing_inband_digit_uses_existing_private_queue_not_event_callback() {
+    use crate::link::{private_phone::PrivatePhoneSession, session::SerialSession};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (io, state) = crate::link::session::tests::phone_source_peer_inband(8000);
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let claim = calls
+        .reserve_outgoing(io.phone_account().unwrap().clone(), io.local())
+        .unwrap();
+    let source = calls.adopt_outgoing(&claim, io).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let io = calls.calls[0].io.take().unwrap();
+    let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    calls.calls[0].owner = Some(control);
+    session.set_source_clock(
+        crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
+    );
+    calls.send_telephone_digit(&source, &reply, '5').unwrap();
+    for now in (0..400).step_by(10) {
+        session.step(now).unwrap();
+    }
+    let state = state.lock().unwrap();
+    assert!(state.digits.is_empty());
+    assert!(!state.prepared.is_empty());
+    assert!(state.texts.is_empty());
+    assert!(!reply.phone_authenticated());
+}
+
+#[test]
+fn radio_telephone_digit_requires_answered_attachment_and_exact_claim() {
+    use crate::link::{private_phone::PrivatePhoneSession, session::SerialSession};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut calls = PhoneCalls::new(1, 16).unwrap();
+    let mut previous = None;
+    for symbol in ['1', '2'] {
+        let (io, state) = crate::link::session::tests::phone_source_peer();
+        let local = io.local().to_owned();
+        let claim = calls
+            .reserve_outgoing(io.phone_account().unwrap().clone(), &local)
+            .unwrap();
+        assert_eq!(calls.outgoing_telephone_id(&local), None);
+        let source = calls.adopt_outgoing(&claim, io).unwrap();
+        let reply = calls.reply(&source).unwrap();
+        let io = calls.calls[0].io.take().unwrap();
+        let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+        calls.calls[0].owner = Some(control);
+        session.set_source_clock(
+            crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
+        );
+        assert!(
+            calls
+                .send_radio_telephone_digit(&local, claim.id(), symbol)
+                .is_err()
+        );
+        calls.attach(&source, &reply, &local).unwrap();
+        assert_eq!(calls.outgoing_telephone_id(&local), Some(claim.id()));
+        assert!(
+            calls
+                .send_radio_telephone_digit("other", claim.id(), symbol)
+                .is_err()
+        );
+        if let Some(old) = previous {
+            assert!(calls.send_radio_telephone_digit(&local, old, '9').is_err());
+        }
+        calls
+            .send_radio_telephone_digit(&local, claim.id(), symbol)
+            .unwrap();
+        session.step(0).unwrap();
+        assert_eq!(state.lock().unwrap().digits, [symbol as u8]);
+        calls
+            .send_radio_telephone_digit(&local, claim.id(), '8')
+            .unwrap();
+        calls.cancel_outgoing(&local, claim.id()).unwrap();
+        assert_eq!(calls.outgoing_telephone_id(&local), None);
+        assert_eq!(session.step(10), Err(Error::Hangup));
+        assert_eq!(state.lock().unwrap().digits, [symbol as u8]);
+        previous = Some(claim.id());
+    }
+}

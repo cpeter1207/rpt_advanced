@@ -1971,16 +1971,27 @@ impl PeerIo {
         };
         (code == 0).then_some(()).ok_or(Error::Write)
     }
-    /// Send one conventional completed digit.
+    /// Send one conventional completed digit; ordinary callers retain strict success.
     pub fn send_digit(&mut self, digit: char) -> Result<(), Error> {
+        self.try_send_digit(digit)?
+            .then_some(())
+            .ok_or(Error::Write)
+    }
+    /// A busy private telephone keeps the symbol at the head of its existing queue.
+    pub(crate) fn try_send_digit(&mut self, digit: char) -> Result<bool, Error> {
+        let digit = u8::try_from(u32::from(digit)).map_err(|_| Error::Write)?;
         let code = unsafe {
             self.services.0.peer_send_digit.unwrap()(
                 self.services.0.context,
                 self.handle.as_ptr(),
-                digit as u8,
+                digit,
             )
         };
-        (code == 0).then_some(()).ok_or(Error::Write)
+        match code {
+            0 => Ok(true),
+            1 => Ok(false),
+            _ => Err(Error::Write),
+        }
     }
     /// Send codec-rate normalized F32 audio, or one end-of-burst marker when empty.
     pub fn write(&mut self, samples: &[f32]) -> Result<(), Error> {

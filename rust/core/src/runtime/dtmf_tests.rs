@@ -782,3 +782,125 @@ fn radio_phone_numbers_do_not_recall_or_replace_the_last_link() {
     assert!(commands.complete_command("0", 1, true).is_some());
     assert_eq!(commands.last_node, "2000");
 }
+
+fn phone_symbols(
+    commands: &mut DtmfCommands,
+    call: Option<u64>,
+    symbols: &str,
+    start: u64,
+) -> Vec<DigitOutcome> {
+    symbols
+        .chars()
+        .enumerate()
+        .filter_map(|(offset, digit)| {
+            commands.feed_phone(
+                DigitEvent::Digit {
+                    digit,
+                    now_ms: start + offset as u64 * 100,
+                },
+                call,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn radio_phone_idle_digits_and_literal_escape_keep_mapped_control() {
+    use crate::command::CommandMapping;
+    let map = DtmfCommandMap::new(vec![
+        CommandMapping::new("0", LinkAction::PhoneHangup),
+        CommandMapping::new("4", LinkAction::Command),
+        CommandMapping::new("70", LinkAction::Status),
+    ])
+    .unwrap();
+    let mut commands = DtmfCommands::new(map);
+    commands.last_node = "4321".into();
+    let forwarded = phone_symbols(&mut commands, Some(7), "012#ABCD***4**#", 0);
+    let symbols: String = forwarded
+        .iter()
+        .map(|outcome| match outcome {
+            DigitOutcome::Telephone(digit) => {
+                assert_eq!(digit.call(), 7);
+                digit.symbol()
+            }
+            _ => panic!("ordinary/quoted input became a node command"),
+        })
+        .collect();
+    assert_eq!(symbols, "012#ABCD*4#");
+    assert_eq!(commands.last_node, "4321");
+    let result = phone_symbols(&mut commands, Some(7), "*0#", 2000);
+    assert_eq!(
+        result.len(),
+        1,
+        "command hash must never reach the IVR: {result:?}"
+    );
+    assert!(
+        matches!(&result[..], [DigitOutcome::Operation(operation)] if operation.command.action == LinkAction::PhoneHangup)
+    );
+    assert!(!format!("{:?}", forwarded[0]).contains('7'));
+    assert_eq!(format!("{:?}", forwarded[0]), "Telephone(TelephoneDigit)");
+}
+
+#[test]
+fn radio_phone_quote_expires_and_never_transfers_to_another_call() {
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    for reset in [
+        DigitEvent::Lost,
+        DigitEvent::Unkey { now_ms: 500 },
+        DigitEvent::Digit {
+            digit: '\0',
+            now_ms: 4000,
+        },
+    ] {
+        assert!(phone_symbols(&mut commands, Some(7), "**", 0).is_empty());
+        assert!(commands.feed_phone(reset, Some(7)).is_none());
+        assert!(phone_symbols(&mut commands, Some(7), "*", 5000).is_empty());
+        assert!(
+            commands.collecting(),
+            "reset must not leave a literal quote"
+        );
+        commands.feed_phone(DigitEvent::Lost, Some(7));
+    }
+    phone_symbols(&mut commands, Some(7), "**", 0);
+    assert!(phone_symbols(&mut commands, Some(8), "*", 500).is_empty());
+    assert!(commands.collecting());
+    commands.feed_phone(DigitEvent::Lost, Some(8));
+    phone_symbols(&mut commands, Some(8), "**", 0);
+    assert!(phone_symbols(&mut commands, Some(8), "*", 4000).is_empty());
+    assert!(commands.collecting());
+}
+
+#[test]
+fn radio_phone_keeps_selected_remote_peer_and_macro_authority_separate() {
+    let mut commands = macro_commands("*70#,*73#", false);
+    feed_symbols(&mut commands, "*95");
+    let operation = commands.advance_macro(1).unwrap();
+    assert!(matches!(
+        &phone_symbols(&mut commands, Some(7), "5", 2)[..],
+        [DigitOutcome::Telephone(_)]
+    ));
+    assert!(!commands.macro_operation_current(&operation, 2));
+    commands.select_remote("2000");
+    let selected = phone_symbols(&mut commands, Some(7), "12*#", 100);
+    assert_eq!(selected.len(), 3);
+    assert!(selected.iter().all(|outcome| matches!(outcome, DigitOutcome::Operation(operation) if operation.command.node == "2000")));
+    assert!(matches!(
+        &phone_symbols(&mut commands, Some(7), "6", 1000)[..],
+        [DigitOutcome::Telephone(_)]
+    ));
+    let mut peer = commands.for_source();
+    assert!(
+        phone_symbols(&mut peer, Some(7), "5", 0)
+            .iter()
+            .all(|outcome| !matches!(outcome, DigitOutcome::Telephone(_)))
+    );
+    let mut original = DtmfCommands::new(DtmfCommandMap::standard());
+    let mut no_call = DtmfCommands::new(DtmfCommandMap::standard());
+    for (index, digit) in "012**#*70#".chars().enumerate() {
+        let event = DigitEvent::Digit {
+            digit,
+            now_ms: index as u64 * 100,
+        };
+        assert_eq!(original.feed(event), no_call.feed_phone(event, None));
+    }
+}

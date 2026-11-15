@@ -70,6 +70,7 @@ struct PrivateDigit {
 }
 
 enum PrivateCommand {
+    TelephoneDigit(char),
     Reply(PrivatePhoneReply),
     Media(Box<media::Ingress>),
     CollectionEnded(NonZeroU32),
@@ -89,6 +90,7 @@ pub(crate) struct PrivatePhoneControl {
     source_ready: Arc<AtomicU32>,
     rate: u32,
     source_media: bool,
+    digit_mode: PhoneDigitMode,
     media: Option<Arc<media::Shared>>,
 }
 impl PrivatePhoneControl {
@@ -104,6 +106,31 @@ impl PrivatePhoneControl {
         self.replies
             .push(PrivateCommand::Reply(reply))
             .unwrap_or_else(|_| unreachable!("reserved private command slot"));
+        self.wake.notify();
+        Ok(())
+    }
+    /// Only explicit initiating-side control can queue a symbol to this exact call.
+    pub(crate) fn send_digit(&mut self, reply: &PeerReply, symbol: char) -> Result<(), Error> {
+        if self.reply != *reply
+            || !reply.phone_outgoing()
+            || !reply.phone_media_authorized()
+            || self.stop.load(Ordering::Acquire)
+            || !"0123456789*#ABCD".contains(symbol)
+        {
+            return Err(Error::Admission);
+        }
+        if self.replies.slots() == 0 {
+            return Err(Error::Allocation);
+        }
+        let command = match self.digit_mode {
+            PhoneDigitMode::NativeEvents => PrivateCommand::TelephoneDigit(symbol),
+            PhoneDigitMode::InBand => {
+                PrivateCommand::Reply(PrivatePhoneReply::telephone_digit(reply, symbol)?)
+            }
+        };
+        self.replies
+            .push(command)
+            .unwrap_or_else(|_| unreachable!("reserved private digit slot"));
         self.wake.notify();
         Ok(())
     }
@@ -320,6 +347,7 @@ impl PrivatePhoneSession {
             source_ready: Arc::clone(&source_ready),
             rate,
             source_media: io.source_media(),
+            digit_mode,
             media: None,
         };
         Ok((
@@ -592,7 +620,17 @@ impl PrivatePhoneSession {
         let now_ns = now_ms.saturating_mul(1_000_000);
         if self.current.is_none() {
             for _ in 0..16 {
+                if let Ok(PrivateCommand::TelephoneDigit(symbol)) = self.replies.peek() {
+                    if !self.io.try_send_digit(*symbol)? {
+                        break;
+                    }
+                    let _ = self.replies.pop();
+                    continue;
+                }
                 match self.replies.pop().ok() {
+                    Some(PrivateCommand::TelephoneDigit(_)) => {
+                        unreachable!("single serial consumer")
+                    }
                     Some(PrivateCommand::Reply(reply)) => {
                         self.current = Some(reply);
                         self.next_audio_ns = 0;

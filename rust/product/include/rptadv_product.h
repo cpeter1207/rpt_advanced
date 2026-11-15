@@ -520,6 +520,8 @@ struct rptadv_host_services_v10 {
     /** Send one text payload. */
     int (*peer_send_text)(void *context, void *peer, const char *text, size_t length);
     /** Send one completed DTMF digit. */
+    /* Completed digit: 0 accepted, 1 busy with caller custody unchanged, negative
+       refused. No callback argument or borrowed input is retained. */
     int (*peer_send_digit)(void *context, void *peer, uint8_t digit);
     /** Send one normalized F32 PCM block, or one end-of-burst marker when empty.
      * Required for PCM-only hosts; absent when the complete prepared group is supplied. */

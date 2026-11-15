@@ -44,6 +44,18 @@ pub struct PrivatePhoneReply {
     playback: Playback,
 }
 impl PrivatePhoneReply {
+    pub(crate) fn telephone_digit(reply: &PeerReply, symbol: char) -> Result<Self, Error> {
+        if !reply.phone_outgoing() || !reply.phone_media_authorized() {
+            return Err(Error::Admission);
+        }
+        let generator = rpt_advanced_core::audio::DtmfGenerator::new(symbol, 200, 50, -12)
+            .map_err(|_| Error::Allocation)?;
+        Ok(Self {
+            source: reply.phone_source().ok_or(Error::Admission)?.clone(),
+            reply: reply.clone(),
+            playback: Playback::new_stream(Box::new(TelephoneTone(generator))),
+        })
+    }
     pub(crate) fn targets(&self, reply: &PeerReply) -> bool {
         self.reply == *reply && self.current()
     }
@@ -74,6 +86,19 @@ impl PrivatePhoneReply {
             self.playback.outcome()
         } else {
             PlaybackOutcome::Cancelled
+        }
+    }
+}
+
+/// Finite released-provider generation rendered only by the private serial owner.
+struct TelephoneTone(rpt_advanced_core::audio::DtmfGenerator);
+impl PcmStreamReader for TelephoneTone {
+    fn render(&mut self, output: &mut [f32]) -> rpt_advanced_core::audio::PcmRead {
+        use rpt_advanced_core::audio::PcmRead;
+        match self.0.render(output) {
+            Ok(0) => PcmRead::Finished,
+            Ok(count) => PcmRead::Samples(count),
+            Err(_) => PcmRead::Failed,
         }
     }
 }
@@ -768,6 +793,52 @@ impl PhoneCalls {
             playback: Playback::new_stream(stream),
         });
         Ok(())
+    }
+    /// Only an answered, attached, live outgoing call can receive actual RF digits.
+    pub(crate) fn outgoing_telephone_id(&self, local: &str) -> Option<u64> {
+        self.calls.iter().find_map(|call| {
+            let claim = call.outgoing.as_ref()?;
+            (claim.current()
+                && call.attachment.as_deref() == Some(local)
+                && call.owner.is_some()
+                && call.signals.reply_target().phone_media_authorized())
+            .then_some(claim.id())
+        })
+    }
+    /// Never resolve a delayed symbol to a newer call at the same local node.
+    pub(crate) fn send_radio_telephone_digit(
+        &mut self,
+        local: &str,
+        id: u64,
+        symbol: char,
+    ) -> Result<(), Error> {
+        if self.outgoing_telephone_id(local) != Some(id) {
+            return Err(Error::Admission);
+        }
+        let call = self
+            .calls
+            .iter()
+            .find(|call| call.outgoing.as_ref().is_some_and(|claim| claim.id() == id))
+            .ok_or(Error::Admission)?;
+        let source = call.source.clone();
+        let reply = call.signals.reply_target();
+        self.send_telephone_digit(&source, &reply, symbol)
+    }
+    /// Queue one telephone digit only for the exact answered outgoing call.
+    pub(crate) fn send_telephone_digit(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        symbol: char,
+    ) -> Result<(), Error> {
+        let call = self.current(source, reply)?;
+        if !call.outgoing.as_ref().is_some_and(|claim| claim.current()) {
+            return Err(Error::Admission);
+        }
+        call.owner
+            .as_mut()
+            .ok_or(Error::Admission)?
+            .send_digit(reply, symbol)
     }
     /// Transfer a prepared private stream to its serial egress owner, never an RF mixer.
     pub fn take_reply(

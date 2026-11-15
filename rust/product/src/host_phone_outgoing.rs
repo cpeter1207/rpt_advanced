@@ -164,3 +164,17 @@ impl Host {
         }
     }
 }
+
+impl Host {
+    /// Deliver local RF telephone input only to its captured answered call.
+    pub(crate) fn send_radio_telephone_digit(
+        &mut self,
+        local: &str,
+        id: u64,
+        symbol: char,
+    ) -> Result<(), RuntimeError> {
+        self.phone_calls
+            .send_radio_telephone_digit(local, id, symbol)
+            .map_err(|_| RuntimeError::Rejected)
+    }
+}

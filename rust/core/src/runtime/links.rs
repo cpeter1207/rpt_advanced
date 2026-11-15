@@ -662,6 +662,15 @@ impl NodeLinkControl {
     pub fn digit(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
         self.commands.feed(event)
     }
+    /// Actual RF telephone routing only; peer and phone collectors never call this.
+    pub fn digit_with_phone(
+        &mut self,
+        event: DigitEvent,
+        call: Option<u64>,
+    ) -> Option<DigitOutcome> {
+        self.commands
+            .feed_phone(event, call.filter(|_| self.admitting))
+    }
     /// Submission loss revokes every source's queued expansion and partial command.
     pub fn lost_digits(&mut self) {
         self.commands.feed(DigitEvent::Lost);

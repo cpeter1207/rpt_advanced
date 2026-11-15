@@ -51,3 +51,27 @@ The owner approved `**` as the active-call escape. Core completion is a single-c
 2026-11-15: the existing answered SIP host callback reproduced a clean behavioral refusal after normal call/account teardown. The narrow sender now passes 14 transport cases and the actual host lifecycle case (1.37 seconds; constrained launcher exit 0). Source review found no additional ownership/backpressure issue. Tests cover all 16 symbols, negotiated event payload, one socket/SSRC/sequence shared with audio, immutable refused datagrams, triple final reports, bounded expiration and source retirement. No callee authority is added.
 
 This is only the transport checkpoint. Private-owner routing, RF grammar, in-band fallback, actual IVR composition and full affected/static gates remain unfinished.
+
+
+## RF grammar and private-owner checkpoint
+
+The actual local RF dispatcher now captures the answered, attached outgoing call
+ID. Ordinary telephone digits and the approved `**` quote reach only that exact
+call through the existing bounded private command ring. An automatically completed
+mapped command retains its optional `#` terminator; a bare or quoted telephone
+`#` stays distinct. Peer, incoming-phone, selected-remote, macro and no-call
+control retain their existing authority and parsing paths.
+
+The SIP event callback retains busy input at the existing ring head. If event
+payload was not negotiated, the same private finite Playback owner uses the
+released DTMF generator. Neither mode creates an RF operation result or a new
+worker/PCM queue. Call retirement cancels queued control and finite playback.
+
+Verification recorded in `.work/phone-ivr-radio-green2.log` and
+`.work/phone-ivr-product-green.log`: seven radio filters, all 30 DTMF tests,
+exact current-call/bounded-owner tests, both finite in-band cases, and strict
+all-target Clippy for core, product and standalone passed. The initial owner RED
+and the optional-command-terminator failure are retained in the earlier logs.
+The actual RF-to-SIP wire fixture is saved separately and is not yet execution
+qualified at this checkpoint. Full affected suites, wire/in-band composition and
+aggregate union gates remain pending.
