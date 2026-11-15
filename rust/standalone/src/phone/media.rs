@@ -3,6 +3,8 @@ use std::{net::SocketAddr, os::fd::AsRawFd, time::Instant};
 
 #[cfg(test)]
 mod tests;
+/// Local receive ceiling, independent of the peer's receive packet-time preference.
+pub(crate) const MAX_RECEIVE_MS: u32 = 30;
 /// Implemented SIP wire profiles; unavailable codecs are never advertised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioProfile {
@@ -22,6 +24,8 @@ pub enum AudioProfile {
     L16Narrowband,
     /// Network-order signed linear PCM at 16 kHz.
     L16Wideband,
+    /// iLBC mode30, one 240-frame/50-byte coding unit per transmit packet.
+    Ilbc30,
 }
 /// Negotiated unencrypted media; no implicit SRTP downgrade.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +103,7 @@ pub struct AudioParameters {
 }
 impl AudioProfile {
     /// Implemented fixed-packet profiles, retaining PCMU as the preference.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Mulaw,
         Self::Alaw,
         Self::G722,
@@ -108,6 +112,7 @@ impl AudioProfile {
         Self::G726Aal2,
         Self::L16Narrowband,
         Self::L16Wideband,
+        Self::Ilbc30,
     ];
     /// Current bounded packet policy, validated against the released provider.
     pub fn parameters(self) -> AudioParameters {
@@ -121,13 +126,18 @@ impl AudioProfile {
             Self::G726Aal2 => (ProfileId::G726Aal2, 8000, 8000, 80),
             Self::L16Narrowband => (ProfileId::Pcm8, 8000, 8000, 320),
             Self::L16Wideband => (ProfileId::Pcm16, 16000, 16000, 640),
+            Self::Ilbc30 => (ProfileId::Ilbc, 8000, 8000, 50),
         };
         AudioParameters {
             provider_profile,
-            mode_id: 0,
+            mode_id: if self == Self::Ilbc30 { 30 } else { 0 },
             pcm_rate_hz,
             rtp_clock_hz,
-            packet_frames: pcm_rate_hz / 50,
+            packet_frames: if self == Self::Ilbc30 {
+                240
+            } else {
+                pcm_rate_hz / 50
+            },
             packet_bytes,
         }
     }
@@ -142,6 +152,7 @@ impl AudioProfile {
             Self::G726Aal2 => 97,
             Self::L16Narrowband => 98,
             Self::L16Wideband => 99,
+            Self::Ilbc30 => 100,
         }
     }
     fn name(self) -> &'static str {
@@ -153,6 +164,7 @@ impl AudioProfile {
             Self::G726 => "G726-32",
             Self::G726Aal2 => "AAL2-G726-32",
             Self::L16Narrowband | Self::L16Wideband => "L16",
+            Self::Ilbc30 => "iLBC",
         }
     }
     fn matches_format(self, format: &str) -> bool {
@@ -204,14 +216,22 @@ impl MediaDescription {
                     | "ice-pwd"
                     | "candidate"
                     | "rtcp-mux"
-            ) || (a.key == "ptime" && a.value.as_deref() != Some("20"))
-                || (a.key == "maxptime"
-                    && a.value
-                        .as_deref()
-                        .and_then(|v| v.parse::<u32>().ok())
-                        .is_none_or(|maximum| maximum < 20))
+            )
         }) {
             return Err(invalid);
+        }
+        // ptime is a preference, not a wire-shape requirement. Peer maxptime
+        // bounds our fixed TX packet; our independent RX ceiling is advertised.
+        let mut maximum = MAX_RECEIVE_MS;
+        for attribute in attributes().filter(|a| matches!(a.key.as_str(), "ptime" | "maxptime")) {
+            let whole = attribute
+                .value
+                .as_deref()
+                .and_then(packet_time_floor)
+                .ok_or(invalid)?;
+            if attribute.key == "maxptime" {
+                maximum = maximum.min(whole);
+            }
         }
         let direction = media
             .attributes
@@ -323,8 +343,40 @@ impl MediaDescription {
                     return Err(invalid);
                 }
             }
+            if codec == Some(AudioProfile::Ilbc30) {
+                let mut mode = None;
+                for attribute in attributes().filter(|a| a.key == "fmtp") {
+                    let (pt, parameters) = attribute
+                        .value
+                        .as_deref()
+                        .and_then(|v| v.split_once(' '))
+                        .ok_or(invalid)?;
+                    if pt != value {
+                        continue;
+                    }
+                    for parameter in parameters.split(';') {
+                        let (key, value) = parameter
+                            .trim()
+                            .split_once('=')
+                            .unwrap_or((parameter.trim(), ""));
+                        let value = value.trim();
+                        if key.trim().eq_ignore_ascii_case("mode")
+                            && (!matches!(value, "20" | "30") || mode.replace(value).is_some())
+                        {
+                            return Err(invalid);
+                        }
+                    }
+                }
+                // RFC3952's lower-bandwidth common mode is30 even for a mode20
+                // peer preference. Absent mode also retains the30ms default.
+            }
             if selected.is_none() {
-                selected = codec.map(|codec| (codec, payload));
+                selected = codec
+                    .filter(|codec| {
+                        let profile = codec.parameters();
+                        profile.packet_frames * 1000 / profile.pcm_rate_hz <= maximum
+                    })
+                    .map(|codec| (codec, payload));
             }
             if let Some(clock_rate_hz) = event_clock {
                 let index = usize::from(clock_rate_hz == 16000);
@@ -448,6 +500,20 @@ impl MediaDescription {
                 )
             })
             .collect::<String>();
+        for (codec, payload) in codecs {
+            if *codec == AudioProfile::Ilbc30 {
+                use std::fmt::Write;
+                write!(attributes, "a=fmtp:{payload} mode=30\r\n").expect("String formatting");
+            }
+        }
+        // A mixed-duration offer cannot associate one ptime with each format.
+        // The selected answer advertises its actual fixed TX cadence.
+        if let [(codec, _)] = codecs {
+            use std::fmt::Write;
+            let profile = codec.parameters();
+            let duration = profile.packet_frames * 1000 / profile.pcm_rate_hz;
+            write!(attributes, "a=ptime:{duration}\r\n").expect("String formatting");
+        }
         for event in events.into_iter().flatten() {
             let pt = event.receive_payload;
             let rate = event.clock_rate_hz;
@@ -459,8 +525,36 @@ impl MediaDescription {
             )
             .expect("String formatting");
         }
-        Ok(format!("v=0\r\no=- {session} {session} IN {family} {}\r\ns=rpt-advanced\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {formats}\r\n{attributes}a=ptime:20\r\na=sendrecv\r\n", local.ip(), local.ip(), local.port()).into_bytes())
+        Ok(format!("v=0\r\no=- {session} {session} IN {family} {}\r\ns=rpt-advanced\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {formats}\r\n{attributes}a=maxptime:{MAX_RECEIVE_MS}\r\na=sendrecv\r\n", local.ip(), local.ip(), local.port()).into_bytes())
     }
+}
+
+// Validate the full positive decimal spelling while retaining only the whole
+// milliseconds needed to compare our integer20/30ms TX periods. Saturation never
+// skips suffix validation. Accept trailing fractional zeroes as a receiver extension.
+fn packet_time_floor(value: &str) -> Option<u32> {
+    let (whole, fraction) = value
+        .split_once('.')
+        .map_or((value, None), |(a, b)| (a, Some(b)));
+    if whole.is_empty() || fraction.is_some_and(str::is_empty) {
+        return None;
+    }
+    let mut positive = false;
+    let mut result = 0;
+    for byte in whole.bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        positive |= byte != b'0';
+        result = (result * 10 + u32::from(byte - b'0')).min(MAX_RECEIVE_MS);
+    }
+    for byte in fraction.unwrap_or("").bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        positive |= byte != b'0';
+    }
+    positive.then_some(result)
 }
 
 // A negotiated RFC 4733 format must cover every telephone keypad symbol.
@@ -510,7 +604,7 @@ pub enum RtpEvent {
 /// Encoded source media; timing is fixed before its first submission.
 #[derive(Clone, Copy)]
 pub struct TimedAudio<'a> {
-    /// Exactly one 20 ms packet from the negotiated released encoder.
+    /// Exactly one fixed packet from the negotiated released encoder.
     pub payload: &'a [u8],
     /// First packet following a source discontinuity.
     pub marker: bool,

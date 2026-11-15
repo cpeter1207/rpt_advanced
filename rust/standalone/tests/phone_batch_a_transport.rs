@@ -12,6 +12,7 @@ async fn fixed_profiles_preserve_packet_shape_directional_payload_and_source_clo
         (111, "AAL2-G726-32/8000"),
         (112, "L16/8000"),
         (113, "L16/16000"),
+        (114, "iLBC/8000"),
     ] {
         let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let sdp = format!(

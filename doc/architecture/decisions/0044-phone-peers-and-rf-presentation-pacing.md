@@ -2283,3 +2283,26 @@ queue, callback owner, provider ABI, converter or decoder per packet. Only the
 selected codec contexts remain live; startup bidirectional probes are temporary.
 The worst supported L16/16k receive payload is 960 bytes and 480 PCM frames.
 This is an implementation ceiling, not a claim to accept every RTP packetization.
+
+
+### iLBC30 negotiation checkpoint
+
+The same catalog now includes the released iLBC profile11 with explicit mode30:
+240 PCM frames, 50 encoded bytes and 240 RTP ticks at 8 kHz per 30 ms transmit
+packet. The default dynamic payload is100. Both selected contexts are prepared
+before advertisement. RFC3952 resolves our mode30 preference against either
+peer mode20 or mode30 to mode30 in both directions; absent mode uses30. Reserved,
+unsupported and duplicate mode declarations are not inferred from payload length.
+
+The local SDP receive maximum is30 ms for the entire advertised catalog, matching
+the complete-unit decoder bounds. A mixed-duration offer omits common ptime; a
+selected answer emits the profile's preferred packet duration. Positive decimal
+ptime is a preference, while peer maxptime limits which fixed TX profile may be
+selected. An incompatible iLBC maximum can still leave an offered20 ms codec
+usable. The peer's receive maximum never changes our advertised receive ceiling.
+Decimal parsing validates all digits without floating point, with a harmless
+receiver extension accepting trailing fractional zeroes such as20.0.
+
+This adds no codec implementation, provider version, ABI or media queue. Focused
+native-provider, SDP, UDP, finite-tail and source-credit checks are distinct from
+actual full-call, external-peer, hardware and aggregate qualification.

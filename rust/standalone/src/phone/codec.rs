@@ -1,5 +1,5 @@
 //! Selected released codec contexts through the existing neutral client.
-use super::media::{AudioParameters, AudioProfile, MediaError};
+use super::media::{AudioParameters, AudioProfile, MAX_RECEIVE_MS, MediaError};
 use crate::abi;
 use rptadv_codec_client::{
     CodecCatalog, Decoder, EncodeResult, Encoder, Error, ProviderSelection, Status,
@@ -34,6 +34,10 @@ pub(crate) fn load_catalog() -> Result<CodecCatalog, MediaError> {
         ProviderSelection {
             path: "librptadv_codec_gsm.so.1".into(),
             profiles: vec![rptadv_codec_client::ProfileId::GsmFr],
+        },
+        ProviderSelection {
+            path: "librptadv_codec_ilbc.so.1".into(),
+            profiles: vec![rptadv_codec_client::ProfileId::Ilbc],
         },
         ProviderSelection {
             path: "librptadv_codec_pcm.so.1".into(),
@@ -100,7 +104,7 @@ impl AudioCodec {
             .map_err(|_| MediaError::Codec)?;
         // Receive is independently bounded in complete native coding units.
         // GSM remains20ms under this30ms ceiling; TX retains its selected cadence.
-        let units = (profile.pcm_rate_hz / 1000 * 30) / mode.frame_samples;
+        let units = (profile.pcm_rate_hz / 1000 * MAX_RECEIVE_MS) / mode.frame_samples;
         let receive_frames = units
             .checked_mul(mode.frame_samples)
             .filter(|frames| *frames >= profile.packet_frames)

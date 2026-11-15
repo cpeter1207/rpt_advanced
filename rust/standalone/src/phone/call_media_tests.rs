@@ -461,7 +461,7 @@ async fn outgoing_offer_keeps_one_port_selects_answer_and_discards_preanswer_pac
     let description = MediaDescription::parse(offer.description()).unwrap();
     let offered = description.remote;
     let text = std::str::from_utf8(offer.description()).unwrap();
-    assert!(text.contains("RTP/AVP 0 8 9 3 96 97 98 99 101 102"));
+    assert!(text.contains("RTP/AVP 0 8 9 3 96 97 98 99 100 101 102"));
     assert_eq!(
         description.telephone_events,
         [Some(TelephoneEvent::symmetric(101, 8000)), None]

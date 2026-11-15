@@ -46,11 +46,11 @@
 
 **Interfaces:** Add `AudioProfile::Ilbc30` with PT100, profile11/mode30, PCM/RTP8k,240frames/50bytes. Startup catalog opens the existing released iLBC provider both ways before advertisement. Keep `MediaDescription` directional fields unchanged.
 
-- [ ] Add table-driven SDP RED: incoming mode20/30/absent resolves30; outgoing answer20/30/absent keeps30; mode30+ptime20 accepted; fractional valid ptime/maxptime; maxptime20 excludes iLBC but keeps G711; unsupported mode/format/PT reinterpretation rejects.
-- [ ] Add SDP emission RED: explicit mode30, maxptime30, no common ptime in mixed-duration offer, selected answer ptime30. Peer maximum never shrinks our advertised receive capability.
-- [ ] Add profile/real-provider RED for240/50/8k/mode30 and bounded decode. Existing finite-source tests automatically cover one-frame, half-tail, exact-full, two-packet, OutputFull/reset when the profile enters ALL.
-- [ ] Implement the single profile/catalog selection and minimal validated decimal packet-time eligibility. Preserve format-name case handling, directional PT mapping and native event8k behavior.
-- [ ] Execute new SDP/profile/finite/provider-error GREEN plus the existing eight-profile controls; commit.
+- [x] Add table-driven SDP RED: incoming mode20/30/absent resolves30; outgoing answer20/30/absent keeps30; mode30+ptime20 accepted; fractional valid ptime/maxptime; maxptime20 excludes iLBC but keeps G711; unsupported mode/format/PT reinterpretation rejects.
+- [x] Add SDP emission RED: explicit mode30, maxptime30, no common ptime in mixed-duration offer, selected answer ptime30. Peer maximum never shrinks our advertised receive capability.
+- [x] Add profile/real-provider RED for240/50/8k/mode30 and bounded decode. Existing finite-source tests automatically cover one-frame, half-tail, exact-full, two-packet, OutputFull/reset when the profile enters ALL.
+- [x] Implement the single profile/catalog selection and minimal validated decimal packet-time eligibility. Preserve format-name case handling, directional PT mapping and native event8k behavior.
+- [x] Execute new SDP/profile/finite/provider-error GREEN plus the existing eight-profile controls; commit.
 
 ### Task3: Qualify actual paced30ms calls
 
@@ -105,3 +105,17 @@ This is a local recovery checkpoint, not full aggregate/native/coverage or wire
 qualification of the new receive path. Task2 iLBC/SDP tests remain intentionally
 RED and unimplemented. Frozen Batch A replay, including the separately observed
 PCMA strict-window boundary failure, remains separate.
+
+
+### Task2 focused iLBC qualification
+
+Independent exact-diff review found no blocking issue atop2aca00af. The
+ilbc-green.log checkpoint completed RUN_EXIT0: iLBC4, variable receive3,
+provider-fault1, original profile8, transport1 (including actual iLBC UDP),
+media15, media-unit25, source13 and finite3 passed, followed by standalone
+all-target Clippy with warnings denied and formatting. Log SHA256:
+`308ebe0c0f88765f27a1091d2ba38394c5912a66051a1d0ee936952107668f65`.
+The old exact-ptime30 negative was replaced by invalidptime0, since ptime is a
+preference. Its new positive/fractional cases were captured in the earlier RED.
+No dependency pin, public artifact or live installation changed. Actual30ms
+call fixtures, aggregate/native/coverage and external-peer checks remain open.

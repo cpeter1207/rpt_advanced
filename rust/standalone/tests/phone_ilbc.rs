@@ -121,3 +121,36 @@ fn packet_time_preferences_accept_valid_fractional_spelling_without_changing_fix
         );
     }
 }
+
+#[test]
+fn ilbc_mode_is_explicit_case_insensitive_and_never_guessed_from_payload_bytes() {
+    let source = |mode: &str| {
+        offer(
+            "100",
+            &format!("a=rtpmap:100 iLBC/8000\r\na=fmtp:100 {mode}\r\n"),
+        )
+    };
+    for mode in ["MODE=20", "Mode=30", "unrecognized=1; mode=30"] {
+        assert_eq!(
+            MediaDescription::parse(source(mode).as_bytes())
+                .unwrap()
+                .codec
+                .parameters()
+                .mode_id,
+            30
+        );
+    }
+    for mode in [
+        "mode",
+        "mode=",
+        "mode=0",
+        "mode=40",
+        "mode=20.0",
+        "mode=20;mode=30",
+    ] {
+        assert!(
+            MediaDescription::parse(source(mode).as_bytes()).is_err(),
+            "{mode}"
+        );
+    }
+}

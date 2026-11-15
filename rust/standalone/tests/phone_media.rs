@@ -44,7 +44,7 @@ fn rejects_unsupported_or_ambiguous_media_instead_of_downgrading() {
     let cases = [
         valid.replace("RTP/AVP", "RTP/SAVP"),
         valid.replace("42000", "0"),
-        valid.replace("a=ptime:20", "a=ptime:30"),
+        valid.replace("a=ptime:20", "a=ptime:0"),
         valid.replace("a=ptime:20", "a=rtpmap:0 PCMU/16000"),
         valid.replace("a=ptime:20", "a=sendonly"),
         valid.replace(
