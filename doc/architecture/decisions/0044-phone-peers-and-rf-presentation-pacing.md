@@ -2050,3 +2050,19 @@ accepted callback credit rather than accepting any marker as proof. Its
 post-DTMF healthy interval continues real incoming zero RTP, since abruptly
 stopping an established source would instead test network loss. These tests
 preserve the existing reset-marker convention, not a new general marker policy.
+
+
+### RF command collection custody (2026-11-15)
+
+P15 suppression follows the existing RF detector/dispatcher pair rather than
+the replaceable audio-graph generation. Qualified onset and digit completion
+publish exact scalar cuts in the existing bounded event ring. Control retains
+the original source receipt and clears only that cut after collection, quoting,
+selected-remote input or keypad capture completes. A rejected qualified tone
+uses an anonymous settlement, never a fabricated digit. Loss, timeout and unkey
+use existing parser cleanup; later onsets cannot be cleared by older receipts.
+
+The receive worker zeros command-interval PCM before the existing delay ring.
+This prevents replay after control release without another PCM buffer or parser.
+Detection qualification latency is not a new zero-delay guarantee; deployed RF
+reserve and existing detector suppression remain part of the audio boundary.

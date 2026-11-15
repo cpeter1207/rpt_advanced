@@ -31,8 +31,30 @@ pub enum DigitEvent {
     Lost,
 }
 
+#[derive(Clone, Copy)]
+struct StampedDigit {
+    event: Option<DigitEvent>,
+    cut: u64,
+}
+
+/// Copied RF input retains its exact detector/dispatcher pair and onset cut.
+/// A graph-only adapter replacement transfers that pair without changing custody.
+pub struct RadioDigit {
+    stamped: StampedDigit,
+    source: Arc<AtomicU64>,
+}
+impl RadioDigit {
+    pub(super) fn event(&self) -> Option<DigitEvent> {
+        self.stamped.event
+    }
+}
+
 struct DtmfPublisher {
-    writer: Producer<DigitEvent>,
+    writer: Producer<StampedDigit>,
+    hold: Arc<AtomicU64>,
+    cut: u64,
+    #[cfg(test)]
+    release_on_publish: bool,
     drops: Arc<AtomicU64>,
     last_ms: u64,
     timeout: bool,
@@ -42,9 +64,14 @@ impl DtmfPublisher {
     fn new(generation: u64) -> (Self, DtmfDispatcher) {
         let (writer, reader) = RingBuffer::new(256);
         let drops = Arc::new(AtomicU64::new(0));
+        let hold = Arc::new(AtomicU64::new(0));
         (
             Self {
                 writer,
+                hold: Arc::clone(&hold),
+                cut: 0,
+                #[cfg(test)]
+                release_on_publish: false,
                 drops: drops.clone(),
                 last_ms: 0,
                 timeout: false,
@@ -52,18 +79,50 @@ impl DtmfPublisher {
             },
             DtmfDispatcher {
                 reader,
+                hold,
                 drops,
                 reported: 0,
                 generation,
             },
         )
     }
+    fn begin_tone(&mut self) {
+        // Reserve the final value as permanent fail-closed exhaustion. It can
+        // never alias an earlier releasable onset, even at the counter limit.
+        self.cut = self
+            .cut
+            .checked_add(2)
+            .filter(|cut| *cut < u64::MAX - 1)
+            .unwrap_or(u64::MAX);
+        self.hold.store(self.cut | 1, Ordering::Release);
+    }
     fn queue(&mut self, digit: char, now_ms: u64) {
         self.publish(DigitEvent::Digit { digit, now_ms });
     }
     fn publish(&mut self, event: DigitEvent) {
-        if self.writer.push(event).is_err() {
+        self.publish_stamped(Some(event));
+    }
+    fn publish_stamped(&mut self, event: Option<DigitEvent>) {
+        if self
+            .writer
+            .push(StampedDigit {
+                event,
+                cut: self.cut,
+            })
+            .is_err()
+        {
             self.drops.fetch_add(1, Ordering::Release);
+        }
+        #[cfg(test)]
+        if self.release_on_publish {
+            // Deterministic control release between event publication and the
+            // producer's final PCM decision, using the same exact compare.
+            let _ = self.hold.compare_exchange(
+                self.cut | 1,
+                self.cut,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
         }
     }
     fn decoded(&mut self, digit: char, now_ms: u64) {
@@ -88,6 +147,8 @@ impl DtmfPublisher {
 pub struct DtmfWorker {
     detector: DtmfDetector,
     publisher: DtmfPublisher,
+    qualified: bool,
+    muting: bool,
 }
 impl DtmfWorker {
     /// Allocate the fixed 256-event queue and return its separate control consumer.
@@ -97,31 +158,66 @@ impl DtmfWorker {
             Self {
                 detector: DtmfDetector::new(muting)?,
                 publisher,
+                qualified: false,
+                muting,
             },
             dispatcher,
         ))
     }
     /// Decode every digit completion and publish without allocation, submission, or locks.
     pub fn process(&mut self, receiving: bool, audio: &mut [f32], now_ms: u64) {
+        let Self {
+            detector,
+            publisher,
+            qualified,
+            muting,
+        } = self;
+        let mut mute_block = *muting && publisher.hold.load(Ordering::Acquire) & 1 != 0;
         let mut emitted = false;
-        self.detector.process(receiving, audio, |digit| {
-            self.publisher.decoded(digit, now_ms);
+        detector.process(receiving, audio, |digit| {
+            // Completion owns a fresh decision cut: an earlier discard/release
+            // cannot clear it, including a complete tone within one callback.
+            if *muting {
+                publisher.begin_tone();
+                mute_block = true;
+            }
+            publisher.decoded(digit, now_ms);
+            *qualified = false;
             emitted = true;
         });
-        self.publisher.finish_frame(receiving, now_ms, emitted);
+        let active = detector.suppressing();
+        if active && !*qualified {
+            publisher.begin_tone();
+            mute_block = true;
+        } else if !active && *qualified {
+            // A short qualified candidate may be rejected without a completed
+            // digit. Settle its exact hold without inventing parser input.
+            publisher.begin_tone();
+            publisher.publish_stamped(None);
+            mute_block = true;
+        }
+        *qualified = active;
+        publisher.finish_frame(receiving, now_ms, emitted);
+        if mute_block || (*muting && publisher.hold.load(Ordering::Acquire) & 1 != 0) {
+            // Keep this local fact even if control already released the event.
+            // No command-interval PCM may later emerge from the delayed ring.
+            audio.fill(0.0);
+        }
     }
 
     /// Current receive-side muting state for the delayed PCM consumer.
     #[must_use]
     pub fn suppressing(&self) -> bool {
         self.detector.suppressing()
+            || (self.muting && self.publisher.hold.load(Ordering::Acquire) & 1 != 0)
     }
 }
 
 /// Non-audio consumer of one generation's fixed SPSC endpoints. It invalidates queued
 /// prefixes after overflow; no other generation can publish into this queue.
 pub struct DtmfDispatcher {
-    reader: Consumer<DigitEvent>,
+    reader: Consumer<StampedDigit>,
+    hold: Arc<AtomicU64>,
     drops: Arc<AtomicU64>,
     reported: u64,
     generation: u64,
@@ -129,35 +225,72 @@ pub struct DtmfDispatcher {
 impl DtmfDispatcher {
     /// Discard the observed prefix after control admission was suppressed or lost.
     pub fn discard(&mut self) {
+        let cut = self.discard_prefix();
+        self.release_cut(cut);
+        self.reported = self.drops.load(Ordering::Acquire);
+    }
+    fn discard_prefix(&mut self) -> u64 {
+        let mut cut = self.hold.load(Ordering::Acquire) & !1;
         let queued = self.reader.slots();
         for _ in 0..queued {
-            let _ = self.reader.pop();
+            if let Ok(event) = self.reader.pop() {
+                cut = cut.max(event.cut);
+            }
         }
-        self.reported = self.drops.load(Ordering::Acquire);
+        cut
+    }
+    fn release_cut(&self, cut: u64) {
+        if cut != 0 && cut < u64::MAX - 1 {
+            let _ = self
+                .hold
+                .compare_exchange(cut | 1, cut, Ordering::AcqRel, Ordering::Acquire);
+        }
+    }
+    pub(super) fn matches(&self, event: &RadioDigit) -> bool {
+        Arc::ptr_eq(&self.hold, &event.source)
+    }
+    pub(super) fn release(&self, event: &RadioDigit) {
+        if self.matches(event) {
+            self.release_cut(event.stamped.cut);
+        }
     }
     pub(super) fn generation(&self) -> u64 {
         self.generation
     }
-    /// Take one current-generation event; overflow discards the observed queued prefix.
-    pub fn next(&mut self, current_generation: u64) -> Option<DigitEvent> {
+    fn next_stamped(&mut self, current_generation: u64) -> Option<StampedDigit> {
         let dropped = self.drops.load(Ordering::Acquire);
         if self.generation != current_generation {
-            let queued = self.reader.slots();
-            for _ in 0..queued {
-                let _ = self.reader.pop();
-            }
-            self.reported = dropped;
+            self.discard();
             return None;
         }
         if dropped != self.reported {
-            let queued = self.reader.slots();
-            for _ in 0..queued {
-                let _ = self.reader.pop();
-            }
+            let cut = self.discard_prefix();
             self.reported = dropped;
-            return Some(DigitEvent::Lost);
+            return Some(StampedDigit {
+                event: Some(DigitEvent::Lost),
+                cut,
+            });
         }
         self.reader.pop().ok()
+    }
+    /// Low-level tone-only consumption releases each popped exact cut. Product
+    /// command processing uses receipt-aware delivery through Runtime instead.
+    pub fn next(&mut self, current_generation: u64) -> Option<DigitEvent> {
+        for _ in 0..self.reader.slots().saturating_add(1) {
+            let stamped = self.next_stamped(current_generation)?;
+            self.release_cut(stamped.cut);
+            if let Some(event) = stamped.event {
+                return Some(event);
+            }
+        }
+        None
+    }
+    pub(super) fn next_radio(&mut self, current_generation: u64) -> Option<RadioDigit> {
+        self.next_stamped(current_generation)
+            .map(|stamped| RadioDigit {
+                stamped,
+                source: Arc::clone(&self.hold),
+            })
     }
     /// Cumulative radio-event drops; read outside audio for diagnostics.
     pub fn dropped(&self) -> u64 {
@@ -853,6 +986,13 @@ impl DtmfCommands {
             macro_permit: None,
             source_custody: None,
         })
+    }
+
+    pub(super) fn holds_radio_audio(&self) -> bool {
+        self.collector.active()
+            || (!self.remote.is_empty() && self.digit_deadline.is_some())
+            || self.pad.is_some()
+            || self.telephone_input == TelephoneInput::Quoted
     }
 
     /// Inspect collection without clearing selection, macros or source grants.

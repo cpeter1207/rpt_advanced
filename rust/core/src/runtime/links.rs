@@ -671,6 +671,9 @@ impl NodeLinkControl {
         self.commands
             .feed_phone(event, call.filter(|_| self.admitting))
     }
+    pub(super) fn radio_collecting(&self) -> bool {
+        self.commands.holds_radio_audio()
+    }
     /// Submission loss revokes every source's queued expansion and partial command.
     pub fn lost_digits(&mut self) {
         self.commands.feed(DigitEvent::Lost);

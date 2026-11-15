@@ -75,3 +75,26 @@ and the optional-command-terminator failure are retained in the earlier logs.
 The actual RF-to-SIP wire fixture is saved separately and is not yet execution
 qualified at this checkpoint. Full affected suites, wire/in-band composition and
 aggregate union gates remain pending.
+
+
+## RF command-interval suppression checkpoint
+
+P15 requires suppression from the first detected digit through command completion,
+not a zero-latency detector guarantee at physical tone onset. The existing RF
+detector/dispatcher pair now shares one scalar exact-cut receipt through its
+bounded event ring. Runtime releases only its matching source and completed
+collector/quote/remote interval. Graph-only adapter transfer retains that pair;
+a stale receipt cannot release a later onset or another detector.
+
+The receive worker zeroes held PCM before the existing delayed ring, so command
+interval samples cannot replay after release. Completed digits obtain a fresh
+cut even after an earlier discard. A rejected qualified short tone settles
+anonymously without inventing parser input. A local per-callback mute fact
+survives concurrent control release. The legacy low-level tone-only consumer
+releases only its popped cut; product processing remains receipt-aware.
+
+Targeted verification: all 36 runtime DTMF cases, the actual Runtime radio drain
+and strict all-target core/product Clippy passed with launcher exit 0 in
+`.work/phone-ivr-hold-green2.log`. Independent source review is clear, including
+selected-remote unkey/timeout behavior. Actual event/in-band wire privacy and
+full affected/union gates remain pending, so this is a local recovery checkpoint.

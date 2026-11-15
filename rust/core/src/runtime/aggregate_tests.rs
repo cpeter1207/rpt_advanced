@@ -3321,7 +3321,7 @@ fn control_views_and_real_radio_digit_drain_share_one_current_node() {
     let events = runtime.node("1000").unwrap().drain_digits();
     let commands: Vec<_> = events
         .into_iter()
-        .filter_map(|event| runtime.digit("1000", event))
+        .filter_map(|event| runtime.digit_with_phone("1000", event, None))
         .collect();
     assert_eq!(commands.len(), 1);
     assert!(

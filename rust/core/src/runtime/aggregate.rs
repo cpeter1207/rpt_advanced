@@ -3,7 +3,7 @@
 use super::{
     DeviceHandoff, GenerationSettings, GenerationWork, LifecycleState, LifecycleStatus, NodeHost,
     OwnedReceiveOwner, OwnedTransmitOwner, RuntimeGeneration,
-    dtmf::{DigitEvent, DigitOperation, DigitOutcome, DtmfDispatcher, DtmfWorker},
+    dtmf::{DigitEvent, DigitOperation, DigitOutcome, DtmfDispatcher, DtmfWorker, RadioDigit},
     link_schedule::{LinkScheduler, ReplacementSpec, RouteSpec},
     links::{LinkEffect, NodeLinkControl},
     prepare::{self, NativeMediaPreparer, RuntimeError},
@@ -319,12 +319,12 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
     }
     /// Drain a bounded raw-event snapshot. The host applies each policy result
     /// before interpreting the next event, so remote selection cannot lag digits.
-    pub fn drain_digits(&mut self) -> Vec<DigitEvent> {
+    pub fn drain_digits(&mut self) -> Vec<RadioDigit> {
         let generation = self.control.digits.generation();
         let mut output = Vec::new();
         let count = self.control.digits.queued();
         for _ in 0..count.saturating_add(1) {
-            let Some(event) = self.control.digits.next(generation) else {
+            let Some(event) = self.control.digits.next_radio(generation) else {
                 break;
             };
             output.push(event);
@@ -2153,10 +2153,20 @@ impl<A: Send, C: Send> Runtime<A, C> {
     pub fn digit_with_phone(
         &mut self,
         local: &str,
-        event: DigitEvent,
+        event: RadioDigit,
         call: Option<u64>,
     ) -> Option<DigitOutcome> {
-        self.node(local)?.links.digit_with_phone(event, call)
+        let node = self.node(local)?;
+        if !node.control.digits.matches(&event) {
+            return None;
+        }
+        let outcome = event
+            .event()
+            .and_then(|input| node.links.digit_with_phone(input, call));
+        if !node.links.radio_collecting() {
+            node.control.digits.release(&event);
+        }
+        outcome
     }
     /// Discard queued digits and partial commands on every active node after admission loss.
     pub fn discard_digits(&mut self) {

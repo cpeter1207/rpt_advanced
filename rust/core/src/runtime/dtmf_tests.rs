@@ -461,8 +461,8 @@ fn final_digit_precedes_unkey_terminator_with_twenty_millisecond_callbacks() {
 }
 
 #[test]
-fn worker_reports_qualified_dtmf_muting_until_the_tone_leaves() {
-    let (mut worker, _) = DtmfWorker::new(7, true).unwrap();
+fn worker_keeps_detected_audio_muted_until_exact_control_release() {
+    let (mut worker, mut dispatcher) = DtmfWorker::new(7, true).unwrap();
     assert!(!worker.suppressing());
     let mut tone = (0..1224)
         .map(|offset| {
@@ -476,6 +476,10 @@ fn worker_reports_qualified_dtmf_muting_until_the_tone_leaves() {
     assert!(worker.suppressing());
     let mut silence = vec![0.0; 612];
     worker.process(true, &mut silence, 2);
+    assert!(!worker.detector.suppressing());
+    assert!(worker.suppressing());
+    let event = dispatcher.next_radio(7).unwrap();
+    dispatcher.release(&event);
     assert!(!worker.suppressing());
 }
 
@@ -903,4 +907,253 @@ fn radio_phone_keeps_selected_remote_peer_and_macro_authority_separate() {
         };
         assert_eq!(original.feed(event), no_call.feed_phone(event, None));
     }
+}
+
+#[test]
+fn rf_command_interval_remains_suppressed_between_detected_digits() {
+    let (mut worker, mut dispatcher) = DtmfWorker::new(7, true).unwrap();
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    for block in 0..8 {
+        let mut pcm = [0.0; 960];
+        if block < 6 {
+            for (offset, sample) in pcm.iter_mut().enumerate() {
+                let time = (block * 960 + offset) as f32 / 48_000.0;
+                *sample = 0.1
+                    * ((std::f32::consts::TAU * 941.0 * time).sin()
+                        + (std::f32::consts::TAU * 1209.0 * time).sin());
+            }
+        }
+        worker.process(true, &mut pcm, block as u64 * 20);
+        while let Some(event) = dispatcher.next_radio(7) {
+            if let Some(input) = event.event() {
+                commands.feed(input);
+            }
+            if !commands.holds_radio_audio() {
+                dispatcher.release(&event);
+            }
+        }
+    }
+    assert!(
+        commands.collecting(),
+        "the existing command collector owns the prefix"
+    );
+    assert!(
+        !worker.detector.suppressing(),
+        "the qualified tone has ended"
+    );
+    assert!(
+        worker.suppressing(),
+        "P15 holds peer-bound RF programme through command collection"
+    );
+    let mut delayed = [0.1; 960];
+    worker.process(true, &mut delayed, 180);
+    assert!(delayed.iter().all(|sample| *sample == 0.0));
+    worker.process(false, &mut [], 200);
+    while let Some(event) = dispatcher.next_radio(7) {
+        if let Some(input) = event.event() {
+            commands.feed(input);
+        }
+        if !commands.holds_radio_audio() {
+            dispatcher.release(&event);
+        }
+    }
+    assert!(!worker.suppressing());
+    assert!(
+        delayed.iter().all(|sample| *sample == 0.0),
+        "release cannot uncover buffered command audio"
+    );
+    let mut voice = [0.1; 960];
+    worker.process(true, &mut voice, 220);
+    assert!(voice.iter().any(|sample| *sample != 0.0));
+}
+
+#[test]
+fn rf_hold_rejects_stale_receipts_and_old_source_after_loss() {
+    let (mut publisher, mut dispatcher) = DtmfPublisher::new(7);
+    publisher.begin_tone();
+    publisher.queue('*', 10);
+    let old = dispatcher.next_radio(7).unwrap();
+    publisher.begin_tone();
+    publisher.queue('7', 20);
+    dispatcher.release(&old);
+    assert_ne!(publisher.hold.load(Ordering::Acquire) & 1, 0);
+    let current = dispatcher.next_radio(7).unwrap();
+    dispatcher.release(&current);
+    assert_eq!(publisher.hold.load(Ordering::Acquire) & 1, 0);
+
+    publisher.begin_tone();
+    for _ in 0..257 {
+        publisher.queue('1', 30);
+    }
+    let lost = dispatcher.next_radio(7).unwrap();
+    assert_eq!(lost.event(), Some(DigitEvent::Lost));
+    publisher.begin_tone();
+    publisher.queue('2', 40);
+    dispatcher.release(&lost);
+    assert_ne!(publisher.hold.load(Ordering::Acquire) & 1, 0);
+    dispatcher.discard();
+    assert_eq!(publisher.hold.load(Ordering::Acquire) & 1, 0);
+
+    let (mut replacement, replacement_dispatcher) = DtmfPublisher::new(7);
+    replacement.begin_tone();
+    replacement_dispatcher.release(&current);
+    assert_ne!(replacement.hold.load(Ordering::Acquire) & 1, 0);
+    assert!(!replacement_dispatcher.matches(&current));
+    publisher.cut = u64::MAX - 3;
+    publisher.begin_tone();
+    publisher.queue('3', 50);
+    let exhausted = dispatcher.next_radio(7).unwrap();
+    dispatcher.release(&exhausted);
+    assert_eq!(publisher.hold.load(Ordering::Acquire), u64::MAX);
+}
+
+#[test]
+fn rf_hold_captures_multiple_whole_callback_digits_and_releases_timeout() {
+    let (mut worker, mut dispatcher) = DtmfWorker::new(7, true).unwrap();
+    let mut pcm = vec![0.0; 19200];
+    for (index, sample) in pcm.iter_mut().enumerate() {
+        let position = index % 9600;
+        if position < 5760 {
+            let time = index as f32 / 48000.0;
+            let high = if index < 9600 { 1209.0 } else { 1336.0 };
+            *sample = 0.1
+                * ((std::f32::consts::TAU * 697.0 * time).sin()
+                    + (std::f32::consts::TAU * high * time).sin());
+        }
+    }
+    worker.process(true, &mut pcm, 400);
+    assert!(!worker.detector.suppressing());
+    assert!(worker.suppressing());
+    assert!(pcm.iter().all(|sample| *sample == 0.0));
+    let first = dispatcher.next_radio(7).unwrap();
+    let second = dispatcher.next_radio(7).unwrap();
+    assert_ne!(first.stamped.cut, second.stamped.cut);
+    dispatcher.release(&first);
+    assert!(worker.suppressing());
+    dispatcher.release(&second);
+    assert!(!worker.suppressing());
+
+    worker.publisher.begin_tone();
+    worker.process(true, &mut [0.1; 960], 3500);
+    let timeout = dispatcher.next_radio(7).unwrap();
+    assert_eq!(
+        timeout.event(),
+        Some(DigitEvent::Digit {
+            digit: '\0',
+            now_ms: 3500
+        })
+    );
+    dispatcher.release(&timeout);
+    assert!(!worker.suppressing());
+    let mut voice = [0.1; 960];
+    worker.process(true, &mut voice, 3520);
+    assert!(voice.iter().any(|sample| *sample != 0.0));
+}
+
+#[test]
+fn rf_hold_uses_existing_command_quote_and_selected_remote_completion() {
+    let (mut publisher, mut dispatcher) = DtmfPublisher::new(7);
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    let mut feed = |commands: &mut DtmfCommands, symbol: char, call| {
+        publisher.begin_tone();
+        publisher.queue(symbol, 1);
+        let event = dispatcher.next_radio(7).unwrap();
+        commands.feed_phone(event.event().unwrap(), call);
+        if !commands.holds_radio_audio() {
+            dispatcher.release(&event);
+        }
+        publisher.hold.load(Ordering::Acquire) & 1 != 0
+    };
+    assert!(!feed(&mut commands, '1', Some(9)));
+    assert!(feed(&mut commands, '*', Some(9)));
+    assert!(feed(&mut commands, '*', Some(9)));
+    assert!(!feed(&mut commands, '#', Some(9)));
+    assert!(feed(&mut commands, '*', Some(9)));
+    assert!(feed(&mut commands, '7', Some(9)));
+    assert!(!feed(&mut commands, '0', Some(9)));
+    commands.select_remote("2000");
+    assert!(feed(&mut commands, '1', Some(9)));
+    commands.feed(DigitEvent::Unkey { now_ms: 2 });
+    assert!(!commands.holds_radio_audio());
+    assert_eq!(
+        commands.remote.as_str(),
+        "2000",
+        "unkey releases audio, not addressed mode"
+    );
+    assert!(feed(&mut commands, '2', Some(9)));
+    commands.feed(DigitEvent::Digit {
+        digit: '\0',
+        now_ms: 4000,
+    });
+    assert!(!commands.holds_radio_audio());
+    assert_eq!(commands.remote.as_str(), "2000");
+    assert!(feed(&mut commands, '3', Some(9)));
+    assert!(!feed(&mut commands, '#', Some(9)));
+}
+
+#[test]
+fn rf_hold_completion_reestablishes_discarded_cut_and_keeps_callback_pcm_muted() {
+    let (mut worker, mut dispatcher) = DtmfWorker::new(7, true).unwrap();
+    for block in 0..5 {
+        let mut pcm = [0.0; 960];
+        for (offset, sample) in pcm.iter_mut().enumerate() {
+            let time = (block * 960 + offset) as f32 / 48000.0;
+            *sample = 0.1
+                * ((std::f32::consts::TAU * 697.0 * time).sin()
+                    + (std::f32::consts::TAU * 1209.0 * time).sin());
+        }
+        worker.process(true, &mut pcm, block as u64 * 20);
+    }
+    let onset = worker.publisher.cut;
+    dispatcher.discard();
+    assert_eq!(worker.publisher.hold.load(Ordering::Acquire) & 1, 0);
+    let mut tail = [0.1; 1920];
+    worker.process(true, &mut tail, 140);
+    let completed = dispatcher.next_radio(7).unwrap();
+    assert!(completed.stamped.cut > onset);
+    assert!(worker.suppressing());
+    assert!(tail.iter().all(|sample| *sample == 0.0));
+    dispatcher.release(&completed);
+
+    let (mut worker, _) = DtmfWorker::new(8, true).unwrap();
+    worker.publisher.release_on_publish = true;
+    let mut pcm = vec![0.0; 9600];
+    for (index, sample) in pcm[..5760].iter_mut().enumerate() {
+        let time = index as f32 / 48000.0;
+        *sample = 0.1
+            * ((std::f32::consts::TAU * 697.0 * time).sin()
+                + (std::f32::consts::TAU * 1209.0 * time).sin());
+    }
+    worker.process(true, &mut pcm, 200);
+    assert!(
+        !worker.suppressing(),
+        "exact control completion ran during the callback"
+    );
+    assert!(
+        pcm.iter().all(|sample| *sample == 0.0),
+        "concurrent release must not uncover this borrowed PCM"
+    );
+}
+
+#[test]
+fn raw_radio_consumer_releases_only_its_popped_tone_receipt() {
+    let (mut publisher, mut dispatcher) = DtmfPublisher::new(7);
+    publisher.begin_tone();
+    publisher.publish_stamped(None);
+    assert_eq!(dispatcher.next(7), None);
+    assert_eq!(publisher.hold.load(Ordering::Acquire) & 1, 0);
+    publisher.begin_tone();
+    publisher.queue('1', 1);
+    publisher.begin_tone();
+    assert_eq!(
+        dispatcher.next(7),
+        Some(DigitEvent::Digit {
+            digit: '1',
+            now_ms: 1
+        })
+    );
+    assert_ne!(publisher.hold.load(Ordering::Acquire) & 1, 0);
+    publisher.publish_stamped(None);
+    assert_eq!(dispatcher.next(7), None);
+    assert_eq!(publisher.hold.load(Ordering::Acquire) & 1, 0);
 }
