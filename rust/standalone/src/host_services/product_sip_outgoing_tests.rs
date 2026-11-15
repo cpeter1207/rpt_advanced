@@ -74,6 +74,10 @@ static LAST_RTP: Mutex<Option<(u16, u32, u32)>> = Mutex::new(None);
 static SOURCE_CUTS: AtomicUsize = AtomicUsize::new(0);
 static LAST_MARKED_CUT: AtomicUsize = AtomicUsize::new(0);
 static ALLOW_SOURCE_CUT: AtomicBool = AtomicBool::new(false);
+// Diagnostic metadata for synthetic silence only; no PCM or control symbols.
+static QUIET_PHASE: AtomicUsize = AtomicUsize::new(0);
+static QUIET_PACKET: AtomicUsize = AtomicUsize::new(0);
+static QUIET_SKIPPED_INPUT: AtomicUsize = AtomicUsize::new(0);
 struct SourceCutObserver {
     original: abi::rptadv_peer_source_sink_v1,
 }
@@ -204,6 +208,81 @@ unsafe extern "C" fn observe_peer_read_source(
     }
 }
 
+// Check every packet, including transition packets. Fresh source credit never
+// permits a cut once the measured strict interval has begun.
+fn assert_rtp_step(
+    previous: (u16, u32, u32),
+    current: (u16, u32, u32),
+    marker: bool,
+    expected: u32,
+    allow_cut: bool,
+    cuts: usize,
+    last_cut: usize,
+) -> usize {
+    let (sequence, timestamp, ssrc) = previous;
+    assert_eq!(
+        (current.0, current.2),
+        (sequence.wrapping_add(1), ssrc),
+        "one accepted RTP sequence and SSRC across source retirement"
+    );
+    let delta = current.1.wrapping_sub(timestamp);
+    if marker || delta != expected {
+        assert!(
+            allow_cut,
+            "healthy negotiated silence must remain continuous: phase={}, packet={}, previous={previous:?}, current={current:?}, marker={marker}, delta={delta}, expected={expected}, cuts={cuts}, last_cut={last_cut}, skipped_input={}",
+            QUIET_PHASE.load(Ordering::Acquire),
+            QUIET_PACKET.load(Ordering::Acquire),
+            QUIET_SKIPPED_INPUT.load(Ordering::Acquire)
+        );
+        assert!(marker, "source cut must retain the existing reset marker");
+        assert!(
+            cuts > last_cut,
+            "a marker alone is not evidence of an accepted source cut"
+        );
+        assert!(
+            (delta as i32) > 0,
+            "retirement cannot replay or rewind source time"
+        );
+        return cuts;
+    }
+    last_cut
+}
+
+#[test]
+fn strict_silence_rejects_even_credited_later_cuts() {
+    let previous = (10, 1000, 7);
+    assert_eq!(
+        assert_rtp_step(previous, (11, 1160, 7), false, 160, false, 20, 20),
+        20
+    );
+    assert_eq!(
+        assert_rtp_step(previous, (11, 1472, 7), true, 160, true, 21, 20),
+        21
+    );
+    for (allow, marker, delta, cuts) in [
+        (false, true, 472, 21),
+        (false, false, 472, 20),
+        (true, true, 472, 20),
+        (true, false, 472, 21),
+        (true, true, 0, 21),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_rtp_step(
+                    previous,
+                    (11, 1000 + delta, 7),
+                    marker,
+                    160,
+                    allow,
+                    cuts,
+                    20,
+                )
+            })
+            .is_err()
+        );
+    }
+}
+
 fn observe_rtp(wire: &[u8]) {
     let current = (
         u16::from_be_bytes(wire[2..4].try_into().unwrap()),
@@ -212,33 +291,17 @@ fn observe_rtp(wire: &[u8]) {
     );
     let mut last = LAST_RTP.lock().unwrap();
     if CONTINUOUS_RTP.load(Ordering::Acquire) {
-        if let Some((sequence, timestamp, ssrc)) = *last {
-            assert_eq!(
-                (current.0, current.2),
-                (sequence.wrapping_add(1), ssrc),
-                "one accepted RTP sequence and SSRC across source retirement"
+        if let Some(previous) = *last {
+            let cut = assert_rtp_step(
+                previous,
+                current,
+                wire[1] & 0x80 != 0,
+                RTP_PACKET_TICKS.load(Ordering::Acquire) as u32,
+                ALLOW_SOURCE_CUT.load(Ordering::Acquire),
+                SOURCE_CUTS.load(Ordering::Acquire),
+                LAST_MARKED_CUT.load(Ordering::Acquire),
             );
-            let delta = current.1.wrapping_sub(timestamp);
-            if wire[1] & 0x80 != 0 || delta != RTP_PACKET_TICKS.load(Ordering::Acquire) as u32 {
-                assert!(
-                    ALLOW_SOURCE_CUT.load(Ordering::Acquire),
-                    "healthy negotiated20ms silence must remain continuous"
-                );
-                assert_ne!(
-                    wire[1] & 0x80,
-                    0,
-                    "source cut must retain the existing reset marker"
-                );
-                let cuts = SOURCE_CUTS.load(Ordering::Acquire);
-                assert!(
-                    cuts > LAST_MARKED_CUT.swap(cuts, Ordering::AcqRel),
-                    "a marker alone is not evidence of an accepted source cut"
-                );
-                assert!(
-                    (delta as i32) > 0,
-                    "retirement cannot replay or rewind source time"
-                );
-            }
+            LAST_MARKED_CUT.store(cut, Ordering::Release);
         }
     }
     if last.is_none() {
@@ -247,14 +310,35 @@ fn observe_rtp(wire: &[u8]) {
     *last = Some(current);
 }
 
-fn quiet_media(caller: &mut Caller, codec: &mut AudioCodec, packets: u64, incoming: bool) {
+fn quiet_media(
+    caller: &mut Caller,
+    codec: &mut AudioCodec,
+    packets: u64,
+    rearm_digits: Option<usize>,
+) {
+    let incoming = rearm_digits.is_some();
+    let mut transition = incoming;
+    let phase = if incoming { 2 } else { 1 };
+    QUIET_PHASE.store(phase, Ordering::Release);
+    QUIET_PACKET.store(0, Ordering::Release);
+    QUIET_SKIPPED_INPUT.store(0, Ordering::Release);
     let rf_before = PUBLIC_OUTPUT.load(Ordering::Acquire);
-    let started = Instant::now();
+    let mut started = Instant::now();
+    let transition_deadline = started + Duration::from_secs(3);
     let mut next_input = started;
     let mut wire = [0; 2048];
     // Thirty seconds is a bounded steady-state transport test, not an assumed NAT lifetime.
-    for packet in 1..=packets {
-        let until = Instant::now() + Duration::from_secs(3);
+    let mut packet = 0;
+    while packet < packets {
+        QUIET_PACKET.store(
+            if transition { 0 } else { packet as usize + 1 },
+            Ordering::Release,
+        );
+        let until = if transition {
+            transition_deadline
+        } else {
+            Instant::now() + Duration::from_secs(3)
+        };
         let (length, source) = loop {
             if incoming && Instant::now() >= next_input {
                 caller.audio_payload(
@@ -265,6 +349,7 @@ fn quiet_media(caller: &mut Caller, codec: &mut AudioCodec, packets: u64, incomi
                 next_input += Duration::from_millis(20);
                 // Preserve source gaps after missed slots, never burst old PCM.
                 while next_input <= Instant::now() {
+                    QUIET_SKIPPED_INPUT.fetch_add(1, Ordering::Release);
                     caller.timestamp = caller
                         .timestamp
                         .wrapping_add(caller.profile.parameters().rtp_clock_hz / 50);
@@ -293,6 +378,29 @@ fn quiet_media(caller: &mut Caller, codec: &mut AudioCodec, packets: u64, incomi
         let mut pcm = vec![0.0; caller.profile.parameters().packet_frames as usize];
         codec.decode(&wire[12..length], &mut pcm).unwrap();
         assert!(pcm.iter().all(|sample| sample.abs() < 0.001));
+        if transition {
+            assert!(
+                Instant::now() < transition_deadline,
+                "native control rearm did not reach the wire"
+            );
+            let accepted = SOURCE_DIGITS.load(Ordering::Acquire);
+            let expected = rearm_digits.unwrap();
+            assert!(
+                accepted <= expected,
+                "native control was accepted more than once"
+            );
+            if accepted == expected
+                && LAST_MARKED_CUT.load(Ordering::Acquire) == SOURCE_CUTS.load(Ordering::Acquire)
+            {
+                // A paced packet has crossed the already credited rearm boundary.
+                // Keep its RTP history; every following packet is strictly continuous.
+                transition = false;
+                ALLOW_SOURCE_CUT.store(false, Ordering::Release);
+                started = Instant::now();
+            }
+            continue;
+        }
+        packet += 1;
         if packet % 50 == 0 {
             // Include ordinary OS scheduling tolerance without accepting a catch-up flood.
             let expected = Duration::from_millis(packet * 20);
@@ -301,6 +409,7 @@ fn quiet_media(caller: &mut Caller, codec: &mut AudioCodec, packets: u64, incomi
             assert!(elapsed <= expected + Duration::from_millis(500));
         }
     }
+    QUIET_PHASE.store(0, Ordering::Release);
     assert_eq!(LOCAL_RX_KEYED_TURNS.load(Ordering::Acquire), 0);
     assert_eq!(
         PUBLIC_OUTPUT.load(Ordering::Acquire),
@@ -974,7 +1083,7 @@ fn product_outgoing_with_policy(
         assert_eq!(LOCAL_RX_KEYED_TURNS.load(Ordering::Acquire), 0);
         caller.media = learned.unwrap();
         CONTINUOUS_RTP.store(true, Ordering::Release);
-        quiet_media(&mut caller, &mut codec, 1500, false);
+        quiet_media(&mut caller, &mut codec, 1500, None);
         // An initial admission cut cannot excuse a later unrelated reset.
         LAST_MARKED_CUT.store(SOURCE_CUTS.load(Ordering::Acquire), Ordering::Release);
         ALLOW_SOURCE_CUT.store(true, Ordering::Release);
@@ -1114,8 +1223,7 @@ fn product_outgoing_with_policy(
     if latching {
         // Continue the established incoming source with real silence instead of
         // introducing missing RTP during this healthy post-rearm cadence phase.
-        ALLOW_SOURCE_CUT.store(false, Ordering::Release);
-        quiet_media(&mut caller, &mut codec, 100, true);
+        quiet_media(&mut caller, &mut codec, 100, Some(digits_before + 6));
         LAST_MARKED_CUT.store(SOURCE_CUTS.load(Ordering::Acquire), Ordering::Release);
         ALLOW_SOURCE_CUT.store(true, Ordering::Release);
     }
