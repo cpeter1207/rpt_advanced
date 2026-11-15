@@ -169,7 +169,29 @@ impl Jitter {
     /// The descriptor must be readable for its declared size and its DSO must
     /// remain loaded until this exclusive context is destroyed.
     pub unsafe fn phone(descriptor: *const c_void) -> Result<Self, Error> {
-        unsafe { Self::with_delays(descriptor, 8000, 160, 160, [20, 40, 100]) }
+        unsafe { Self::phone_at_rate(descriptor, 8000, 160, 160) }
+    }
+    /// Prepare phone delay policy at the negotiated PCM clock and packet bounds.
+    /// RTP timestamp clocks are translated by the protocol owner before admission.
+    ///
+    /// # Safety
+    /// The descriptor must be readable for its declared size and its DSO must
+    /// remain loaded until this exclusive context is destroyed.
+    pub unsafe fn phone_at_rate(
+        descriptor: *const c_void,
+        rate: u32,
+        loss_unit: u32,
+        maximum_payload_bytes: usize,
+    ) -> Result<Self, Error> {
+        unsafe {
+            Self::with_delays(
+                descriptor,
+                rate,
+                loss_unit,
+                maximum_payload_bytes,
+                [20, 40, 100],
+            )
+        }
     }
     /// Validate a readable descriptor and create the approved 160/180/500ms context.
     ///

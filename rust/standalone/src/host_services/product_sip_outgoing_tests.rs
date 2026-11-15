@@ -243,7 +243,7 @@ fn observe_rtp(wire: &[u8]) {
     *last = Some(current);
 }
 
-fn quiet_media(caller: &mut Caller, codec: &mut G711Codec, packets: u64, incoming: bool) {
+fn quiet_media(caller: &mut Caller, codec: &mut AudioCodec, packets: u64, incoming: bool) {
     let rf_before = PUBLIC_OUTPUT.load(Ordering::Acquire);
     let started = Instant::now();
     let mut next_input = started;
@@ -322,7 +322,7 @@ fn service(caller: &Caller) {
         caller.answer_register(&values, source);
     }
 }
-fn drain(caller: &Caller, codec: &mut G711Codec, returned: &mut Vec<f32>) {
+fn drain(caller: &Caller, codec: &mut AudioCodec, returned: &mut Vec<f32>) {
     let mut wire = [0; 2048];
     while let Ok((length, source)) = caller.rtp.recv_from(&mut wire) {
         assert_eq!(
@@ -344,7 +344,7 @@ fn drain(caller: &Caller, codec: &mut G711Codec, returned: &mut Vec<f32>) {
 }
 fn media(
     caller: &mut Caller,
-    codec: &mut G711Codec,
+    codec: &mut AudioCodec,
     samples: &[f32],
     returned: &mut Vec<f32>,
     mut linked: Option<&mut vox::Remote>,
@@ -392,32 +392,32 @@ fn radio_digits(digits: &[u8]) {
 
 #[test]
 fn actual_product_originates_two_way_phone_and_releases_the_exact_call() {
-    product_outgoing(false, false, false, G711::Mulaw, false);
+    product_outgoing(false, false, false, AudioProfile::Mulaw, false);
 }
 
 #[test]
 fn actual_radio_dtmf_originates_two_way_phone_and_hangs_up() {
-    product_outgoing(true, false, false, G711::Mulaw, false);
+    product_outgoing(true, false, false, AudioProfile::Mulaw, false);
 }
 
 #[test]
 fn actual_answer_first_utterance_reaches_rf_without_any_receiver_key() {
-    product_outgoing(false, true, false, G711::Mulaw, false);
+    product_outgoing(false, true, false, AudioProfile::Mulaw, false);
 }
 
 #[test]
 fn actual_rf_answer_first_utterance_reaches_rf_without_receiver_rekey() {
-    product_outgoing(true, true, false, G711::Mulaw, false);
+    product_outgoing(true, true, false, AudioProfile::Mulaw, false);
 }
 
 #[test]
 fn actual_answered_quiet_call_opens_symmetric_rtp_before_any_receiver_key() {
-    product_outgoing(false, true, true, G711::Mulaw, false);
+    product_outgoing(false, true, true, AudioProfile::Mulaw, false);
 }
 
 #[test]
 fn actual_alaw_quiet_call_sends_continuous_silence_without_receiver_key() {
-    product_outgoing(false, true, true, G711::Alaw, false);
+    product_outgoing(false, true, true, AudioProfile::Alaw, false);
 }
 
 // A symmetric media relay learns only the actual RTP source, never the SDP
@@ -443,7 +443,14 @@ fn latch(caller: &Caller) -> Option<SocketAddr> {
 
 #[test]
 fn actual_outgoing_call_isolates_and_restores_existing_ordinary_link() {
-    product_outgoing_with_ivr(true, false, false, G711::Mulaw, IvrMode::Events, true);
+    product_outgoing_with_ivr(
+        true,
+        false,
+        false,
+        AudioProfile::Mulaw,
+        IvrMode::Events,
+        true,
+    );
 }
 
 fn pump_linked(remote: &mut vox::Remote, duration: Duration) {
@@ -475,25 +482,59 @@ fn wait_linked_quiet(remote: &mut vox::Remote) {
 
 #[test]
 fn actual_radio_digits_reach_telephone_ivr_without_control_or_audio_leak() {
-    product_outgoing_with_ivr(true, true, false, G711::Mulaw, IvrMode::Events, false);
+    product_outgoing_with_ivr(
+        true,
+        true,
+        false,
+        AudioProfile::Mulaw,
+        IvrMode::Events,
+        false,
+    );
 }
 
 #[test]
 fn actual_radio_digits_use_private_inband_when_event_payload_is_absent() {
-    product_outgoing_with_ivr(true, true, false, G711::Mulaw, IvrMode::InBand, false);
+    product_outgoing_with_ivr(
+        true,
+        true,
+        false,
+        AudioProfile::Mulaw,
+        IvrMode::InBand,
+        false,
+    );
 }
 
 #[test]
 fn actual_alaw_radio_digits_reach_telephone_ivr_without_audio_leak() {
-    product_outgoing_with_ivr(true, true, false, G711::Alaw, IvrMode::Events, false);
+    product_outgoing_with_ivr(
+        true,
+        true,
+        false,
+        AudioProfile::Alaw,
+        IvrMode::Events,
+        false,
+    );
 }
 
 #[test]
 fn actual_alaw_radio_digits_use_private_inband() {
-    product_outgoing_with_ivr(true, true, false, G711::Alaw, IvrMode::InBand, false);
+    product_outgoing_with_ivr(
+        true,
+        true,
+        false,
+        AudioProfile::Alaw,
+        IvrMode::InBand,
+        false,
+    );
 }
 
-fn product_outgoing(radio: bool, immediate: bool, latching: bool, selected: G711, isolated: bool) {
+fn product_outgoing(
+    radio: bool,
+    immediate: bool,
+    latching: bool,
+    selected: AudioProfile,
+    isolated: bool,
+) {
     product_outgoing_with_ivr(
         radio,
         immediate,
@@ -508,7 +549,7 @@ fn product_outgoing_with_ivr(
     radio: bool,
     immediate: bool,
     latching: bool,
-    selected: G711,
+    selected: AudioProfile,
     ivr: IvrMode,
     isolated: bool,
 ) {
@@ -516,15 +557,15 @@ fn product_outgoing_with_ivr(
     if std::env::var_os(CHILD).is_none() {
         let name = if isolated {
             "host_services::product_phone_tests::sip::outgoing::actual_outgoing_call_isolates_and_restores_existing_ordinary_link"
-        } else if ivr == IvrMode::InBand && selected == G711::Alaw {
+        } else if ivr == IvrMode::InBand && selected == AudioProfile::Alaw {
             "host_services::product_phone_tests::sip::outgoing::actual_alaw_radio_digits_use_private_inband"
-        } else if ivr == IvrMode::Events && selected == G711::Alaw {
+        } else if ivr == IvrMode::Events && selected == AudioProfile::Alaw {
             "host_services::product_phone_tests::sip::outgoing::actual_alaw_radio_digits_reach_telephone_ivr_without_audio_leak"
         } else if ivr == IvrMode::InBand {
             "host_services::product_phone_tests::sip::outgoing::actual_radio_digits_use_private_inband_when_event_payload_is_absent"
         } else if ivr == IvrMode::Events {
             "host_services::product_phone_tests::sip::outgoing::actual_radio_digits_reach_telephone_ivr_without_control_or_audio_leak"
-        } else if selected == G711::Alaw {
+        } else if selected == AudioProfile::Alaw {
             "host_services::product_phone_tests::sip::outgoing::actual_alaw_quiet_call_sends_continuous_silence_without_receiver_key"
         } else if latching {
             "host_services::product_phone_tests::sip::outgoing::actual_answered_quiet_call_opens_symmetric_rtp_before_any_receiver_key"
@@ -551,7 +592,11 @@ fn product_outgoing_with_ivr(
         return;
     }
     SELECTED_PAYLOAD.store(
-        if selected == G711::Mulaw { 0 } else { 8 },
+        if selected == AudioProfile::Mulaw {
+            0
+        } else {
+            8
+        },
         Ordering::Release,
     );
     let directory =
@@ -759,6 +804,8 @@ fn product_outgoing_with_ivr(
     assert!(worker.incoming().is_none());
     let answer = MediaDescription {
         codec: selected,
+        receive_payload: selected.payload(),
+        send_payload: selected.payload(),
         telephone_event: if ivr == IvrMode::InBand {
             None
         } else {
@@ -788,7 +835,7 @@ fn product_outgoing_with_ivr(
         timestamp: 0,
         keepalive: false,
     };
-    let mut codec = G711Codec::load(selected).unwrap();
+    let mut codec = AudioCodec::load(selected).unwrap();
     let mut returned = Vec::new();
     if latching {
         let learned = latch(&caller);
@@ -1028,6 +1075,8 @@ fn product_outgoing_with_ivr(
         MediaDescription::parse(invite.split_once("\r\n\r\n").unwrap().1.as_bytes()).unwrap();
     let answer = MediaDescription {
         codec: selected,
+        receive_payload: selected.payload(),
+        send_payload: selected.payload(),
         ..next_offer.clone()
     }
     .answer(caller.rtp.local_addr().unwrap(), 100)
@@ -1087,7 +1136,7 @@ fn product_outgoing_with_ivr(
 
 fn assert_radio_return(
     caller: &mut Caller,
-    codec: &mut G711Codec,
+    codec: &mut AudioCodec,
     mut linked: Option<&mut vox::Remote>,
 ) {
     let mut returned = Vec::new();
@@ -1121,7 +1170,7 @@ fn assert_radio_return(
 
 fn telephone_ivr(
     caller: &mut Caller,
-    codec: &mut G711Codec,
+    codec: &mut AudioCodec,
     mode: IvrMode,
     mut linked: Option<&mut vox::Remote>,
 ) {

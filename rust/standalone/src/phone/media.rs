@@ -1,11 +1,11 @@
-//! Narrow 8 kHz G.711 phone profile. All operations run off audio.
+//! Negotiated SIP audio profiles and RTP framing. All operations run off audio.
 use std::{net::SocketAddr, os::fd::AsRawFd, time::Instant};
 
 #[cfg(test)]
 mod tests;
-/// Selected static RTP audio format.
+/// Implemented SIP wire profiles; unavailable codecs are never advertised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum G711 {
+pub enum AudioProfile {
     /// RTP payload 0, PCMU at 8000 Hz.
     Mulaw,
     /// RTP payload 8, PCMA at 8000 Hz.
@@ -16,8 +16,12 @@ pub enum G711 {
 pub struct MediaDescription {
     /// Remote media endpoint from SDP.
     pub remote: SocketAddr,
-    /// Selected static G.711 format.
-    pub codec: G711,
+    /// Selected codec wire profile.
+    pub codec: AudioProfile,
+    /// Payload accepted from the peer, independent of the transmit mapping.
+    pub receive_payload: u8,
+    /// Payload sent to the peer, independent of the receive mapping.
+    pub send_payload: u8,
     /// Negotiated RFC 4733 payload at 8000 Hz, if present.
     pub telephone_event: Option<u8>,
 }
@@ -40,13 +44,44 @@ pub enum MediaError {
     SourceContract,
     /// The shared media owner lock was poisoned.
     Owner,
-    /// Released G.711 provider operation failed.
+    /// Released codec provider operation failed.
     Codec,
     /// The nonwrapping transmit generation is exhausted; replace the call owner.
     Retired,
 }
-impl G711 {
-    fn payload(self) -> u8 {
+/// Explicit codec and wire clocks; encoded bytes never stand in for PCM frames.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioParameters {
+    /// Existing protocol-neutral codec identity.
+    pub provider_profile: rptadv_codec_client::ProfileId,
+    /// Selected provider-local mode.
+    pub mode_id: u32,
+    /// PCM clock used by the converter, jitter source and product ring.
+    pub pcm_rate_hz: u32,
+    /// RTP clock used only by packet timestamps.
+    pub rtp_clock_hz: u32,
+    /// PCM samples represented by one transmit packet.
+    pub packet_frames: u32,
+    /// Maximum encoded bytes in the selected packet profile.
+    pub packet_bytes: usize,
+}
+impl AudioProfile {
+    /// Current bounded packet policy, validated against the released provider.
+    pub fn parameters(self) -> AudioParameters {
+        AudioParameters {
+            provider_profile: match self {
+                Self::Mulaw => rptadv_codec_client::ProfileId::G711Mu,
+                Self::Alaw => rptadv_codec_client::ProfileId::G711A,
+            },
+            mode_id: 0,
+            pcm_rate_hz: 8000,
+            rtp_clock_hz: 8000,
+            packet_frames: 160,
+            packet_bytes: 160,
+        }
+    }
+    /// Static RTP/AVP assignment for this implemented wire profile.
+    pub fn payload(self) -> u8 {
         match self {
             Self::Mulaw => 0,
             Self::Alaw => 8,
@@ -155,12 +190,12 @@ impl MediaDescription {
             .formats
             .iter()
             .find_map(|value| match value.as_str() {
-                "0" => Some(G711::Mulaw),
-                "8" => Some(G711::Alaw),
+                "0" => Some(AudioProfile::Mulaw),
+                "8" => Some(AudioProfile::Alaw),
                 _ => None,
             })
             .ok_or(invalid)?;
-        let expected = format!("{}/8000", codec.name());
+        let expected = format!("{}/{}", codec.name(), codec.parameters().rtp_clock_hz);
         let payload = codec.payload().to_string();
         for attribute in attributes().filter(|a| a.key == "rtpmap") {
             let (pt, format) = attribute
@@ -203,6 +238,8 @@ impl MediaDescription {
         Ok(Self {
             remote: SocketAddr::new(ip, port),
             codec,
+            receive_payload: codec.payload(),
+            send_payload: codec.payload(),
             telephone_event,
         })
     }
@@ -212,12 +249,17 @@ impl MediaDescription {
     }
     /// Offer the two existing G.711 profiles and the fixed telephone-event map.
     pub(crate) fn offer(local: SocketAddr, session: u64) -> Result<Vec<u8>, MediaError> {
-        Self::describe(local, session, &[G711::Mulaw, G711::Alaw], Some(101))
+        Self::describe(
+            local,
+            session,
+            &[AudioProfile::Mulaw, AudioProfile::Alaw],
+            Some(101),
+        )
     }
     fn describe(
         local: SocketAddr,
         session: u64,
-        codecs: &[G711],
+        codecs: &[AudioProfile],
         event: Option<u8>,
     ) -> Result<Vec<u8>, MediaError> {
         if local.ip().is_unspecified() || local.ip().is_multicast() || local.port() == 0 {
@@ -231,7 +273,14 @@ impl MediaDescription {
             .join(" ");
         let mut attributes = codecs
             .iter()
-            .map(|codec| format!("a=rtpmap:{} {}/8000\r\n", codec.payload(), codec.name()))
+            .map(|codec| {
+                format!(
+                    "a=rtpmap:{} {}/{}\r\n",
+                    codec.payload(),
+                    codec.name(),
+                    codec.parameters().rtp_clock_hz
+                )
+            })
             .collect::<String>();
         if let Some(pt) = event {
             use std::fmt::Write;
@@ -362,6 +411,8 @@ impl RtpEndpoint {
         if media.remote.port() == 0
             || media.remote.ip().is_unspecified()
             || media.remote.ip().is_multicast()
+            || media.receive_payload != media.codec.payload()
+            || media.send_payload != media.codec.payload()
             || media
                 .telephone_event
                 .is_some_and(|payload| !(96..=127).contains(&payload))
@@ -382,7 +433,7 @@ impl RtpEndpoint {
             egress: RtpEgress {
                 header: rtp::header::Header {
                     version: 2,
-                    payload_type: media.codec.payload(),
+                    payload_type: media.send_payload,
                     sequence_number: sequence,
                     ssrc,
                     ..Default::default()
@@ -419,7 +470,7 @@ impl RtpEndpoint {
             match receive_datagram(&self.socket, &mut wire, 0, &mut self.receipt_floor) {
                 Ok(_) => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    self.egress.header.payload_type = media.codec.payload();
+                    self.egress.header.payload_type = media.send_payload;
                     self.media = media;
                     self.source = None;
                     self.events = [None; 16];
@@ -555,7 +606,7 @@ impl RtpEndpoint {
             }
             payload = &payload[..payload.len() - padding];
         }
-        let event = if header.payload_type == self.media.codec.payload() {
+        let event = if header.payload_type == self.media.receive_payload {
             let packet: &[u8; 160] = payload.try_into().map_err(|_| MediaError::InvalidPacket)?;
             output.copy_from_slice(packet);
             RtpEvent::Audio {
@@ -597,8 +648,8 @@ impl RtpEndpoint {
         Ok(RtpEvent::Digit { digit, ended })
     }
 }
-/// Independent encode/decode contexts from the released dynamic G.711 provider.
-pub use super::codec::G711Codec;
+/// Independent contexts through the existing protocol-neutral codec client.
+pub use super::codec::AudioCodec;
 
 /// One immutable datagram retained only after socket backpressure. Audio and
 /// telephone events share this one slot, SSRC and sequence-number owner.

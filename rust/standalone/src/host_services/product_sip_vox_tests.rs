@@ -153,7 +153,7 @@ impl Remote {
         }
     }
 }
-fn media(caller: &mut Caller, codec: &mut G711Codec, samples: &[f32]) {
+fn media(caller: &mut Caller, codec: &mut AudioCodec, samples: &[f32]) {
     for chunk in samples.chunks(160) {
         let mut pcm = [0.0; 160];
         pcm[..chunk.len()].copy_from_slice(chunk);
@@ -165,7 +165,7 @@ fn media(caller: &mut Caller, codec: &mut G711Codec, samples: &[f32]) {
 pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool) {
     let mut caller = Caller::establish(sip, None);
     caller.keepalive = true;
-    let mut codec = G711Codec::load(G711::Mulaw).unwrap();
+    let mut codec = AudioCodec::load(AudioProfile::Mulaw).unwrap();
     caller.prompt(&mut codec, "mailbox");
     // Reuse the licensed source fixture and the existing source-rate test sampling.
     let speech: Vec<f32> =

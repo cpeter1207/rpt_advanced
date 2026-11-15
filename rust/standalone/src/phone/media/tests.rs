@@ -192,7 +192,9 @@ async fn socket_receipt_floor_requires_real_empty_probe_and_never_dequeues_on_ca
         "127.0.0.1:0".parse().unwrap(),
         MediaDescription {
             remote: sender.local_addr().unwrap(),
-            codec: G711::Mulaw,
+            codec: AudioProfile::Mulaw,
+            receive_payload: AudioProfile::Mulaw.payload(),
+            send_payload: AudioProfile::Mulaw.payload(),
             telephone_event: None,
         },
         1,
@@ -398,7 +400,9 @@ async fn negotiated_event_uses_existing_udp_socket_and_unsupported_is_refused() 
         "127.0.0.1:0".parse().unwrap(),
         MediaDescription {
             remote: receiver.local_addr().unwrap(),
-            codec: G711::Alaw,
+            codec: AudioProfile::Alaw,
+            receive_payload: AudioProfile::Alaw.payload(),
+            send_payload: AudioProfile::Alaw.payload(),
             telephone_event: Some(101),
         },
         19,
@@ -418,4 +422,26 @@ async fn negotiated_event_uses_existing_udp_socket_and_unsupported_is_refused() 
     assert_eq!(wire[12], 5);
     endpoint.media.telephone_event = None;
     assert_eq!(endpoint.send_digit(b'6'), -1);
+}
+
+#[test]
+fn negotiated_g711_profiles_keep_pcm_and_rtp_clocks_explicit() {
+    for (codec, payload, provider) in [(AudioProfile::Mulaw, 0, 1), (AudioProfile::Alaw, 8, 2)] {
+        let profile = codec.parameters();
+        assert_eq!((profile.pcm_rate_hz, profile.rtp_clock_hz), (8000, 8000));
+        assert_eq!(
+            (profile.packet_frames, profile.packet_bytes, profile.mode_id),
+            (160, 160, 0)
+        );
+        assert_eq!(profile.provider_profile as u32, provider);
+        let source = format!(
+            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5000 RTP/AVP {payload}\r\n"
+        );
+        let media = MediaDescription::parse(source.as_bytes()).unwrap();
+        assert_eq!(media.codec, codec);
+        assert_eq!(
+            (media.receive_payload, media.send_payload),
+            (payload, payload)
+        );
+    }
 }

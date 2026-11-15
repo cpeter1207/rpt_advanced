@@ -1,6 +1,7 @@
 //! SIP's thin RTP/codec/jitter translation into the existing product source callbacks.
 use super::media::{
-    G711Codec, MediaDescription, MediaError, RtpEndpoint, RtpEvent, SendStatus, TimedAudio,
+    AudioCodec, AudioParameters, MediaDescription, MediaError, RtpEndpoint, RtpEvent, SendStatus,
+    TimedAudio,
 };
 use crate::abi;
 use rptadv_jitter_client::{Admission, Jitter, Kind};
@@ -29,7 +30,9 @@ impl Offer {
     pub(crate) async fn new(route: SocketAddr, session: u64) -> Result<Self, MediaError> {
         let media = MediaDescription {
             remote: route,
-            codec: super::media::G711::Mulaw,
+            codec: super::media::AudioProfile::Mulaw,
+            receive_payload: super::media::AudioProfile::Mulaw.payload(),
+            send_payload: super::media::AudioProfile::Mulaw.payload(),
             telephone_event: Some(101),
         };
         let local = if route.is_ipv4() {
@@ -63,12 +66,13 @@ impl Offer {
 /// One serial media owner; product Outbound still owns PCM conversion and pacing.
 pub(crate) struct Media {
     endpoint: RtpEndpoint,
-    codec: G711Codec,
+    codec: AudioCodec,
+    profile: AudioParameters,
     jitter: Jitter,
     clock: Option<(u32, u64)>,
     births: [Option<(u64, u64)>; 64],
     birth_slot: usize,
-    pcm: [f32; 160],
+    pcm: Box<[f32]>,
     pending: Option<Pending>,
     offset: usize,
     // End of source media actually credited by product, independent of jitter adaptation.
@@ -108,17 +112,26 @@ impl Media {
         jitter: &'static abi::rptadv_jitter_descriptor_v1,
     ) -> Result<Self, MediaError> {
         let inband = description.telephone_event.is_none();
-        let codec = G711Codec::load(description.codec)?;
-        let jitter = unsafe { Jitter::phone(std::ptr::from_ref(jitter).cast()) }
-            .map_err(|_| MediaError::Jitter)?;
+        let profile = description.codec.parameters();
+        let codec = AudioCodec::load(description.codec)?;
+        let jitter = unsafe {
+            Jitter::phone_at_rate(
+                std::ptr::from_ref(jitter).cast(),
+                profile.pcm_rate_hz,
+                profile.packet_frames,
+                profile.packet_bytes,
+            )
+        }
+        .map_err(|_| MediaError::Jitter)?;
         Ok(Self {
             endpoint,
             codec,
+            profile,
             jitter,
             clock: None,
             births: [None; 64],
             birth_slot: 0,
-            pcm: [0.0; 160],
+            pcm: vec![0.0; profile.packet_frames as usize].into_boxed_slice(),
             pending: None,
             offset: 0,
             source_end: None,
@@ -171,7 +184,7 @@ impl Media {
         match self.endpoint.try_send_audio(TimedAudio {
             payload: bytes,
             marker: self.marker,
-            timestamp: timestamp_ms.wrapping_mul(8),
+            timestamp: timestamp_ms.wrapping_mul(self.profile.rtp_clock_hz / 1000),
             deadline_ms,
             epoch,
         })? {
@@ -194,7 +207,10 @@ impl Media {
         if self.clock.is_none_or(|(_, previous)| extended > previous) {
             self.clock = Some((value, extended));
         }
-        Ok(extended)
+        extended
+            .checked_mul(u64::from(self.profile.pcm_rate_hz))
+            .map(|ticks| ticks / u64::from(self.profile.rtp_clock_hz))
+            .ok_or(MediaError::Retired)
     }
     fn poll(&mut self, now: u64) -> Result<(), MediaError> {
         let mut packet = [0; 160];
@@ -210,7 +226,7 @@ impl Media {
                     let timestamp = self.timestamp(timestamp)?;
                     if self
                         .jitter
-                        .put(timestamp, 160, now, &packet)
+                        .put(timestamp, self.profile.packet_frames, now, &packet)
                         .map_err(|_| MediaError::Jitter)?
                         == Admission::Accepted
                     {
@@ -234,7 +250,7 @@ impl Media {
         }
         let decision = self
             .jitter
-            .get(now, 160, &mut packet)
+            .get(now, self.profile.packet_frames, &mut packet)
             .map_err(|_| MediaError::Jitter)?;
         match decision.kind {
             Kind::NotDue => return Ok(()),
@@ -243,7 +259,9 @@ impl Media {
                 // cursor. Positive offsets are missing prefixes; negative ones
                 // trim samples that have already been released (as in IAX playout).
                 let span = decision.span as usize;
-                if decision.length != 160 || span != 160 {
+                if decision.length != self.profile.packet_bytes
+                    || span != self.profile.packet_frames as usize
+                {
                     return Err(MediaError::JitterShape);
                 }
                 let skip = u64::from(decision.start_offset.saturating_neg().max(0) as u32).max(

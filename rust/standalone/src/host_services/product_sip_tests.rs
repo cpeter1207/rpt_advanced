@@ -1,6 +1,6 @@
 //! Same actual product/private source, with an independent literal SIP/RTP caller.
 use super::*;
-use crate::phone::media::{G711, G711Codec};
+use crate::phone::media::{AudioCodec, AudioProfile};
 use std::collections::BTreeMap;
 #[path = "product_sip_outgoing_tests.rs"]
 mod outgoing;
@@ -149,10 +149,10 @@ impl Caller {
             }
         }
     }
-    fn audio(&mut self, codec: &mut G711Codec, pcm: &[f32; 160]) {
+    fn audio(&mut self, codec: &mut AudioCodec, pcm: &[f32; 160]) {
         self.audio_payload(codec, pcm, 0);
     }
-    fn audio_payload(&mut self, codec: &mut G711Codec, pcm: &[f32; 160], payload: u8) {
+    fn audio_payload(&mut self, codec: &mut AudioCodec, pcm: &[f32; 160], payload: u8) {
         let mut encoded = [0; 160];
         codec.encode(pcm, &mut encoded).unwrap();
         let mut wire = [0; 172];
@@ -166,7 +166,7 @@ impl Caller {
         self.sequence = self.sequence.wrapping_add(1);
         self.timestamp = self.timestamp.wrapping_add(160);
     }
-    fn prompt(&mut self, codec: &mut G711Codec, stage: &str) -> Vec<f32> {
+    fn prompt(&mut self, codec: &mut AudioCodec, stage: &str) -> Vec<f32> {
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut last_tone = Instant::now();
         let mut result = Vec::new();
@@ -230,7 +230,7 @@ pub(crate) fn caller(sip: UdpSocket, registered: Option<SocketAddr>) {
 }
 fn call_flow(sip: UdpSocket, registered: Option<SocketAddr>, login_only: bool) {
     let mut caller = Caller::establish(sip, registered);
-    let mut codec = G711Codec::load(G711::Mulaw).unwrap();
+    let mut codec = AudioCodec::load(AudioProfile::Mulaw).unwrap();
     let login = caller.prompt(&mut codec, "login");
     if !login_only {
         caller.digits(b"100#");

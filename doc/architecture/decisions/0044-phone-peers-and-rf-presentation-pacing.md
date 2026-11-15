@@ -2109,3 +2109,30 @@ control pumping. Callback Busy retains the isolated policy until safe replacemen
 and both boundaries revoke old input history. The one-call bound remains unchanged.
 Unlock-qualified per-call bypass and local/all-peer playout remain a following
 P14/configuration increment, not implicit authority from mailbox authentication.
+
+
+### Negotiated codec boundary (2026-11-15, neutral checkpoint)
+
+SIP's codec selection now records separate PCM and RTP clocks, provider mode,
+packet-frame/byte bounds and directional payload IDs. This checkpoint continues
+to advertise only PCMU and PCMA with the existing 20 ms, 8 kHz behavior.
+The existing protocol-neutral codec client at immutable revision
+`becbff939a0817cc91df6dcb0d40e85e381ec87b` replaces SIP's duplicate descriptor,
+context-lifetime and encode/decode FFI implementation. Providers remain released
+versioned dynamic libraries; no codec algorithm, resampler or external-library
+wrapper enters the controller. Metadata and both directions are validated before
+selected contexts are exposed. The existing fault-wrapped provider tests retain
+partial-construction cleanup and exact packet-shape checks.
+
+Phone jitter retains its 20/40/100 ms policy through the same validated client,
+now parameterized by source PCM clock and packet bounds. Unwrapped RTP timestamps
+are translated into that PCM clock before jitter and source credit. Transmit
+RTP timestamps use the separate RTP clock. Original receipt ages, exact retained
+prefix/gap credit, deadline and generation retirement remain unchanged.
+
+Codec parity is incremental. G.722 requires 16 kHz PCM with an 8 kHz RTP clock;
+it is not advertised at this checkpoint. Its next end-to-end checkpoint must
+also qualify source-rate DTMF and the product's currently G.711-specific finite
+tail and timed-send boundaries before advertisement or hardware validation.
+Legacy Dialogic ADPCM and LPC10 wire mappings remain unresolved; IAX bitstream
+availability alone does not establish standard RTP interoperability.

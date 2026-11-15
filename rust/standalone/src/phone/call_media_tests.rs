@@ -249,7 +249,7 @@ async fn signed_offset(offset: i32) {
         );
     }
     let mut reference = [0.0; 160];
-    let mut codec = G711Codec::load(super::super::media::G711::Mulaw).unwrap();
+    let mut codec = AudioCodec::load(super::super::media::AudioProfile::Mulaw).unwrap();
     codec.decode(&payload, &mut reference).unwrap();
     assert_eq!(sink.pcm, reference[if offset < 0 { 40 } else { 0 }..]);
 }
@@ -512,7 +512,9 @@ async fn outgoing_offer_refuses_unoffered_events_and_uncleared_receive_backlog()
         }
         let answer = MediaDescription {
             remote: route.local_addr().unwrap(),
-            codec: super::super::media::G711::Mulaw,
+            codec: super::super::media::AudioProfile::Mulaw,
+            receive_payload: super::super::media::AudioProfile::Mulaw.payload(),
+            send_payload: super::super::media::AudioProfile::Mulaw.payload(),
             telephone_event: Some(if crowded { 101 } else { 102 }),
         }
         .answer(route.local_addr().unwrap(), 78)

@@ -1,6 +1,6 @@
 //! Independent wire-format contract for the native phone media boundary.
 use rpt_advanced_standalone::phone::media::{
-    G711, MediaDescription, MediaError, SendStatus, TimedAudio,
+    AudioProfile, MediaDescription, MediaError, SendStatus, TimedAudio,
 };
 use std::net::SocketAddr;
 
@@ -17,7 +17,7 @@ fn selects_g711_and_only_explicit_8000hz_telephone_events() {
         "a=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\n",
     );
     let media = MediaDescription::parse(source.as_bytes()).unwrap();
-    assert_eq!(media.codec, G711::Alaw);
+    assert_eq!(media.codec, AudioProfile::Alaw);
     assert_eq!(
         media.remote,
         "127.0.0.1:42000".parse::<SocketAddr>().unwrap()
@@ -84,7 +84,9 @@ async fn rtp_socket_preserves_packet_order_and_original_source_clock() {
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let description = MediaDescription {
         remote: peer.local_addr().unwrap(),
-        codec: G711::Mulaw,
+        codec: AudioProfile::Mulaw,
+        receive_payload: AudioProfile::Mulaw.payload(),
+        send_payload: AudioProfile::Mulaw.payload(),
         telephone_event: Some(101),
     };
     let mut transport = RtpEndpoint::bind(
@@ -154,7 +156,9 @@ async fn telephone_events_are_bounded_and_end_repetitions_are_deduplicated() {
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let description = MediaDescription {
         remote: peer.local_addr().unwrap(),
-        codec: G711::Alaw,
+        codec: AudioProfile::Alaw,
+        receive_payload: AudioProfile::Alaw.payload(),
+        send_payload: AudioProfile::Alaw.payload(),
         telephone_event: Some(101),
     };
     let mut transport = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), description, 1, 1)
@@ -217,9 +221,9 @@ async fn telephone_events_are_bounded_and_end_repetitions_are_deduplicated() {
 
 #[test]
 fn g711_uses_the_released_dynamic_provider_in_both_directions() {
-    use rpt_advanced_standalone::phone::media::G711Codec;
-    for (format, silence) in [(G711::Mulaw, 0xff), (G711::Alaw, 0xd5)] {
-        let mut codec = G711Codec::load(format).unwrap();
+    use rpt_advanced_standalone::phone::media::AudioCodec;
+    for (format, silence) in [(AudioProfile::Mulaw, 0xff), (AudioProfile::Alaw, 0xd5)] {
+        let mut codec = AudioCodec::load(format).unwrap();
         let mut packet = [0; 160];
         codec.encode(&[0.0; 160], &mut packet).unwrap();
         assert_eq!(packet, [silence; 160]);
@@ -256,7 +260,9 @@ async fn constructing_media_cannot_bypass_payload_and_endpoint_validation() {
     ] {
         let media = MediaDescription {
             remote: remote.parse().unwrap(),
-            codec: G711::Mulaw,
+            codec: AudioProfile::Mulaw,
+            receive_payload: AudioProfile::Mulaw.payload(),
+            send_payload: AudioProfile::Mulaw.payload(),
             telephone_event: event,
         };
         assert!(matches!(
@@ -304,7 +310,10 @@ fn sdp_size_media_and_connection_boundaries_fail_closed() {
 
 #[test]
 fn g711_mapping_and_ipv6_answers_preserve_the_selected_profile() {
-    for (payload, name, codec) in [("0", "PCMU", G711::Mulaw), ("8", "PCMA", G711::Alaw)] {
+    for (payload, name, codec) in [
+        ("0", "PCMU", AudioProfile::Mulaw),
+        ("8", "PCMA", AudioProfile::Alaw),
+    ] {
         for channels in ["", "/1"] {
             let source = offer(
                 payload,
@@ -350,7 +359,7 @@ fn telephone_event_mappings_require_offered_dynamic_payloads_and_valid_ranges() 
             &format!("a=rtpmap:{mapping} telephone-event/8000\r\na=fmtp:{mapping} {range}\r\n"),
         );
         let media = MediaDescription::parse(source.as_bytes()).unwrap();
-        assert_eq!(media.codec, G711::Mulaw);
+        assert_eq!(media.codec, AudioProfile::Mulaw);
         assert_eq!(media.telephone_event, None, "{source}");
     }
     let media = MediaDescription::parse(
@@ -370,7 +379,9 @@ async fn media_pair() -> (tokio::net::UdpSocket, RtpEndpoint) {
         "127.0.0.1:0".parse().unwrap(),
         MediaDescription {
             remote: peer.local_addr().unwrap(),
-            codec: G711::Mulaw,
+            codec: AudioProfile::Mulaw,
+            receive_payload: AudioProfile::Mulaw.payload(),
+            send_payload: AudioProfile::Mulaw.payload(),
             telephone_event: Some(101),
         },
         1,

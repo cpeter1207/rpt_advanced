@@ -734,6 +734,7 @@ dependencies = [
  "crossbeam-queue",
  "libc",
  "libloading",
+ "rptadv-codec-client",
  "rptadv-control-standalone-adapter",
  "rptadv-jitter-client",
  "rptadv-peer-support",
@@ -753,6 +754,15 @@ dependencies = [
  "libloading",
  "rptadv-control-standalone-adapter",
  "rptadv-peer-support",
+]
+
+[[package]]
+name = "rptadv-codec-client"
+version = "0.1.0-alpha1"
+source = "git+https://github.com/cpeter1207/rptadv-codec-adapters?rev=becbff939a0817cc91df6dcb0d40e85e381ec87b#becbff939a0817cc91df6dcb0d40e85e381ec87b"
+dependencies = [
+ "bindgen",
+ "libloading",
 ]
 
 [[package]]

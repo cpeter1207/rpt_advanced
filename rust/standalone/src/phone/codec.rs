@@ -1,103 +1,83 @@
-//! Released G.711 ABI ownership; no duplicate implementation or resampler.
-use super::media::{G711, MediaError};
+//! Selected released codec contexts through the existing neutral client.
+use super::media::{AudioParameters, AudioProfile, MediaError};
 use crate::abi;
-use std::{ffi::c_void, mem::size_of, ptr};
+use rptadv_codec_client::{CodecCatalog, Decoder, Encoder, ProviderSelection, Status};
 
-type Descriptor = abi::rptadv_codec_descriptor_v1_table;
-
-/// One selected G.711 profile with independent encoder and decoder contexts.
-pub struct G711Codec {
-    api: Descriptor,
-    encoder: *mut c_void,
-    decoder: *mut c_void,
-    _library: libloading::Library,
+/// One negotiated profile with independent encoder and decoder contexts.
+pub struct AudioCodec {
+    profile: AudioParameters,
+    encoder: Encoder,
+    decoder: Decoder,
 }
-// SAFETY: both contexts move together to one serial media owner, never shared.
-unsafe impl Send for G711Codec {}
 
-impl G711Codec {
-    /// Load and validate the versioned provider, preparing only this profile.
-    pub fn load(codec: G711) -> Result<Self, MediaError> {
-        // SAFETY: only the project's released versioned provider is loaded.
-        let library = unsafe { libloading::Library::new("librptadv_codec_g711.so.1") }
-            .map_err(|_| MediaError::Codec)?;
-        let api = unsafe {
-            let entry = library
-                .get::<unsafe extern "C" fn() -> *const Descriptor>(b"rptadv_codec_descriptor_v1\0")
-                .map_err(|_| MediaError::Codec)?;
-            let table = entry();
-            // The mandatory readable size prefix is checked before copying.
-            if table.is_null() || ptr::read(table.cast::<u32>()) < size_of::<Descriptor>() as u32 {
-                return Err(MediaError::Codec);
-            }
-            table.read()
-        };
-        if api.abi_version != 1
-            || api.capability != *b"rptadv.codec.v1\0"
-            || api.open_encoder.is_none()
-            || api.open_decoder.is_none()
-            || api.encode.is_none()
-            || api.decode.is_none()
-            || api.destroy.is_none()
-            || api.reset.is_none()
+impl AudioCodec {
+    /// Validate provider metadata and prepare only the negotiated profile.
+    pub fn load(codec: AudioProfile) -> Result<Self, MediaError> {
+        let profile = codec.parameters();
+        let catalog = CodecCatalog::load(&[ProviderSelection {
+            path: "librptadv_codec_g711.so.1".into(),
+            profiles: vec![profile.provider_profile],
+        }])
+        .map_err(|_| MediaError::Codec)?;
+        let metadata = catalog
+            .profile(profile.provider_profile)
+            .ok_or(MediaError::Codec)?;
+        let mode = metadata
+            .modes
+            .iter()
+            .find(|mode| mode.id == profile.mode_id)
+            .ok_or(MediaError::Codec)?;
+        if metadata.sample_rate_hz != profile.pcm_rate_hz
+            || profile.packet_frames % mode.frame_samples != 0
+            || profile.packet_frames / mode.frame_samples * mode.frame_bytes
+                != profile.packet_bytes as u32
         {
             return Err(MediaError::Codec);
         }
-        let config = abi::rptadv_codec_config_v1 {
-            struct_size: size_of::<abi::rptadv_codec_config_v1>() as u32,
-            profile_id: match codec {
-                G711::Mulaw => 1,
-                G711::Alaw => 2,
-            },
-            mode_id: 0,
-            packet_frames: 160,
-            max_packet_bytes: 160,
-        };
-        let mut owner = Self {
-            api,
-            encoder: ptr::null_mut(),
-            decoder: ptr::null_mut(),
-            _library: library,
-        };
-        // SAFETY: complete config and writable owned pointer slots; destroy also
-        // handles partial setup before this function returns an error.
-        if unsafe { owner.api.open_encoder.unwrap()(&config, &mut owner.encoder) } != 0
-            || owner.encoder.is_null()
-            || unsafe { owner.api.open_decoder.unwrap()(&config, &mut owner.decoder) } != 0
-            || owner.decoder.is_null()
-        {
-            return Err(MediaError::Codec);
-        }
-        Ok(owner)
-    }
-    /// Encode exactly 160 source-rate normalized mono samples.
-    pub fn encode(&mut self, pcm: &[f32; 160], packet: &mut [u8; 160]) -> Result<(), MediaError> {
-        let mut result: abi::rptadv_codec_encode_result_v1 = unsafe { std::mem::zeroed() };
-        result.struct_size = size_of::<abi::rptadv_codec_encode_result_v1>() as u32;
-        // SAFETY: the unique encoder and nonoverlapping complete arrays live
-        // through this synchronous off-audio call.
-        let status = unsafe {
-            self.api.encode.unwrap()(
-                self.encoder,
-                pcm.as_ptr(),
-                pcm.len(),
-                packet.as_mut_ptr(),
-                packet.len(),
-                0,
-                &mut result,
+        let encoder = catalog
+            .encoder(
+                profile.provider_profile,
+                profile.mode_id,
+                profile.packet_frames,
+                profile.packet_bytes,
             )
-        };
-        if status != 0
-            || result.consumed_frames != 160
-            || result.encoded_bytes != 160
-            || result.source_frames != 160
-            || result.packet_frames != 160
+            .map_err(|_| MediaError::Codec)?;
+        let decoder = catalog
+            .decoder(
+                profile.provider_profile,
+                profile.mode_id,
+                profile.packet_frames,
+                profile.packet_bytes,
+            )
+            .map_err(|_| MediaError::Codec)?;
+        Ok(Self {
+            profile,
+            encoder,
+            decoder,
+        })
+    }
+    /// Encode exactly one complete negotiated PCM packet.
+    pub fn encode(&mut self, pcm: &[f32], packet: &mut [u8]) -> Result<(), MediaError> {
+        if pcm.len() != self.profile.packet_frames as usize
+            || packet.len() != self.profile.packet_bytes
+        {
+            return Err(MediaError::Codec);
+        }
+        let result = self
+            .encoder
+            .encode(pcm, packet, false)
+            .map_err(|_| MediaError::Codec)?;
+        if result.status != Status::Complete
+            || result.consumed_frames != pcm.len()
+            || result.encoded_bytes != packet.len()
+            || result.source_frames != self.profile.packet_frames
+            || result.packet_frames != self.profile.packet_frames
         {
             return Err(MediaError::Codec);
         }
         Ok(())
     }
-    /// Forward partial input and finite flush to the released packetizer unchanged.
+    /// Adapt the common result into the host's existing sized ABI, without a second codec owner.
     pub(crate) fn prepare(
         &mut self,
         pcm: &[f32],
@@ -105,53 +85,51 @@ impl G711Codec {
         flush: u32,
         result: &mut abi::rptadv_codec_encode_result_v1,
     ) -> i32 {
-        // SAFETY: uniquely owned encoder; borrowed extents and result live synchronously.
-        unsafe {
-            self.api.encode.unwrap()(
-                self.encoder,
-                pcm.as_ptr(),
-                pcm.len(),
-                packet.as_mut_ptr(),
-                packet.len(),
-                flush,
-                result,
-            )
+        if flush > 1 {
+            return -1;
+        }
+        match self.encoder.encode(pcm, packet, flush != 0) {
+            Ok(encoded) => {
+                result.status = encoded.status.as_raw();
+                result.consumed_frames = encoded.consumed_frames;
+                result.encoded_bytes = encoded.encoded_bytes;
+                result.source_start_frames = encoded.source_start_frames;
+                result.source_frames = encoded.source_frames;
+                result.packet_frames = encoded.packet_frames;
+                result.required_capacity = 0;
+                result.status as i32
+            }
+            Err(error) => {
+                result.status = error.status.as_raw();
+                result.required_capacity = error.required_capacity;
+                result.status as i32
+            }
         }
     }
-    /// Retire only transmit codec history; the existing product owns source timing.
+    /// Retire transmit codec history; the product retains source timing ownership.
     pub(crate) fn reset_encoder(&mut self) -> Result<(), MediaError> {
-        if unsafe { self.api.reset.unwrap()(self.encoder) } == 0 {
-            Ok(())
-        } else {
-            Err(MediaError::Codec)
-        }
+        self.encoder.reset().map_err(|_| MediaError::Codec)
     }
-    /// Decode one complete 20 ms G.711 payload.
-    pub fn decode(&mut self, packet: &[u8; 160], pcm: &mut [f32; 160]) -> Result<(), MediaError> {
-        let mut count = 0;
-        // SAFETY: the unique decoder and borrowed complete arrays remain live.
-        let status = unsafe {
-            self.api.decode.unwrap()(
-                self.decoder,
-                packet.as_ptr(),
-                packet.len(),
-                pcm.as_mut_ptr(),
-                pcm.len(),
-                &mut count,
-            )
-        };
-        if status != 0 || count != 160 {
+    /// Inspect and decode the complete payload before any PCM overlap trimming.
+    pub fn decode(&mut self, packet: &[u8], pcm: &mut [f32]) -> Result<(), MediaError> {
+        let info = self
+            .decoder
+            .inspect(packet)
+            .map_err(|_| MediaError::Codec)?;
+        if packet.len() != self.profile.packet_bytes
+            || info.frames != self.profile.packet_frames
+            || info.mode != self.profile.mode_id
+            || pcm.len() != self.profile.packet_frames as usize
+        {
+            return Err(MediaError::Codec);
+        }
+        let count = self
+            .decoder
+            .decode_recovering(packet, pcm)
+            .map_err(|_| MediaError::Codec)?;
+        if count != self.profile.packet_frames as usize {
             return Err(MediaError::Codec);
         }
         Ok(())
-    }
-}
-impl Drop for G711Codec {
-    fn drop(&mut self) {
-        // SAFETY: no callback retains these handles; the DSO is still retained.
-        unsafe {
-            self.api.destroy.unwrap()(self.encoder);
-            self.api.destroy.unwrap()(self.decoder);
-        }
     }
 }

@@ -11,6 +11,7 @@ name = "rpt-advanced"
 path = "src/main.rs"
 
 [dependencies]
+rptadv-codec-client = { git = "https://github.com/cpeter1207/rptadv-codec-adapters", rev = "becbff939a0817cc91df6dcb0d40e85e381ec87b" }
 sdp = "=0.8.0"
 rtp = "=0.13.0"
 webrtc-util = { version = "=0.11.0", default-features = false, features = ["marshal"] }

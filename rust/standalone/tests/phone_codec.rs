@@ -1,5 +1,5 @@
 //! Actual loader/callback contracts using a fault-wrapping released codec DSO.
-use rpt_advanced_standalone::phone::media::{G711, G711Codec, MediaError};
+use rpt_advanced_standalone::phone::media::{AudioCodec, AudioProfile, MediaError};
 use std::{ffi::CStr, path::PathBuf, process::Command};
 
 const FAULT: &str = "RPTADV_TEST_CODEC_FAULT";
@@ -37,8 +37,8 @@ fn exercise_fault(fault: &str) {
             .get::<unsafe extern "C" fn() -> u32>(b"rptadv_test_codec_live_handles\0")
             .unwrap()
     };
-    for (format, silence) in [(G711::Mulaw, 0xff), (G711::Alaw, 0xd5)] {
-        let result = G711Codec::load(format);
+    for (format, silence) in [(AudioProfile::Mulaw, 0xff), (AudioProfile::Alaw, 0xd5)] {
+        let result = AudioCodec::load(format);
         if matches!(
             fault,
             "null_table"
