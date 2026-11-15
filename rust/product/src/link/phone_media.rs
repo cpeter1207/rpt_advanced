@@ -6,6 +6,7 @@ use crate::{
     services::{PcmProcessor, ProcessedPeer, SourceBirth, SourceTimeReference},
 };
 use rpt_advanced_core::audio::{LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue};
+use rpt_advanced_core::config::PhoneSpeechSettings;
 use rpt_advanced_core::link::{
     PeerInput, PeerReply, PeerSignals, PhoneSource, ReceivePolicy, RenderedPeerBlock,
     SourceCoordinate, SourceTimeBound, TimedPeerSample,
@@ -191,6 +192,8 @@ pub(super) struct Ingress {
     speech: Option<SpeechAnalysis>,
     last_voice: Option<u64>,
     voice_until: u64,
+    preroll_frames: u64,
+    hold_frames: u64,
 }
 impl Ingress {
     fn voice_decision(&mut self, last: Option<u64>) {
@@ -199,11 +202,11 @@ impl Ingress {
         };
         self.last_voice = Some(last);
         let end = last.saturating_add(1);
-        // Reuse the existing 160-ms retained onset and the design's 1000-ms
-        // default hang. Neither adds a programme buffer to shared analysis.
+        // Only mark retained source history. A zero lookback deliberately does
+        // not recover an earlier interval; reserve remains independently owned.
         self.shared
-            .mark_voice(end.saturating_sub(self.shared.width * 8), end);
-        self.voice_until = end.saturating_add(self.shared.width * 50);
+            .mark_voice(end.saturating_sub(self.preroll_frames), end);
+        self.voice_until = end.saturating_add(self.hold_frames);
     }
     pub(super) fn active(&self) -> bool {
         self.shared.active()
@@ -337,7 +340,7 @@ impl PeerInput for TimedInput {
         self.reader.source_rate()
     }
     fn receive_policy(&self) -> ReceivePolicy {
-        ReceivePolicy::Phone
+        self.reader.receive_policy()
     }
     fn source_timing_available(&self) -> bool {
         self.reader.timing_available()
@@ -455,7 +458,7 @@ impl PeerInput for PhoneMediaInput {
         self.input.source_rate()
     }
     fn receive_policy(&self) -> ReceivePolicy {
-        ReceivePolicy::Phone
+        self.input.receive_policy()
     }
     fn source_timing_available(&self) -> bool {
         self.input.source_timing_available()
@@ -533,7 +536,14 @@ pub(super) fn prepare(
     expected_revision: NonZeroU32,
     processor: Option<PcmProcessor>,
 ) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
-    prepare_with_speech(reply, rate, expected_revision, processor, None)
+    prepare_with_speech(
+        reply,
+        rate,
+        expected_revision,
+        processor,
+        None,
+        PhoneSpeechSettings::default(),
+    )
 }
 
 pub(super) fn prepare_voiced(
@@ -541,12 +551,20 @@ pub(super) fn prepare_voiced(
     rate: u32,
     expected_revision: NonZeroU32,
     processor: Option<PcmProcessor>,
+    settings: PhoneSpeechSettings,
 ) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
     if !reply.phone_media_authorized() {
         return Err(Error::Admission);
     }
-    let speech = SpeechAnalysis::new(rate, (rate / 50) as usize)?;
-    prepare_with_speech(reply, rate, expected_revision, processor, Some(speech))
+    let speech = SpeechAnalysis::new(rate, (rate / 50) as usize, settings)?;
+    prepare_with_speech(
+        reply,
+        rate,
+        expected_revision,
+        processor,
+        Some(speech),
+        settings,
+    )
 }
 
 fn prepare_with_speech(
@@ -555,17 +573,26 @@ fn prepare_with_speech(
     expected_revision: NonZeroU32,
     processor: Option<PcmProcessor>,
     speech: Option<SpeechAnalysis>,
+    settings: PhoneSpeechSettings,
 ) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
     if !reply.phone_media_authorized() {
         return Err(Error::Admission);
+    }
+    if settings.preroll_ms > 300 || !(86..=280).contains(&settings.reserve_ms) {
+        return Err(Error::UnsupportedFormat);
     }
     let generation = NEXT_GENERATION
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
             next.checked_add(1)
         })
         .map_err(|_| Error::Admission)?;
-    let (writer, reader) =
-        InboundRing::open(rate, InboundPolicy::Phone).map_err(|_| Error::Allocation)?;
+    let (writer, reader) = InboundRing::open(
+        rate,
+        InboundPolicy::Phone {
+            reserve_ms: settings.reserve_ms,
+        },
+    )
+    .map_err(|_| Error::Allocation)?;
     if !reader.timing_available() {
         return Err(Error::UnsupportedFormat);
     }
@@ -600,6 +627,8 @@ fn prepare_with_speech(
             speech,
             last_voice: None,
             voice_until: 0,
+            preroll_frames: u64::from(rate) * u64::from(settings.preroll_ms) / 1000,
+            hold_frames: u64::from(rate) * u64::from(settings.hold_ms) / 1000,
             shared: Arc::clone(&shared),
             expected_revision,
             writer,

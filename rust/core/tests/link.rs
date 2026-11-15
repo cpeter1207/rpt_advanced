@@ -976,7 +976,8 @@ fn phone_receive_policy_uses_existing_preroll_without_the_ordinary_peer_target()
     for rate in [8000, 16000, 48000] {
         for frames in [1, 480, 960, 4096] {
             let target = u64::from(rate) * 160 / 1000;
-            let mut phone = ReceiveState::with_policy(rate, ReceivePolicy::Phone).unwrap();
+            let mut phone =
+                ReceiveState::with_policy(rate, ReceivePolicy::Phone { reserve_ms: 160 }).unwrap();
             let mut ordinary = ReceiveState::new(rate).unwrap();
             assert!(!phone.should_render(0, target, false, frames));
             assert!(!phone.should_render(1, target - 1, false, frames));
@@ -1099,4 +1100,26 @@ fn retry_publication_retains_intent_blocked_by_newly_learned_topology() {
     assert_eq!(hub.publish_retry(&retry), Ok(()));
     hub.finish_retry(retry, true, 1000);
     assert!(hub.owns_permanent("200"));
+}
+
+#[test]
+fn phone_receive_gate_uses_its_prepared_reserve_without_a_hidden_160ms_floor() {
+    use rpt_advanced_core::link::{ReceivePolicy, ReceiveState};
+    for (rate, reserve_ms, target) in [
+        (8000, 86, 688),
+        (8000, 160, 1280),
+        (8000, 280, 2240),
+        (16000, 86, 1376),
+        (16000, 280, 4480),
+        (48000, 86, 4128),
+        (48000, 280, 13440),
+    ] {
+        let mut receive =
+            ReceiveState::with_policy(rate, ReceivePolicy::Phone { reserve_ms }).unwrap();
+        assert!(!receive.should_render(1, target - 1, false, 480));
+        assert!(receive.should_render(2, target, false, 480));
+    }
+    for reserve_ms in [0, 85, 281, u32::MAX] {
+        assert!(ReceiveState::with_policy(8000, ReceivePolicy::Phone { reserve_ms }).is_err());
+    }
 }

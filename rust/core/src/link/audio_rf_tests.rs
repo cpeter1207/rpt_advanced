@@ -25,7 +25,7 @@ impl PeerInput for RfInput {
     }
     fn receive_policy(&self) -> ReceivePolicy {
         if self.call.is_some() {
-            ReceivePolicy::Phone
+            ReceivePolicy::Phone { reserve_ms: 160 }
         } else {
             ReceivePolicy::Peer
         }

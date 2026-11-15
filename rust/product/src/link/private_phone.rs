@@ -151,18 +151,19 @@ impl PrivatePhoneControl {
         &mut self,
         processor: Option<PcmProcessor>,
     ) -> Result<(PreparedPhoneMedia, media::PhoneMediaInput), Error> {
-        self.prepare_media_candidate(processor, false)
+        self.prepare_media_candidate(processor, None)
     }
     pub(crate) fn prepare_pending_voiced_media(
         &mut self,
         processor: Option<PcmProcessor>,
+        settings: rpt_advanced_core::config::PhoneSpeechSettings,
     ) -> Result<(PreparedPhoneMedia, media::PhoneMediaInput), Error> {
-        self.prepare_media_candidate(processor, true)
+        self.prepare_media_candidate(processor, Some(settings))
     }
     fn prepare_media_candidate(
         &mut self,
         processor: Option<PcmProcessor>,
-        voiced: bool,
+        speech: Option<rpt_advanced_core::config::PhoneSpeechSettings>,
     ) -> Result<(PreparedPhoneMedia, media::PhoneMediaInput), Error> {
         if !self.media_capable() {
             return Err(Error::Admission);
@@ -170,11 +171,6 @@ impl PrivatePhoneControl {
         if self.media_occupied() {
             return Err(Error::Reservation);
         }
-        let prepare = if voiced {
-            media::prepare_voiced
-        } else {
-            media::prepare
-        };
         // An outgoing call has no command collector. Its serial source owner
         // publishes the exact settled cut, including resets without a digit.
         // Initial preparation remains inert until that owner validates it.
@@ -184,7 +180,12 @@ impl PrivatePhoneControl {
             self.consumed_revision
         }
         .unwrap_or(NonZeroU32::MIN);
-        let (ingress, input, shared) = prepare(self.reply.clone(), self.rate, revision, processor)?;
+        let (ingress, input, shared) = match speech {
+            Some(settings) => {
+                media::prepare_voiced(self.reply.clone(), self.rate, revision, processor, settings)
+            }
+            None => media::prepare(self.reply.clone(), self.rate, revision, processor),
+        }?;
         self.media = Some(shared);
         Ok((PreparedPhoneMedia(ingress), input))
     }
@@ -522,7 +523,9 @@ impl PrivatePhoneSession {
                     }
                     SourceInput::Discontinuity => {
                         retire_egress = true;
-                        if let Some(media) = media.take() {
+                        // Revoke immediately, but leave DSP destruction to the
+                        // existing serial-owner replacement/cleanup path.
+                        if let Some(media) = media.as_ref() {
                             media.retire();
                         }
                         if mode == PhoneDigitMode::InBand && digits.slots() == 0 {

@@ -286,6 +286,7 @@ pub struct Host {
 
 struct PhonePreparation<'a> {
     calls: &'a mut PhoneCalls,
+    document: &'a ConfigDocument,
     clock_epoch: u64,
     retain_ordinary: bool,
     policy: Option<PhonePolicy>,
@@ -404,7 +405,12 @@ fn prepared(
         redirects.push((peer.remote.clone(), command));
     }
     let phone_clock_epoch = phones.as_ref().map_or(0, |value| value.clock_epoch);
-    if let Some(PhonePreparation { calls: phones, .. }) = phones {
+    if let Some(PhonePreparation {
+        calls: phones,
+        document,
+        ..
+    }) = phones
+    {
         for (source, reply) in phone_attachments {
             // A graph replacement is an explicit media cut, never a transfer
             // of the private call handle or revival of the previous generation.
@@ -419,7 +425,15 @@ fn prepared(
                 )
                 .map_err(|_| RuntimeError::Preparation)?;
             let (pending, mut input) = phones
-                .prepare_pending_media(&source, &reply, processor)
+                .prepare_pending_media(
+                    &source,
+                    &reply,
+                    processor,
+                    rpt_advanced_core::config::PhoneSpeechSettings::resolve(
+                        document,
+                        source.account(),
+                    ),
+                )
                 .map_err(|_| RuntimeError::Preparation)?;
             let output = input.take_output().ok_or(RuntimeError::Preparation)?;
             phone_redirects.push((source.clone(), reply.clone(), pending));
@@ -1120,6 +1134,7 @@ impl Host {
                 &self.peers,
                 Some(PhonePreparation {
                     calls: &mut self.phone_calls,
+                    document: self.runtime.document(),
                     clock_epoch: self.peer_io.source_clock_epoch(),
                     retain_ordinary,
                     policy,

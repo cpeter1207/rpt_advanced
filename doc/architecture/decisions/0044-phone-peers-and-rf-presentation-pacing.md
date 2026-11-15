@@ -2214,12 +2214,13 @@ unlock grant expires. It retains the existing call/hangup, mix-minus and bounded
 watchdogs. The separate linked-IVR case preserves default isolation and exact
 telephone digit privacy; these are synthetic composition checks, not deployment.
 
-## Per-account analysis preprocessing settings — 2026-11-15 preparation
+## Per-account analysis preprocessing settings — 2026-11-15 integration candidate
 
 Phone speech settings are an exact-account analysis snapshot, separate from
-transport identity and registration settings. This checkpoint parses them; the
-configured shared-provider and prepared-media consumers are a following
-integration step, not a claim of deployed preprocessing.
+transport identity and registration settings. Control-side attachment preparation
+resolves the exact account and passes that snapshot through the private call
+owner into the shared-provider classifier and existing programme ring. This is
+an offline integration candidate, not deployed preprocessing.
 
 The explicit preprocessing opt-in defaults off. Plain analysis retains threshold
 0.5 and one 16-ms onset frame. Enabling preprocessing selects threshold 0.75 and
@@ -2251,3 +2252,23 @@ the new committed configuration. Failed reload retains the prior configuration
 and call. Analysis objects must be prepared outside callbacks; no tuning mutates
 a live graph or recreates it from a source callback. Original accepted programme
 PCM remains the only ring input. Preprocessing is analysis-only.
+
+The consumer requires the complete speech-analysis capability tail and bit 0
+before passing the 32-byte configured-constructor record, including plain tuned
+analysis. An older provider that ignores unknown config bytes is rejected, not
+used as a silent unfiltered fallback. Filter bounds use the decoded PCM source
+rate, including 16-kHz G.722, never the RTP timestamp clock.
+
+Source callbacks write only the original accepted PCM prefix to the existing
+ring before analyzing that same prefix. Ring reserve is forwarded through the
+existing receive-policy path rather than adding a second delay owner. Source
+discontinuity immediately revokes media but retains its DSP in the existing
+serial-owner slot until non-callback replacement or cleanup. A fresh selected
+graph still requires the existing exact source revision, authorization and
+collector-release protocol; no reset grants readmission.
+
+Focused offline speech/media behavior has been exercised against a hash-pinned
+private Radio API candidate. This does not qualify a distributable artifact or
+native callback safety: Rust allocation counters do not observe C-library
+allocation, and the shared chain's native allocator guard remains blocked.
+Full quality gates, native platform coverage and live qualification are separate.

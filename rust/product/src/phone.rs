@@ -385,6 +385,7 @@ impl PhoneCalls {
         source: &PhoneSource,
         reply: &PeerReply,
         processor: Option<PcmProcessor>,
+        settings: rpt_advanced_core::config::PhoneSpeechSettings,
     ) -> Result<(PreparedPhoneMedia, PhoneMediaInput), Error> {
         let call = self.current(source, reply)?;
         if call.mailbox.is_none() && !reply.phone_outgoing() {
@@ -393,7 +394,7 @@ impl PhoneCalls {
         call.owner
             .as_mut()
             .ok_or(Error::Admission)?
-            .prepare_pending_voiced_media(processor)
+            .prepare_pending_voiced_media(processor, settings)
     }
     pub(crate) fn adopt_media(
         &mut self,

@@ -117,8 +117,11 @@ impl Peer {
 pub enum ReceivePolicy {
     /// Ordinary peer startup target, independently of codec source rate.
     Peer,
-    /// Phone pre-roll within its existing inbound ring.
-    Phone,
+    /// Phone programme reserve within its existing inbound ring.
+    Phone {
+        /// Prepared startup target; independent of retrospective voice marking.
+        reserve_ms: u32,
+    },
 }
 
 /// Consumer-owned receive qualification; the shared ring alone supplies concealment.
@@ -138,14 +141,17 @@ impl ReceiveState {
 
     /// Retain the prepared input's latency policy without another delay owner.
     pub fn with_policy(source_rate: u32, policy: ReceivePolicy) -> Result<Self, AdmissionError> {
-        if source_rate == 0 || source_rate > 48000 {
+        if source_rate == 0
+            || source_rate > 48000
+            || matches!(policy, ReceivePolicy::Phone { reserve_ms } if !(86..=280).contains(&reserve_ms))
+        {
             return Err(AdmissionError::Invalid);
         }
         Ok(Self {
             rate: u64::from(source_rate),
             target_ms: match policy {
                 ReceivePolicy::Peer => 260,
-                ReceivePolicy::Phone => 160,
+                ReceivePolicy::Phone { reserve_ms } => u64::from(reserve_ms),
             },
             epoch: 0,
             age_native_samples: 0,

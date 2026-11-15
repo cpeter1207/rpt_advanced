@@ -314,7 +314,7 @@ impl<P: PeerInput> AudioPeer<P> {
         if !reply.phone_media_authorized()
             || reply.phone_source() != Some(source)
             || input.phone_reply() != Some(reply)
-            || input.receive_policy() != ReceivePolicy::Phone
+            || !matches!(input.receive_policy(), ReceivePolicy::Phone { .. })
         {
             return Err(AdmissionError::Invalid);
         }

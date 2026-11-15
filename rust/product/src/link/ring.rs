@@ -22,8 +22,11 @@ pub struct RingError;
 pub enum InboundPolicy {
     /// Decoded network PCM uses G.711 PLC and the peer playout target.
     Peer,
-    /// Phone 8–48kHz PCM retains 160ms pre-roll in this existing inbound owner.
-    Phone,
+    /// Phone 8–48kHz PCM retains its configured reserve in this existing owner.
+    Phone {
+        /// Programme reserve in milliseconds, independent of voice-history marking.
+        reserve_ms: u32,
+    },
     /// EchoLink selected-talker PCM, with explicit finite-burst drainage.
     Echo,
     /// Local RF uses silence on shortfall and only its captured squelch delay.
@@ -162,7 +165,7 @@ impl InboundRing {
         if input_rate == 0
             || (!media_rate && input_rate > 48000)
             || (media_rate && !(8000..=192000).contains(&input_rate))
-            || (matches!(policy, InboundPolicy::Phone) && input_rate < 8000)
+            || (matches!(policy, InboundPolicy::Phone { .. }) && input_rate < 8000)
         {
             return Err(RingError);
         }
@@ -202,8 +205,12 @@ impl InboundRing {
                     let capacity = (rate * 300 / 1000).max(512).max(target + 4096);
                     (reserve, target, capacity, 1)
                 }
-                InboundPolicy::Phone => {
-                    (rate * 160 / 1000, rate * 160 / 1000, rate * 300 / 1000, 1)
+                InboundPolicy::Phone { reserve_ms } => {
+                    if !(86..=280).contains(&reserve_ms) {
+                        return Err(RingError);
+                    }
+                    let reserve = rate * u64::from(reserve_ms) / 1000;
+                    (reserve, reserve, rate * 300 / 1000, 1)
                 }
                 InboundPolicy::Local { squelch_delay_ms } => {
                     let delay = rate.checked_mul(squelch_delay_ms).ok_or(RingError)? / 1000;
@@ -219,7 +226,7 @@ impl InboundRing {
                 output_rate_hz: 48000,
                 reserve_samples: reserve,
                 target_samples: target,
-                max_producer_samples: if matches!(policy, InboundPolicy::Phone) {
+                max_producer_samples: if matches!(policy, InboundPolicy::Phone { .. }) {
                     rate / 50
                 } else {
                     4096
@@ -414,7 +421,7 @@ impl PeerInput for InboundConsumer {
     }
     fn receive_policy(&self) -> ReceivePolicy {
         match self.0.policy {
-            InboundPolicy::Phone => ReceivePolicy::Phone,
+            InboundPolicy::Phone { reserve_ms } => ReceivePolicy::Phone { reserve_ms },
             _ => ReceivePolicy::Peer,
         }
     }
@@ -556,7 +563,7 @@ impl InboundConsumer {
 }
 impl Shared {
     fn producer_prefix(&self, samples: u64) -> u64 {
-        if matches!(self.policy, InboundPolicy::Phone) {
+        if matches!(self.policy, InboundPolicy::Phone { .. }) {
             samples.min(u64::from(self.input_rate) / 50)
         } else {
             samples

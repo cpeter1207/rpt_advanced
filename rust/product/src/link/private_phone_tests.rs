@@ -2821,3 +2821,63 @@ fn unpublished_phone_media_candidates_never_fill_an_active_prompt_queue() {
     drop(input);
     assert!(!reply.ended());
 }
+
+#[test]
+fn source_discontinuity_retires_media_but_keeps_dsp_with_its_serial_owner() {
+    let (mut session, mut control, state, reply) = source_session_with_auth(true);
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    let (pending, input) = control
+        .prepare_pending_voiced_media(
+            None,
+            rpt_advanced_core::config::PhoneSpeechSettings {
+                preprocessing_enabled: true,
+                threshold: 0.75,
+                onset_frames: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    control.adopt_media(pending).ok().unwrap();
+    session.step(0).unwrap();
+    assert!(input.active());
+    state.lock().unwrap().source_reset = true;
+    session.step(1).unwrap();
+    assert!(!input.active());
+    assert!(!control.media_occupied());
+    assert!(!reply.ended());
+    assert!(
+        session
+            .media
+            .as_ref()
+            .is_some_and(|media| !media.occupied()),
+        "the retired DSP stays in the existing owner slot until non-callback replacement or cleanup"
+    );
+    // Incoming reset has no authority to reuse its initial revision. Exercise
+    // the real collector acknowledgment before preparing a fresh selected graph.
+    state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+    session.step(2).unwrap();
+    assert_eq!(control.digit(), Some(('5', 2)));
+    assert!(control.collection_ended(&reply));
+    let (pending, replacement) = control
+        .prepare_pending_voiced_media(
+            None,
+            rpt_advanced_core::config::PhoneSpeechSettings {
+                preprocessing_enabled: true,
+                threshold: 0.75,
+                onset_frames: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    control.adopt_media(pending).ok().unwrap();
+    session.step(3).unwrap();
+    assert!(
+        session.media.as_ref().is_some_and(|media| media.active()),
+        "the queued replacement must take the retired serial-owner slot"
+    );
+    assert!(replacement.active());
+    assert!(
+        !input.active(),
+        "replacing the owner cannot revive its previous generation"
+    );
+}

@@ -64,7 +64,7 @@ fn input(reply: PeerReply) -> PhoneInput {
     PhoneInput {
         signals,
         reply,
-        policy: ReceivePolicy::Phone,
+        policy: ReceivePolicy::Phone { reserve_ms: 160 },
         age: None,
         public: false,
         quiet: false,
@@ -706,7 +706,7 @@ fn outgoing_isolation_suppresses_only_ordinary_media_in_both_directions() {
                     let mut input = input(reply.clone());
                     input.public = !phone;
                     input.policy = if phone {
-                        ReceivePolicy::Phone
+                        ReceivePolicy::Phone { reserve_ms: 160 }
                     } else {
                         ReceivePolicy::Peer
                     };

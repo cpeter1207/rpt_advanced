@@ -40,7 +40,11 @@ fn timed_consumer_rejects_failed_or_malformed_provider_results() {
         let (mut producer, mut consumer) = unsafe {
             let mut api = *ffi::rpcr3_descriptor();
             api.ring_consumer_render_sample_timed = Some(malformed_timed_sample);
-            InboundRing::from_descriptor(8000, InboundPolicy::Phone, Box::leak(Box::new(api)))
+            InboundRing::from_descriptor(
+                8000,
+                InboundPolicy::Phone { reserve_ms: 160 },
+                Box::leak(Box::new(api)),
+            )
         }
         .unwrap();
         assert_eq!(producer.write(&[0.25; 160]), Ok(160));
@@ -301,7 +305,8 @@ fn timed_consumer_does_not_consume_an_untimed_prefix_or_relabel_untagged_pcm() {
 #[test]
 fn phone_tagged_prefix_preserves_crossing_future_and_lookback_mutes() {
     for (start, end) in [(0, 320), (200, 320), (80, 240)] {
-        let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+        let (mut producer, mut consumer) =
+            InboundRing::open(8000, InboundPolicy::Phone { reserve_ms: 160 }).unwrap();
         let spans = [MuteSpan { start, end }];
         assert_eq!(producer.write_tagged(&[0.25; 320], 7, 0, &spans), Ok(160));
         assert_eq!((spans[0].start, spans[0].end), (start, end));
@@ -333,7 +338,8 @@ fn phone_tagged_prefix_preserves_crossing_future_and_lookback_mutes() {
         }
         assert!((heard_muted, heard_clear) == (true, true));
     }
-    let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+    let (mut producer, mut consumer) =
+        InboundRing::open(8000, InboundPolicy::Phone { reserve_ms: 160 }).unwrap();
     for packet in 0..2 {
         assert_eq!(
             producer.write_tagged(&[0.25; 160], 7, packet * 160, &[]),
@@ -376,7 +382,8 @@ fn phone_tagged_prefix_validates_the_original_offer_before_clipping() {
         (u64::MAX - 200, 0, 0, 0),
         (0, 200, 320, 65),
     ] {
-        let (mut producer, consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+        let (mut producer, consumer) =
+            InboundRing::open(8000, InboundPolicy::Phone { reserve_ms: 160 }).unwrap();
         let spans = vec![MuteSpan { start, end }; count];
         assert_eq!(
             producer.write_tagged(&[0.25; 320], 7, source_start, &spans),
@@ -388,7 +395,8 @@ fn phone_tagged_prefix_validates_the_original_offer_before_clipping() {
 
 #[test]
 fn phone_tagged_prefix_retries_after_zero_credit_without_advancing_source() {
-    let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+    let (mut producer, mut consumer) =
+        InboundRing::open(8000, InboundPolicy::Phone { reserve_ms: 160 }).unwrap();
     for packet in 0..15 {
         assert_eq!(
             producer.write_tagged(&[0.25; 160], 7, packet * 160, &[]),
@@ -428,7 +436,8 @@ fn phone_tagged_prefix_retries_after_zero_credit_without_advancing_source() {
 
 #[test]
 fn timed_phone_prefix_gap_mute_and_reset_keep_actual_source_provenance() {
-    let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+    let (mut producer, mut consumer) =
+        InboundRing::open(8000, InboundPolicy::Phone { reserve_ms: 160 }).unwrap();
     assert_eq!(producer.write_tagged(&[0.25; 320], 7, 0, &[]), Ok(160));
     assert_eq!(producer.write_tagged(&[0.25; 160], 7, 160, &[]), Ok(160));
     let mute = [MuteSpan {
@@ -507,10 +516,11 @@ fn timed_phone_prefix_gap_mute_and_reset_keep_actual_source_provenance() {
 #[test]
 fn phone_ring_prepares_one_preroll_owner_and_bounded_source_prefixes() {
     for rate in [0, 7999, 48001] {
-        assert!(InboundRing::open(rate, InboundPolicy::Phone).is_err());
+        assert!(InboundRing::open(rate, InboundPolicy::Phone { reserve_ms: 160 }).is_err());
     }
     for rate in [8000, 16000, 48000] {
-        let (mut producer, consumer) = InboundRing::open(rate, InboundPolicy::Phone).unwrap();
+        let (mut producer, consumer) =
+            InboundRing::open(rate, InboundPolicy::Phone { reserve_ms: 160 }).unwrap();
         let observation = consumer.observe().unwrap();
         assert_eq!(observation.reserve_samples, u64::from(rate) * 160 / 1000);
         assert_eq!(observation.target_samples, observation.reserve_samples);
@@ -536,7 +546,8 @@ fn phone_policy_survives_processing_into_the_common_link_audio_gate() {
         controller::{ControllerSettings, CourtesySettings, NodeController},
         link::{AudioPeer, LinkAudio, Mode, SourcePosition},
     };
-    let (mut producer, consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+    let (mut producer, consumer) =
+        InboundRing::open(8000, InboundPolicy::Phone { reserve_ms: 160 }).unwrap();
     for _ in 0..8 {
         assert_eq!(producer.write(&[0.25; 160]), Ok(160));
     }
@@ -1343,4 +1354,34 @@ pub(crate) unsafe fn local_with_descriptor(
         )
     }
     .unwrap()
+}
+
+#[test]
+fn phone_reserve_uses_actual_ring_headroom_and_capacity_bounds() {
+    for (rate, reserve_ms, expected) in [
+        (8000, 86, 688),
+        (8000, 280, 2240),
+        (16000, 86, 1376),
+        (16000, 280, 4480),
+        (48000, 86, 4128),
+        (48000, 280, 13440),
+    ] {
+        let (_producer, consumer) =
+            InboundRing::open(rate, InboundPolicy::Phone { reserve_ms }).unwrap();
+        let observed = consumer.observe().unwrap();
+        assert_eq!(observed.reserve_samples, expected);
+        assert_eq!(observed.target_samples, expected);
+        assert_eq!(
+            consumer.receive_policy(),
+            ReceivePolicy::Phone { reserve_ms }
+        );
+    }
+    for rate in [8000, 11025, 16000, 24000, 32000, 44100, 48000] {
+        for reserve_ms in [86, 280] {
+            assert!(InboundRing::open(rate, InboundPolicy::Phone { reserve_ms }).is_ok());
+        }
+        for reserve_ms in [0, 85, 281, u32::MAX] {
+            assert!(InboundRing::open(rate, InboundPolicy::Phone { reserve_ms }).is_err());
+        }
+    }
 }

@@ -663,6 +663,7 @@ fn retained_candidate(host: &mut Host) -> PreparedAdapter<Audio, GenerationContr
             &host.peers,
             Some(PhonePreparation {
                 calls: &mut host.phone_calls,
+                document: host.runtime.document(),
                 clock_epoch: host.peer_io.source_clock_epoch(),
                 retain_ordinary: true,
                 policy: None,

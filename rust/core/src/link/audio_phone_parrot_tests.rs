@@ -29,7 +29,7 @@ impl PeerInput for CapturedPhone {
         48000
     }
     fn receive_policy(&self) -> ReceivePolicy {
-        ReceivePolicy::Phone
+        ReceivePolicy::Phone { reserve_ms: 160 }
     }
     fn signals(&self) -> &PeerSignals {
         &self.signals

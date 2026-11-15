@@ -417,7 +417,10 @@ fn prepared_phone_media_qualifies_original_age_through_the_actual_processor() {
         let call = reply();
         let (mut ingress, mut input, shared) = prepare(call.clone(), rate, Some(graph)).unwrap();
         assert_eq!(input.phone_reply(), Some(&call));
-        assert_eq!(input.input.receive_policy(), ReceivePolicy::Phone);
+        assert_eq!(
+            input.input.receive_policy(),
+            ReceivePolicy::Phone { reserve_ms: 160 }
+        );
         assert!(
             input.source_timing_available(),
             "the graph needs the inner exact call token at preparation"
@@ -484,7 +487,10 @@ fn prepared_phone_media_joins_the_product_mixer_with_an_ordinary_peer() {
     let private = AudioInput::Phone(private);
     assert_eq!(private.source_rate(), 8000);
     assert_eq!(private.phone_reply(), Some(&call));
-    assert_eq!(private.receive_policy(), ReceivePolicy::Phone);
+    assert_eq!(
+        private.receive_policy(),
+        ReceivePolicy::Phone { reserve_ms: 160 }
+    );
     assert!(private.source_timing_available());
     assert_eq!(private.finite_playout(), None);
     let (private_out, _) = LinkAudioQueue::new(1920, 480).unwrap().into_endpoints();
@@ -638,7 +644,7 @@ fn prepared_phone_media_adoption_does_not_rewrite_active_or_retired_anchors() {
 }
 
 #[test]
-fn prepared_phone_media_revision_adds_only_scalar_storage_to_existing_ingress() {
+fn prepared_phone_media_revision_and_timing_add_only_scalar_storage_to_existing_ingress() {
     type Unstamped = (
         Arc<Shared>,
         InboundProducer,
@@ -653,7 +659,9 @@ fn prepared_phone_media_revision_adds_only_scalar_storage_to_existing_ingress() 
     let previous = std::mem::size_of::<Unstamped>();
     let actual = std::mem::size_of::<Ingress>();
     eprintln!("prepared_ingress_bytes unstamped={previous} stamped={actual}");
-    assert!(actual <= previous + std::mem::align_of::<Ingress>());
+    // The revision retains its original alignment allowance; configurable
+    // lookback and hold add exactly two source-clock u64 scalars, not buffers.
+    assert!(actual <= previous + 2 * std::mem::size_of::<u64>() + std::mem::align_of::<Ingress>());
 }
 
 #[test]
@@ -696,7 +704,7 @@ fn mixed_audio_inputs_delegate_live_timed_and_untimed_output_and_silence() {
         assert_eq!(
             input.receive_policy(),
             if phone {
-                ReceivePolicy::Phone
+                ReceivePolicy::Phone { reserve_ms: 160 }
             } else {
                 ReceivePolicy::Peer
             }
@@ -736,8 +744,14 @@ fn mixed_audio_inputs_delegate_live_timed_and_untimed_output_and_silence() {
 
 #[test]
 fn voiced_phone_silence_does_not_create_receive_or_transmit_activity() {
-    let (mut ingress, mut input, _) =
-        super::prepare_voiced(reply(), 8000, NonZeroU32::MIN, None).unwrap();
+    let (mut ingress, mut input, _) = super::prepare_voiced(
+        reply(),
+        8000,
+        NonZeroU32::MIN,
+        None,
+        PhoneSpeechSettings::default(),
+    )
+    .unwrap();
     adopt(&mut ingress, 0, reference());
     for block in 0..10 {
         assert_eq!(
@@ -759,8 +773,14 @@ fn voiced_phone_silence_does_not_create_receive_or_transmit_activity() {
 fn voiced_phone_delayed_decision_preserves_short_onset_in_the_existing_ring() {
     use rpt_advanced_core::link::ReceiveState;
     for chunk in [160, 7] {
-        let (mut ingress, mut input, _) =
-            super::prepare_voiced(reply(), 8000, NonZeroU32::MIN, None).unwrap();
+        let (mut ingress, mut input, _) = super::prepare_voiced(
+            reply(),
+            8000,
+            NonZeroU32::MIN,
+            None,
+            PhoneSpeechSettings::default(),
+        )
+        .unwrap();
         adopt(&mut ingress, 0, reference());
         let source: Vec<_> = (0..1600)
             .map(|frame| if frame < 640 { 0.25 } else { 0.0 })
@@ -774,7 +794,8 @@ fn voiced_phone_delayed_decision_preserves_short_onset_in_the_existing_ring() {
             assert!(accepted > 0);
             start += accepted;
         }
-        let mut receive = ReceiveState::with_policy(8000, ReceivePolicy::Phone).unwrap();
+        let mut receive =
+            ReceiveState::with_policy(8000, ReceivePolicy::Phone { reserve_ms: 160 }).unwrap();
         assert!(
             !receive.should_render(input.signals().pcm_epoch(), input.available(), false, 480),
             "the existing 160-ms reserve still retains the onset"
@@ -832,8 +853,14 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
         let call = reply();
         let source = call.phone_source().unwrap().clone();
         let (_graph_state, graph) = crate::services::history_tests::processor_fixture(1, 1);
-        let (mut ingress, mut private, shared) =
-            super::prepare_voiced(call.clone(), 8000, NonZeroU32::MIN, Some(graph)).unwrap();
+        let (mut ingress, mut private, shared) = super::prepare_voiced(
+            call.clone(),
+            8000,
+            NonZeroU32::MIN,
+            Some(graph),
+            PhoneSpeechSettings::default(),
+        )
+        .unwrap();
         adopt(&mut ingress, 0, reference());
         let private_out = private.take_output().unwrap();
         let phone = AudioPeer::for_phone(
@@ -945,8 +972,14 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
 #[test]
 fn voiced_phone_preserves_the_qualified_dsp_tail_after_source_gate_closes() {
     let (state, graph) = crate::services::history_tests::processor_fixture(1, 1);
-    let (mut ingress, mut input, shared) =
-        super::prepare_voiced(reply(), 48000, NonZeroU32::MIN, Some(graph)).unwrap();
+    let (mut ingress, mut input, shared) = super::prepare_voiced(
+        reply(),
+        48000,
+        NonZeroU32::MIN,
+        Some(graph),
+        PhoneSpeechSettings::default(),
+    )
+    .unwrap();
     adopt(&mut ingress, 0, reference());
     // Exercise an exact qualification boundary independently of classifier hang.
     // The real ring and the qualified one-frame processor retain the sole PCM.
@@ -1018,4 +1051,117 @@ fn prepared_phone_media_drains_pre_cut_jitter_prefix_without_chasing_a_new_admis
         "stale input after admitted PCM is still a discontinuity"
     );
     assert!(!shared.reply.ended());
+}
+
+#[test]
+fn configured_phone_lookback_and_hold_are_independent_of_programme_reserve() {
+    for reserve_ms in [86, 160, 280] {
+        for (preroll_ms, hold_ms, first_voice, until) in [
+            (0, 0, None, 1600),
+            (0, 1000, None, 9600),
+            (50, 10, Some(1200), 1680),
+            (300, 0, Some(0), 1600),
+        ] {
+            let settings = PhoneSpeechSettings {
+                preprocessing_enabled: true,
+                threshold: 1.0,
+                onset_frames: u32::MAX,
+                preroll_ms,
+                hold_ms,
+                reserve_ms,
+                ..Default::default()
+            };
+            let (mut ingress, input, shared) =
+                super::prepare_voiced(reply(), 8000, NonZeroU32::MIN, None, settings).unwrap();
+            adopt(&mut ingress, 0, reference());
+            for start in (0..1600).step_by(160) {
+                assert_eq!(ingress.audio(start, &[0.0; 160], Some(birth(10))), Ok(160));
+            }
+            ingress.voice_decision(Some(1599));
+            assert_eq!(ingress.voice_until, until);
+            for frame in 0..1600 {
+                assert_eq!(
+                    shared.voiced_frame(frame),
+                    first_voice.is_some_and(|first| frame >= first)
+                );
+            }
+            assert_eq!(input.receive_policy(), ReceivePolicy::Phone { reserve_ms });
+            assert_eq!(ingress.audio(1600, &[0.0; 160], Some(birth(10))), Ok(160));
+            assert_eq!(shared.voiced_frame(1600), hold_ms != 0);
+            assert_eq!(shared.voiced_frame(1680), hold_ms > 10);
+            ingress.voice_decision(Some(1599));
+            assert_eq!(
+                ingress.voice_until, until,
+                "duplicate decisions cannot extend hold"
+            );
+        }
+    }
+}
+
+#[test]
+fn configured_phone_analysis_transmits_original_accepted_pcm_and_retries_only_unaccepted_suffix() {
+    for rate in [8000, 16000, 48000] {
+        let settings = PhoneSpeechSettings {
+            preprocessing_enabled: true,
+            threshold: 0.0,
+            onset_frames: 1,
+            ..Default::default()
+        };
+        let (mut ingress, mut input, _) =
+            super::prepare_voiced(reply(), rate, NonZeroU32::MIN, None, settings).unwrap();
+        adopt(&mut ingress, 0, reference());
+        let width = rate as usize / 50;
+        let offered = vec![0.25; width + 1];
+        let mut start = 0;
+        for _ in 0..15 {
+            assert_eq!(ingress.audio(start, &offered, Some(birth(10))), Ok(width));
+            start += width as u64;
+        }
+        assert_eq!(ingress.audio(start, &offered, Some(birth(10))), Ok(0));
+        let mut original = 0;
+        for _ in 0..9600 {
+            if let Some(sample) = input.render_timed_sample() {
+                if sample.provenance.is_some_and(|p| {
+                    p.real
+                        && !p.muted
+                        && p.position.is_some_and(|position| {
+                            !position.negative && position.frame > (width * 2) as u64
+                        })
+                }) {
+                    assert!(
+                        (sample.sample - 0.25).abs() < 0.01,
+                        "filtered analysis PCM leaked at {rate}: {}",
+                        sample.sample
+                    );
+                    original += 1;
+                }
+            }
+        }
+        assert!(
+            original > 0,
+            "selected analysis must qualify original programme at {rate}"
+        );
+        assert_eq!(ingress.audio(start, &offered, Some(birth(10))), Ok(width));
+        assert_eq!(ingress.cursor, Some(start + width as u64));
+    }
+}
+
+#[test]
+fn configured_phone_media_rejects_unbounded_history_and_reserve_before_publication() {
+    for (preroll_ms, reserve_ms) in [(301, 160), (160, 85), (160, 281)] {
+        assert!(
+            super::prepare_voiced(
+                reply(),
+                8000,
+                NonZeroU32::MIN,
+                None,
+                PhoneSpeechSettings {
+                    preroll_ms,
+                    reserve_ms,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+    }
 }
