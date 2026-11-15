@@ -1,11 +1,42 @@
 # Phone patch, DTMF macros, and half-duplex receive opportunities
 
-Date: 2026-11-09. Status: design approved by owner 2026-11-09; unimplemented.
+Date: 2026-11-09. Status: design approved by owner 2026-11-09; implementation
+in progress. The 2026-11-15 scope clarification below governs current delivery.
 
 This document records the user's phone-patch requirements and subsequent
 decisions. Engineering proposals are identified separately. It does not change
 runtime configuration, authorize a node installation, or claim provider or RF
 acceptance. Paging remains a separate wishlist item.
+
+## Current delivery scope: owner clarification, 2026-11-15
+
+The owner clarified that the intended phone path behaves like a softphone,
+handling one call at a time and leaving conferencing to an external SIP system.
+
+Deliver the standalone SIP phone path for one call at a time. Preserve the
+existing one-call admission/reservation behavior and reject busy requests
+without replacing the active call. Do not add simultaneous-call capacity or
+conference mixing as a prerequisite to this delivery. An external Asterisk
+server may provide a SIP destination or conference service; this is distinct
+from adding IAX transport or integrating the controller's Asterisk host.
+
+Multiple simultaneous phone calls, IAX phone integration, and Asterisk-host
+phone integration are stretch goals. Retain their original requirements below
+as design history and future scope, not mandatory work for the single-call SIP
+merge. The owner accepts the existing proposed `**` literal escape. Ordinary
+digits, including escaped routing-like sequences, must reach the telephone
+without granting the called party node-control authority.
+
+This clarification does not defer private control, permitted remote-node
+access, manual admission, half-duplex receive checks, or the shared privacy,
+lifecycle and quality requirements. It does not separately resolve multiple
+node attachments for one call or whether the one-call limit should be global
+across a multi-node process. Keep the current one-attachment default and
+reservation boundary; do not invent broader limits or new capacity.
+
+Read the [current implementation entry point](../plans/2026-11-09-phone-patch-implementation.md#current-single-call-sip-entry-point-2026-11-15)
+before the original requirement/task list. This note changes delivery scope,
+not runtime behavior, deployment authority, or acceptance evidence.
 
 ## Intent and scope
 
@@ -23,7 +54,9 @@ SBC requirements. Do not implement an unofficial account/browser bridge.
 
 ## Accepted requirements
 
-The following are owner decisions, not discretionary engineering defaults.
+The following are the original owner decisions, not discretionary engineering
+defaults. Apply the dated delivery-scope clarification above to P01/P16 and
+the related IAX, Asterisk-host and simultaneous-call details below.
 
 | ID | Required behavior |
 | --- | --- |

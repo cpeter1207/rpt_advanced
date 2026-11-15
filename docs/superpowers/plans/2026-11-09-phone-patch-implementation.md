@@ -18,10 +18,61 @@ Tokio, versioned IAX/codec/jitter/ring providers, native Debian 13 QA.
 uninstalled Hybrid Coder. Do not invoke its skills, plugin, model-routing policy,
 contract runner or Temporal workflow. Its availability is not a prerequisite.
 
+## Current single-call SIP entry point, 2026-11-15
+
+The [owner's scope clarification](../specs/2026-11-09-phone-patch-and-half-duplex-design.md#current-delivery-scope-owner-clarification-2026-11-15)
+makes one-call standalone SIP the current delivery. Multiple simultaneous phone
+calls, IAX phone integration and Asterisk-host phone integration are stretch.
+An external Asterisk SIP destination/conference service remains compatible with
+that core. The original tasks below retain the broader design history; unchecked
+IAX, host-parity and multi-call items are not current-core merge blockers.
+
+Baseline for this reconciliation is
+`2155a524bf21fb638edfbd1cbac7d328cc91d4af`. It includes incoming private login,
+bound-node commands, explicit attachment/VOX, outgoing SIP dialing/hangup,
+pre-dial acknowledgment, provisional ringing and continuous G.711 media. The
+owner has confirmed outgoing calls work. That acceptance does not establish
+unimplemented IVR, linked-peer isolation, receive checks or the full release gate.
+
+Work in small independently verified checkpoints:
+
+1. Finish active-call IVR digit egress, including ordinary digits and the
+   accepted `**` literal escape. Preserve command/remapping precedence,
+   suppression, no credential leakage, exact call ownership and hangup.
+2. Finish outgoing peer isolation while retaining existing linked peers. Acquire
+   before dialing, revoke buffered media, release only the exact call, and add
+   unlock-qualified bypass and configured local/all-eligible-peer playout.
+   Preserve the single-call reservation; overlapping calls are stretch tests.
+3. Integrate those two independently developed slices and qualify the real
+   product/provider path, then seek the authorized manual checkpoint. Do not
+   describe the merge as complete solely because ordinary two-way calling works.
+4. Complete the retained private-command/reply paths and allowed local/remote
+   destination handling. Remote-private/protected control needs verified
+   call-origin, private replies and retirement; unsupported legacy operations
+   must fail privately. Phone macros retain the same per-source authority.
+5. Complete configured manual admission and Task 5's RF-only pacing/receive
+   arbiter using the released prerequisites. Keep deadline, actual off/settle,
+   full RF-turn priority, age/discard and privacy requirements. This clarification
+   did not defer half-duplex behavior.
+6. Run the applicable Task 7 integration/performance work and Task 8 review,
+   native Debian 13 amd64/arm64, production coverage, package/install and
+   documentation gates for the shipped core. Preserve existing-host regression
+   and ABI checks without implementing stretch host parity. Resolve the recorded
+   combined-distribution review before public source/artifact publication.
+
+Steps 4 and 5 have independent prerequisites and may be staged separately after
+the next manual checkpoint; neither is silently removed from the approved scope.
+Retain the current one-attachment default. A process-wide one-call cap or expanded
+single-call attachment count needs clarification before changing that boundary.
+No new concurrency, IAX, Asterisk-host implementation, deployment or public push
+is authorized by this scope reconciliation.
+
 ## Global constraints
 
-- Preserve P01–P18 in the approved spec. Defaults: manual or VAD admission,
-  five-second receive deadline, 1000 ms VAD hang, one attachment/call, one reverse
+- Preserve P01–P18 under the 2026-11-15 delivery scope above; retained stretch
+  requirements do not gate the current single-call SIP merge. Defaults: manual
+  or VAD admission, five-second receive deadline, 1000 ms VAD hang, one
+  attachment/call, one reverse
   call/node, 2000 ms comma pauses, 4096 symbols and 120 seconds per expansion.
 - Target added local age below 250 ms normally, 500 ms transiently. Include
   hidden conversion/DSP/queue delay; retain source time and discard when needed.

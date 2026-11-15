@@ -615,7 +615,30 @@ remain planned. Local-file decoding does not imply network stream support.
 
 ### Telephony integration
 
-**Status — 2026-11-09:** Design approved; implementation in progress. DTMF testing,
+**Current scope/status — 2026-11-15:** Deliver the standalone SIP phone path for
+one call at a time, behaving like a softphone. Multiple simultaneous phone calls,
+IAX phone integration and Asterisk-host phone integration are stretch goals.
+Conferencing may be supplied by an external system such as Asterisk reached
+over SIP; do not build internal multi-call conferencing for the current merge.
+The owner accepts `**` as the literal escape and has confirmed outgoing calls
+work. This does not defer private local/remote control, manual admission,
+half-duplex receive opportunities, privacy/lifecycle behavior or release gates.
+
+At `2155a524bf21fb638edfbd1cbac7d328cc91d4af`, standalone SIP private login,
+bound-node controls, explicit incoming attachment/VOX and outgoing calling with
+radio acknowledgment/ringing and continuous G.711 are implemented checkpoints.
+Remaining core work includes IVR digits, linked-peer isolation/unlock bypass,
+unfinished private command/remote routes, manual/half-duplex behavior, and full
+integration, coverage, packaging and distribution qualification. Existing IAX
+foundations and Asterisk interfaces remain intact without new parity work.
+Use the [current plan entry point](docs/superpowers/plans/2026-11-09-phone-patch-implementation.md#current-single-call-sip-entry-point-2026-11-15)
+for staged dependencies, rather than treating every historical open item below
+as a current-core blocker.
+
+The earlier status and broader requirements below are preserved as history and
+stretch scope where superseded by this clarification. Paging remains separate.
+
+**Historical status — 2026-11-09:** Design approved; implementation in progress. DTMF testing,
 regeneration, and addressed command forwarding are released in `rpt_advanced` v0.1.0-alpha11 with
 `librptadvdtmf` v0.1.0-alpha.2; those are not open telephony requirements.
 The standalone AllStarLink IAX2 implementation is also released. Autopatch,
