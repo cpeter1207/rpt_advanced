@@ -121,3 +121,8 @@ PTT and all older combined-counter assertions.
 Mu-law cases passed in 50.40 and 50.41 seconds with launcher exit 0 in
 `.work/phone-ivr-wire-green.log`. A-law composition and remaining full/static
 gates are still pending. No live call or node change was made.
+
+A-law uses the identical actual-wire oracle and completed in 50.82 seconds
+(events) and 50.39 seconds (in-band), launcher exit 0 in
+`.work/phone-ivr-alaw-green.log`. Thus both G.711 profiles are composed; full
+affected suites/static and the later isolation union are still pending.

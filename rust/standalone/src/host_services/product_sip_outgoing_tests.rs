@@ -442,6 +442,16 @@ fn actual_radio_digits_use_private_inband_when_event_payload_is_absent() {
     product_outgoing_with_ivr(true, true, false, G711::Mulaw, IvrMode::InBand);
 }
 
+#[test]
+fn actual_alaw_radio_digits_reach_telephone_ivr_without_audio_leak() {
+    product_outgoing_with_ivr(true, true, false, G711::Alaw, IvrMode::Events);
+}
+
+#[test]
+fn actual_alaw_radio_digits_use_private_inband() {
+    product_outgoing_with_ivr(true, true, false, G711::Alaw, IvrMode::InBand);
+}
+
 fn product_outgoing(radio: bool, immediate: bool, latching: bool, selected: G711) {
     product_outgoing_with_ivr(radio, immediate, latching, selected, IvrMode::Disabled);
 }
@@ -455,7 +465,11 @@ fn product_outgoing_with_ivr(
 ) {
     const CHILD: &str = "RPTADV_TEST_OUTGOING_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
-        let name = if ivr == IvrMode::InBand {
+        let name = if ivr == IvrMode::InBand && selected == G711::Alaw {
+            "host_services::product_phone_tests::sip::outgoing::actual_alaw_radio_digits_use_private_inband"
+        } else if ivr == IvrMode::Events && selected == G711::Alaw {
+            "host_services::product_phone_tests::sip::outgoing::actual_alaw_radio_digits_reach_telephone_ivr_without_audio_leak"
+        } else if ivr == IvrMode::InBand {
             "host_services::product_phone_tests::sip::outgoing::actual_radio_digits_use_private_inband_when_event_payload_is_absent"
         } else if ivr == IvrMode::Events {
             "host_services::product_phone_tests::sip::outgoing::actual_radio_digits_reach_telephone_ivr_without_control_or_audio_leak"
