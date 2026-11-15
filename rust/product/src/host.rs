@@ -191,6 +191,22 @@ impl DeviceHandoff for Device {
     }
 }
 
+/// Exact call identity is independent of its desired isolation. A bypassed call
+/// must retain the same cut/ACK custody and remain distinct from no call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PhonePolicy {
+    call_id: u64,
+    isolated: bool,
+}
+impl PhonePolicy {
+    fn for_claim(claim: &crate::phone::OutgoingClaim) -> Self {
+        Self {
+            call_id: claim.id(),
+            isolated: !claim.bypassed(),
+        }
+    }
+}
+
 /// Dispatcher lifetime and endpoint-redirection acknowledgments for one audio generation.
 pub struct GenerationControl {
     text_origins: Vec<(String, TextOrigin)>,
@@ -206,7 +222,7 @@ pub struct GenerationControl {
     awaiting_outbound: Vec<(String, u64)>,
     local_update: Option<LocalRingUpdate>,
     awaiting_local: bool,
-    isolated_call: Option<u64>,
+    phone_policy: Option<PhonePolicy>,
     isolation_transition: bool,
     isolation_failed: bool,
 }
@@ -272,7 +288,7 @@ struct PhonePreparation<'a> {
     calls: &'a mut PhoneCalls,
     clock_epoch: u64,
     retain_ordinary: bool,
-    isolation: Option<u64>,
+    policy: Option<PhonePolicy>,
     isolation_transition: bool,
 }
 
@@ -297,7 +313,7 @@ fn prepared(
         return Err(RuntimeError::Preparation);
     }
     let retain_ordinary = phones.as_ref().is_some_and(|value| value.retain_ordinary);
-    let isolation = phones.as_ref().and_then(|value| value.isolation);
+    let policy = phones.as_ref().and_then(|value| value.policy);
     let isolation_transition = phones
         .as_ref()
         .is_some_and(|value| value.isolation_transition);
@@ -416,7 +432,14 @@ fn prepared(
                 AudioPeer::for_phone(
                     &source,
                     &reply,
-                    Mode::TRANSCEIVE,
+                    if reply.phone_outgoing()
+                        && settings.phone_outgoing_playout
+                            == rpt_advanced_core::config::PhonePlayout::Local
+                    {
+                        Mode::LOCAL_TRANSCEIVE
+                    } else {
+                        Mode::TRANSCEIVE
+                    },
                     AudioInput::Phone(input),
                     output,
                     MAXIMUM_FRAMES,
@@ -431,7 +454,7 @@ fn prepared(
             .map_err(|_| RuntimeError::Preparation)?;
     audio = audio
         .with_phone_clock(phone_clock_epoch)
-        .with_peer_isolation(isolation.is_some())
+        .with_peer_isolation(policy.is_some_and(|policy| policy.isolated))
         .with_text(Box::new(TextMix(text_readers)));
     let regeneration = if settings.dtmf_regeneration.enabled {
         let (writer, reader) = InboundRing::open(48000, InboundPolicy::Media)
@@ -459,7 +482,7 @@ fn prepared(
             awaiting_outbound,
             local_update: None,
             awaiting_local: false,
-            isolated_call: isolation,
+            phone_policy: policy,
             isolation_transition,
             isolation_failed: false,
         },
@@ -1059,18 +1082,19 @@ impl Host {
             // A preceding publication may still await dispatcher/redirect quiescence.
             // This control owner must collect it before another replacement can succeed.
             self.pump(clock)?;
-            let isolation = self
+            let policy = self
                 .phone_calls
                 .outgoing_claim(local)
-                .map(|claim| claim.id());
+                .map(|claim| PhonePolicy::for_claim(claim));
             let old_control = self
                 .runtime
                 .node(local)
                 .and_then(|node| node.status(clock.now_ms).active)
                 .and_then(|active| self.runtime.adapter_control_mut(local, active));
             if let Some(control) = old_control.as_ref()
-                && isolation.is_some()
-                && isolation == control.isolated_call
+                && policy.is_some()
+                && policy.map(|policy| policy.call_id)
+                    == control.phone_policy.map(|policy| policy.call_id)
             {
                 // Topology work cannot replace the proof owed by this exact
                 // call's isolation cut with a fresh successful-looking graph.
@@ -1081,8 +1105,8 @@ impl Host {
                     return Err(RuntimeError::Busy);
                 }
             }
-            let old_isolation = old_control.and_then(|control| control.isolated_call);
-            let isolation_transition = isolation != old_isolation;
+            let old_policy = old_control.and_then(|control| control.phone_policy);
+            let isolation_transition = policy != old_policy;
             // Entry/exit revokes ordinary history. Only phone rearm within the
             // same policy transfers the existing unique ordinary inputs.
             let retain_ordinary = retain_ordinary && !isolation_transition;
@@ -1098,7 +1122,7 @@ impl Host {
                     calls: &mut self.phone_calls,
                     clock_epoch: self.peer_io.source_clock_epoch(),
                     retain_ordinary,
-                    isolation,
+                    policy,
                     isolation_transition,
                 }),
                 media_worker(&mut self.media_workers, local)?,
@@ -1125,6 +1149,10 @@ impl Host {
             };
             if replacement_completed(result)? {
                 self.activate_dispatchers(clock.now_ms);
+                #[cfg(test)]
+                if tests::phone::fail_refresh_after_publication() {
+                    return Err(RuntimeError::Preparation);
+                }
                 return self.pump(clock);
             }
             std::thread::sleep(std::time::Duration::from_millis(1));

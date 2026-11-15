@@ -1598,6 +1598,18 @@ impl<A: Send, C: Send> Runtime<A, C> {
     ) -> Result<(), RuntimeError> {
         self.queue_link_rejection(local, "", None, Message::OperationResult { result })
     }
+    /// Queue a generic outcome only to the captured ordinary peer generation.
+    pub fn queue_peer_operation_result(
+        &mut self,
+        local: &str,
+        reply: crate::link::PeerReply,
+        result: crate::messages::OperationResult,
+    ) -> Result<(), RuntimeError> {
+        if reply.ended() || reply.phone_source().is_some() {
+            return Err(RuntimeError::Rejected);
+        }
+        self.queue_link_rejection(local, "", Some(reply), Message::OperationResult { result })
+    }
     /// Queue a finite LOCAL acknowledgment and observe its existing control-side return.
     /// This is controller playback completion, not a hardware delivery certification.
     pub fn queue_operation_acknowledgment(
@@ -2059,6 +2071,29 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .remote
             .is_some_and(|request| request.administrative())
         {
+            return;
+        }
+        if let Some(node) = self.node(local) {
+            if let Some(reply) = &operation.reply {
+                node.links.confirm_peer_administrative_command(
+                    operation.origin.as_deref(),
+                    reply,
+                    now_ms,
+                );
+            } else {
+                node.links.confirm_administrative_command(now_ms);
+            }
+        }
+    }
+    /// Renew only the still-live collector that authorized a committed call bypass.
+    pub fn complete_phone_bypass(
+        &mut self,
+        local: &str,
+        source: &super::links::AdmittedPhoneSource,
+        now_ms: u64,
+    ) {
+        let operation = source.operation();
+        if operation.command.action != LinkAction::PhoneBypass || !source.current(now_ms) {
             return;
         }
         if let Some(node) = self.node(local) {

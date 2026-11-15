@@ -115,6 +115,14 @@ fn phone_diagnostics_cannot_succeed_in_the_radio_telemetry_queue() {
         Err(RuntimeError::Rejected)
     );
     assert_eq!(
+        runtime.queue_peer_operation_result(
+            "1000",
+            reply.clone(),
+            crate::messages::OperationResult::Completed,
+        ),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(
         runtime.queue_status("1000", LinkAction::Status, None, clock(), Some(reply)),
         Err(RuntimeError::Rejected)
     );
@@ -5104,4 +5112,130 @@ fn private_site_report_requires_live_phone_and_existing_recipe_producer() {
         Err(RuntimeError::Rejected)
     ));
     assert!(runtime.stop(20));
+}
+
+#[test]
+fn phone_bypass_confirmation_and_results_keep_the_original_peer_generation() {
+    use crate::runtime::dtmf::DigitOutcome;
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    for retired in [false, true] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse("[1000]\nlink_command_phone_bypass=99\n").unwrap(),
+            &CapturingMedia(Arc::clone(&messages)),
+            adapter,
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+        runtime.incoming("1000", "2000", true).unwrap();
+        let signals = crate::link::PeerSignals::new();
+        let reply = signals.reply_target();
+        let operation = {
+            let links = runtime.node("1000").unwrap().links();
+            links.configure_admin(&digest, &digest, 100);
+            for digit in "*8001234#".chars() {
+                assert!(
+                    links
+                        .peer_digit("2000", digit, 1001, reply.clone())
+                        .is_none()
+                );
+            }
+            let Some(DigitOutcome::Operation(operation)) = "*99"
+                .chars()
+                .filter_map(|digit| links.peer_digit("2000", digit, 1002, reply.clone()))
+                .last()
+            else {
+                panic!("actual protected bypass");
+            };
+            operation
+        };
+        let crate::runtime::links::LinkEffect::Phone(source) = runtime
+            .command(
+                "1000",
+                operation,
+                RuntimeClock {
+                    now_ms: 1003,
+                    ..clock()
+                },
+                false,
+            )
+            .unwrap()
+        else {
+            panic!("typed telephone source");
+        };
+        let source = source.admit(1003).unwrap();
+        let current_reply = if retired {
+            reply.retire();
+            let replacement = crate::link::PeerSignals::new().reply_target();
+            let links = runtime.node("1000").unwrap().links();
+            for digit in "*8001234#".chars() {
+                assert!(
+                    links
+                        .peer_digit("2000", digit, 1001, replacement.clone())
+                        .is_none()
+                );
+            }
+            replacement
+        } else {
+            reply.clone()
+        };
+        runtime.complete_phone_bypass("1000", &source, 1050);
+        let renewed = {
+            let links = runtime.node("1000").unwrap().links();
+            "*99"
+                .chars()
+                .filter_map(|digit| links.peer_digit("2000", digit, 1102, current_reply.clone()))
+                .any(|outcome| matches!(outcome, DigitOutcome::Operation(_)))
+        };
+        assert_eq!(
+            renewed, !retired,
+            "retired source cannot renew a replacement collector"
+        );
+        let result = runtime.queue_peer_operation_result(
+            "1000",
+            reply.clone(),
+            crate::messages::OperationResult::Unavailable,
+        );
+        assert_eq!(result.is_ok(), !retired);
+        if retired {
+            assert!(messages.lock().unwrap().is_empty());
+        } else {
+            let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+            let mut generation = rx.acquire_pair(&mut tx).unwrap();
+            let mut audio = [0.0; 960];
+            let mut parrot = [0.0; 960];
+            let mut active = false;
+            let mut replies = [crate::controller::PeerReplySample::default(); 960];
+            generation.transmit().controller.process_audio_with_parrot(
+                false,
+                false,
+                false,
+                &[],
+                &mut audio,
+                crate::controller::ParrotOutput {
+                    samples: &mut parrot,
+                    active: &mut active,
+                    replies: Some(&mut replies),
+                    regeneration: None,
+                    local_media: Default::default(),
+                },
+            );
+            assert!(audio.iter().all(|sample| *sample == 0.0));
+            assert!(replies.iter().any(|sample| sample.sample != 0.0));
+            assert!(
+                replies
+                    .iter()
+                    .filter(|sample| sample.sample != 0.0)
+                    .all(|sample| sample.target == signals.reply_identity())
+            );
+        }
+        runtime.node("1000").unwrap().links().ended("2000");
+        runtime.peer_detached("1000", "2000", 1200);
+        assert!(runtime.stop(1200));
+    }
 }

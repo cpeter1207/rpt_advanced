@@ -65,10 +65,12 @@ pub enum LinkAction {
     PhoneDial,
     /// Terminate the initiating node's exact outgoing telephone call.
     PhoneHangup,
+    /// Unlock-qualified release of only the current outgoing call isolation.
+    PhoneBypass,
 }
 
 /// Number of configurable linking actions.
-pub const ACTION_COUNT: usize = 28;
+pub const ACTION_COUNT: usize = 29;
 
 /// A DTMF prefix and the operation it selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -280,9 +282,9 @@ impl DtmfCommandMap {
 
     /// Build the standard AllStar-compatible and local administration command map.
     pub fn standard() -> Self {
-        let prefixes = [
+        let prefixes: [&str; ACTION_COUNT] = [
             "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818",
-            "10", "722", "800", "801", "804", "805", "82", "77", "76", "78", "", "", "", "",
+            "10", "722", "800", "801", "804", "805", "82", "77", "76", "78", "", "", "", "", "",
         ];
         let mappings = prefixes
             .into_iter()
@@ -418,6 +420,7 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::RemoteBase,
         LinkAction::PhoneDial,
         LinkAction::PhoneHangup,
+        LinkAction::PhoneBypass,
     ]
 }
 
@@ -439,6 +442,7 @@ fn takes_node(action: LinkAction) -> bool {
             | LinkAction::CancelMessage
             | LinkAction::RemoteBase
             | LinkAction::PhoneHangup
+            | LinkAction::PhoneBypass
     )
 }
 

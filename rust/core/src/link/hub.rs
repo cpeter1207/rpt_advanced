@@ -31,6 +31,11 @@ impl Mode {
         transmit: true,
         forward: true,
     };
+    /// Receive locally and transmit back without forwarding this source to other peers.
+    pub const LOCAL_TRANSCEIVE: Self = Self {
+        transmit: true,
+        forward: false,
+    };
     /// Receive and forward, without transmitting back to this peer.
     pub const MONITOR: Self = Self {
         transmit: false,

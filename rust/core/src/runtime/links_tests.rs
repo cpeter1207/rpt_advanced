@@ -3826,3 +3826,108 @@ fn admitted_phone_source_survives_graph_retirement_but_not_its_macro() {
         );
     }
 }
+
+#[test]
+fn phone_bypass_requires_the_exact_current_unlock_even_under_open() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let document =
+        crate::config::ConfigDocument::parse("[524950]\nlink_command_phone_bypass=99\n").unwrap();
+    let map = crate::config::ResolvedNodeSettings::resolve(
+        &document,
+        &crate::config::NodeId::new("524950").unwrap(),
+    )
+    .unwrap()
+    .value
+    .command_map()
+    .unwrap();
+    let command = map.parse("99").expect("configured bypass action");
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    for authorized_source in 0..3 {
+        let mut links = NodeLinkControl::new(
+            "524950",
+            AccessPolicy::new("", "").unwrap(),
+            map.clone(),
+            None,
+        )
+        .unwrap();
+        links.configure_admin(&digest, &digest, 100);
+        links
+            .configure_remote("", crate::remote_base_command::RemoteDtmfAccess::Open)
+            .unwrap();
+        links.accept("2000", true).unwrap();
+        let peer = PeerSignals::new();
+        let phone = PeerSignals::for_phone(source.clone());
+        assert!(phone.authenticate_phone());
+        let feed = |links: &mut NodeLinkControl, kind, text: &str, now_ms| {
+            let mut result = None;
+            for digit in text.chars() {
+                let next = match kind {
+                    0 => links.digit(DigitEvent::Digit { digit, now_ms }),
+                    1 => links.peer_digit("2000", digit, now_ms, peer.reply_target()),
+                    _ => links.phone_digit(&source, digit, now_ms, phone.reply_target(), 1000),
+                };
+                if next.is_some() {
+                    result = next;
+                }
+            }
+            result
+        };
+        let mut host = NodeHost::new(generation(1));
+        assert!(
+            matches!(
+                links.command(
+                    DigitOperation::new(command.clone(), None),
+                    host.control().work().unwrap(),
+                    0,
+                    false,
+                ),
+                Err(AdmissionError::Denied)
+            ),
+            "a raw command or Open policy cannot manufacture unlock authority"
+        );
+        for kind in 0..3 {
+            assert!(feed(&mut links, kind, "*99", 0).is_none());
+        }
+        assert!(feed(&mut links, authorized_source, "*8001234#", 1).is_none());
+        for kind in 0..3 {
+            if kind != authorized_source {
+                assert!(feed(&mut links, kind, "*99", 2).is_none());
+            }
+        }
+        let Some(DigitOutcome::Operation(operation)) =
+            feed(&mut links, authorized_source, "*99", 3)
+        else {
+            panic!("only the unlocked source must produce bypass");
+        };
+        assert_eq!(operation.command, command);
+        assert!(matches!(
+            links.command(operation.clone(), host.control().work().unwrap(), 4, false),
+            Ok(LinkEffect::Phone(_))
+        ));
+        let mut foreign = operation.clone();
+        foreign.origin = Some("3000".into());
+        assert!(matches!(
+            links.command(foreign, host.control().work().unwrap(), 4, false),
+            Err(AdmissionError::Denied)
+        ));
+        assert!(
+            matches!(
+                links.command(operation, host.control().work().unwrap(), 101, false),
+                Err(AdmissionError::Denied)
+            ),
+            "the original source grant must still be live at serialized admission"
+        );
+    }
+}

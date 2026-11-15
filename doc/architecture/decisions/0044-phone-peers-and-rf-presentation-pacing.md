@@ -2170,3 +2170,37 @@ retain their old behavior. Older products reject the unknown bit safely.
 
 No new resampler, programme path, codec implementation or third-party dependency
 is introduced. This milestone is not full codec parity or hardware qualification.
+
+### Exact-call bypass and outgoing playout (2026-11-15)
+
+The optional, initially unassigned PhoneBypass command reuses the initiating
+node's existing exact-source administrative collector. It requires node unlock
+even with remote-base access Open. Mailbox login, selected remote mode, CLI
+availability and outgoing callee media permission supply no unlock grant.
+Serialized admission captures the exact existing outgoing claim before consuming
+the original graph work. The latch lasts only that call; unlock expiry does not
+undo an applied bypass, and a successor never inherits it.
+
+Prepared graph policy keeps call identity separate from the isolation bit.
+Changing that bit performs the same ordinary-input/history cut as isolation
+entry and release. The exact claim's unresolved ACKs or retained failure cannot
+be erased by a policy change. A pre-publication refusal rolls the desired latch
+back; a failure after publication preserves the actually committed graph's
+policy and retirement custody. Cancellation observed during publication cannot
+be reported as successful bypass.
+
+Outgoing phone playout is a resolved configuration snapshot. Local is the new
+outgoing mode's conservative default: transmit to local RF but do not forward
+telephone audio to ordinary peers. All uses the existing transceive mode and
+normal eligible-peer mix-minus. Default isolation still wins until that exact
+call has bypass. Incoming explicit attachment forwarding remains unchanged.
+Rearm reuses the same configuration; committed reload retires the call.
+
+Confirmation renews only the original still-live source collector, using its
+existing bounded grant. Human RF outcomes are LOCAL only; authenticated phone
+outcomes remain private. The full ordinary-ring cut retires an ordinary issuing
+reply token, so its later result and renewal are canceled rather than remapped to
+a successor by name. Pre-cut failures can still target that exact live reply.
+Macro/source cancellation and the original Engine revision remain authoritative.
+This increment adds no media queue, provider interface, worker or call-concurrency
+policy and is separate from the selected default-isolation hardware checkpoint.

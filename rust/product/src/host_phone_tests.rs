@@ -39,6 +39,8 @@ fn mailbox_host() -> Host {
 }
 
 thread_local! {
+    static AFTER_REFRESH_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static FAIL_REFRESH_AFTER_PUBLICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_EVENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_OPERATION_RESULT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
@@ -1780,9 +1782,11 @@ fn outgoing_isolation_waits_for_the_existing_serial_redirect_ack() {
         .unwrap();
     pause.wait();
     let before_ack = host.prepare_outgoing_isolation(&claim, clock());
+    let bypass_before_ack = host.bypass_outgoing_phone(&claim, clock());
     let replacement_before_ack = host.refresh("1000", clock());
     pause.wait();
     assert_eq!(replacement_before_ack, Err(RuntimeError::Busy));
+    assert_eq!(bypass_before_ack, Err(RuntimeError::Busy));
     assert_eq!(
         before_ack,
         Ok(false),
@@ -1910,6 +1914,7 @@ fn outgoing_isolation_failed_reset_cannot_become_vacuous_after_owner_reaping() {
     let _ = host.prepare_outgoing_isolation(&claim, clock());
     pump_until(&mut host, |host| host.peers.is_empty());
     let readiness = host.prepare_outgoing_isolation(&claim, clock());
+    let bypass = host.bypass_outgoing_phone(&claim, clock());
     // A same-claim topology refresh must not erase the failed required-owner cut.
     let replacement = host.refresh("1000", clock());
     let after_replacement = host.prepare_outgoing_isolation(&claim, clock());
@@ -1918,8 +1923,245 @@ fn outgoing_isolation_failed_reset_cannot_become_vacuous_after_owner_reaping() {
     host.cancel_outgoing_phone("1000", claim.id()).unwrap();
     assert!(host.stop(40));
     assert!(reset_attempted != 0);
+    assert_eq!(bypass, Err(RuntimeError::Preparation));
     assert!(
         readiness.is_err() && after_replacement.is_err(),
         "failed exact cut cannot become ready by pruning/replacing: before={readiness:?}, replacement={replacement:?}, after={after_replacement:?}"
     );
+}
+
+#[test]
+fn outgoing_bypass_replaces_exact_policy_and_does_not_reach_a_successor() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = outgoing_host();
+    let state = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let account = rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap();
+    let claim = host
+        .reserve_outgoing_phone(account.clone(), "1000")
+        .unwrap();
+    pump_until(&mut host, |host| {
+        host.prepare_outgoing_isolation(&claim, clock()) == Ok(true)
+    });
+    let isolated_input = host.peers[0].control.inbound_observer();
+    let result = host.bypass_outgoing_phone(&claim, clock());
+    if result.is_ok() {
+        pump_until(&mut host, |host| {
+            host.prepare_outgoing_isolation(&claim, clock()) == Ok(true)
+        });
+    }
+    let status = host.runtime.node("1000").unwrap().status(clock().now_ms);
+    let bypassed = host
+        .runtime
+        .adapter_control_mut("1000", status.active.unwrap())
+        .unwrap()
+        .phone_policy
+        == Some(PhonePolicy {
+            call_id: claim.id(),
+            isolated: false,
+        });
+    let retired_input = isolated_input.signals().ended()
+        && !isolated_input.same_generation(&host.peers[0].control.inbound_observer());
+    let first_live = claim.current();
+    host.cancel_outgoing_phone("1000", claim.id()).unwrap();
+    host.reconcile_phone_isolation(clock());
+    pump_until(&mut host, |host| {
+        host.runtime
+            .node("1000")
+            .unwrap()
+            .status(clock().now_ms)
+            .retiring
+            .is_none()
+    });
+    let successor = host.reserve_outgoing_phone(account, "1000").unwrap();
+    let stale = host.bypass_outgoing_phone(&claim, clock());
+    pump_until(&mut host, |host| {
+        host.prepare_outgoing_isolation(&successor, clock()) == Ok(true)
+    });
+    let status = host.runtime.node("1000").unwrap().status(clock().now_ms);
+    let successor_isolated = host
+        .runtime
+        .adapter_control_mut("1000", status.active.unwrap())
+        .unwrap()
+        .phone_policy
+        == Some(PhonePolicy {
+            call_id: successor.id(),
+            isolated: true,
+        });
+    let drops = state.lock().unwrap().drops;
+    host.cancel_outgoing_phone("1000", successor.id()).unwrap();
+    assert!(host.stop(40));
+    assert_eq!(result, Ok(()), "authorized exact-call bypass must publish");
+    assert!(bypassed && retired_input && first_live);
+    assert!(stale.is_err() && successor_isolated);
+    assert_eq!(drops, 0, "same ordinary control owner survives both cuts");
+}
+
+/// Inject a failure after the real graph publication, not before its commit.
+pub(crate) fn fail_refresh_after_publication() -> bool {
+    if let Some(callback) = AFTER_REFRESH_PUBLICATION.with_borrow_mut(Option::take) {
+        callback();
+    }
+    FAIL_REFRESH_AFTER_PUBLICATION.replace(false)
+}
+
+/// Inspect the existing prepared policy, not a second test-only policy store.
+pub(crate) fn outgoing_bypassed(host: &mut Host, local: &str, now_ms: u64) -> bool {
+    let active = host
+        .runtime
+        .node(local)
+        .unwrap()
+        .status(now_ms)
+        .active
+        .unwrap();
+    host.runtime
+        .adapter_control_mut(local, active)
+        .unwrap()
+        .phone_policy
+        .is_some_and(|policy| !policy.isolated)
+}
+
+#[test]
+fn outgoing_bypass_preserves_policy_custody_after_published_pump_failure() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = outgoing_host();
+    let state = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let claim = host
+        .reserve_outgoing_phone(
+            rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap(),
+            "1000",
+        )
+        .unwrap();
+    pump_until(&mut host, |host| {
+        host.prepare_outgoing_isolation(&claim, clock()) == Ok(true)
+    });
+    let before = host
+        .runtime
+        .node("1000")
+        .unwrap()
+        .status(clock().now_ms)
+        .active;
+    FAIL_REFRESH_AFTER_PUBLICATION.set(true);
+    let result = host.bypass_outgoing_phone(&claim, clock());
+    let injected = !FAIL_REFRESH_AFTER_PUBLICATION.replace(false);
+    let after = host
+        .runtime
+        .node("1000")
+        .unwrap()
+        .status(clock().now_ms)
+        .active;
+    let committed = outgoing_bypassed(&mut host, "1000", clock().now_ms);
+    if injected {
+        pump_until(&mut host, |host| {
+            host.prepare_outgoing_isolation(&claim, clock()) == Ok(true)
+        });
+        host.refresh("1000", clock()).unwrap();
+    }
+    let retained = outgoing_bypassed(&mut host, "1000", clock().now_ms);
+    let drops = state.lock().unwrap().drops;
+    host.cancel_outgoing_phone("1000", claim.id()).unwrap();
+    assert!(host.stop(40));
+    assert_eq!(result, Err(RuntimeError::Preparation));
+    assert!(
+        injected && before != after && committed && retained,
+        "a post-commit error must not roll the exact claim behind its published graph"
+    );
+    assert_eq!(drops, 0);
+}
+
+#[test]
+fn outgoing_bypass_cancellation_during_publication_cannot_report_success() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = outgoing_host();
+    let state = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let claim = host
+        .reserve_outgoing_phone(
+            rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap(),
+            "1000",
+        )
+        .unwrap();
+    pump_until(&mut host, |host| {
+        host.prepare_outgoing_isolation(&claim, clock()) == Ok(true)
+    });
+    let cancel = Arc::clone(&claim);
+    AFTER_REFRESH_PUBLICATION
+        .with_borrow_mut(|hook| *hook = Some(Box::new(move || cancel.cancel())));
+    let result = host.bypass_outgoing_phone(&claim, clock());
+    let fired = AFTER_REFRESH_PUBLICATION
+        .with_borrow_mut(Option::take)
+        .is_none();
+    host.reconcile_phone_isolation(clock());
+    pump_until(&mut host, |host| {
+        host.runtime
+            .node("1000")
+            .unwrap()
+            .status(clock().now_ms)
+            .retiring
+            .is_none()
+    });
+    let current = claim.current();
+    let drops = state.lock().unwrap().drops;
+    assert!(host.stop(40));
+    assert!(fired && !current);
+    assert_eq!(
+        result,
+        Err(RuntimeError::Rejected),
+        "revoked call cannot complete bypass"
+    );
+    assert_eq!(
+        drops, 0,
+        "cancellation must preserve ordinary transport ownership"
+    );
+}
+
+#[test]
+fn phone_bypass_private_results_are_exact_and_fail_once_without_rf() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for completed in [true, false] {
+        let (mut host, speech) = driven_mailbox_host();
+        let (phone, _state) = crate::link::session::tests::phone_peer();
+        let call = phone.identity().call_id().unwrap();
+        host.incoming_peer(phone, "203.0.113.9", private_clock(&host))
+            .unwrap();
+        let source = host.phone_source(call).unwrap().clone();
+        let reply = host.phone_reply(&source).unwrap();
+        host.authenticate_phone(&source, &reply, "100", "1234", private_clock(&host))
+            .unwrap();
+        while host.take_phone_reply(&source, &reply).unwrap().is_some() {}
+        let mut operation = operation(LinkAction::PhoneBypass, "");
+        operation.reply = Some(reply.clone());
+        let before = speech.opened.lock().unwrap().len();
+        host.phone_bypass_result("1000", &operation, completed, false);
+        if !completed {
+            assert_eq!(
+                speech.opened.lock().unwrap().len(),
+                before,
+                "the inner helper must not duplicate the outer private failure"
+            );
+            assert!(host.take_phone_reply(&source, &reply).unwrap().is_none());
+            host.private_phone_failure(&reply).unwrap();
+        }
+        // Preparation is lazy; the existing helper renders the one exact
+        // private stream, requires success, and rejects a second queued reply.
+        attachment_policy::finish_prompt(&mut host, &source, &reply);
+        assert_eq!(speech.opened.lock().unwrap().len(), before + 1);
+        assert!(!probe_public_phone_media(&mut host, "1000"));
+        assert!(host.retire_phone(&source));
+        let before = speech.opened.lock().unwrap().len();
+        host.phone_bypass_result("1000", &operation, true, false);
+        assert_eq!(
+            speech.opened.lock().unwrap().len(),
+            before,
+            "retired private source cannot become RF or a replacement reply"
+        );
+        assert!(!probe_public_phone_media(&mut host, "1000"));
+        assert!(host.stop(private_clock(&host).now_ms + 1));
+    }
 }

@@ -851,3 +851,111 @@ fn delayed_radio_ringing_cannot_target_a_successor_or_reloaded_generation() {
     );
     assert!(engine.stop());
 }
+
+#[test]
+fn unlocked_phone_bypass_reaches_the_exact_call_through_engine_admission() {
+    use rpt_advanced_core::runtime::dtmf::DigitEvent;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let configuration = active_configuration(&format!(
+        "phone_allow_accounts=provider\nlink_command_phone_bypass=99\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n{}\nprotocol=sip\nattach_local_nodes=1000\n",
+        include_str!("tests/fixtures/phone_account.conf"),
+    ));
+    let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+    let speech = super::phone::speech();
+    let engine = super::phone::engine(configuration, services, Arc::clone(&speech));
+    let clock = engine.clock();
+    let claim = engine
+        .run(move |host| {
+            let claim = host.reserve_outgoing_phone(
+                rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap(),
+                "1000",
+            )?;
+            // This fixture has no autonomous radio callback. The existing finite
+            // probe parks its real owners, then the shared helper adopts the cut.
+            assert!(!crate::host::tests::probe_public_phone_media(host, "1000"));
+            crate::host::tests::phone::refresh_outgoing_test_graph(host, clock)?;
+            let node = host.runtime.node("1000").unwrap();
+            // Existing deterministic Argon2 fixture, using the actual source collector.
+            node.links().configure_admin(
+                include_str!("tests/fixtures/phone_mailbox.conf")
+                    .lines()
+                    .find_map(|line| line.strip_prefix("pin_hash="))
+                    .unwrap(),
+                include_str!("tests/fixtures/phone_mailbox.conf")
+                    .lines()
+                    .find_map(|line| line.strip_prefix("pin_hash="))
+                    .unwrap(),
+                20_000,
+            );
+            Ok(claim)
+        })
+        .unwrap();
+    let now_ms = engine.clock().now_ms;
+    let outcome = engine
+        .run(move |host| {
+            let node = host.runtime.node("1000").unwrap();
+            let links = node.links();
+            let mut outcome = None;
+            for digit in "*8001234#".chars() {
+                let _ = links.digit(DigitEvent::Digit { digit, now_ms: 0 });
+            }
+            for digit in "*99".chars() {
+                if let Some(next) = links.digit(DigitEvent::Digit { digit, now_ms }) {
+                    outcome = Some(next);
+                }
+            }
+            Ok(outcome)
+        })
+        .unwrap()
+        .expect("real unlocked collector must produce bypass");
+    let result = engine.execute_digit("1000".into(), outcome);
+    let now_ms = engine.clock().now_ms;
+    let bypassed = engine
+        .run(move |host| {
+            Ok(crate::host::tests::phone::outgoing_bypassed(
+                host, "1000", now_ms,
+            ))
+        })
+        .unwrap();
+    let live = claim.current();
+    let (renewed, heard) = engine
+        .run(|host| {
+            let renewed = {
+                let node = host.runtime.node("1000").unwrap();
+                let links = node.links();
+                let mut outcome = None;
+                for digit in "*99".chars() {
+                    if let Some(next) = links.digit(DigitEvent::Digit {
+                        digit,
+                        now_ms: 20_001,
+                    }) {
+                        outcome = Some(next);
+                    }
+                }
+                matches!(outcome, Some(DigitOutcome::Operation(_)))
+            };
+            Ok((
+                renewed,
+                crate::host::tests::probe_public_phone_media(host, "1000"),
+            ))
+        })
+        .unwrap();
+    engine.hangup_phone("1000".into(), claim.id()).unwrap();
+    assert!(engine.stop());
+    assert_eq!(result, Ok(()), "typed bypass must reach its exact call");
+    assert!(bypassed && live);
+    assert!(
+        renewed,
+        "successful bypass renews only its original collector grant"
+    );
+    assert!(heard, "human RF bypass receives its finite LOCAL result");
+    let opened = speech.opened.lock().unwrap();
+    assert!(opened.iter().any(|text| text == "Command completed"));
+    assert!(
+        !opened
+            .iter()
+            .any(|text| text == "Requested operation is unavailable")
+    );
+}

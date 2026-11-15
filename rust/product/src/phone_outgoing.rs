@@ -11,6 +11,7 @@ pub(crate) struct OutgoingClaim {
     account: PhoneAccountId,
     local: String,
     current: AtomicBool,
+    bypass: AtomicBool,
 }
 impl OutgoingClaim {
     pub(crate) fn id(&self) -> u64 {
@@ -24,6 +25,13 @@ impl OutgoingClaim {
     }
     pub(crate) fn current(&self) -> bool {
         self.current.load(Ordering::Acquire)
+    }
+    /// Exact-call latch; neither unlock expiry nor another call inherits it.
+    pub(crate) fn bypassed(&self) -> bool {
+        self.bypass.load(Ordering::Acquire)
+    }
+    pub(crate) fn set_bypass(&self, enabled: bool) {
+        self.bypass.store(enabled, Ordering::Release);
     }
     pub(crate) fn cancel(&self) {
         self.current.store(false, Ordering::Release);
@@ -53,6 +61,7 @@ impl PhoneCalls {
             account,
             local: local.to_owned(),
             current: AtomicBool::new(true),
+            bypass: AtomicBool::new(false),
         });
         self.pending_outgoing.push(Arc::clone(&claim));
         Ok(claim)

@@ -170,3 +170,65 @@ fn radio_phone_prefixes_are_explicit_and_preserve_existing_defaults() {
             .is_ok()
     );
 }
+
+#[test]
+fn phone_bypass_configuration_is_optional_and_inherited() {
+    use super::{ConfigDocument, NodeId, ResolvedNodeSettings};
+    let node = NodeId::new("1000").unwrap();
+    let resolve = |text: &str| {
+        ResolvedNodeSettings::resolve(&ConfigDocument::parse(text).unwrap(), &node).unwrap()
+    };
+    let configured =
+        resolve("[general]\nlink_command_phone_bypass=99\nphone_outgoing_playout=all\n[1000]\n");
+    assert!(
+        configured.warnings.is_empty(),
+        "bypass mapping and telephone playout must be recognized"
+    );
+    assert_eq!(
+        configured.value.phone_outgoing_playout,
+        super::PhonePlayout::All
+    );
+    let command = configured.value.command_map().unwrap().parse("99").unwrap();
+    assert_eq!(command.action, crate::command::LinkAction::PhoneBypass);
+    assert_eq!(
+        command.node, "",
+        "bypass takes no destination or credentials"
+    );
+    let defaults = resolve("[1000]\n");
+    assert_eq!(
+        defaults.value.phone_outgoing_playout,
+        super::PhonePlayout::Local
+    );
+    assert_eq!(
+        defaults
+            .value
+            .link_commands
+            .get("link_command_phone_bypass")
+            .map(String::as_str),
+        Some(""),
+        "no shipped bypass key"
+    );
+    for (key, value, fallback) in [
+        ("link_command_phone_bypass", "bad*", "99"),
+        ("phone_outgoing_playout", "everything", "all"),
+    ] {
+        let inherited = resolve(&format!(
+            "[general]\nlink_command_phone_bypass=99\nphone_outgoing_playout=all\n[1000]\n{key}={value}\n",
+        ));
+        assert_eq!(inherited.warnings.len(), 1);
+        assert_eq!(inherited.warnings[0].fallback, fallback);
+        assert_eq!(
+            inherited.value.link_commands["link_command_phone_bypass"],
+            "99"
+        );
+    }
+    let disabled = resolve(
+        "[general]\nlink_command_phone_bypass=99\n[1000]\nlink_command_phone_bypass=\nphone_outgoing_playout=local\n",
+    );
+    assert!(disabled.warnings.is_empty());
+    assert_eq!(
+        disabled.value.phone_outgoing_playout,
+        super::PhonePlayout::Local
+    );
+    assert!(disabled.value.command_map().unwrap().parse("99").is_none());
+}

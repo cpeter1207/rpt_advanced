@@ -2,7 +2,10 @@
 use super::*;
 
 pub(super) fn action(action: LinkAction) -> bool {
-    matches!(action, LinkAction::PhoneDial | LinkAction::PhoneHangup)
+    matches!(
+        action,
+        LinkAction::PhoneDial | LinkAction::PhoneHangup | LinkAction::PhoneBypass
+    )
 }
 
 impl Engine {
@@ -33,6 +36,32 @@ impl Engine {
             }
             // Only actual RF dispatch, never every reply=None request.
             let report = dtmf_source && source.local_operation_result();
+            if source.operation().command.action == LinkAction::PhoneBypass {
+                let operation = source.operation().clone();
+                let claim = match host.phone_bypass_claim(&local) {
+                    Ok(claim) => claim,
+                    Err(error) => {
+                        if owner.current(revision) && source.current(owner.clock().now_ms) {
+                            host.phone_bypass_result(&local, &operation, false, report);
+                        }
+                        return Err(error);
+                    }
+                };
+                // Consume old graph custody only after exact claim capture. The
+                // full policy cut must not authorize a replacement source.
+                let source = source
+                    .admit(owner.clock().now_ms)
+                    .map_err(|_| RuntimeError::Rejected)?;
+                let result = host.bypass_outgoing_phone(&claim, owner.clock());
+                let now_ms = owner.clock().now_ms;
+                if owner.current(revision) && source.current(now_ms) {
+                    if result.is_ok() {
+                        host.runtime.complete_phone_bypass(&local, &source, now_ms);
+                    }
+                    host.phone_bypass_result(&local, &operation, result.is_ok(), report);
+                }
+                return result.map(|()| None);
+            }
             let admitted = if source.operation().command.action == LinkAction::PhoneDial {
                 if available {
                     host.prepare_radio_phone(&local, &source.operation().command.node)

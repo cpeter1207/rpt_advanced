@@ -365,6 +365,8 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_command_remote_base"
                 | "link_command_phone_dial"
                 | "link_command_phone_hangup"
+                | "link_command_phone_bypass"
+                | "phone_outgoing_playout"
                 | "phone_outgoing_account"
         ),
         KnownScope::Identifier => {
@@ -614,6 +616,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         "group_name" => !value.trim().is_empty() && value.len() <= 63,
         "link_allow_nodes" | "link_deny_nodes" => AccessPolicy::list_valid(value),
         "link_lookup_method" => matches!(value, "both" | "dns" | "file"),
+        "phone_outgoing_playout" => matches!(value, "local" | "all"),
         "phone_outgoing_account" => {
             value.is_empty() || crate::link::PhoneAccountId::new(value).is_ok()
         }
@@ -699,6 +702,7 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::General | ScopeKind::Node, "squelch_delay_ms") => "0",
         (ScopeKind::General | ScopeKind::Node, "status_snapshot_interval_ms") => "50",
         (ScopeKind::General | ScopeKind::Node, "link_lookup_method") => "both",
+        (ScopeKind::General | ScopeKind::Node, "phone_outgoing_playout") => "local",
         (ScopeKind::General | ScopeKind::Node, "statpost_time") => "60",
         (ScopeKind::General | ScopeKind::Node, "statpost_url") => "",
         (ScopeKind::General | ScopeKind::Node, "iax_registration_url") => {
@@ -769,7 +773,7 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_cancel_message" => "78",
         "link_command_echo_telemetry" => "",
         "link_command_remote_base" => "",
-        "link_command_phone_dial" | "link_command_phone_hangup" => "",
+        "link_command_phone_dial" | "link_command_phone_hangup" | "link_command_phone_bypass" => "",
         _ => return None,
     })
 }

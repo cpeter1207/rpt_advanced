@@ -690,94 +690,100 @@ fn outgoing_idle_pcm_uses_existing_route_without_rf_telemetry_or_retired_recipie
 
 #[test]
 fn outgoing_isolation_suppresses_only_ordinary_media_in_both_directions() {
-    for isolated in [false, true] {
-        for (ordinary, callee, local) in [
-            (true, false, false),
-            (true, false, true),
-            (false, true, false),
-        ] {
-            let source = source(7, 9, 13);
-            let owner = PeerSignals::for_outgoing_phone(source.clone());
-            let reply = owner.reply_target();
-            let mut peers = Vec::new();
-            let mut outputs = Vec::new();
-            for phone in [false, true] {
-                let mut input = input(reply.clone());
-                input.public = !phone;
-                input.policy = if phone {
-                    ReceivePolicy::Phone
-                } else {
-                    ReceivePolicy::Peer
-                };
-                input.quiet = !(if phone { callee } else { ordinary });
-                input.signals.set_radio_keyed(!input.quiet);
-                let (writer, reader) = LinkAudioQueue::new(16, 4).unwrap().into_endpoints();
-                outputs.push(reader);
-                peers.push(if phone {
-                    AudioPeer::for_phone(&source, &reply, Mode::TRANSCEIVE, input, writer, 4)
+    for (phone_mode, forwards) in [(Mode::TRANSCEIVE, true), (Mode::LOCAL_TRANSCEIVE, false)] {
+        for isolated in [false, true] {
+            for (ordinary, callee, local) in [
+                (true, false, false),
+                (true, false, true),
+                (false, true, false),
+            ] {
+                let source = source(7, 9, 13);
+                let owner = PeerSignals::for_outgoing_phone(source.clone());
+                let reply = owner.reply_target();
+                let mut peers = Vec::new();
+                let mut outputs = Vec::new();
+                for phone in [false, true] {
+                    let mut input = input(reply.clone());
+                    input.public = !phone;
+                    input.policy = if phone {
+                        ReceivePolicy::Phone
+                    } else {
+                        ReceivePolicy::Peer
+                    };
+                    input.quiet = !(if phone { callee } else { ordinary });
+                    input.signals.set_radio_keyed(!input.quiet);
+                    let (writer, reader) = LinkAudioQueue::new(16, 4).unwrap().into_endpoints();
+                    outputs.push(reader);
+                    peers.push(if phone {
+                        AudioPeer::for_phone(&source, &reply, phone_mode, input, writer, 4).unwrap()
+                    } else {
+                        AudioPeer::new(
+                            PeerIdentity::from_operator("2000").unwrap(),
+                            Mode::TRANSCEIVE,
+                            input,
+                            writer,
+                            4,
+                            0,
+                        )
                         .unwrap()
-                } else {
-                    AudioPeer::new(
-                        PeerIdentity::from_operator("2000").unwrap(),
-                        Mode::TRANSCEIVE,
-                        input,
-                        writer,
-                        4,
-                        0,
-                    )
-                    .unwrap()
-                });
-            }
-            let (links, mut dispatcher) = LinkAudio::new(peers, 4).unwrap();
-            let mut links = links.with_peer_isolation(isolated);
-            let (mut controller, _) = NodeController::new(
-                ControllerSettings::default(),
-                vec![],
-                vec![],
-                CourtesySettings::default(),
-            )
-            .unwrap();
-            let mut rf = [if local { 0.5 } else { 0.0 }; 4];
-            let keyed = links
-                .process(&mut controller, local, &mut rf, SourcePosition::default())
+                    });
+                }
+                let (links, mut dispatcher) = LinkAudio::new(peers, 4).unwrap();
+                let mut links = links.with_peer_isolation(isolated);
+                let (mut controller, _) = NodeController::new(
+                    ControllerSettings::default(),
+                    vec![],
+                    vec![],
+                    CourtesySettings::default(),
+                )
                 .unwrap();
-            if ordinary && !callee && !local && isolated {
-                assert!(!keyed, "isolated peer must not key RF");
-                assert_eq!(rf, [0.0; 4], "ordinary ingress cannot reach RF");
+                let mut rf = [if local { 0.5 } else { 0.0 }; 4];
+                let keyed = links
+                    .process(&mut controller, local, &mut rf, SourcePosition::default())
+                    .unwrap();
+                if ordinary && !callee && !local && isolated {
+                    assert!(!keyed, "isolated peer must not key RF");
+                    assert_eq!(rf, [0.0; 4], "ordinary ingress cannot reach RF");
+                }
+                if callee {
+                    assert!(keyed);
+                    assert_eq!(rf, [0.25; 4], "callee retains local RF playout");
+                }
+                dispatcher.dispatch(1);
+                let mut sent = [9.0; 4];
+                let ordinary_read = outputs[0].read_span(&mut sent);
+                if isolated {
+                    assert!(ordinary_read.is_none(), "ordinary egress is isolated");
+                } else if local || (callee && forwards) {
+                    assert!(ordinary_read.is_some(), "normal mix-minus is unchanged");
+                    assert_eq!(sent, [if local { 0.5 } else { 0.25 }; 4]);
+                } else if callee {
+                    assert!(
+                        ordinary_read.is_none(),
+                        "local-only telephone playout cannot reach ordinary peers"
+                    );
+                }
+                assert!(
+                    outputs[1].read_span(&mut sent).is_some(),
+                    "outgoing call keeps its clocked route"
+                );
+                assert_eq!(
+                    sent,
+                    [(if local { 0.5 } else { 0.0 })
+                        + (if ordinary && !isolated { 0.25 } else { 0.0 }); 4],
+                    "phone hears local input but no isolated peer or self echo"
+                );
+                assert!(
+                    !links.peers[0].input.signals.ended(),
+                    "control/transport stays live"
+                );
+                assert_eq!(
+                    links.peers[0].input.signals.radio_keyed(),
+                    ordinary,
+                    "media policy does not falsify the transport control signal"
+                );
+                assert!(!reply.ended());
             }
-            if callee {
-                assert!(keyed);
-                assert_eq!(rf, [0.25; 4], "callee retains local RF playout");
-            }
-            dispatcher.dispatch(1);
-            let mut sent = [9.0; 4];
-            let ordinary_read = outputs[0].read_span(&mut sent);
-            if isolated {
-                assert!(ordinary_read.is_none(), "ordinary egress is isolated");
-            } else if local || callee {
-                assert!(ordinary_read.is_some(), "normal mix-minus is unchanged");
-                assert_eq!(sent, [if local { 0.5 } else { 0.25 }; 4]);
-            }
-            assert!(
-                outputs[1].read_span(&mut sent).is_some(),
-                "outgoing call keeps its clocked route"
-            );
-            assert_eq!(
-                sent,
-                [(if local { 0.5 } else { 0.0 }) + (if ordinary && !isolated { 0.25 } else { 0.0 });
-                    4],
-                "phone hears local input but no isolated peer or self echo"
-            );
-            assert!(
-                !links.peers[0].input.signals.ended(),
-                "control/transport stays live"
-            );
-            assert_eq!(
-                links.peers[0].input.signals.radio_keyed(),
-                ordinary,
-                "media policy does not falsify the transport control signal"
-            );
-            assert!(!reply.ended());
         }
     }
 }

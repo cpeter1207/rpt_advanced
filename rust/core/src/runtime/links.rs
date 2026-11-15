@@ -175,6 +175,10 @@ pub struct AdmittedPhoneSource {
     operation: DigitOperation,
 }
 impl AdmittedPhoneSource {
+    /// Borrow the original source for exact-collector confirmation only.
+    pub(crate) fn operation(&self) -> &DigitOperation {
+        &self.operation
+    }
     /// Recheck the original source lifetime, macro cancellation and deadline.
     pub fn current(&self, now_ms: u64) -> bool {
         pending_source_current(Some(&self.operation), Some(now_ms))
@@ -1165,7 +1169,17 @@ impl NodeLinkControl {
             | LinkAction::Time) => LinkEffect::Telemetry(action, operation.reply),
             action @ (LinkAction::ParrotEnable
             | LinkAction::ParrotDisable
-            | LinkAction::EchoTelemetry) => {
+            | LinkAction::EchoTelemetry
+            | LinkAction::PhoneBypass) => {
+                if action == LinkAction::PhoneBypass {
+                    if operation.reply.is_none() && operation.origin.is_some() {
+                        return Err(AdmissionError::Denied);
+                    }
+                    if !remote.is_empty() || operation.digit.is_some() || operation.remote.is_some()
+                    {
+                        return Err(AdmissionError::Invalid);
+                    }
+                }
                 let commands = if let Some(reply) = &operation.reply {
                     self.peer_commands
                         .iter_mut()
@@ -1182,7 +1196,9 @@ impl NodeLinkControl {
                 }) {
                     return Err(AdmissionError::Denied);
                 }
-                if action == LinkAction::EchoTelemetry {
+                if action == LinkAction::PhoneBypass {
+                    LinkEffect::Phone(PhoneCommand { operation, work })
+                } else if action == LinkAction::EchoTelemetry {
                     use crate::config::EchoLinkTelemetry as Mode;
                     LinkEffect::EchoTelemetry(match remote.as_str() {
                         "0" => Mode::Off,

@@ -40,7 +40,7 @@ pub use phone_accounts::{PhoneAccountProtocol, PhoneAccountSettings, resolve_pho
 pub use phone_mailboxes::{PhoneMailbox, resolve_phone_mailboxes};
 pub use schema::Schema;
 pub use settings::{
-    LinkLookupMethod, NodeId, ResolvedAnnouncementSettings, ResolvedCourtesySettings,
+    LinkLookupMethod, NodeId, PhonePlayout, ResolvedAnnouncementSettings, ResolvedCourtesySettings,
     ResolvedDtmfRegenerationSettings, ResolvedEventSettings, ResolvedIdentifierSettings,
     ResolvedMacroSettings, ResolvedMorseSettings, ResolvedNodeSettings,
     ResolvedPermanentLinkSettings, ResolvedRadioSettings, ResolvedScheduleSettings,

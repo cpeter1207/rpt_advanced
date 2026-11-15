@@ -34,7 +34,11 @@ impl Host {
             .runtime
             .adapter_control_mut(local, status.active.ok_or(RuntimeError::Rejected)?)
             .ok_or(RuntimeError::Rejected)?;
-        let started = control.isolated_call == Some(claim.id());
+        let desired = PhonePolicy::for_claim(claim);
+        let started = control
+            .phone_policy
+            .is_some_and(|policy| policy.call_id == claim.id());
+        let prepared = control.phone_policy == Some(desired);
         if started && control.isolation_failed {
             return Err(RuntimeError::Preparation);
         }
@@ -47,7 +51,7 @@ impl Host {
         {
             return Ok(true);
         }
-        if !started {
+        if !prepared {
             match self.refresh(local, clock) {
                 Ok(()) => {}
                 Err(RuntimeError::Busy) => return Ok(false),
@@ -67,7 +71,7 @@ impl Host {
             return Err(RuntimeError::Preparation);
         }
         Ok(claim.current()
-            && control.isolated_call == Some(claim.id())
+            && control.phone_policy == Some(desired)
             && status.retiring.is_none()
             && control.redirects_complete())
     }
@@ -85,7 +89,7 @@ impl Host {
             let isolated = status
                 .active
                 .and_then(|active| self.runtime.adapter_control_mut(&local, active))
-                .is_some_and(|control| control.isolated_call.is_some());
+                .is_some_and(|control| control.phone_policy.is_some());
             if isolated {
                 match self.refresh(&local, clock) {
                     Ok(()) | Err(RuntimeError::Busy) => {}
@@ -243,6 +247,122 @@ impl Host {
         {
             self.services
                 .scheduler_notice("radio phone result preparation failed");
+        }
+    }
+}
+
+impl Host {
+    /// Capture the exact current call in the same turn as source authorization.
+    pub(crate) fn phone_bypass_claim(
+        &self,
+        local: &str,
+    ) -> Result<Arc<OutgoingClaim>, RuntimeError> {
+        self.phone_calls
+            .outgoing_claim(local)
+            .cloned()
+            .ok_or(RuntimeError::Rejected)
+    }
+
+    /// Latch only the captured call after validating its current cut custody.
+    pub(crate) fn bypass_outgoing_phone(
+        &mut self,
+        claim: &Arc<OutgoingClaim>,
+        clock: RuntimeClock,
+    ) -> Result<(), RuntimeError> {
+        if !self
+            .phone_calls
+            .outgoing_claim(claim.local())
+            .is_some_and(|current| Arc::ptr_eq(current, claim))
+        {
+            return Err(RuntimeError::Rejected);
+        }
+        if self.runtime.reload_pending() {
+            return Err(RuntimeError::Busy);
+        }
+        let local = claim.local();
+        let status = self
+            .runtime
+            .node(local)
+            .ok_or(RuntimeError::MissingNode)?
+            .status(clock.now_ms);
+        let control = self
+            .runtime
+            .adapter_control_mut(local, status.active.ok_or(RuntimeError::Rejected)?)
+            .ok_or(RuntimeError::Rejected)?;
+        let started = control
+            .phone_policy
+            .is_some_and(|policy| policy.call_id == claim.id());
+        if started && control.isolation_failed {
+            return Err(RuntimeError::Preparation);
+        }
+        // Inspect only: no pump/wait may separate source admission from this
+        // mutation. The existing dial/pump completes unresolved cuts separately.
+        if status.retiring.is_some()
+            || (started && !control.redirects_complete())
+            || (!started
+                && (!control.text_origins.is_empty()
+                    || self.peers.iter().any(|peer| peer.local == local)))
+        {
+            return Err(RuntimeError::Busy);
+        }
+        if claim.bypassed() {
+            return (control.phone_policy == Some(PhonePolicy::for_claim(claim)))
+                .then_some(())
+                .ok_or(RuntimeError::Busy);
+        }
+        claim.set_bypass(true);
+        let desired = PhonePolicy::for_claim(claim);
+        let result = self.refresh(local, clock);
+        if result.is_err() {
+            let committed = self
+                .runtime
+                .node(local)
+                .and_then(|node| node.status(clock.now_ms).active)
+                .and_then(|active| self.runtime.adapter_control_mut(local, active))
+                .is_some_and(|control| control.phone_policy == Some(desired));
+            if !committed {
+                claim.set_bypass(false);
+            }
+        }
+        // Publication may pump a cancellation after the exact graph commits.
+        // Keep its policy custody, but never acknowledge a revoked call.
+        result.and_then(|()| claim.current().then_some(()).ok_or(RuntimeError::Rejected))
+    }
+}
+
+impl Host {
+    /// Keep solicited bypass outcomes on the original source, never its successor.
+    /// Private errors are already delivered once by the outer command boundary.
+    pub(crate) fn phone_bypass_result(
+        &mut self,
+        local: &str,
+        operation: &rpt_advanced_core::runtime::dtmf::DigitOperation,
+        completed: bool,
+        radio_result: bool,
+    ) {
+        use rpt_advanced_core::messages::OperationResult;
+        let outcome = if completed {
+            OperationResult::Completed
+        } else {
+            OperationResult::Unavailable
+        };
+        let delivery = match operation.reply.as_ref() {
+            Some(reply) if reply.ended() => return,
+            Some(reply) if reply.phone_source().is_some() => {
+                if !completed {
+                    return;
+                }
+                self.node_operation_result(local, Some(reply), outcome)
+            }
+            Some(reply) => self
+                .runtime
+                .queue_peer_operation_result(local, reply.clone(), outcome),
+            None if radio_result => self.node_operation_result(local, None, outcome),
+            None => return,
+        };
+        if delivery.is_err() {
+            self.services
+                .scheduler_notice("phone bypass result preparation failed");
         }
     }
 }

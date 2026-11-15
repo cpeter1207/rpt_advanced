@@ -665,7 +665,7 @@ fn retained_candidate(host: &mut Host) -> PreparedAdapter<Audio, GenerationContr
                 calls: &mut host.phone_calls,
                 clock_epoch: host.peer_io.source_clock_epoch(),
                 retain_ordinary: true,
-                isolation: None,
+                policy: None,
                 isolation_transition: false,
             }),
             media_worker(&mut host.media_workers, "1000").unwrap(),

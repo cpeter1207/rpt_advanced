@@ -22,6 +22,16 @@ pub enum LinkLookupMethod {
     File,
 }
 
+/// Outgoing telephone source playout after ordinary mode and isolation policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PhonePlayout {
+    /// Play telephone audio on the initiating local radio only.
+    #[default]
+    Local,
+    /// Also forward telephone audio to otherwise eligible ordinary peers.
+    All,
+}
+
 /// Local-transmitter DTMF regeneration after general and node-scoped inheritance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolvedDtmfRegenerationSettings {
@@ -109,6 +119,8 @@ pub struct ResolvedNodeSettings {
     pub link_commands: BTreeMap<String, String>,
     /// Explicit inherited account for radio-origin telephone calls; absent leaves dialing unavailable.
     pub phone_outgoing_account: Option<crate::link::PhoneAccountId>,
+    /// Outgoing telephone source audience; incoming attached callers keep their policy.
+    pub phone_outgoing_playout: PhonePlayout,
     /// Optional PHC-encoded Argon2id digest required to unlock DTMF administration.
     pub dtmf_admin_unlock_hash: String,
     /// Optional PHC-encoded Argon2id digest required to lock DTMF administration.
@@ -1387,6 +1399,20 @@ impl ResolvedNodeSettings {
         }) {
             value.phone_outgoing_account = account;
         }
+        if let Some(playout) =
+            lookup_valid(
+                document,
+                "phone_outgoing_playout",
+                &scopes,
+                |raw| match raw {
+                    "local" => Some(PhonePlayout::Local),
+                    "all" => Some(PhonePlayout::All),
+                    _ => None,
+                },
+            )
+        {
+            value.phone_outgoing_playout = playout;
+        }
         for key in command_keys()
             .into_iter()
             .filter(|key| key.starts_with("link_command_"))
@@ -1452,6 +1478,7 @@ impl ResolvedNodeSettings {
                 .map(|key| (key.to_owned(), default_command(key)))
                 .collect(),
             phone_outgoing_account: None,
+            phone_outgoing_playout: PhonePlayout::Local,
             dtmf_admin_unlock_hash: String::new(),
             dtmf_admin_lock_hash: String::new(),
             dtmf_admin_timeout_ms: 300_000,
@@ -1509,6 +1536,7 @@ pub(super) fn command_keys() -> [&'static str; crate::command::ACTION_COUNT] {
         "link_command_remote_base",
         "link_command_phone_dial",
         "link_command_phone_hangup",
+        "link_command_phone_bypass",
     ]
 }
 
@@ -1579,6 +1607,7 @@ pub(super) fn command_action(key: &str) -> Option<LinkAction> {
         "link_command_remote_base" => LinkAction::RemoteBase,
         "link_command_phone_dial" => LinkAction::PhoneDial,
         "link_command_phone_hangup" => LinkAction::PhoneHangup,
+        "link_command_phone_bypass" => LinkAction::PhoneBypass,
         _ => return None,
     })
 }

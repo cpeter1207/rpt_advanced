@@ -952,7 +952,10 @@ impl DtmfCommands {
                 }
                 return None;
             }
-            LinkAction::ParrotEnable | LinkAction::ParrotDisable | LinkAction::EchoTelemetry => {
+            LinkAction::ParrotEnable
+            | LinkAction::ParrotDisable
+            | LinkAction::EchoTelemetry
+            | LinkAction::PhoneBypass => {
                 if self.admin_until_ms == 0 {
                     return None;
                 }
