@@ -149,3 +149,30 @@ Default linked-peer isolation is still a separate qualified leaf; optional
 bypass must not delay the initial IVR/default-isolation union. That union should
 add the known 1 kHz RF-return assertion after IVR to directly prove the finite
 private fallback yields back to normal programme media. No node was changed.
+
+
+## Default-isolation union composition checkpoint
+
+The qualified IVR leaf is combined with only the default-isolation chain
+`29bb1aa` / `1918284` / `dc02689`. No optional bypass or codec expansion is
+included. Production overlaps preserve the exact admitted-source, cut/ACK,
+original-grant and source-only-result boundaries.
+
+All four IVR codec/delivery compositions passed with an added known 1 kHz RF
+return after IVR. The existing retained-ordinary-link case now also sends real
+RF telephone-event IVR while that same peer remains connected and pumped. It
+rejects any peer digit event and nonzero peer PCM, proves programme resumes
+after private digit playback, and restores ordinary two-way media after exact
+hangup. This case passed in 72.56 seconds; the other six outgoing baseline
+cases passed in 38.32, 47.40, 38.34, 46.41, 70.45 and 70.43 seconds. Every outer
+case retained its 90-second watchdog.
+
+The first linked-IVR attempt exposed a fixture setup omission: it used the
+zero-delay branch rather than the qualified IVR receive reserve. Only the
+configuration-selection predicate was corrected; no detector guarantee,
+privacy assertion, clip or timeout was weakened. The strict preflight then
+identified one redundant final test-helper reborrow, corrected without a
+warning exemption. Source review, fmt and six-package all-target Clippy pass.
+Full union suites and final host/static qualification are still in progress.
+Evidence is `.work/union-ivr-wire.log`, `.work/union-seven-wire2.log` and the
+preflight portion of `.work/union-full-strict3.log`. No node was changed.
