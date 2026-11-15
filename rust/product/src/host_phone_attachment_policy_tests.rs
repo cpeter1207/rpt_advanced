@@ -661,11 +661,13 @@ fn retained_candidate(host: &mut Host) -> PreparedAdapter<Audio, GenerationContr
             "1000",
             &settings,
             &host.peers,
-            Some((
-                &mut host.phone_calls,
-                host.peer_io.source_clock_epoch(),
-                true,
-            )),
+            Some(PhonePreparation {
+                calls: &mut host.phone_calls,
+                clock_epoch: host.peer_io.source_clock_epoch(),
+                retain_ordinary: true,
+                isolation: None,
+                isolation_transition: false,
+            }),
             media_worker(&mut host.media_workers, "1000").unwrap(),
             &mut host.text,
             host.services,

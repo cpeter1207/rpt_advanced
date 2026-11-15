@@ -7,13 +7,97 @@ use rpt_advanced_core::{
 };
 
 impl Host {
-    /// The exact outgoing intent temporarily owns ordinary publication/retry admission.
-    pub(crate) fn outgoing_phone_reserved(&self, local: &str) -> bool {
-        self.phone_calls.outgoing_reserved(local)
+    /// Prepare the existing graph cut and acknowledge exact serial owners before dialing.
+    pub(crate) fn prepare_outgoing_isolation(
+        &mut self,
+        claim: &Arc<OutgoingClaim>,
+        clock: RuntimeClock,
+    ) -> Result<bool, RuntimeError> {
+        if !self
+            .phone_calls
+            .outgoing_claim(claim.local())
+            .is_some_and(|current| Arc::ptr_eq(current, claim))
+        {
+            return Err(RuntimeError::Rejected);
+        }
+        if self.runtime.reload_pending() {
+            return Ok(false);
+        }
+        self.pump(clock)?;
+        let local = claim.local();
+        let status = self
+            .runtime
+            .node(local)
+            .ok_or(RuntimeError::MissingNode)?
+            .status(clock.now_ms);
+        let control = self
+            .runtime
+            .adapter_control_mut(local, status.active.ok_or(RuntimeError::Rejected)?)
+            .ok_or(RuntimeError::Rejected)?;
+        let started = control.isolated_call == Some(claim.id());
+        if started && control.isolation_failed {
+            return Err(RuntimeError::Preparation);
+        }
+        // Only a never-started cut without retained ordinary graph history is
+        // vacuous. A required owner disappearing cannot satisfy its prior ACK.
+        if !started
+            && control.text_origins.is_empty()
+            && status.retiring.is_none()
+            && !self.peers.iter().any(|peer| peer.local == local)
+        {
+            return Ok(true);
+        }
+        if !started {
+            match self.refresh(local, clock) {
+                Ok(()) => {}
+                Err(RuntimeError::Busy) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        let status = self
+            .runtime
+            .node(local)
+            .ok_or(RuntimeError::MissingNode)?
+            .status(clock.now_ms);
+        let control = self
+            .runtime
+            .adapter_control_mut(local, status.active.ok_or(RuntimeError::Rejected)?)
+            .ok_or(RuntimeError::Rejected)?;
+        if control.isolation_failed {
+            return Err(RuntimeError::Preparation);
+        }
+        Ok(claim.current()
+            && control.isolated_call == Some(claim.id())
+            && status.retiring.is_none()
+            && control.redirects_complete())
     }
 
-    /// First milestone requires a peer-free initiating node for the exact call.
-    /// Inspect retained owners too; a closing transport is not an empty node.
+    /// Restore released policy on ordinary Engine control, never recursive pump
+    /// or pending reload. Busy retains isolation for the next existing pump.
+    pub(crate) fn reconcile_phone_isolation(&mut self, clock: RuntimeClock) {
+        if self.runtime.reload_pending() {
+            return;
+        }
+        for (local, status) in self.runtime.status(clock.now_ms) {
+            if self.phone_calls.outgoing_claim(&local).is_some() {
+                continue;
+            }
+            let isolated = status
+                .active
+                .and_then(|active| self.runtime.adapter_control_mut(&local, active))
+                .is_some_and(|control| control.isolated_call.is_some());
+            if isolated {
+                match self.refresh(&local, clock) {
+                    Ok(()) | Err(RuntimeError::Busy) => {}
+                    Err(_) => self
+                        .services
+                        .scheduler_notice("phone isolation: media restore failed"),
+                }
+            }
+        }
+    }
+
+    /// Reserve an exact call without disconnecting ordinary control transports.
     pub(crate) fn reserve_outgoing_phone(
         &mut self,
         account: PhoneAccountId,
@@ -22,11 +106,10 @@ impl Host {
         self.runtime
             .settings(local)
             .ok_or(RuntimeError::MissingNode)?;
-        if self.peers.iter().any(|peer| peer.local == local)
-            || !self
-                .runtime
-                .document()
-                .phone_local_attachment_allowed(&account, local)
+        if !self
+            .runtime
+            .document()
+            .phone_local_attachment_allowed(&account, local)
             || !PhoneAccountSettings::resolve(self.runtime.document(), &account)
                 .value
                 .is_some_and(|settings| {
@@ -51,7 +134,6 @@ impl Host {
     ) -> Result<PhoneSource, RuntimeError> {
         let local = claim.local();
         if !claim.current()
-            || self.peers.iter().any(|peer| peer.local == local)
             || self.runtime.settings(local).is_none()
             || !self
                 .runtime

@@ -179,7 +179,7 @@ fn outgoing_engine_reserves_before_factory_and_cancels_only_the_exact_call() {
 }
 
 #[test]
-fn outgoing_claim_pauses_retry_admission_without_erasing_permanent_intent() {
+fn outgoing_isolation_keeps_permanent_retry_control_available() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -202,8 +202,8 @@ fn outgoing_claim_pauses_retry_admission_without_erasing_permanent_intent() {
     due.now_ms = 60_000;
     engine.pump(due, true).unwrap();
     assert!(
-        engine.jobs.lock().unwrap().is_empty(),
-        "reserved node must not dispatch an ordinary retry during its outgoing call"
+        !engine.jobs.lock().unwrap().is_empty(),
+        "isolation must preserve ordinary retry/control admission"
     );
     assert!(
         engine
@@ -211,11 +211,10 @@ fn outgoing_claim_pauses_retry_admission_without_erasing_permanent_intent() {
             .unwrap()
     );
     engine.hangup_phone("1000".into(), claim.id()).unwrap();
-    engine.pump(due, true).unwrap();
     assert_eq!(
         engine.jobs.lock().unwrap().len(),
         1,
-        "ending the exact call must make retained ordinary retry intent eligible again"
+        "ending the call cannot erase or duplicate its ordinary retry owner"
     );
     assert!(engine.stop());
 }
@@ -390,7 +389,7 @@ fn radio_phone_actions_use_the_existing_pending_call_and_exact_cancel() {
     );
     assert!(
         engine
-            .run(|host| Ok(host.outgoing_phone_reserved("1000")))
+            .run(|host| Ok(crate::host::tests::phone::outgoing_reserved(host, "1000")))
             .unwrap()
     );
     assert!(
@@ -410,7 +409,7 @@ fn radio_phone_actions_use_the_existing_pending_call_and_exact_cancel() {
     }
     assert!(
         !engine
-            .run(|host| Ok(host.outgoing_phone_reserved("1000")))
+            .run(|host| Ok(crate::host::tests::phone::outgoing_reserved(host, "1000")))
             .unwrap()
     );
     assert!(engine.execute_digit("1000".into(), command("0")).is_err());
@@ -633,7 +632,7 @@ fn radio_phone_acknowledgment_precedes_factory_and_answer_never_repeats_it() {
             assert!(voice.opened.lock().unwrap().is_empty(), "{mode}");
             assert!(
                 !engine
-                    .run(|host| Ok(host.outgoing_phone_reserved("1000")))
+                    .run(|host| Ok(crate::host::tests::phone::outgoing_reserved(host, "1000")))
                     .unwrap(),
                 "{mode}"
             );
@@ -688,7 +687,7 @@ fn radio_phone_acknowledgment_precedes_factory_and_answer_never_repeats_it() {
         if mode == "revision" {
             assert!(
                 engine
-                    .run(|host| Ok(host.outgoing_phone_reserved("1000")))
+                    .run(|host| Ok(crate::host::tests::phone::outgoing_reserved(host, "1000")))
                     .unwrap()
             );
             engine.revision.fetch_add(1, Ordering::AcqRel);
@@ -742,7 +741,7 @@ fn radio_phone_acknowledgment_precedes_factory_and_answer_never_repeats_it() {
         if mode == "revision" {
             assert!(
                 !engine
-                    .run(|host| Ok(host.outgoing_phone_reserved("1000")))
+                    .run(|host| Ok(crate::host::tests::phone::outgoing_reserved(host, "1000")))
                     .unwrap(),
                 "revision alone retires the old pending call"
             );

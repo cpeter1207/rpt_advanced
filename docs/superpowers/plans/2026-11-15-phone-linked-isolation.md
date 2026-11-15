@@ -36,11 +36,11 @@
 ### Task 2: Publish default shared-graph isolation
 **Files:** core link/audio.rs and audio_tests.rs; product host.rs, host_phone_outgoing.rs, host_phone_worker.rs, phone_outgoing.rs and adjacent host/lifecycle tests.
 **Interface:** LinkAudio::with_peer_isolation(bool) sets prepared ordinary-media policy. GenerationControl records exact isolated claim ID. Host::prepare_outgoing_isolation(&Arc<OutgoingClaim>, RuntimeClock) returns readiness only for that current policy after exact endpoint ACKs/retirement. Ordinary Engine reconciliation restores released policy through the same graph boundary.
-- [ ] Add shared-mixer input/output/control cases and retained-peer reservation/publication REDs.
-- [ ] Suppress ordinary input activity/mix and ordinary media destinations while retaining transport owners, source processing and control.
-- [ ] Replace existing rings/queues at acquisition/release, wait existing redirect ACK before dial, and allow new/retry peer publication under current policy.
-- [ ] Prove Busy/preparation failure, delayed ACK, buffered revocation, failure/hangup restoration and successor identity with existing fixtures.
-- [ ] Run targeted tests, independent review and a clean recovery commit.
+- [x] Add shared-mixer input/output/control cases and retained-peer reservation/publication REDs.
+- [x] Suppress ordinary input activity/mix and ordinary media destinations while retaining transport owners, source processing and control.
+- [x] Replace existing rings/queues at acquisition/release, wait existing redirect ACK before dial, and allow new/retry peer publication under current policy.
+- [x] Prove Busy/preparation failure, delayed ACK, buffered revocation, failure/hangup restoration and successor identity with existing fixtures.
+- [x] Run targeted tests, independent review and a clean recovery commit.
 
 ### Task 3: Qualify single-call checkpoint
 **Files:** existing standalone composed fixture and ADR0044 append.

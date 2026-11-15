@@ -219,6 +219,35 @@ impl Engine {
                         .as_ref()
                         .is_none_or(|source| source.current(engine.clock().now_ms))
             };
+            let isolated = loop {
+                if !current() {
+                    break false;
+                }
+                let owner = Arc::clone(&engine);
+                let claim = Arc::clone(&pending);
+                let source = source.clone();
+                match engine.run_inner(true, move |host| {
+                    let clock = owner.clock();
+                    if !owner.current(revision)
+                        || !claim.current()
+                        || source
+                            .as_ref()
+                            .is_some_and(|source| !source.current(clock.now_ms))
+                    {
+                        return Err(RuntimeError::Rejected);
+                    }
+                    host.prepare_outgoing_isolation(&claim, clock)
+                }) {
+                    Ok(true) => break true,
+                    Ok(false) | Err(RuntimeError::Busy) => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break false,
+                }
+            };
+            if !isolated && let Some(completion) = &acknowledgment {
+                completion.cancel();
+            }
             // Wait on the existing dial worker, never the serialized or audio owner.
             // Queue admission alone does not mean the finite acknowledgment played.
             let acknowledged = acknowledgment.as_ref().is_none_or(|completion| {
@@ -234,7 +263,7 @@ impl Engine {
             });
             let mut ringback: Option<rpt_advanced_core::controller::PlaybackCompletion> = None;
             let mut ringback_failed = false;
-            let io = if acknowledged && current() {
+            let io = if isolated && acknowledged && current() {
                 if report {
                     engine
                         .services
@@ -926,6 +955,7 @@ impl Engine {
             if schedule {
                 host.runtime.tick_links(clock);
             }
+            host.reconcile_phone_isolation(clock);
             host.reconcile_private_collections(clock);
             Ok((host.take_operations(), host.take_site_links()))
         })?;
@@ -969,9 +999,6 @@ impl Engine {
                     .map(str::to_owned)
                     .collect::<Vec<_>>()
                 {
-                    if host.outgoing_phone_reserved(&local) {
-                        continue;
-                    }
                     let node = host.runtime.node(&local).ok_or(RuntimeError::MissingNode)?;
                     let work = node
                         .work()

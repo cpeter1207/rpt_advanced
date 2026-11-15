@@ -106,6 +106,7 @@ fn echo_source_never_detects_a_new_burst_before_the_previous_finite_token_retire
         .into_endpoints();
     control
         .send(Command::Redirect {
+            retire_connection: None,
             inbound,
             outbound,
             dtmf_muting: true,
@@ -186,6 +187,7 @@ fn echo_source_never_joins_detector_qualification_across_loss_or_codec_plc() {
             .into_endpoints();
         control
             .send(Command::Redirect {
+                retire_connection: None,
                 inbound,
                 outbound,
                 dtmf_muting: true,
@@ -242,6 +244,7 @@ fn echo_source_decodes_dtmf_and_retains_mute_spans_but_never_decodes_codec_plc()
             .into_endpoints();
         control
             .send(Command::Redirect {
+                retire_connection: None,
                 inbound,
                 dtmf_muting: muting,
                 outbound,
@@ -306,6 +309,7 @@ fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
         .into_endpoints();
     control
         .send(Command::Redirect {
+            retire_connection: None,
             inbound,
             dtmf_muting: true,
             outbound,
@@ -370,6 +374,7 @@ fn echo_source_returns_ring_credit_without_copying_the_provider_owned_suffix() {
         .into_endpoints();
     control
         .send(Command::Redirect {
+            retire_connection: None,
             inbound,
             dtmf_muting: true,
             outbound,
@@ -425,6 +430,7 @@ fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
             .into_endpoints();
         control
             .send(Command::Redirect {
+                retire_connection: None,
                 inbound,
                 dtmf_muting: true,
                 outbound,
@@ -452,6 +458,7 @@ fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
                 .into_endpoints();
             control
                 .send(Command::Redirect {
+                    retire_connection: None,
                     inbound,
                     dtmf_muting: true,
                     outbound,
@@ -794,6 +801,7 @@ fn echo_source_metadata_backpressure_delays_finish_and_errors_do_not_acknowledge
             .into_endpoints();
         control
             .send(Command::Redirect {
+                retire_connection: None,
                 inbound,
                 outbound,
                 dtmf_muting: true,
@@ -2572,6 +2580,7 @@ fn egress_future_reopen_and_redirect_discard_uncommitted_media() {
     assert!(
         control
             .send(Command::Redirect {
+                retire_connection: None,
                 inbound,
                 dtmf_muting: true,
                 outbound
@@ -3225,6 +3234,7 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
         .into_endpoints();
     control
         .send(Command::Redirect {
+            retire_connection: None,
             inbound,
             dtmf_muting: true,
             outbound,
@@ -3273,6 +3283,7 @@ fn failed_or_overreported_ring_admission_ends_audio_and_gap_ingress() {
                 crate::link::ring::tests::invalid_ingress_endpoints(gap, overreported);
             control
                 .send(Command::Redirect {
+                    retire_connection: None,
                     inbound,
                     dtmf_muting: true,
                     outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
@@ -3300,6 +3311,7 @@ fn pending_gap_rejects_a_ring_that_overreports_its_next_acceptance() {
     let (inbound, _consumer) = crate::link::ring::tests::pending_overreported_gap_endpoints();
     control
         .send(Command::Redirect {
+            retire_connection: None,
             inbound,
             dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
@@ -3323,6 +3335,7 @@ fn counted_gap_is_staged_before_following_peer_events_when_ring_is_full() {
     let (inbound, mut consumer) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     control
         .send(Command::Redirect {
+            retire_connection: None,
             inbound,
             dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
@@ -3378,6 +3391,7 @@ fn partial_pcm_is_staged_before_a_following_counted_gap() {
     let (inbound, mut consumer) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     control
         .send(Command::Redirect {
+            retire_connection: None,
             inbound,
             dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
@@ -3735,5 +3749,76 @@ fn outbound_only_redirect_keeps_ordinary_pending_source_and_acknowledges_exact_g
         assert!(session.source_dirty);
         assert_eq!(session.source_finish, Some(91));
         assert!(!observer.signals().ended());
+    }
+}
+
+#[test]
+fn isolation_redirect_retires_prepared_egress_before_exact_ack() {
+    use rpt_advanced_core::audio::LinkAudioQueue;
+    for (prepared, fail, stale) in [
+        (true, false, false),
+        (true, true, false),
+        (true, false, true),
+        (false, false, false),
+    ] {
+        let (io, state) = peer_with_egress(48000, prepared, prepared);
+        let (_, output) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+        let (mut session, mut control) =
+            PeerSession::prepare(io, output, "1000", "2000", true).unwrap();
+        let old = session.inbound.observer();
+        assert_eq!(session.inbound.write(&[0.375; 64]).unwrap(), 64);
+        session.pending_pcm[..8].fill(0.25);
+        session.pending_input = Some(PendingInput::Audio { next: 0, len: 8 });
+        {
+            let mut state = state.lock().unwrap();
+            state.encoder_reset_result = if fail { -1 } else { 0 };
+            if prepared {
+                state.encode_pending.extend_from_slice(&[0.5; 8]);
+            }
+        }
+        let (inbound, _) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+        let next = inbound.observer();
+        let (_, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+        control
+            .send(Command::Redirect {
+                retire_connection: Some(control.connection_generation() + u64::from(stale)),
+                inbound,
+                outbound,
+                dtmf_muting: true,
+            })
+            .ok()
+            .unwrap();
+        let result = session.step_inner(0);
+        if fail || stale {
+            assert!(
+                result.is_err(),
+                "failed reset/wrong owner cannot acknowledge isolation"
+            );
+            assert!(control.event().is_none());
+            if stale {
+                assert!(old.same_generation(&session.inbound.observer()));
+                assert_eq!(old.observe().unwrap().available_samples, 64);
+                assert!(session.pending_input.is_some());
+                assert_eq!(state.lock().unwrap().encoder_resets, 0);
+            }
+        } else {
+            result.unwrap();
+            assert_eq!(
+                state.lock().unwrap().encoder_resets,
+                usize::from(prepared),
+                "ACK must prove immediate encoder retirement even with no next PCM"
+            );
+            assert!(matches!(control.event(), Some(Event::Redirected(ack))
+                if ack.same_generation(&next)));
+            assert!(old.signals().ended());
+            assert_eq!(next.observe().unwrap().available_samples, 0);
+            assert!(session.pending_input.is_none());
+            if prepared {
+                assert!(
+                    state.lock().unwrap().encode_pending.is_empty(),
+                    "provider-owned buffered programme must retire before ACK"
+                );
+            }
+        }
     }
 }

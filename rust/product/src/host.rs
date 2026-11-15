@@ -206,8 +206,17 @@ pub struct GenerationControl {
     awaiting_outbound: Vec<(String, u64)>,
     local_update: Option<LocalRingUpdate>,
     awaiting_local: bool,
+    isolated_call: Option<u64>,
+    isolation_transition: bool,
+    isolation_failed: bool,
 }
 impl GenerationControl {
+    fn redirects_complete(&self) -> bool {
+        self.redirects.is_empty()
+            && self.awaiting.is_empty()
+            && self.awaiting_outbound.is_empty()
+            && !self.awaiting_local
+    }
     fn acknowledge_outbound(&mut self, remote: &str, connection: u64, graph: u64, active: u64) {
         if graph == active {
             self.awaiting_outbound
@@ -259,11 +268,19 @@ pub struct Host {
     epoch: Instant,
 }
 
+struct PhonePreparation<'a> {
+    calls: &'a mut PhoneCalls,
+    clock_epoch: u64,
+    retain_ordinary: bool,
+    isolation: Option<u64>,
+    isolation_transition: bool,
+}
+
 fn prepared(
     local: &str,
     settings: &ResolvedNodeSettings,
     peers: &[PeerOwner],
-    phones: Option<(&mut PhoneCalls, u64, bool)>,
+    phones: Option<PhonePreparation<'_>>,
     worker: &mut MediaWorker,
     text: &mut TextExecutor,
     services: HostServices,
@@ -279,10 +296,14 @@ fn prepared(
     if remote_commands.is_some() && !services.remote_control_available() {
         return Err(RuntimeError::Preparation);
     }
-    let retain_ordinary = phones.as_ref().is_some_and(|(_, _, retain)| *retain);
+    let retain_ordinary = phones.as_ref().is_some_and(|value| value.retain_ordinary);
+    let isolation = phones.as_ref().and_then(|value| value.isolation);
+    let isolation_transition = phones
+        .as_ref()
+        .is_some_and(|value| value.isolation_transition);
     let phone_attachments = phones
         .as_ref()
-        .map_or_else(Vec::new, |(phones, _, _)| phones.attachments(local));
+        .map_or_else(Vec::new, |value| value.calls.attachments(local));
     // Authorized phone programme joins the ordinary shared mixer and negotiated
     // peer path. Transport-specific timed custody is not an attachment policy.
     static NEXT_TEXT_STATION: AtomicU64 = AtomicU64::new(1);
@@ -349,6 +370,8 @@ fn prepared(
         let command = if let Some(inbound) = inbound {
             awaiting.push((peer.remote.clone(), inbound.observer()));
             PeerCommand::Redirect {
+                retire_connection: isolation_transition
+                    .then(|| peer.control.connection_generation()),
                 inbound,
                 outbound,
                 dtmf_muting: settings.dtmf_muting,
@@ -364,8 +387,8 @@ fn prepared(
         };
         redirects.push((peer.remote.clone(), command));
     }
-    let phone_clock_epoch = phones.as_ref().map_or(0, |(_, epoch, _)| *epoch);
-    if let Some((phones, _, _)) = phones {
+    let phone_clock_epoch = phones.as_ref().map_or(0, |value| value.clock_epoch);
+    if let Some(PhonePreparation { calls: phones, .. }) = phones {
         for (source, reply) in phone_attachments {
             // A graph replacement is an explicit media cut, never a transfer
             // of the private call handle or revival of the previous generation.
@@ -408,6 +431,7 @@ fn prepared(
             .map_err(|_| RuntimeError::Preparation)?;
     audio = audio
         .with_phone_clock(phone_clock_epoch)
+        .with_peer_isolation(isolation.is_some())
         .with_text(Box::new(TextMix(text_readers)));
     let regeneration = if settings.dtmf_regeneration.enabled {
         let (writer, reader) = InboundRing::open(48000, InboundPolicy::Media)
@@ -435,6 +459,9 @@ fn prepared(
             awaiting_outbound,
             local_update: None,
             awaiting_local: false,
+            isolated_call: isolation,
+            isolation_transition,
+            isolation_failed: false,
         },
         receive_maximum: MAXIMUM_FRAMES,
         transmit_maximum: MAXIMUM_FRAMES,
@@ -939,9 +966,7 @@ impl Host {
     ) -> Result<(), RuntimeError> {
         // Telephone media needs explicit authenticated *3 policy and per-node rings.
         // Pending private calls must never enter this numeric-node/ASL path.
-        if io.identity().protocol() == ProtocolId::Phone
-            || self.phone_calls.outgoing_reserved(local)
-        {
+        if io.identity().protocol() == ProtocolId::Phone {
             return Err(RuntimeError::Rejected);
         }
         self.peers
@@ -1034,6 +1059,33 @@ impl Host {
             // A preceding publication may still await dispatcher/redirect quiescence.
             // This control owner must collect it before another replacement can succeed.
             self.pump(clock)?;
+            let isolation = self
+                .phone_calls
+                .outgoing_claim(local)
+                .map(|claim| claim.id());
+            let old_control = self
+                .runtime
+                .node(local)
+                .and_then(|node| node.status(clock.now_ms).active)
+                .and_then(|active| self.runtime.adapter_control_mut(local, active));
+            if let Some(control) = old_control.as_ref()
+                && isolation.is_some()
+                && isolation == control.isolated_call
+            {
+                // Topology work cannot replace the proof owed by this exact
+                // call's isolation cut with a fresh successful-looking graph.
+                if control.isolation_failed {
+                    return Err(RuntimeError::Preparation);
+                }
+                if control.isolation_transition && !control.redirects_complete() {
+                    return Err(RuntimeError::Busy);
+                }
+            }
+            let old_isolation = old_control.and_then(|control| control.isolated_call);
+            let isolation_transition = isolation != old_isolation;
+            // Entry/exit revokes ordinary history. Only phone rearm within the
+            // same policy transfers the existing unique ordinary inputs.
+            let retain_ordinary = retain_ordinary && !isolation_transition;
             let settings = self
                 .runtime
                 .settings(local)
@@ -1042,11 +1094,13 @@ impl Host {
                 local,
                 settings,
                 &self.peers,
-                Some((
-                    &mut self.phone_calls,
-                    self.peer_io.source_clock_epoch(),
+                Some(PhonePreparation {
+                    calls: &mut self.phone_calls,
+                    clock_epoch: self.peer_io.source_clock_epoch(),
                     retain_ordinary,
-                )),
+                    isolation,
+                    isolation_transition,
+                }),
                 media_worker(&mut self.media_workers, local)?,
                 &mut self.text,
                 self.services,
@@ -1818,9 +1872,11 @@ impl Host {
                     peer.local == local
                         && peer.remote == remote
                         && match &command {
-                            PeerCommand::RedirectOutbound { connection, .. } => {
-                                peer.control.connection_generation() == *connection
-                            }
+                            PeerCommand::RedirectOutbound { connection, .. }
+                            | PeerCommand::Redirect {
+                                retire_connection: Some(connection),
+                                ..
+                            } => peer.control.connection_generation() == *connection,
                             _ => true,
                         }
                 }) {
@@ -1828,14 +1884,22 @@ impl Host {
                         pending.push((remote, *command));
                     }
                 } else {
+                    control.isolation_failed |= control.isolation_transition;
                     control.awaiting.retain(|(name, _)| name != &remote);
                 }
             }
             control.redirects = pending;
-            control.awaiting.retain(|(remote, _)| {
-                self.peers
-                    .iter()
-                    .any(|peer| peer.local == local && &peer.remote == remote)
+            let failed = &mut control.isolation_failed;
+            control.awaiting.retain(|(remote, observer)| {
+                let live = !observer.signals().ended()
+                    && self
+                        .peers
+                        .iter()
+                        .any(|peer| peer.local == local && &peer.remote == remote);
+                if !live && control.isolation_transition {
+                    *failed = true;
+                }
+                live
             });
             control.awaiting_outbound.retain(|(remote, connection)| {
                 self.peers.iter().any(|peer| {
@@ -1844,9 +1908,7 @@ impl Host {
                         && peer.control.connection_generation() == *connection
                 })
             });
-            let redirects_done = control.awaiting.is_empty()
-                && control.awaiting_outbound.is_empty()
-                && !control.awaiting_local;
+            let redirects_done = control.redirects_complete();
             if let Some(old) = status.retiring {
                 let retired = self
                     .runtime

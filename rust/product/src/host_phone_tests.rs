@@ -1452,7 +1452,7 @@ fn account_interdigit_timing_reaches_private_login_and_command_grammar() {
 }
 
 #[test]
-fn outgoing_claim_blocks_an_already_pending_ordinary_publication_before_binding() {
+fn outgoing_isolation_admits_pending_ordinary_publication_without_releasing_claim() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -1477,13 +1477,12 @@ fn outgoing_claim_blocks_an_already_pending_ordinary_publication_before_binding(
             .unwrap()
     );
     let (io, state) = peer(48000);
-    assert_eq!(
-        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock()),
-        Err(RuntimeError::Rejected)
-    );
-    assert!(host.peers.is_empty());
-    assert!(state.lock().unwrap().bound_radio.is_none());
-    assert_eq!(state.lock().unwrap().drops, 1);
+    host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+        .expect("ordinary control transport must remain available during a call");
+    assert_eq!(host.peers.len(), 1);
+    assert!(state.lock().unwrap().bound_radio.is_some());
+    assert_eq!(state.lock().unwrap().drops, 0);
+    assert!(claim.current());
     host.reject_peer("1000", "2000", clock().now_ms);
     host.phone_calls
         .cancel_outgoing("1000", claim.id())
@@ -1494,7 +1493,7 @@ fn outgoing_claim_blocks_an_already_pending_ordinary_publication_before_binding(
 }
 
 #[test]
-fn outgoing_claim_policy_uses_explicit_eligible_local_and_refuses_owned_peers() {
+fn outgoing_isolation_reservation_preserves_existing_ordinary_owners() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -1512,10 +1511,12 @@ fn outgoing_claim_policy_uses_explicit_eligible_local_and_refuses_owned_peers() 
     .unwrap();
     let account = rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap();
     let _ordinary = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
-    assert!(
-        host.reserve_outgoing_phone(account.clone(), "1000")
-            .is_err()
-    );
+    let first = host
+        .reserve_outgoing_phone(account.clone(), "1000")
+        .expect("ordinary peers must be isolated, not disconnected or rejected");
+    assert!(first.current());
+    assert_eq!(host.peers.len(), 1);
+    assert_eq!(_ordinary.lock().unwrap().drops, 0);
     let claim = host
         .reserve_outgoing_phone(account.clone(), "2000")
         .expect("eligible explicit local is not restricted to account's incoming default");
@@ -1754,4 +1755,171 @@ pub(crate) fn refresh_outgoing_test_graph(
             .is_none()
     });
     Ok(())
+}
+
+#[test]
+fn outgoing_isolation_waits_for_the_existing_serial_redirect_ack() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = outgoing_host();
+    let state = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let old = host.peers[0].control.inbound_observer();
+    let account = rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap();
+    // Reserve directly so this test isolates ACK readiness from Host policy admission.
+    let claim = host.phone_calls.reserve_outgoing(account, "1000").unwrap();
+    let pause = Arc::new(Barrier::new(2));
+    state.lock().unwrap().pause = Some(Arc::clone(&pause));
+    host.peers[0]
+        .control
+        .send(PeerCommand::Text {
+            text: std::ffi::CString::new("fixture control").unwrap(),
+            advisory: true,
+        })
+        .ok()
+        .unwrap();
+    pause.wait();
+    let before_ack = host.prepare_outgoing_isolation(&claim, clock());
+    let replacement_before_ack = host.refresh("1000", clock());
+    pause.wait();
+    assert_eq!(replacement_before_ack, Err(RuntimeError::Busy));
+    assert_eq!(
+        before_ack,
+        Ok(false),
+        "queued redirect is not serial media retirement"
+    );
+    pump_until(&mut host, |host| {
+        host.prepare_outgoing_isolation(&claim, clock()) == Ok(true)
+    });
+    assert!(old.signals().ended(), "old inbound history must be revoked");
+    assert!(!old.same_generation(&host.peers[0].control.inbound_observer()));
+    assert_eq!(
+        state.lock().unwrap().drops,
+        0,
+        "control transport remains connected"
+    );
+    assert!(claim.current());
+    host.peers[0]
+        .control
+        .send(PeerCommand::Text {
+            text: std::ffi::CString::new("isolated control").unwrap(),
+            advisory: true,
+        })
+        .ok()
+        .unwrap();
+    pump_until(&mut host, |_| {
+        state
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text == b"isolated control")
+    });
+    let isolated_input = host.peers[0].control.inbound_observer();
+    let lease = Arc::clone(
+        &host
+            .leases
+            .iter()
+            .find(|(local, _)| local == "1000")
+            .unwrap()
+            .1,
+    );
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    let isolated_generation = host
+        .runtime
+        .node("1000")
+        .unwrap()
+        .status(10)
+        .active
+        .unwrap();
+    let held = owners.1.acquire().unwrap();
+    host.cancel_outgoing_phone("1000", claim.id()).unwrap();
+    host.reconcile_phone_isolation(clock());
+    assert_eq!(
+        host.runtime.node("1000").unwrap().status(10).active,
+        Some(isolated_generation),
+        "callback Busy must retain the old isolated graph until safe replacement"
+    );
+    drop(held);
+    host.reconcile_phone_isolation(clock());
+    pump_until(&mut host, |host| {
+        drop(owners.0.acquire());
+        drop(owners.1.acquire());
+        let status = host.runtime.node("1000").unwrap().status(10);
+        status.active != Some(isolated_generation) && status.retiring.is_none()
+    });
+    lease.lock().unwrap().owners = Some(owners);
+    assert!(
+        isolated_input.signals().ended(),
+        "release must revoke isolated input history"
+    );
+    assert!(!isolated_input.same_generation(&host.peers[0].control.inbound_observer()));
+    assert_eq!(
+        state.lock().unwrap().drops,
+        0,
+        "ordinary owner survives call release"
+    );
+    assert!(host.stop(30));
+}
+
+#[test]
+fn outgoing_isolation_failed_reset_cannot_become_vacuous_after_owner_reaping() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = outgoing_host();
+    let LinkEffect::Connect(attempt) = host
+        .runtime
+        .command(
+            "1000",
+            operation(LinkAction::Transceive, "2000"),
+            clock(),
+            false,
+        )
+        .unwrap()
+    else {
+        panic!("ordinary dial");
+    };
+    assert!(
+        host.runtime
+            .finish_connect("1000", attempt, true, clock())
+            .unwrap()
+    );
+    let (io, state) = crate::link::session::tests::peer_with_egress(48000, true, true);
+    state.lock().unwrap().continuous_async = true;
+    host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+        .unwrap();
+    pump_until(&mut host, |host| {
+        named_peer_ready(host, "2000")
+            && host
+                .runtime
+                .node("1000")
+                .unwrap()
+                .status(clock().now_ms)
+                .retiring
+                .is_none()
+    });
+    let claim = host
+        .reserve_outgoing_phone(
+            rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap(),
+            "1000",
+        )
+        .unwrap();
+    state.lock().unwrap().encoder_reset_result = -1;
+    let _ = host.prepare_outgoing_isolation(&claim, clock());
+    pump_until(&mut host, |host| host.peers.is_empty());
+    let readiness = host.prepare_outgoing_isolation(&claim, clock());
+    // A same-claim topology refresh must not erase the failed required-owner cut.
+    let replacement = host.refresh("1000", clock());
+    let after_replacement = host.prepare_outgoing_isolation(&claim, clock());
+    // Always shut down before asserting a fixture failure.
+    let reset_attempted = state.lock().unwrap().encoder_resets;
+    host.cancel_outgoing_phone("1000", claim.id()).unwrap();
+    assert!(host.stop(40));
+    assert!(reset_attempted != 0);
+    assert!(
+        readiness.is_err() && after_replacement.is_err(),
+        "failed exact cut cannot become ready by pruning/replacing: before={readiness:?}, replacement={replacement:?}, after={after_replacement:?}"
+    );
 }

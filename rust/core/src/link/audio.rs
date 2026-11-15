@@ -382,6 +382,7 @@ impl<P: PeerInput> AudioPeer<P> {
 pub struct LinkAudio<P: PeerInput> {
     retirement: RetirementDomain,
     phone_clock_epoch: u64,
+    peer_isolation: bool,
     peer_source_active: bool,
     rf_programme: RfProgrammeMetadata,
     text: Option<Box<dyn LocalTextInput>>,
@@ -694,6 +695,7 @@ impl<P: PeerInput> LinkAudio<P> {
             Self {
                 retirement,
                 phone_clock_epoch: 0,
+                peer_isolation: false,
                 peer_source_active: false,
                 rf_programme: RfProgrammeMetadata::default(),
                 text: None,
@@ -755,6 +757,11 @@ impl<P: PeerInput> LinkAudio<P> {
                     call,
                 })
         })
+    }
+    /// Prepared ordinary-peer isolation policy; graph replacement owns the cut.
+    pub fn with_peer_isolation(mut self, isolated: bool) -> Self {
+        self.peer_isolation = isolated;
+        self
     }
     /// Bind the already shared host clock identity during off-audio preparation.
     pub fn with_phone_clock(mut self, epoch: u64) -> Self {
@@ -908,7 +915,11 @@ impl<P: PeerInput> LinkAudio<P> {
             if !audio_active {
                 peer.audio[..count].fill(0.0);
             }
-            let active = !peer.ended() && (audio_active || peer.input.signals().radio_keyed());
+            // Ordinary input still advances its sole DSP/ring owner, but its
+            // programme and key demand cannot enter an isolated call's mix.
+            let active = !peer.ended()
+                && (!self.peer_isolation || private)
+                && (audio_active || peer.input.signals().radio_keyed());
             peer.active = active;
             peer.rf_contributor = count != 0 && render_attempted && audio_active && active;
             peer.phone_bound = age_bound;
@@ -1133,6 +1144,7 @@ impl<P: PeerInput> LinkAudio<P> {
             // existing sender. Keep mix eligibility separate so idle silence
             // cannot enable a source, key RF, or include public telemetry.
             let eligible = route.target != 0
+                && (!self.peer_isolation || peer.phone.is_some())
                 && (route.enabled
                     || (route.broadcast
                         && peer.phone.as_ref().is_some_and(PeerReply::phone_outgoing))

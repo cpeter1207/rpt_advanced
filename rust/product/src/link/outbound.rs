@@ -226,6 +226,16 @@ impl Outbound {
     pub(super) fn redirect(&mut self, queue: LinkAudioConsumer) -> Result<(), Error> {
         self.exchange((queue, 0)).map(drop)
     }
+    /// Complete an isolation redirect on the existing serial owner. Application
+    /// conversion was discarded by redirect; prepared-provider custody must also
+    /// retire before its ACK, even when no following PCM will arrive.
+    pub(super) fn retire_redirected_egress(&mut self, io: &mut PeerIo) -> Result<(), Error> {
+        if io.prepared_media() {
+            io.reset_encoder()?;
+            self.reset_encoder = false;
+        }
+        Ok(())
+    }
     /// Exchange only the queue; conversion, encoder and retry ownership remain here.
     /// The observation cursor follows a parked queue, avoiding duplicate drop counts.
     pub(super) fn exchange(

@@ -2083,3 +2083,29 @@ original macro expiry/cancellation and refusal to newly admit retired work. The
 Engine/factory matrix proves a graph-only refresh while ringing survives, while
 revision changes and exact cancellation remain terminal. This is a prerequisite
 for P13 linked-peer isolation, not a claim that isolation is implemented.
+
+### Default outgoing isolation on existing owners (2026-11-15)
+
+A reserved outgoing call prepares immutable ordinary-peer media suppression in
+the initiating node's existing shared mixer before provider dialing. Ordinary
+ingress continues through its sole ring/DSP/source owner, and DTMF, text, link
+control and teardown remain available. Its programme and key demand cannot enter
+local RF or the phone mix, and ordinary media destinations are ineligible.
+Local RF, the exact outgoing phone's mix-minus and its clocked idle PCM keep their
+existing paths. New and permanent-retry ordinary links may remain connected; their
+published graph inherits the same isolation policy.
+
+Entry and release replace ordinary ring/egress endpoints instead of transferring
+their retained history. The existing serial redirect carries an exact connection
+only for this cut. It discards application conversion and synchronously invokes
+the applicable prepared-provider reset before its existing exact-observer ACK.
+No new provider interface or downstream network-expiry guarantee is introduced.
+A failed or missing required owner fails readiness; pruning it or refreshing the
+same call's topology cannot replace that failure with apparent success. Pending
+ACKs and callback retirement defer dialing. An already empty graph needs no cut.
+
+Cancellation, failure or hangup restore the ordinary graph through existing
+control pumping. Callback Busy retains the isolated policy until safe replacement,
+and both boundaries revoke old input history. The one-call bound remains unchanged.
+Unlock-qualified per-call bypass and local/all-peer playout remain a following
+P14/configuration increment, not implicit authority from mailbox authentication.

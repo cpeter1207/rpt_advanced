@@ -61,6 +61,8 @@ pub enum Command {
     },
     /// Prepared replacement generation endpoints; the old ingress becomes terminal.
     Redirect {
+        /// Isolation cut: retire prepared egress before ACK on this exact connection.
+        retire_connection: Option<u64>,
         /// Unique replacement inbound producer.
         inbound: InboundProducer,
         /// Unique replacement native outbound consumer.
@@ -1051,10 +1053,16 @@ impl PeerSession {
                     })?;
                 }
                 Command::Redirect {
+                    retire_connection,
                     inbound,
                     outbound,
                     dtmf_muting,
                 } => {
+                    if retire_connection
+                        .is_some_and(|connection| connection != self.text_identity.connection)
+                    {
+                        return Err(Error::Admission);
+                    }
                     if self.source_dirty {
                         self.source_completion = SourceCompletion::Cancelled;
                     }
@@ -1067,6 +1075,9 @@ impl PeerSession {
                     self.inbound = inbound;
                     self.pending_input = None;
                     self.outbound.redirect(outbound)?;
+                    if retire_connection.is_some() {
+                        self.outbound.retire_redirected_egress(&mut self.io)?;
+                    }
                     self.peer.activity(false, now_ms);
                     self.edge = 0;
                     self.query_epoch = None;

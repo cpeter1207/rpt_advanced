@@ -392,6 +392,7 @@ fn echo_ring_policy_survives_prepared_generation() {
     .unwrap();
     assert_eq!(candidate.control.redirects.len(), 1);
     let PeerCommand::Redirect {
+        retire_connection: None,
         inbound,
         dtmf_muting: true,
         ..
@@ -2751,6 +2752,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     host.peers[0]
         .control
         .send(PeerCommand::Redirect {
+            retire_connection: None,
             inbound,
             dtmf_muting: true,
             outbound,
