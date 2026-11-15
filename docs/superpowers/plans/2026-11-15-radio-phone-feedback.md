@@ -17,7 +17,7 @@ Current lifecycle.rs calls dial_phone before radio_phone_result and reports Comp
 - [x] Focused GREEN and independent review; checkpoint acknowledgment separately.
 - [x] Prove actual 180 progress reaches a bounded LOCAL tone source and stops on answer/failure/cancel/reload. Check complete existing interfaces before selecting a nullable sized progress extension; preserve old complete-prefix rejection rules and both hosts.
 - [x] Actual wire sequence: acknowledgment finishes before INVITE,180 produces ringback before200, answer ends ringback and does not repeat acknowledgment. Wrong/stale progress cannot affect a successor.
-- [ ] Affected full suites, strict checks, independent review and verified bundle. No live/config/provider changes or public publication.
+- [x] Affected full suites, strict checks and independent review. Qualified source is preserved in a verified local bundle. No live/config/provider changes or public publication.
 
 ## Review focus
 
@@ -100,3 +100,51 @@ origination, both immediate-answer greetings, both negotiated codecs through
 self-echo, actual RF return and exact local/remote hangup. The separate full
 core/product aggregate and standalone-base/host strict groups remain pending at
 this recovery checkpoint. No native or live qualification is implied.
+
+
+## Final combined development qualification
+
+The exact combined production tree from ab85356 passed all six outgoing
+actual-product compositions in 311.62 seconds. The same tree then passed 809
+core unit tests and 94 core integration tests, and 871 product unit tests plus
+five product integrations. The existing `egress_full_path_load` experiment
+remains intentionally ignored. The complete aggregate log reaches both final
+successful doc-test summaries; its launcher exit receipt was lost when the
+execution session expired across context recovery, so no numeric launcher
+result is inferred for that group.
+
+The remaining combined group records launcher exit 0: 318 standalone library
+tests (the six already-qualified outgoing cases excluded), two binary tests,
+30 integrations and one doctest; Asterisk 66 tests; peer-support 13 unit and
+82 integration tests; SIP adapter 13 tests. It includes the unchanged incoming
+phone-origin and existing-ordinary-link compositions. The freshly rebuilt C ABI
+probe, all-target Clippy with warnings denied, warning-fatal Rustdoc, and
+formatting pass for all six affected packages. The recorded product library
+SHA256 is 8136fb8c932aaf931aaa9abfe7e9c432ce5bd782c012b614faabd49c1db6a715;
+the unchanged SIP library is
+b3d352592388e358d5d95f7a727c395f0fd9d1592f36fb219f221fa2e1e989f3.
+
+Evidence: `.work/radio-feedback-continuous-outgoing.log`,
+`.work/radio-feedback-continuous-full.log`, and
+`.work/radio-feedback-continuous-host-strict.log`. Every run used the freshly
+pulled constrained quality image digest
+`sha256:4e62696d8e6809b7b716c3c81d70b59ed9ab5b109a7539dc97c855dc7d41e844`,
+private targets/providers, and a 595-second outer runner cap. The native
+handoff preserves the separately qualified 90-second per-process watchdog for
+each isolated composed case; no fixture deadline or speech clip was extended.
+
+Independent overlap review confirms that the six continuous-media production
+and support files match c4733fad exactly. All startup-only transport state is
+excluded. The optional HostServices10 progress tail is 440 bytes; the prior
+complete 432-byte prefix remains accepted and partial tails rejected. Product
+and host must be rebuilt together. No SIP/provider ABI or dependency change is
+introduced. Asterisk still exposes no outgoing-phone factory.
+
+This is an affected-development qualification, not the full pull-request gate
+or physical radio/provider validation. Native arm64 build and composed checks,
+parent-selected deployment, and manual acknowledgment/ringing/first-hello
+acceptance remain. Full production coverage, packaging/staged-install and
+platform-independent PR checks remain separate. Ringback reflects actual SIP
+180; 183 early media is not implemented. Finite completion certifies controller
+playback/reclamation, not physical RF delivery. No live node/config change or
+public push was performed by this work.
