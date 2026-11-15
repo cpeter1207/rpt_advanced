@@ -477,3 +477,126 @@ fn advertised_profiles_have_verified_bidirectional_provider_metadata() {
     }
     assert_eq!(catalog.profiles().count(), AudioProfile::ALL.len());
 }
+
+fn event_profile_sdp(payloads: &str, mappings: &str, port: u16) -> String {
+    format!(
+        "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {port} RTP/AVP {payloads}\r\n{mappings}a=ptime:20\r\n"
+    )
+}
+
+#[test]
+fn incoming_event_answer_selects_the_audio_rtp_clock_not_pcm_rate() {
+    for (audio, format, selected) in [(99, "L16/16000", 102), (9, "G722/8000", 101)] {
+        let source = event_profile_sdp(
+            &format!("{audio} 101 102"),
+            &format!(
+                "a=rtpmap:{audio} {format}\r\na=rtpmap:101 telephone-event/8000\r\na=rtpmap:102 telephone-event/16000\r\n"
+            ),
+            42000,
+        );
+        let media = MediaDescription::parse(source.as_bytes()).unwrap();
+        let answer =
+            String::from_utf8(media.answer("127.0.0.1:43000".parse().unwrap(), 9).unwrap())
+                .unwrap();
+        assert!(answer.contains(&format!("m=audio 43000 RTP/AVP {audio} {selected}\r\n")));
+        let omitted = if selected == 101 { 102 } else { 101 };
+        assert!(!answer.contains(&format!("a=rtpmap:{omitted} telephone-event")));
+    }
+}
+
+#[test]
+fn answer_payload_renumbering_preserves_format_but_reinterpretation_is_rejected() {
+    let valid = event_profile_sdp(
+        "113 120 121",
+        "a=rtpmap:113 L16/16000\r\na=rtpmap:120 telephone-event/8000\r\na=rtpmap:121 telephone-event/16000\r\n",
+        42000,
+    );
+    let media = MediaDescription::parse_answer(valid.as_bytes()).unwrap();
+    assert_eq!((media.receive_payload, media.send_payload), (99, 113));
+    for invalid in [
+        valid.replace("113", "101"), // Offered event PT cannot be reinterpreted as audio.
+        valid
+            .replace("120 telephone-event/8000", "101 telephone-event/16000")
+            .replace("113 120 121", "113 101 121"),
+        valid.replace("L16/16000", "Opus/48000/2"),
+        valid.replace("telephone-event/8000", "telephone-event/48000"),
+    ] {
+        assert!(
+            MediaDescription::parse_answer(invalid.as_bytes()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn both_negotiated_receive_event_clocks_are_retained_and_tx_uses_only_matching_clock() {
+    for mixed_only in [false, true] {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let payloads = if mixed_only { "113 120" } else { "113 120 121" };
+        let maps = format!(
+            "a=rtpmap:113 L16/16000\r\na=rtpmap:120 telephone-event/8000\r\n{}",
+            if mixed_only {
+                ""
+            } else {
+                "a=rtpmap:121 telephone-event/16000\r\n"
+            }
+        );
+        let sdp = event_profile_sdp(payloads, &maps, peer.local_addr().unwrap().port());
+        let media = MediaDescription::parse_answer(sdp.as_bytes()).unwrap();
+        let mut endpoint = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), media, 55, 1)
+            .await
+            .unwrap();
+        let local = endpoint.local_addr().unwrap();
+        let mut output = [0x5a; 160];
+        for pt in [101, 102].into_iter().take(if mixed_only { 1 } else { 2 }) {
+            let mut wire = [
+                0x80, pt, 0, 1, 0, 0, 0, 123, 0, 0, 0, 77, 5, 0x8c, 0x01, 0x40,
+            ];
+            for repeat in 0..3 {
+                wire[3] = repeat + pt;
+                peer.send_to(&wire, local).await.unwrap();
+                let event = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    endpoint.receive(&mut output),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    event,
+                    if repeat == 0 {
+                        RtpEvent::Digit {
+                            digit: b'5',
+                            ended: true,
+                        }
+                    } else {
+                        RtpEvent::None
+                    }
+                );
+                assert_eq!(output, [0x5a; 160]);
+            }
+        }
+        assert_eq!(endpoint.send_digit(b'5'), if mixed_only { -1 } else { 0 });
+        endpoint.poll_digit().unwrap();
+        let mut wire = [0; 32];
+        if mixed_only {
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(30),
+                    peer.recv_from(&mut wire)
+                )
+                .await
+                .is_err()
+            );
+        } else {
+            let (size, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), peer.recv_from(&mut wire))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(size, 16);
+            assert_eq!(wire[1] & 0x7f, 121);
+            assert_eq!(&wire[14..16], &320u16.to_be_bytes());
+        }
+    }
+}
