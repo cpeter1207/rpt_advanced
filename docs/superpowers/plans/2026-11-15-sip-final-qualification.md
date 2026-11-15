@@ -6,11 +6,11 @@
 
 ## Cohort boundaries
 
-- Existing focused/wire/strict receipts use an isolated unreleased 16 kHz detector. Owned DTMF PR5 merged as06948a9 after both native PR gates, but alpha4 publication and released package selection remain pending.
+- Existing focused/wire/strict receipts use an isolated unreleased 16 kHz detector. Owned DTMF PR5 merged as06948a9 after both native PR gates. Alpha4 is now released; the isolated final branch selects the verified release as recorded below.
 - Keep the currently qualified Sofia1.13.19 dependency unchanged. A failed no-OpenSSL probe is not a replacement qualification and does not establish distribution clearance.
 - Final published artifacts require exact released runtime/development provider pins, package versions, artifact hashes, source SHA and native architecture recorded together. Do not silently substitute the candidate DSO or an image's older installed detector.
 - Native means Debian13 amd64 and arm64 on their native runners; amd64-local tests do not establish arm64. The running node is not a CI runner.
-- Every local heavy command uses the maintained constrained launcher and a separately granted serial slot. Current image digest is4e62696d8e6809b7b716c3c81d70b59ed9ab5b109a7539dc97c855dc7d41e844. Stop on first failure and release the slot. Do not lengthen fixtures to hide regressions.
+- Every local heavy command uses the maintained constrained launcher and a separately granted serial slot. Previous receipts used image4e62696d8e6809b7b716c3c81d70b59ed9ab5b109a7539dc97c855dc7d41e844; new released-cohort runs use verified imagec3800ed0094d0d01284b70481d3189a76044042b2900594115db2e2a41f2d0fa. Stop on first failure and release the slot. Do not lengthen fixtures to hide regressions.
 
 ## Bounded local aggregate passes
 
@@ -34,3 +34,16 @@ Before publication, verify the exact provider release assets and pins, the sourc
 ## Estimated serial test time
 
 Core/product roughly8-10minutes; full outgoing inventory roughly15-20minutes at current fixture durations, split across three bounded slots; standalone/workspace remainder and portable/C boundary checks roughly5-15minutes depending on cached builds. Native package/integration/coverage and hosted-runner waiting are separate and cannot be honestly bounded from the focused receipts. Reuse cached builds but never stale executables or silently skipped cases.
+
+## Released alpha4 and reconciled local evidence
+
+- DTMF tag `v0.1.0-alpha.4` targets merged `06948a9a78933ed36299279a49bfaaa189eb3377`. Release run43745348688 completed verified-source, native Debian13 amd64/arm64 and artifact publication checks. Runtime/dev packages are version `0.1.0~alpha4-1` and match published SHA256SUMS. The official amd64 runtime package hash is `eb12741c54074fa2616dbf895ccbc4e901bebd0d2e6f4544a904027af325fed3`.
+- The private test extraction selects official DSO SHA256 `b8d34917520b0219152495f524f0d0904bb6cf8386892a5c66e0431e162e1e14`, with no candidate path or system installation. Existing composed product/SIP artifact hashes remain unchanged.
+- Manifest-only published `caecd9773e0077c51db40b6624a0464594d4b7dc` is based on current feature `ac3b8dd`, not older main. Every non-DTMF pin/package list equals that feature and original image source `eeb7e770`. Native image run43747025587 passed both build/smoke jobs and promoted manifest `c3800ed0094d0d01284b70481d3189a76044042b2900594115db2e2a41f2d0fa`. Local receipts verify SDK35, IAX13, PortAudio5, ring6 and DTMFalpha4.
+- The first released full run on36160d6 passed823 core unit tests but found the obsolete core integration assertion that16k must fail. Test-only `b16ca1e` adds16k to exact whole/37/1-sample digit/mute-span equivalence and retains unsupported12k rejection. Targeted proof and16k SIP readiness passed.
+- The subsequent full run onb16ca1e passed823 core unit and94 integration tests. Product completed883 passed,1 stale16k-negative failure and1 existing ignored load experiment in408.55s. The exact failure log is retained as `.work/released-full-core-product-b16ca1e-failed.log`.
+- Test-only `07411a6` changes that private-source negative to12k, preserves legacy16k success and adds16k native-source onset/muting/exact-one-command coverage. Its targeted8 tests, all5 product integration tests and documentation stage passed on the released image/DSO. Read-only scan found no additional stale detector-rate oracle; ordinary EchoLink/native-radio and invalid RTP clock negatives are unrelated and unchanged.
+- Local `7d45ba3` replays only the verified DTMF manifest SHA replacement. These are reconciled component receipts, not a fresh full product run on the corrected head. No production source changed in either rate-oracle correction. Run the complete aggregate on the next coherent final candidate, and retain the canonical native/full PR requirements above. Standalone real wire, full package/coverage and hardware qualification on the released final cohort remain pending.
+
+Release: https://github.com/cpeter1207/librptadvdtmf/releases/tag/v0.1.0-alpha.4
+Image run: https://github.com/cpeter1207/rpt_advanced-workflows/actions/runs/43747025587
