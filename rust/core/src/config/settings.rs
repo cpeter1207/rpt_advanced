@@ -107,6 +107,8 @@ pub struct ResolvedNodeSettings {
     pub link_lookup_method: LinkLookupMethod,
     /// Configured DTMF command prefixes by option name.
     pub link_commands: BTreeMap<String, String>,
+    /// Explicit inherited account for radio-origin telephone calls; absent leaves dialing unavailable.
+    pub phone_outgoing_account: Option<crate::link::PhoneAccountId>,
     /// Optional PHC-encoded Argon2id digest required to unlock DTMF administration.
     pub dtmf_admin_unlock_hash: String,
     /// Optional PHC-encoded Argon2id digest required to lock DTMF administration.
@@ -1376,6 +1378,15 @@ impl ResolvedNodeSettings {
         }) {
             value.link_lookup_method = parsed;
         }
+        if let Some(account) = lookup_valid(document, "phone_outgoing_account", &scopes, |raw| {
+            if raw.is_empty() {
+                Some(None)
+            } else {
+                crate::link::PhoneAccountId::new(raw).ok().map(Some)
+            }
+        }) {
+            value.phone_outgoing_account = account;
+        }
         for key in command_keys()
             .into_iter()
             .filter(|key| key.starts_with("link_command_"))
@@ -1440,6 +1451,7 @@ impl ResolvedNodeSettings {
                 .into_iter()
                 .map(|key| (key.to_owned(), default_command(key)))
                 .collect(),
+            phone_outgoing_account: None,
             dtmf_admin_unlock_hash: String::new(),
             dtmf_admin_lock_hash: String::new(),
             dtmf_admin_timeout_ms: 300_000,
@@ -1495,6 +1507,8 @@ pub(super) fn command_keys() -> [&'static str; crate::command::ACTION_COUNT] {
         "link_command_cancel_message",
         "link_command_echo_telemetry",
         "link_command_remote_base",
+        "link_command_phone_dial",
+        "link_command_phone_hangup",
     ]
 }
 
@@ -1563,6 +1577,8 @@ pub(super) fn command_action(key: &str) -> Option<LinkAction> {
         "link_command_cancel_message" => LinkAction::CancelMessage,
         "link_command_echo_telemetry" => LinkAction::EchoTelemetry,
         "link_command_remote_base" => LinkAction::RemoteBase,
+        "link_command_phone_dial" => LinkAction::PhoneDial,
+        "link_command_phone_hangup" => LinkAction::PhoneHangup,
         _ => return None,
     })
 }

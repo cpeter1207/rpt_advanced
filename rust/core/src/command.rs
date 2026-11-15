@@ -61,10 +61,14 @@ pub enum LinkAction {
     EchoTelemetry,
     /// Operate the configured remote base through its typed command family.
     RemoteBase,
+    /// Dial a literal telephone destination from the initiating local node.
+    PhoneDial,
+    /// Terminate the initiating node's exact outgoing telephone call.
+    PhoneHangup,
 }
 
 /// Number of configurable linking actions.
-pub const ACTION_COUNT: usize = 26;
+pub const ACTION_COUNT: usize = 28;
 
 /// A DTMF prefix and the operation it selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,7 +94,7 @@ impl CommandMapping {
 pub struct Command {
     /// Selected operation.
     pub action: LinkAction,
-    /// Decimal destination/Message selector, or empty for argument-free operations.
+    /// Decimal node, message selector or literal telephone destination; empty for no argument.
     pub node: String,
 }
 
@@ -166,8 +170,8 @@ impl DtmfCommandMap {
                     || takes_node(longer.action)
                     || matches!(left.action, LinkAction::Message | LinkAction::SiteStatus)
                     || matches!(right.action, LinkAction::Message | LinkAction::SiteStatus)
-                    || left.action == LinkAction::RemoteBase
-                    || right.action == LinkAction::RemoteBase
+                    || matches!(left.action, LinkAction::RemoteBase | LinkAction::PhoneDial)
+                    || matches!(right.action, LinkAction::RemoteBase | LinkAction::PhoneDial)
                 {
                     return Err(CommandMapError::AmbiguousPrefix);
                 }
@@ -278,7 +282,7 @@ impl DtmfCommandMap {
     pub fn standard() -> Self {
         let prefixes = [
             "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818",
-            "10", "722", "800", "801", "804", "805", "82", "77", "76", "78", "", "",
+            "10", "722", "800", "801", "804", "805", "82", "77", "76", "78", "", "", "", "",
         ];
         let mappings = prefixes
             .into_iter()
@@ -412,6 +416,8 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::CancelMessage,
         LinkAction::EchoTelemetry,
         LinkAction::RemoteBase,
+        LinkAction::PhoneDial,
+        LinkAction::PhoneHangup,
     ]
 }
 
@@ -432,6 +438,7 @@ fn takes_node(action: LinkAction) -> bool {
             | LinkAction::PadTest
             | LinkAction::CancelMessage
             | LinkAction::RemoteBase
+            | LinkAction::PhoneHangup
     )
 }
 

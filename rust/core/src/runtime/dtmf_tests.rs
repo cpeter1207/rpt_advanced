@@ -750,3 +750,35 @@ fn remote_operation_custody_is_lazy_and_never_an_authority() {
     assert!(!next.admin_authorized);
     assert!(next.macro_permit.is_none());
 }
+
+#[test]
+fn radio_phone_numbers_do_not_recall_or_replace_the_last_link() {
+    let document = crate::config::ConfigDocument::parse(
+        "[1000]\nlink_command_phone_dial=6\nlink_command_phone_hangup=0\n",
+    )
+    .unwrap();
+    let settings = crate::config::ResolvedNodeSettings::resolve(
+        &document,
+        &crate::config::NodeId::new("1000").unwrap(),
+    )
+    .unwrap()
+    .value;
+    let mut commands = DtmfCommands::new(settings.command_map().unwrap());
+    feed_symbols(&mut commands, "*32000#");
+    assert_eq!(commands.last_node, "2000");
+    for number in ["0", "00123", "5550100"] {
+        let operation = commands
+            .complete_command(&format!("6{number}"), 1, true)
+            .expect("configured phone dial must produce a typed operation");
+        assert_eq!(operation.command.node, number);
+        assert_eq!(commands.last_node, "2000");
+    }
+    assert!(
+        commands
+            .complete_command(&format!("6{}", "1".repeat(64)), 1, true)
+            .is_none()
+    );
+    assert!(commands.complete_command("6", 1, true).is_none());
+    assert!(commands.complete_command("0", 1, true).is_some());
+    assert_eq!(commands.last_node, "2000");
+}

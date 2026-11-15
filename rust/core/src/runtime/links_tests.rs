@@ -3653,3 +3653,78 @@ fn outgoing_phone_role_cannot_create_an_incoming_command_collector() {
     assert!(!outgoing.authenticate_phone());
     links.close();
 }
+
+#[test]
+fn radio_phone_actions_retain_local_generation_without_peer_authority() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    let document = crate::config::ConfigDocument::parse(
+        "[524950]\nlink_command_phone_dial=6\nlink_command_phone_hangup=0\n",
+    )
+    .unwrap();
+    let map = crate::config::ResolvedNodeSettings::resolve(
+        &document,
+        &crate::config::NodeId::new("524950").unwrap(),
+    )
+    .unwrap()
+    .value
+    .command_map()
+    .unwrap();
+    let mut links = NodeLinkControl::new(
+        "524950",
+        AccessPolicy::new("", "").unwrap(),
+        map.clone(),
+        None,
+    )
+    .unwrap();
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    let phone = PeerSignals::for_phone(source.clone());
+    assert!(phone.authenticate_phone());
+    let peer = PeerSignals::new();
+    let mut host = NodeHost::new(generation(1));
+    for text in ["600123", "0"] {
+        let command = map.parse(text).expect("configured telephone action");
+        let local = DigitOperation::new(command.clone(), None);
+        let effect = links.command(local.clone(), host.control().work().unwrap(), 1, false);
+        let Ok(LinkEffect::Phone(effect)) = effect else {
+            panic!("typed local phone effect")
+        };
+        assert!(effect.current(1));
+        assert_eq!(effect.operation().command, command);
+        for (reply, origin) in [
+            (Some(peer.reply_target()), Some("2000".to_owned())),
+            (
+                Some(phone.reply_target()),
+                Some(source.call_id().to_string()),
+            ),
+            (None, Some("2000".to_owned())),
+            (Some(peer.reply_target()), None),
+        ] {
+            let mut remote = local.clone();
+            remote.reply = reply;
+            remote.origin = origin;
+            assert!(matches!(
+                links.command(remote, host.control().work().unwrap(), 1, false),
+                Err(AdmissionError::Denied)
+            ));
+        }
+    }
+    let stale = host.control().work().unwrap();
+    host.control().publish(generation(2), 2).unwrap();
+    assert!(matches!(
+        links.command(
+            DigitOperation::new(map.parse("600123").unwrap(), None),
+            stale,
+            2,
+            false
+        ),
+        Err(AdmissionError::Stale)
+    ));
+    assert!(links.manager().snapshot().is_empty());
+}

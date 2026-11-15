@@ -83,6 +83,8 @@ fn spawn_dial(operation: impl FnOnce() + Send + 'static) -> std::io::Result<Join
 
 #[path = "lifecycle_phone_command.rs"]
 mod phone_command;
+#[path = "lifecycle_radio_phone.rs"]
+mod radio_phone;
 #[path = "lifecycle_site.rs"]
 mod site;
 
@@ -190,12 +192,31 @@ impl Engine {
             }
             host.reserve_outgoing_phone(account, &local)
         })?;
+        self.launch_phone(call, claim, revision, destination, None, false)
+    }
+    /// Share the existing dial job between administrative and admitted RF commands.
+    fn launch_phone(
+        self: &Arc<Self>,
+        call: Call,
+        claim: Arc<crate::phone::OutgoingClaim>,
+        revision: u64,
+        destination: String,
+        source: Option<rpt_advanced_core::runtime::links::PhoneCommand>,
+        report: bool,
+    ) -> Result<u64, RuntimeError> {
         let id = claim.id();
+        let source_generation = source.as_ref().map(|source| source.generation());
         let pending = Arc::clone(&claim);
         let engine = Arc::clone(self);
         let operation = move || {
             let _call = call;
-            let current = || engine.current(revision) && pending.current();
+            let current = || {
+                engine.current(revision)
+                    && pending.current()
+                    && source
+                        .as_ref()
+                        .is_none_or(|source| source.current(engine.clock().now_ms))
+            };
             let io = engine
                 .services
                 .dial_phone(
@@ -209,18 +230,31 @@ impl Engine {
             let owner = Arc::clone(&engine);
             let retained = Arc::clone(&pending);
             let completed = engine.run_inner(true, move |host| {
-                if owner.current(revision) && retained.current() {
-                    if let Some(io) = io {
-                        return host
-                            .adopt_outgoing_phone(&retained, io, owner.clock())
-                            .map(|_| ());
-                    }
+                let current = owner.current(revision)
+                    && retained.current()
+                    && source
+                        .as_ref()
+                        .is_none_or(|source| source.current(owner.clock().now_ms));
+                if !current {
+                    let _ = host.cancel_outgoing_phone(retained.local(), retained.id());
+                    return Ok(());
                 }
-                host.cancel_outgoing_phone(retained.local(), retained.id())
+                let answered = io.is_some_and(|io| {
+                    host.adopt_outgoing_phone(&retained, io, owner.clock())
+                        .is_ok()
+                });
+                if !answered {
+                    let _ = host.cancel_outgoing_phone(retained.local(), retained.id());
+                }
+                if report {
+                    host.radio_phone_result(retained.local(), answered);
+                }
+                // Known failure/cleanup is not uncertain admission. A failed RF
+                // result must never retire successfully adopted telephone media.
+                Ok(())
             });
             if completed.is_err() {
                 // An uncertain control completion may already have adopted media.
-                // The existing pump observes this exact atomic claim in either state.
                 pending.cancel();
             }
         };
@@ -231,10 +265,27 @@ impl Engine {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(thread),
             Err(_) => {
-                claim.cancel();
+                let owner = Arc::clone(self);
+                let failed = Arc::clone(&claim);
                 let _ = self.run_inner(true, move |host| {
-                    host.cancel_outgoing_phone(claim.local(), id)
+                    let current = owner.current(revision)
+                        && claim.current()
+                        && source_generation.is_some_and(|generation| {
+                            host.runtime
+                                .node(claim.local())
+                                .and_then(|node| node.status(owner.clock().now_ms).active)
+                                == Some(generation)
+                        });
+                    claim.cancel();
+                    let _ = host.cancel_outgoing_phone(claim.local(), id);
+                    if report && current {
+                        host.radio_phone_result(claim.local(), false);
+                    }
+                    Ok(())
                 });
+                // Submission may fail without executing cleanup; the ordinary pump
+                // must still observe the exact canceled pending/active intent.
+                failed.cancel();
                 return Err(RuntimeError::Preparation);
             }
         }
@@ -266,7 +317,15 @@ impl Engine {
     fn digit_effect(
         self: &Arc<Self>,
         local: &str,
-        outcome: rpt_advanced_core::runtime::dtmf::DigitOutcome,
+        outcome: DigitOutcome,
+    ) -> Result<LinkEffect, RuntimeError> {
+        self.digit_effect_at(local, outcome, self.revision.load(Ordering::Acquire))
+    }
+    fn digit_effect_at(
+        self: &Arc<Self>,
+        local: &str,
+        outcome: DigitOutcome,
+        revision: u64,
     ) -> Result<LinkEffect, RuntimeError> {
         match outcome {
             DigitOutcome::MacroStopped { reply } => {
@@ -289,7 +348,13 @@ impl Engine {
                     .filter(|reply| reply.phone_source().is_some())
                     .cloned();
                 let source = operation.clone();
-                let result = self.operation(local, operation).map(|mut effect| {
+                let admitted = if radio_phone::action(operation.command.action) {
+                    self.radio_phone(local.to_owned(), operation, revision, true)
+                        .map(|()| LinkEffect::None)
+                } else {
+                    self.operation(local, operation)
+                };
+                let result = admitted.map(|mut effect| {
                     if let LinkEffect::Connect(attempt) = &mut effect {
                         attempt.retain_local_operation_result(&source);
                     }
@@ -327,7 +392,13 @@ impl Engine {
         let peer = operation.command.node.clone();
         let reply = operation.reply.clone();
         let source = dtmf_source.then(|| operation.clone());
-        match self.operation(&local, operation) {
+        let admitted = if radio_phone::action(operation.command.action) {
+            self.radio_phone(local.clone(), operation, revision, dtmf_source)
+                .map(|()| LinkEffect::None)
+        } else {
+            self.operation(&local, operation)
+        };
+        match admitted {
             Ok(mut effect) => {
                 if let (Some(source), LinkEffect::Connect(attempt)) = (&source, &mut effect) {
                     attempt.retain_local_operation_result(source);
@@ -758,7 +829,7 @@ impl Engine {
             }
             .is_some_and(|reply| reply.phone_source().is_some());
             if self
-                .digit_effect(&local, operation)
+                .digit_effect_at(&local, operation, revision)
                 .and_then(|effect| self.background(local, effect, revision, true))
                 .is_err()
                 && !private_source

@@ -688,6 +688,13 @@ impl DtmfCommands {
             }
             _ => {}
         }
+        if matches!(
+            command.action,
+            LinkAction::PhoneDial | LinkAction::PhoneHangup
+        ) {
+            // Telephone digits are literal, never an ordinary last-node alias.
+            return Some(DigitOperation::new(command, None));
+        }
         if command.node == "0" {
             if self.last_node.is_empty() {
                 return None;

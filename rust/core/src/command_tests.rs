@@ -360,3 +360,24 @@ fn standard_map_accepts_argument_free_current_message_cancellation() {
     }
     assert_eq!(complete.as_deref(), Some("78"));
 }
+
+#[test]
+fn radio_phone_dial_prefix_never_shadows_a_decimal_destination() {
+    for action in [LinkAction::Status, LinkAction::PhoneHangup] {
+        assert_eq!(
+            DtmfCommandMap::new(vec![
+                CommandMapping::new("6", LinkAction::PhoneDial),
+                CommandMapping::new("60", action),
+            ]),
+            Err(CommandMapError::AmbiguousPrefix),
+            "a literal telephone0 must not select an argument-free command",
+        );
+    }
+    assert!(
+        DtmfCommandMap::new(vec![
+            CommandMapping::new("6", LinkAction::PhoneDial),
+            CommandMapping::new("0", LinkAction::PhoneHangup),
+        ])
+        .is_ok()
+    );
+}

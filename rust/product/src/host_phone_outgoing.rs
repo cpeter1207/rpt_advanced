@@ -99,3 +99,68 @@ impl Host {
         Ok(())
     }
 }
+
+impl Host {
+    /// Resolve the explicit node account and literal decimal destination before reserving.
+    /// Call only in the same serialized turn that admits the original RF command.
+    pub(crate) fn prepare_radio_phone(
+        &mut self,
+        local: &str,
+        number: &str,
+    ) -> Result<(Arc<OutgoingClaim>, String), RuntimeError> {
+        if number.is_empty() || number.len() > 63 || !number.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(RuntimeError::Rejected);
+        }
+        let account = self
+            .runtime
+            .settings(local)
+            .ok_or(RuntimeError::MissingNode)?
+            .phone_outgoing_account
+            .clone()
+            .ok_or(RuntimeError::Rejected)?;
+        let settings = PhoneAccountSettings::resolve(self.runtime.document(), &account)
+            .value
+            .ok_or(RuntimeError::Rejected)?;
+        let destination = format!("sip:{number}@{}", settings.server);
+        if destination.len() > 255 {
+            return Err(RuntimeError::Rejected);
+        }
+        rptadv_peer_support::sip::SipUri::parse(destination.as_bytes())
+            .map_err(|_| RuntimeError::Rejected)?
+            .require_cleartext_routing()
+            .map_err(|_| RuntimeError::Rejected)?;
+        let claim = self.reserve_outgoing_phone(account, local)?;
+        Ok((claim, destination))
+    }
+
+    /// Capture and cancel in one control turn, never look up a successor later.
+    pub(crate) fn hangup_radio_phone(&mut self, local: &str) -> Result<(), RuntimeError> {
+        let id = self
+            .phone_calls
+            .outgoing_claim(local)
+            .ok_or(RuntimeError::Rejected)?
+            .id();
+        self.cancel_outgoing_phone(local, id)
+    }
+}
+
+impl Host {
+    /// Failed solicited RF telemetry is diagnostic, not failed telephone adoption.
+    pub(crate) fn radio_phone_result(&mut self, local: &str, completed: bool) {
+        if self
+            .node_operation_result(
+                local,
+                None,
+                if completed {
+                    rpt_advanced_core::messages::OperationResult::Completed
+                } else {
+                    rpt_advanced_core::messages::OperationResult::Unavailable
+                },
+            )
+            .is_err()
+        {
+            self.services
+                .scheduler_notice("radio phone result preparation failed");
+        }
+    }
+}

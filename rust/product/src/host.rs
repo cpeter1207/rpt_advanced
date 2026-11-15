@@ -1383,7 +1383,7 @@ impl Host {
             return Err(RuntimeError::Rejected);
         }
         match effect {
-            LinkEffect::Connect(_) => Err(RuntimeError::Rejected),
+            LinkEffect::Connect(_) | LinkEffect::Phone(_) => Err(RuntimeError::Rejected),
             LinkEffect::PrivateDetach { remotes, reply } => {
                 self.current_private_phone(local, &reply)?;
                 for remote in remotes {

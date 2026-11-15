@@ -136,6 +136,31 @@ fn pending_phone_reply(source: Option<&DigitOperation>) -> Option<&PeerReply> {
         .filter(|reply| reply.phone_source().is_some())
 }
 
+/// Local telephone request retaining its original generation and macro custody.
+/// Product control binds an exact call reservation before any provider work.
+pub struct PhoneCommand {
+    operation: DigitOperation,
+    work: GenerationWork,
+}
+impl PhoneCommand {
+    /// Borrow the admitted action and literal destination, never a provider identity.
+    pub fn operation(&self) -> &DigitOperation {
+        &self.operation
+    }
+    /// True only for an unaddressed human source; the caller must also prove RF dispatch.
+    pub fn local_operation_result(&self) -> bool {
+        pending_local_result(Some(&self.operation))
+    }
+    /// Original generation, also used to qualify a failed job submission.
+    pub fn generation(&self) -> u64 {
+        self.work.id()
+    }
+    /// Revalidate source lifetime at the original bounded macro deadline.
+    pub fn current(&self, now_ms: u64) -> bool {
+        self.work.is_current() && pending_source_current(Some(&self.operation), Some(now_ms))
+    }
+}
+
 /// Adapter-facing consequence of one serialized existing link command.
 pub enum LinkEffect {
     /// Dial outside the serialized owner, then return the token before attaching resources.
@@ -179,6 +204,8 @@ pub enum LinkEffect {
     EchoTelemetry(crate::config::EchoLinkTelemetry),
     /// Submit typed rig work to its physical owner, retaining the exact source.
     RemoteBase(DigitOperation),
+    /// Bind a local telephone request to the existing product call owner.
+    Phone(PhoneCommand),
     /// Cancel only the currently admitted message attempt on the audio owner.
     CancelMessage,
     /// No physical operation is needed (for example resumed retry intent).
@@ -895,6 +922,22 @@ impl NodeLinkControl {
             .filter(|reply| reply.phone_source().is_some())
             .cloned();
         let effect = match operation.command.action {
+            LinkAction::PhoneDial | LinkAction::PhoneHangup => {
+                if operation.reply.is_some() || operation.origin.is_some() {
+                    return Err(AdmissionError::Denied);
+                }
+                let valid = if operation.command.action == LinkAction::PhoneDial {
+                    !remote.is_empty()
+                        && remote.len() <= 63
+                        && remote.bytes().all(|byte| byte.is_ascii_digit())
+                } else {
+                    remote.is_empty()
+                };
+                if !valid || operation.digit.is_some() || operation.remote.is_some() {
+                    return Err(AdmissionError::Invalid);
+                }
+                LinkEffect::Phone(PhoneCommand { operation, work })
+            }
             LinkAction::RemoteBase => {
                 operation.remote.ok_or(AdmissionError::Invalid)?;
                 if !self.remote_authorized(&operation, now_ms) {

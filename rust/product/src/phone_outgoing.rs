@@ -102,6 +102,19 @@ impl PhoneCalls {
             .ok_or(Error::Admission)?;
         Ok(self.retire(&source))
     }
+    /// Borrow the exact current node-local intent during serialized command admission.
+    pub(crate) fn outgoing_claim(&self, local: &str) -> Option<&Arc<OutgoingClaim>> {
+        self.pending_outgoing
+            .iter()
+            .find(|claim| claim.local == local)
+            .or_else(|| {
+                self.calls
+                    .iter()
+                    .filter_map(|call| call.outgoing.as_ref())
+                    .find(|claim| claim.local == local)
+            })
+            .filter(|claim| claim.current())
+    }
     /// Held through pending and active control ownership. Exact cancellation first
     /// revokes media, then releases this intent; provider teardown may finish later.
     pub(crate) fn outgoing_reserved(&self, local: &str) -> bool {

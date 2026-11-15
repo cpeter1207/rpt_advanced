@@ -1924,9 +1924,34 @@ implementation, outgoing Asterisk composition, or physical/public-provider call
 acceptance. Those remain separately verified milestones.
 
 
-The outgoing/incoming integration keeps generic RF-operation private mirrors
-limited to authenticated incoming attachments. An outgoing callee is eligible
-for its call's media but not private control results; excluding it from that
-recipient list must not retire its call. Explicit private result requests still
-require exact mailbox authority, and LOCAL RF result rendering is independent.
-Media attachment enumeration remains shared for graph preparation and cleanup.
+The outgoing/incoming integration follows source-only operation results. RF
+results never enumerate attached telephones, including authenticated incoming
+calls. Explicit private results require the exact live mailbox authority and
+never fall back to RF. An outgoing callee is eligible for call media but not
+control results; a local result must not retire it. Media attachment enumeration
+remains shared only where graph preparation and cleanup require it.
+
+### Configured radio-origin telephone command boundary
+
+The selected bridge adds optional `link_command_phone_dial` and
+`link_command_phone_hangup` actions plus the inherited `phone_outgoing_account`
+selector. All three default to unconfigured, like existing optional command
+families; current command and macro namespaces remain unchanged. ASL-style6/0
+are explicit fixture mappings, not new live defaults. Enabled dial prefixes
+must leave every literal decimal destination unambiguous. Destinations retain
+leading zeros and never recall or replace the last ordinary node.
+
+Only initiating-node local command custody enters this first bridge. Incoming
+mailbox authority and ordinary peer control do not authorize telephone dialing
+or hangup. A typed request retains its original generation and any existing
+macro permit. Product admission resolves the configured account/server and
+captures the exact call claim in the same serialized turn. Telephone targets
+use existing bounded SIP URI validation; no country, emergency-number or cost
+classification is added.
+
+Asynchronous work reuses the existing outgoing job and media-only role. Radio
+hangup binds to the exact admitted pending/active call, never a successor found
+later by local node name. Current actual answer/failure results use the same
+source-only local result route; job acceptance, successful cleanup and stale
+completion are not successful answers. This remains the peer-free milestone,
+not full linked-peer isolation or physical provider acceptance.
