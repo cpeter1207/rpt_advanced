@@ -168,7 +168,9 @@ fn private_inband_capability_requires_the_complete_timed_phone_profile() {
         (883, true), // complete group with both in-band bits and finite packets
         (512, false),
         (562, false),
+        (561, false),
         (547, false),
+        (531, false),
         (1075, false), // next unknown capability remains rejected
         (64, false),
         (96, false),
@@ -221,6 +223,7 @@ fn timed_g711_capability_requires_an_ordinary_async_prepared_peer() {
     services.0.peer_send_prepared_timed = phone.services.0.peer_send_prepared_timed;
     for (capabilities, expected) in [
         (143, true),
+        (655, false), // TX-only PHONE capability is not valid for ordinary ASL
         (128, false),
         (142, false),
         (141, false),
@@ -466,4 +469,27 @@ fn phone_progress_tail_retains_established_factory_prefix_and_rejects_every_part
     }
     table.struct_size = std::mem::size_of_val(&table) as u32;
     assert!(unsafe { HostServices::open(&table) }.is_ok());
+}
+
+#[test]
+fn private_inband_accessors_keep_receive_and_transmit_modes_independent() {
+    let (mut peer, _state) = crate::link::session::tests::phone_source_peer();
+    for capabilities in [51, 115, 307, 371, 563, 819, 627, 883] {
+        peer.capabilities = capabilities;
+        let receive = if capabilities & 64 != 0 {
+            PhoneDigitMode::InBand
+        } else {
+            PhoneDigitMode::NativeEvents
+        };
+        let transmit = if capabilities & (64 | 512) != 0 {
+            PhoneDigitMode::InBand
+        } else {
+            PhoneDigitMode::NativeEvents
+        };
+        assert_eq!(peer.phone_digit_mode(), Some(receive));
+        assert_eq!(peer.phone_transmit_digit_mode(), Some(transmit));
+    }
+    let (ordinary, _state) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    assert_eq!(ordinary.phone_digit_mode(), None);
+    assert_eq!(ordinary.phone_transmit_digit_mode(), None);
 }

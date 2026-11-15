@@ -316,6 +316,7 @@ impl PrivatePhoneSession {
             return Err(Error::Admission);
         }
         let digit_mode = io.phone_digit_mode().ok_or(Error::Admission)?;
+        let transmit_digit_mode = io.phone_transmit_digit_mode().ok_or(Error::Admission)?;
         let rate = io.rate();
         let source = if io.source_media() {
             let mut source = SourceIngress::<4>::at_rate(true, rate, rate as usize / 50)?;
@@ -347,7 +348,7 @@ impl PrivatePhoneSession {
             source_ready: Arc::clone(&source_ready),
             rate,
             source_media: io.source_media(),
-            digit_mode,
+            digit_mode: transmit_digit_mode,
             media: None,
         };
         Ok((

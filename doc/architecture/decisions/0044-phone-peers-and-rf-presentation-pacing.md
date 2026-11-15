@@ -2213,3 +2213,20 @@ source-private results, then proves ordinary media stays restored after the
 unlock grant expires. It retains the existing call/hangup, mix-minus and bounded
 watchdogs. The separate linked-IVR case preserves default isolation and exact
 telephone digit privacy; these are synthetic composition checks, not deployment.
+
+### Directional telephone digit selection (Batch A)
+
+`RPTADV_PEER_PHONE_INBAND_DIGITS` keeps its existing receive-and-transmit
+semantics. The additional `RPTADV_PEER_PHONE_INBAND_EGRESS` bit512 requests only
+transmit synthesis through the existing finite private digit owner. Native
+received events remain actionable, and their source credit, exact-call authority
+and deduplication are unchanged. The complete PHONE/ASYNC/PREPARED/SOURCE_MEDIA/
+PRIVATE_CALL group is required. Redundant declaration of both in-band bits is
+harmless and retains the original in-band receive policy. Other peer kinds,
+incomplete callback groups and unknown bits remain rejected.
+
+This is an additive semantic capability, with no ABI layout or SONAME change.
+Old hosts preserve their behavior with the bit absent; old products reject the
+unknown capability rather than silently discarding negotiated receive events.
+Only the private transmit control copy uses the new accessor. The session's
+receive policy still uses bit64, and there is no second detector or queue.

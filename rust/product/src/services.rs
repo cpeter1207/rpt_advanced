@@ -981,20 +981,24 @@ impl HostServices {
         };
         if identity.wire_identity() != remote
             || !local_valid
-            || capabilities & !511 != 0
+            || capabilities & !1023 != 0
             || (capabilities & abi::RPTADV_PEER_TIMED_G711_EGRESS != 0
                 && (protocol != ProtocolId::AllStarLink
                     || capabilities & 3 != 3
                     || self.0.peer_send_prepared_timed.is_none()))
-            || (protocol != ProtocolId::Phone && capabilities & 96 != 0)
+            || (protocol != ProtocolId::Phone
+                && capabilities & (96 | abi::RPTADV_PEER_PHONE_INBAND_EGRESS) != 0)
             || (protocol == ProtocolId::Phone
                 && (capabilities & 32 == 0
-                    || capabilities & !371 != 0
+                    || capabilities & !883 != 0
                     || raw.account_generation == 0
                     || raw.qso_generation == 0))
             || (capabilities & abi::RPTADV_PEER_FINITE_PACKET_EGRESS != 0
                 && (protocol != ProtocolId::Phone || capabilities & 51 != 51))
-            || (capabilities & abi::RPTADV_PEER_PHONE_INBAND_DIGITS != 0 && capabilities & 51 != 51)
+            || (capabilities
+                & (abi::RPTADV_PEER_PHONE_INBAND_DIGITS | abi::RPTADV_PEER_PHONE_INBAND_EGRESS)
+                != 0
+                && capabilities & 51 != 51)
             || (capabilities & 1 != 0 && !self.peer_step_available())
             || (capabilities & 2 != 0
                 && (capabilities & 1 == 0 || self.0.peer_prepare_audio.is_none()))
@@ -1536,6 +1540,19 @@ impl PeerIo {
     pub fn phone_digit_mode(&self) -> Option<PhoneDigitMode> {
         self.phone_account().map(|_| {
             if self.capabilities & abi::RPTADV_PEER_PHONE_INBAND_DIGITS != 0 {
+                PhoneDigitMode::InBand
+            } else {
+                PhoneDigitMode::NativeEvents
+            }
+        })
+    }
+    /// Transmit-only synthesis never changes the independently selected RX mode.
+    pub fn phone_transmit_digit_mode(&self) -> Option<PhoneDigitMode> {
+        self.phone_account().map(|_| {
+            if self.capabilities
+                & (abi::RPTADV_PEER_PHONE_INBAND_DIGITS | abi::RPTADV_PEER_PHONE_INBAND_EGRESS)
+                != 0
+            {
                 PhoneDigitMode::InBand
             } else {
                 PhoneDigitMode::NativeEvents
