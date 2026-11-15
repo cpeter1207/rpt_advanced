@@ -553,9 +553,51 @@ fn product_outgoing_with_ivr(
     ivr: IvrMode,
     isolated: bool,
 ) {
+    product_outgoing_with_policy(radio, immediate, latching, selected, ivr, isolated, None);
+}
+
+#[test]
+fn actual_unlocked_phone_bypass_preserves_local_only_playout() {
+    product_outgoing_with_policy(
+        true,
+        false,
+        false,
+        AudioProfile::Mulaw,
+        IvrMode::Disabled,
+        true,
+        Some(false),
+    );
+}
+
+#[test]
+fn actual_unlocked_phone_bypass_allows_eligible_peer_playout() {
+    product_outgoing_with_policy(
+        true,
+        false,
+        false,
+        AudioProfile::Mulaw,
+        IvrMode::Disabled,
+        true,
+        Some(true),
+    );
+}
+
+fn product_outgoing_with_policy(
+    radio: bool,
+    immediate: bool,
+    latching: bool,
+    selected: AudioProfile,
+    ivr: IvrMode,
+    isolated: bool,
+    bypass_all: Option<bool>,
+) {
     const CHILD: &str = "RPTADV_TEST_OUTGOING_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
-        let name = if selected == AudioProfile::G722 {
+        let name = if bypass_all == Some(true) {
+            "host_services::product_phone_tests::sip::outgoing::actual_unlocked_phone_bypass_allows_eligible_peer_playout"
+        } else if bypass_all == Some(false) {
+            "host_services::product_phone_tests::sip::outgoing::actual_unlocked_phone_bypass_preserves_local_only_playout"
+        } else if selected == AudioProfile::G722 {
             "host_services::product_phone_tests::sip::outgoing::actual_product_g722_two_way_phone_preserves_wideband_pcm"
         } else if isolated {
             "host_services::product_phone_tests::sip::outgoing::actual_outgoing_call_isolates_and_restores_existing_ordinary_link"
@@ -617,8 +659,20 @@ fn product_outgoing_with_ivr(
     } else {
         configuration
     };
-    // IVR privacy uses the deployed receive reserve, including the linked case.
-    let configuration = if immediate || ivr != IvrMode::Disabled {
+    let configuration = if let Some(all) = bypass_all {
+        let digest = include_str!("../../../product/src/tests/fixtures/phone_mailbox.conf")
+            .lines()
+            .find_map(|line| line.strip_prefix("pin_hash="))
+            .unwrap();
+        configuration.replace("[1000]", &format!(
+            "[1000]\nlink_command_phone_bypass=99\nphone_outgoing_playout={}\ndtmf_admin_unlock_hash={digest}\ndtmf_admin_lock_hash={digest}\ndtmf_admin_timeout_ms=2000",
+            if all { "all" } else { "local" },
+        ))
+    } else {
+        configuration
+    };
+    // IVR and protected commands use the deployed receive reserve.
+    let configuration = if immediate || ivr != IvrMode::Disabled || bypass_all.is_some() {
         configuration.replace("[1000]", "[1000]\nfull_duplex=yes\nsquelch_delay_ms=30")
             + "\n[radio]\nradio_duplex_mode=half\n[radio 1000]\nvad_mode=kerchunk\nvad_hang_ms=1000\n"
     } else {
@@ -1014,6 +1068,15 @@ fn product_outgoing_with_ivr(
             );
         }
     }
+    if let Some(all) = bypass_all {
+        assert_call_bypass(
+            &mut caller,
+            &mut codec,
+            linked.as_mut().unwrap(),
+            &speech,
+            all,
+        );
+    }
     if radio {
         radio_digits(b"*0#");
     } else {
@@ -1319,6 +1382,138 @@ fn telephone_ivr(
         PUBLIC_PCM_OUTPUT.load(Ordering::Acquire),
         before_pcm,
         "IVR digits created RF results/audio"
+    );
+}
+
+/// Exercise protected bypass through real RF tones while the same media owners
+/// continue paced RTP and ordinary control; no direct command shortcut.
+fn assert_call_bypass(
+    caller: &mut Caller,
+    codec: &mut AudioCodec,
+    remote: &mut vox::Remote,
+    speech: &[f32],
+    all: bool,
+) {
+    let mut returned = Vec::new();
+    let before = PUBLIC_PCM_OUTPUT.load(Ordering::Acquire);
+    LOCAL_DTMF.store(usize::from(b' '), Ordering::Release);
+    media(
+        caller,
+        codec,
+        &[0.0; 800],
+        &mut returned,
+        Some(&mut *remote),
+    );
+    for &digit in b"*8001234#*99#" {
+        LOCAL_DTMF.store(usize::from(digit), Ordering::Release);
+        media(
+            caller,
+            codec,
+            &[0.0; 1280],
+            &mut returned,
+            Some(&mut *remote),
+        );
+        LOCAL_DTMF.store(usize::from(b' '), Ordering::Release);
+        media(
+            caller,
+            codec,
+            &[0.0; 960],
+            &mut returned,
+            Some(&mut *remote),
+        );
+    }
+    LOCAL_DTMF.store(0, Ordering::Release);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut quiet_since = Instant::now();
+    let mut public = PUBLIC_PCM_OUTPUT.load(Ordering::Acquire);
+    loop {
+        media(
+            caller,
+            codec,
+            &[0.0; 160],
+            &mut returned,
+            Some(&mut *remote),
+        );
+        let current = PUBLIC_PCM_OUTPUT.load(Ordering::Acquire);
+        if current != public || LAST_PTT.load(Ordering::Acquire) {
+            public = current;
+            quiet_since = Instant::now();
+        }
+        if current > before && quiet_since.elapsed() >= Duration::from_millis(750) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "finite protected-command result must drain"
+        );
+    }
+    assert!(
+        returned.iter().all(|sample| sample.abs() <= 0.01),
+        "unlock/bypass and LOCAL result cannot reach the callee as PCM"
+    );
+    assert_eq!(
+        remote.voiced_samples(),
+        0,
+        "unlock/bypass and LOCAL result cannot leak to the restored ordinary peer"
+    );
+    remote.clear_voice_observation();
+    returned.clear();
+    let before = PUBLIC_PCM_OUTPUT.load(Ordering::Acquire);
+    media(caller, codec, speech, &mut returned, Some(&mut *remote));
+    media(
+        caller,
+        codec,
+        &[0.0; 16000],
+        &mut returned,
+        Some(&mut *remote),
+    );
+    assert!(
+        PUBLIC_PCM_OUTPUT.load(Ordering::Acquire) > before + 160,
+        "bypassed telephone speech still reaches local RF"
+    );
+    assert_eq!(
+        remote.voiced_samples() > 160,
+        all,
+        "configured outgoing audience alone selects eligible ordinary peers"
+    );
+    if !all {
+        assert_eq!(
+            remote.voiced_samples(),
+            0,
+            "local-only means no callee PCM to peers"
+        );
+    }
+    assert!(
+        returned.iter().all(|sample| sample.abs() <= 0.01),
+        "bypass preserves telephone mix-minus"
+    );
+    // The two-second source grant has expired during result/speech playback.
+    // The applied bypass remains attached to the call, not that grant timer.
+    remote.clear_voice_observation();
+    returned.clear();
+    let before = PUBLIC_PCM_OUTPUT.load(Ordering::Acquire);
+    remote.request_return();
+    media(
+        caller,
+        codec,
+        &[0.0; 8000],
+        &mut returned,
+        Some(&mut *remote),
+    );
+    assert_eq!(remote.sent_return_packets(), 15);
+    assert!(
+        PUBLIC_PCM_OUTPUT.load(Ordering::Acquire) > before + 160,
+        "the same ordinary input is restored by call-scoped bypass"
+    );
+    assert!(
+        returned.iter().any(|sample| sample.abs() > 0.01),
+        "ordinary programme reaches the call after bypass"
+    );
+    remote.clear_voice_observation();
+    assert_radio_return(caller, codec, Some(&mut *remote));
+    assert!(
+        remote.voiced_samples() > 160,
+        "local-only telephone audience does not disable ordinary RF forwarding"
     );
 }
 

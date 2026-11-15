@@ -69,3 +69,11 @@ The existing source collector, call claim and prepared graph already own all req
 - bypass-private-strict-green.log: rendered private success/failure-once/no-RF/retired matrix passed; all five outgoing isolation regressions passed; core/product all-target Clippy and formatting passed.
 - The first private test attempt inspected lazy speech before rendering. Its final version uses the existing finite private-stream helper, requiring successful completion and no second reply before counting opened speech. No production adjustment or privacy relaxation was needed.
 - This is a local recovery checkpoint, not full PR, composed, hardware or release qualification. Integration with selected IVR/default isolation, composed bypass/local-all proof and complete affected gates remain open.
+
+
+## Integrated composition checkpoint
+- Isolated replay onto exact 1285f8f produced e478913. The only conflict was append-only Host methods; both the exact IVR forwarding block and exact P14 block were retained.
+- bypass-union-wire.log exited 0 using freshly rebuilt, hashed own product/SIP DSOs: real RF unlock/bypass Local case 82.97 s, All case 82.59 s, unchanged linked-IVR/isolation case 72.54 s, then three core and eight product focused tests. The existing 90-second case bounds were unchanged.
+- Both new cases preserve default isolation before bypass, then test callee/RF/ordinary audience, exact mix-minus, no command/result PCM to caller or ordinary peer, bypass after the two-second unlock expires, and same-transport restoration/teardown. Exact successor reset is additionally covered by the Host matrix.
+- One review finding added the ordinary-peer zero-PCM assertion before clearing its command-phase observation. Local case reported two skipped synthetic callbacks; the other two reported zero. No timing or privacy assertion was relaxed.
+- Complete aggregate/static qualification is next. No P14 deployment or hardware acceptance is claimed.

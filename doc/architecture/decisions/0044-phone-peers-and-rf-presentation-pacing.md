@@ -2204,3 +2204,12 @@ a successor by name. Pre-cut failures can still target that exact live reply.
 Macro/source cancellation and the original Engine revision remain authoritative.
 This increment adds no media queue, provider interface, worker or call-concurrency
 policy and is separate from the selected default-isolation hardware checkpoint.
+
+
+The composed bypass fixture keeps one actual ordinary transport connected before,
+during and after the same SIP call. It applies the optional command through real
+RF tones with healthy RTP continuing, verifies both Local and All audiences and
+source-private results, then proves ordinary media stays restored after the
+unlock grant expires. It retains the existing call/hangup, mix-minus and bounded
+watchdogs. The separate linked-IVR case preserves default isolation and exact
+telephone digit privacy; these are synthetic composition checks, not deployment.
