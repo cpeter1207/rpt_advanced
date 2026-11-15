@@ -157,7 +157,9 @@ impl AudioProfile {
     }
     fn matches_format(self, format: &str) -> bool {
         let expected = format!("{}/{}", self.name(), self.parameters().rtp_clock_hz);
-        format == expected || format == format!("{expected}/1")
+        // RFC8866 encoding names are case-insensitive; clock/channel syntax stays exact.
+        format.eq_ignore_ascii_case(&expected)
+            || format.eq_ignore_ascii_case(&format!("{expected}/1"))
     }
 }
 
@@ -281,8 +283,18 @@ impl MediaDescription {
                 return Err(invalid);
             }
             let event_clock = match mapping {
-                Some("telephone-event/8000" | "telephone-event/8000/1") => Some(8000),
-                Some("telephone-event/16000" | "telephone-event/16000/1") => Some(16000),
+                Some(value)
+                    if value.eq_ignore_ascii_case("telephone-event/8000")
+                        || value.eq_ignore_ascii_case("telephone-event/8000/1") =>
+                {
+                    Some(8000)
+                }
+                Some(value)
+                    if value.eq_ignore_ascii_case("telephone-event/16000")
+                        || value.eq_ignore_ascii_case("telephone-event/16000/1") =>
+                {
+                    Some(16000)
+                }
                 _ => None,
             }
             .filter(|_| (96..=127).contains(&payload))

@@ -1430,7 +1430,11 @@ unsafe extern "C" fn peer_send_prepared_timed(
         }
         if let Some(shared) = unsafe { sip_phone::shared(peer) } {
             return sip_phone::media(shared, "send", |media| {
-                if frames != media.packet_frames() || count != media.packet_bytes() {
+                // Invalid encoded length is a rejected ABI submission, not call failure.
+                if count != media.packet_bytes() {
+                    return Ok(-1);
+                }
+                if frames != media.packet_frames() {
                     return Err(crate::phone::media::MediaError::Codec);
                 }
                 let bytes = unsafe { std::slice::from_raw_parts(bytes, count) };

@@ -163,3 +163,12 @@ correct-length/wrong-PCM-frame input. The saved data-driven test constructs real
 Media/Shared for every profile and calls the actual ABI callback, including
 null/oversized bounds and the terminal frame control. Production repair and
 GREEN are not yet part of this RED checkpoint.
+
+The following minimal repair passed `compatibility-green.log`, terminal0:
+new SDP2 and actual host lifecycle1; media/event22; original phone_media15;
+profile/provider8; formatting, all-target standalone Clippy and Rustdoc with
+warnings denied. Independent review cleared the exact two-file source delta.
+Bad encoded length now returns the same nonterminal-1 before frame validation;
+valid-length wrong PCM frames still retire the call. ASCII-insensitive name
+comparisons retain exact numeric clock, channel, payload and format-shape checks.
+No new codec, state, queue, dependency or runtime API was introduced by this repair.
