@@ -45,8 +45,20 @@
 ### Task 3: Qualify single-call checkpoint
 **Files:** existing standalone composed fixture and ADR0044 append.
 - [x] Extend existing actual SIP/ordinary-peer fixture with default isolation, unchanged one-call capacity, local/callee audio, ordinary control and restoration.
-- [ ] Run affected full core/product/standalone and strict checks, record exact counts and limits.
+- [x] Run affected full core/product/standalone and strict checks, record exact counts and limits.
 - [ ] Deliver exact commit/bundle to parent for separately authorized hardware milestone. Do not activate.
 
 ### Follow-on P14/configuration
 After the default milestone, use optional configured action and the existing exact-source node unlock grant. Capture the exact call at serialized admission; Open remote-base policy, mailbox login and callee media role grant no bypass. Reuse Mode's independent transmit/forward bits for local versus otherwise-eligible all-peer playout; do not add another mixer. No live mapping or multi-call semantics are introduced.
+
+
+## Combined qualification
+
+The IVR/default-isolation union is qualified at implementation/test head
+`be13861f0a2c4c6c1844a9feea271c60ca0fee94`. Its existing retained-link
+composition additionally exercises actual telephone-event IVR and post-IVR
+RF programme resumption while ordinary media remains isolated, then restores
+the same ordinary transport after exact hangup. All eleven outgoing cases,
+full affected suites and strict gates pass; exact counts/evidence are recorded
+in the IVR plan. Optional P14 is deliberately absent. Native/manual selection
+remains the parent's separately authorized next step, not a claimed deployment.

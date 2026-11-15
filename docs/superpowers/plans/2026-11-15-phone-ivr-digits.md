@@ -176,3 +176,33 @@ warning exemption. Source review, fmt and six-package all-target Clippy pass.
 Full union suites and final host/static qualification are still in progress.
 Evidence is `.work/union-ivr-wire.log`, `.work/union-seven-wire2.log` and the
 preflight portion of `.work/union-full-strict3.log`. No node was changed.
+
+
+## Qualified IVR/default-isolation union
+
+Implementation/test head `be13861f0a2c4c6c1844a9feea271c60ca0fee94` passed
+820 core unit plus 94 integration and 878 product unit plus 5 integration
+tests. The one existing opt-in product test remains ignored. Standalone base
+passed 324 library, 2 binary, 30 integration and 1 doc test, including the real
+incoming and ordinary-link compositions. Its 11 outgoing cases were run as
+separate process-isolated compositions, all passing with unchanged 90-second
+outer limits. Final-byte IVR event/in-band tests passed in 51.36/51.47 seconds
+for Mu-law and 51.38/51.38 seconds for A-law, including post-IVR RF resumption.
+The simultaneous retained-link IVR/isolation/restoration case passed in 72.56
+seconds as recorded above.
+
+Asterisk compatibility passed 66 tests; peer support passed 13 unit plus 82
+integration; SIP adapter passed 13. The C11 product ABI harness, six-package
+all-target Clippy and Rustdoc with warnings denied, and fmt check passed.
+Evidence: `.work/union-seven-wire2.log`, `.work/union-full-strict3.log` and
+`.work/union-host-final.log`; every final launcher exited 0 under its bounded
+constrained profile. The exact fresh image digest is
+`sha256:4e62696d8e6809b7b716c3c81d70b59ed9ab5b109a7539dc97c855dc7d41e844`.
+
+The public header only documents the existing peer-send-digit callback's
+accepted/busy/refused return semantics; no ABI table layout or version changes.
+Product and standalone must be rebuilt from this matched source. Dependencies
+and Cargo lock remain unchanged. No optional bypass, new codec scope, live
+configuration change, node deployment or new hardware validation is included.
+The native/manual milestone and complete PR coverage/package/platform gates
+remain separate. This final documentation commit does not change tested source.
