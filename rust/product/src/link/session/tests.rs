@@ -1486,7 +1486,10 @@ pub(crate) fn phone_source_peer_at_rate(rate: u32) -> (PeerIo, Shared) {
     make_peer(rate, true, true, true, false, true)
 }
 pub(crate) fn phone_source_peer_inband(rate: u32) -> (PeerIo, Shared) {
-    make_peer_with_local(rate, true, true, true, false, Some(true), None)
+    make_peer_with_local(rate, true, true, true, false, Some(64), None)
+}
+pub(crate) fn phone_source_peer_transmit_inband(rate: u32) -> (PeerIo, Shared) {
+    make_peer_with_local(rate, true, true, true, false, Some(512), None)
 }
 pub(crate) fn phone_peer() -> (PeerIo, Shared) {
     make_peer(8000, false, false, false, false, true)
@@ -1495,7 +1498,7 @@ pub(crate) fn phone_peer_at_rate(rate: u32) -> (PeerIo, Shared) {
     make_peer(rate, false, false, false, false, true)
 }
 pub(crate) fn phone_peer_named(local: &str) -> (PeerIo, Shared) {
-    make_peer_with_local(8000, false, false, false, false, Some(false), Some(local))
+    make_peer_with_local(8000, false, false, false, false, Some(0), Some(local))
 }
 pub(crate) fn phone_with_egress(async_enabled: bool, egress: bool) -> (PeerIo, Shared) {
     make_peer(8000, async_enabled || egress, egress, false, false, true)
@@ -1517,7 +1520,7 @@ fn make_peer(
         egress,
         source,
         forward_text,
-        phone.then_some(false),
+        phone.then_some(0),
         None,
     )
 }
@@ -1527,14 +1530,14 @@ fn make_peer_with_local(
     egress: bool,
     source: bool,
     forward_text: bool,
-    phone: Option<bool>,
+    phone: Option<u32>,
     local: Option<&str>,
 ) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
         local: local.map(Box::from),
-        capabilities: if let Some(inband) = phone {
-            32 | (u32::from(inband) << 6)
+        capabilities: if let Some(digit_capabilities) = phone {
+            32 | digit_capabilities
                 | u32::from(async_enabled)
                 | (u32::from(egress) << 1)
                 | (u32::from(source) << 4)

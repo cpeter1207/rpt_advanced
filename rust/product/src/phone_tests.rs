@@ -1226,28 +1226,33 @@ fn outgoing_inband_digit_uses_existing_private_queue_not_event_callback() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (io, state) = crate::link::session::tests::phone_source_peer_inband(8000);
-    let mut calls = PhoneCalls::new(1, 16).unwrap();
-    let claim = calls
-        .reserve_outgoing(io.phone_account().unwrap().clone(), io.local())
-        .unwrap();
-    let source = calls.adopt_outgoing(&claim, io).unwrap();
-    let reply = calls.reply(&source).unwrap();
-    let io = calls.calls[0].io.take().unwrap();
-    let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
-    calls.calls[0].owner = Some(control);
-    session.set_source_clock(
-        crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
-    );
-    calls.send_telephone_digit(&source, &reply, '5').unwrap();
-    for now in (0..400).step_by(10) {
-        session.step(now).unwrap();
+    for peer in [
+        crate::link::session::tests::phone_source_peer_inband,
+        crate::link::session::tests::phone_source_peer_transmit_inband,
+    ] {
+        let (io, state) = peer(8000);
+        let mut calls = PhoneCalls::new(1, 16).unwrap();
+        let claim = calls
+            .reserve_outgoing(io.phone_account().unwrap().clone(), io.local())
+            .unwrap();
+        let source = calls.adopt_outgoing(&claim, io).unwrap();
+        let reply = calls.reply(&source).unwrap();
+        let io = calls.calls[0].io.take().unwrap();
+        let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+        calls.calls[0].owner = Some(control);
+        session.set_source_clock(
+            crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
+        );
+        calls.send_telephone_digit(&source, &reply, '5').unwrap();
+        for now in (0..400).step_by(10) {
+            session.step(now).unwrap();
+        }
+        let state = state.lock().unwrap();
+        assert!(state.digits.is_empty());
+        assert!(!state.prepared.is_empty());
+        assert!(state.texts.is_empty());
+        assert!(!reply.phone_authenticated());
     }
-    let state = state.lock().unwrap();
-    assert!(state.digits.is_empty());
-    assert!(!state.prepared.is_empty());
-    assert!(state.texts.is_empty());
-    assert!(!reply.phone_authenticated());
 }
 
 #[test]

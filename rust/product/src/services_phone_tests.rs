@@ -162,7 +162,14 @@ fn private_inband_capability_requires_the_complete_timed_phone_profile() {
         (256, false),
         (306, false),
         (291, false),
-        (563, false), // next unknown capability remains rejected
+        (563, true), // native RX and in-band TX
+        (819, true), // finite packets plus TX-only synthesis
+        (627, true), // redundant in-band bits preserve existing RX behavior
+        (883, true), // complete group with both in-band bits and finite packets
+        (512, false),
+        (562, false),
+        (547, false),
+        (1075, false), // next unknown capability remains rejected
         (64, false),
         (96, false),
         (99, false),
