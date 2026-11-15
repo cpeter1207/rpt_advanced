@@ -112,3 +112,40 @@ Evidence: `rust/standalone/src/iax.rs` composition manifest and the pinned owned
 codec adapters' `rust/{pcm,gsm,spandsp,ilbc,bcg729,ffmpeg,speex,opus,dialogic}`
 metadata/implementations. Wire references: RFC 3551, RFC 3952, RFC 5574 and
 RFC 7587. Codec names alone are not evidence of wire compatibility.
+
+## Composed G.722 and P14 checkpoint
+
+The separate integration tree replays P14 final source `7be33d5` onto G.722
+`f044eca`. Tested revision: `b406ba4af8f0496b233acfa0d4351d6a48ca37d8`.
+Only the additive ADR append and outgoing fixture dispatch needed resolution.
+Independent review found all P14 production files byte-identical to its qualified
+revision; Local/All retain their original Mulaw timing, exact call identity,
+ordinary-peer pumping and pre-clear zero-peer privacy assertion.
+
+Both bounded commands exited zero under the serial constrained quality profile
+and image digest `4e62696d8e6809b7b716c3c81d70b59ed9ab5b109a7539dc97c855dc7d41e844`:
+
+- `union-wire` (595-second outer, 90 seconds per case): Local bypass 83.18 s,
+  All bypass 82.53 s, linked IVR/isolation 72.51 s, outgoing G.722 70.47 s,
+  incoming G.722 events 20.00 s, incoming G.722 in-band 22.56 s, and original
+  G.711 private incoming 19.92 s. Core bypass 3 and product bypass 8 also passed.
+- `g722-strict` (180-second outer): formatting, core/product/standalone/jitter
+  Clippy all-targets and Rustdoc with warnings denied; outbound 20, call-media
+  11, catalog post-join lifetime 1, finite codec 3, capability 1, source-credit
+  13, and readiness against both candidate and installed old detector passed.
+
+These runs used the isolated unreleased detector from exact source `0fa83df`,
+DSO SHA256 `a2ba48027ef052ac24a4901d86f0992a91bb8dd0e9b960a8fa644adf43f8989f`.
+Owned DTMF PR #5 passed both hosted native gates and merged as `06948a9`; its
+alpha4 tag/assets are not yet published and no consumer release pin was changed.
+The merged source tree matches the fully tested PR head. Released-provider
+selection must be verified separately before deployment.
+
+Actual product DSO SHA256:
+`f03bdac61b9665bd216dfaeba4c61ccc6d8c6e4c04b1d8eaf0a84ca6035dc617`.
+Actual SIP adapter DSO SHA256:
+`b3d352592388e358d5d95f7a727c395f0fd9d1592f36fb219f221fa2e1e989f3`.
+
+This is combined focused, loopback-wire and scoped strict evidence, not full
+aggregate/native/package qualification, real hardware validation, or all-codec
+parity. No running-node or system-provider change was made.
