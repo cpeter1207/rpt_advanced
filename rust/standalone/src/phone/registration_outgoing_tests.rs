@@ -174,7 +174,7 @@ fn outgoing_reactor_adopts_validated_answer_without_incoming_authority() {
     socket
         .send_to(response(&bye, 200, false).as_bytes(), remote)
         .unwrap();
-    host_factory_roundtrip(&worker, &providers, &accounts, &socket, &rtp);
+    let digit_result = host_factory_roundtrip(&worker, &providers, &accounts, &socket, &rtp);
     // More than the native slot count proves refusal releases terminal custody.
     for _ in 0..9 {
         let mut refused = worker
@@ -293,6 +293,10 @@ fn outgoing_reactor_adopts_validated_answer_without_incoming_authority() {
     worker.stop().unwrap();
     drop(dial);
     fs::remove_dir_all(directory).unwrap();
+    assert_eq!(
+        digit_result, 0,
+        "negotiated SIP telephone digit was unavailable"
+    );
 }
 
 /// Queue refusal retains one claim; cancellation never needs a second queue slot.
@@ -360,7 +364,7 @@ fn host_factory_roundtrip(
     accounts: &PreparedAccounts,
     socket: &UdpSocket,
     rtp: &UdpSocket,
-) {
+) -> i32 {
     use crate::host_services::HostServicesOwner;
     use std::{
         ffi::c_void,
@@ -422,7 +426,7 @@ fn host_factory_roundtrip(
     );
     host.set_sip_dial_admission(true);
     // First request validates the answered socket and existing PHONE owner.
-    std::thread::scope(|scope| {
+    let digit_result = std::thread::scope(|scope| {
         let task = scope.spawn(call);
         let mut wire = [0; 8192];
         let (invite, remote) = receive(socket, &mut wire);
@@ -462,12 +466,17 @@ fn host_factory_roundtrip(
             b"second-node"
         );
         assert!(worker.incoming().is_none());
+        // The existing completed-digit callback must reach negotiated SIP event
+        // egress without manufacturing an incoming receipt or node authority.
+        let digit_result =
+            unsafe { api.peer_send_digit.unwrap()(api.context, raw as *mut c_void, b'5') };
         unsafe { api.peer_destroy.unwrap()(api.context, raw as *mut c_void) };
         let (bye, remote) = receive(socket, &mut wire);
         assert!(bye.starts_with("BYE "));
         socket
             .send_to(response(&bye, 200, false).as_bytes(), remote)
             .unwrap();
+        digit_result
     });
     // Cancellation during queued/prepared admission must not emit an INVITE.
     for remove in [false, true] {
@@ -578,4 +587,5 @@ fn host_factory_roundtrip(
     // An old account binding cannot initiate after its committed publication ends.
     current.store(true, Ordering::Release);
     assert_eq!(call(), (-1, 0));
+    digit_result
 }

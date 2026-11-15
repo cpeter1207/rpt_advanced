@@ -156,12 +156,17 @@ impl Media {
         self.marker = true;
         Ok(())
     }
+    /// One completed control digit uses negotiated event egress, never caller echo.
+    pub(crate) fn send_digit(&mut self, digit: u8) -> i32 {
+        self.endpoint.send_digit(digit)
+    }
     pub(crate) fn send(
         &mut self,
         bytes: &[u8; 160],
         timestamp_ms: u32,
         deadline_ms: u32,
     ) -> Result<i32, MediaError> {
+        self.endpoint.poll_digit()?;
         let epoch = self.epoch.ok_or(MediaError::Retired)?;
         match self.endpoint.try_send_audio(TimedAudio {
             payload: bytes,
@@ -327,6 +332,8 @@ impl Media {
         if completion != 0 {
             return Err(MediaError::SourceContract);
         }
+        // Call control continues even while the inbound source retains credit.
+        self.endpoint.poll_digit()?;
         if sink.is_null() {
             return Ok(());
         }

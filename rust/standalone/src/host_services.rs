@@ -1265,6 +1265,13 @@ unsafe extern "C" fn peer_send_text(
 }
 
 unsafe extern "C" fn peer_send_digit(_: *mut c_void, peer: *mut c_void, digit: u8) -> i32 {
+    if let Some(shared) = unsafe { sip_phone::shared(peer) } {
+        if !shared.established() {
+            return -1;
+        }
+        return sip_phone::media(shared, "digit", |media| Ok(media.send_digit(digit)))
+            .unwrap_or(-1);
+    }
     unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| {
         if peer.peer.send_digit(digit).is_ok() {
             0

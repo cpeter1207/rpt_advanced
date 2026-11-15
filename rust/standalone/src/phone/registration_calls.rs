@@ -208,6 +208,9 @@ impl Shared {
     pub(crate) fn live(&self) -> bool {
         self.state.load(Ordering::Acquire) < 4 && !self.close.load(Ordering::Acquire)
     }
+    pub(crate) fn established(&self) -> bool {
+        self.state.load(Ordering::Acquire) == 3 && self.live()
+    }
     pub(crate) fn wake(&self) {
         self.client.wake.notify_one();
     }

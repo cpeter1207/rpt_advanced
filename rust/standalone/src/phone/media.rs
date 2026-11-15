@@ -389,6 +389,7 @@ impl RtpEndpoint {
                 },
                 pending: None,
                 epoch: 1,
+                digit: None,
             },
             started: std::time::Instant::now(),
             receipt_floor,
@@ -458,6 +459,19 @@ impl RtpEndpoint {
         let now_ms = self.elapsed_ms();
         self.egress
             .send(audio, now_ms, |wire| self.socket.try_send(wire))
+    }
+    /// Admit one completed symbol without another queue. Zero accepts, one
+    /// retains caller custody, and minus one refuses invalid/unnegotiated input.
+    pub(crate) fn send_digit(&mut self, digit: u8) -> i32 {
+        let Some(payload) = self.media.telephone_event else {
+            return -1;
+        };
+        self.egress.begin_digit(digit, payload, self.elapsed_ms())
+    }
+    /// Service at most one due event report on the existing serial media turn.
+    pub(crate) fn poll_digit(&mut self) -> Result<(), MediaError> {
+        self.egress
+            .poll_digit(self.elapsed_ms(), |wire| self.socket.try_send(wire))
     }
     /// True only while a real WouldBlock retains an uncommitted datagram.
     pub fn wants_writable(&self) -> bool {
@@ -586,37 +600,67 @@ impl RtpEndpoint {
 /// Independent encode/decode contexts from the released dynamic G.711 provider.
 pub use super::codec::G711Codec;
 
-/// One immutable datagram retained only after socket backpressure.
-struct PendingAudio {
+/// One immutable datagram retained only after socket backpressure. Audio and
+/// telephone events share this one slot, SSRC and sequence-number owner.
+struct PendingDatagram {
     wire: [u8; 172],
+    length: usize,
+    audio: bool,
     timestamp: u32,
     marker: bool,
     deadline_ms: u32,
 }
-impl PendingAudio {
-    fn matches(&self, audio: TimedAudio<'_>) -> bool {
-        self.timestamp == audio.timestamp
-            && self.marker == audio.marker
-            && self.deadline_ms == audio.deadline_ms
-            && self.wire[12..] == audio.payload[..]
+impl PendingDatagram {
+    fn matches(&self, packet: &Packet<'_>) -> bool {
+        self.timestamp == packet.timestamp
+            && self.marker == packet.marker
+            && self.deadline_ms == packet.deadline_ms
+            && self.wire[1] & 0x7f == packet.payload_type
+            && self.wire[12..self.length] == *packet.payload
     }
+}
+
+/// One borrowed packet request; source deadline and payload never change on retry.
+struct Packet<'a> {
+    payload: &'a [u8],
+    payload_type: u8,
+    timestamp: u32,
+    marker: bool,
+    deadline_ms: u32,
+    audio: bool,
+}
+
+/// A completed digit is regenerated as a finite 200 ms event with a 50 ms gap,
+/// matching the existing default DTMF regeneration shape. No symbol is logged.
+struct TelephoneDigit {
+    symbol: u8,
+    payload_type: u8,
+    started_ms: u32,
+    next_ms: u32,
+    final_reports: u8,
 }
 
 /// Serial packet framing, separate from socket readiness.
 struct RtpEgress {
     header: rtp::header::Header,
-    pending: Option<PendingAudio>,
+    pending: Option<PendingDatagram>,
     epoch: u64,
+    digit: Option<TelephoneDigit>,
 }
 impl RtpEgress {
     fn retire(&mut self) -> Result<u64, MediaError> {
-        self.pending = None;
+        // An audio-source cut does not revoke separately admitted call control.
+        if self.pending.as_ref().is_some_and(|pending| pending.audio) {
+            self.pending = None;
+        }
         self.epoch = self
             .epoch
             .checked_add(1)
             .filter(|_| self.epoch != 0)
             .unwrap_or(0);
         if self.epoch == 0 {
+            self.digit = None;
+            self.pending = None;
             Err(MediaError::Retired)
         } else {
             Ok(self.epoch)
@@ -628,41 +672,147 @@ impl RtpEgress {
         now_ms: u32,
         send: impl FnOnce(&[u8]) -> std::io::Result<usize>,
     ) -> Result<SendStatus, MediaError> {
-        use webrtc_util::marshal::Marshal;
         if self.epoch == 0 || audio.epoch != self.epoch {
             return Ok(SendStatus::Expired);
         }
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| !pending.matches(audio))
-        {
-            return Err(MediaError::InvalidPacket);
-        }
-        if now_ms >= audio.deadline_ms {
-            self.pending = None;
-            return Ok(SendStatus::Expired);
-        }
-        if audio.deadline_ms - now_ms > 200 {
-            return Err(MediaError::InvalidPacket);
-        }
-        if self.pending.is_none() {
-            self.header.marker = audio.marker;
-            self.header.timestamp = audio.timestamp;
-            let mut wire = [0; 172];
-            self.header
-                .marshal_to(&mut wire[..12])
-                .map_err(|_| MediaError::InvalidPacket)?;
-            wire[12..].copy_from_slice(audio.payload);
-            self.pending = Some(PendingAudio {
-                wire,
+        self.packet(
+            Packet {
+                payload: audio.payload,
+                payload_type: self.header.payload_type,
                 timestamp: audio.timestamp,
                 marker: audio.marker,
                 deadline_ms: audio.deadline_ms,
+                audio: true,
+            },
+            now_ms,
+            send,
+        )
+    }
+    fn begin_digit(&mut self, digit: u8, payload_type: u8, now_ms: u32) -> i32 {
+        let Some(symbol) = b"0123456789*#ABCD".iter().position(|value| *value == digit) else {
+            return -1;
+        };
+        if self.epoch == 0
+            || now_ms.checked_add(650).is_none()
+            || !(96..=127).contains(&payload_type)
+        {
+            return -1;
+        }
+        if self.digit.is_some() {
+            return 1;
+        }
+        self.digit = Some(TelephoneDigit {
+            symbol: symbol as u8,
+            payload_type,
+            started_ms: now_ms,
+            next_ms: now_ms,
+            final_reports: 0,
+        });
+        0
+    }
+    fn poll_digit(
+        &mut self,
+        now_ms: u32,
+        send: impl FnOnce(&[u8]) -> std::io::Result<usize>,
+    ) -> Result<(), MediaError> {
+        let Some(digit) = &self.digit else {
+            return Ok(());
+        };
+        if digit.final_reports == 3 {
+            if now_ms >= digit.next_ms {
+                self.digit = None;
+            }
+            return Ok(());
+        }
+        if now_ms >= digit.started_ms + 450 {
+            self.digit = None;
+            if self.pending.as_ref().is_some_and(|pending| !pending.audio) {
+                self.pending = None;
+            }
+            return Ok(());
+        }
+        if now_ms < digit.next_ms {
+            return Ok(());
+        }
+        let duration = (digit.next_ms - digit.started_ms + 20).min(200) as u16 * 8;
+        let ended = duration == 1600;
+        let payload = [
+            digit.symbol,
+            12 | if ended { 0x80 } else { 0 },
+            (duration >> 8) as u8,
+            duration as u8,
+        ];
+        let result = self.packet(
+            Packet {
+                payload: &payload,
+                payload_type: digit.payload_type,
+                timestamp: digit.started_ms.wrapping_mul(8),
+                marker: digit.next_ms == digit.started_ms,
+                deadline_ms: (digit.next_ms + 200).min(digit.started_ms + 450),
+                audio: false,
+            },
+            now_ms,
+            send,
+        )?;
+        match result {
+            SendStatus::Sent => {
+                let digit = self.digit.as_mut().expect("retained event");
+                digit.final_reports += u8::from(ended);
+                // Never emit a catch-up burst after a late serial turn.
+                digit.next_ms = now_ms + if digit.final_reports == 3 { 50 } else { 20 };
+            }
+            SendStatus::WouldBlock => {}
+            SendStatus::Expired => self.digit = None,
+        }
+        Ok(())
+    }
+    fn packet(
+        &mut self,
+        packet: Packet<'_>,
+        now_ms: u32,
+        send: impl FnOnce(&[u8]) -> std::io::Result<usize>,
+    ) -> Result<SendStatus, MediaError> {
+        use webrtc_util::marshal::Marshal;
+        if self.epoch == 0 {
+            return Ok(SendStatus::Expired);
+        }
+        if let Some(pending) = &self.pending {
+            if pending.audio != packet.audio {
+                return Ok(SendStatus::WouldBlock);
+            }
+            if !pending.matches(&packet) {
+                return Err(MediaError::InvalidPacket);
+            }
+        }
+        if now_ms >= packet.deadline_ms {
+            self.pending = None;
+            return Ok(SendStatus::Expired);
+        }
+        if packet.deadline_ms - now_ms > 200 || packet.payload.len() > 160 {
+            return Err(MediaError::InvalidPacket);
+        }
+        if self.pending.is_none() {
+            self.header.marker = packet.marker;
+            self.header.timestamp = packet.timestamp;
+            let audio_payload =
+                std::mem::replace(&mut self.header.payload_type, packet.payload_type);
+            let mut wire = [0; 172];
+            let marshalled = self.header.marshal_to(&mut wire[..12]);
+            self.header.payload_type = audio_payload;
+            marshalled.map_err(|_| MediaError::InvalidPacket)?;
+            let length = 12 + packet.payload.len();
+            wire[12..length].copy_from_slice(packet.payload);
+            self.pending = Some(PendingDatagram {
+                wire,
+                length,
+                audio: packet.audio,
+                timestamp: packet.timestamp,
+                marker: packet.marker,
+                deadline_ms: packet.deadline_ms,
             });
         }
-        // UDP submits this fixed 172-byte datagram atomically or returns an error.
-        match send(&self.pending.as_ref().expect("prepared datagram").wire) {
+        let pending = self.pending.as_ref().expect("prepared datagram");
+        match send(&pending.wire[..pending.length]) {
             Ok(_) => {
                 self.pending = None;
                 self.header.sequence_number = self.header.sequence_number.wrapping_add(1);
