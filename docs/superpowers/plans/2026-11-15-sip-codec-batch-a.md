@@ -145,3 +145,21 @@ checks, twenty outbound source/age/cancellation checks and the catalog-lifetime
 check passed. This receipt precedes the newly prepared malformed-length host
 regression; the settled no-event rerun is recorded above, and remaining codec wire cases
 are pending.
+
+### Compatibility regressions observed before repair
+
+`compatibility-red.log` records two separate Cargo101 results: two SDP tests
+reject valid case-insensitive encoding names or silently lose their event
+mapping, and one actual host callback test retires a live call after malformed
+encoded length. The wrapper exit0 verifies only those expected RED outcomes.
+RFC8866 section5.14 (referencing RFC4855 section3) requires case-insensitive
+encoding names; numeric clock/channel and payload identity remain exact.
+https://www.rfc-editor.org/rfc/rfc8866.html#section-5.14
+
+Independent source review confirmed that the previous host rejected invalid
+encoded length before entering the terminal media-error path. The minimal repair
+must preserve that nonterminal rejection and the existing terminal behavior of
+correct-length/wrong-PCM-frame input. The saved data-driven test constructs real
+Media/Shared for every profile and calls the actual ABI callback, including
+null/oversized bounds and the terminal frame control. Production repair and
+GREEN are not yet part of this RED checkpoint.

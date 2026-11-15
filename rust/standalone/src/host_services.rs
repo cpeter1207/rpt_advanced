@@ -1650,7 +1650,7 @@ unsafe extern "C" fn peer_send_human_text(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::PeerRegistration;
     use super::{HostServicesOwner, boundary, dial_peer, input, peer_dial};
     use crate::abi;
@@ -1665,6 +1665,78 @@ mod tests {
         thread,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
+
+    /// Exercise the actual ABI callback without adding a production handle constructor.
+    pub(crate) fn assert_sip_timed_input_contract(
+        handle: crate::phone::registration::calls::Handle,
+    ) {
+        let shared = std::sync::Arc::clone(&handle.shared);
+        let (count, frames) = {
+            let media = shared.media.lock().unwrap();
+            (media.packet_bytes(), media.packet_frames())
+        };
+        let bytes = vec![0; count + 1];
+        let mut handle = super::PeerHandle::Sip(handle);
+        let peer = std::ptr::from_mut(&mut handle).cast();
+        for malformed_count in [0, count - 1, count + 1] {
+            for supplied_frames in [frames, frames - 1] {
+                assert_eq!(
+                    unsafe {
+                        super::peer_send_prepared_timed(
+                            ptr::null_mut(),
+                            peer,
+                            bytes.as_ptr(),
+                            malformed_count,
+                            supplied_frames,
+                            0,
+                            200,
+                        )
+                    },
+                    -1
+                );
+                assert!(
+                    shared.live(),
+                    "encoded length rejection must not retire a call"
+                );
+            }
+        }
+        for (pointer, malformed_count) in [
+            (ptr::null(), count),
+            (bytes.as_ptr(), isize::MAX as usize + 1),
+        ] {
+            assert_eq!(
+                unsafe {
+                    super::peer_send_prepared_timed(
+                        ptr::null_mut(),
+                        peer,
+                        pointer,
+                        malformed_count,
+                        frames,
+                        0,
+                        200,
+                    )
+                },
+                -1
+            );
+            assert!(shared.live());
+        }
+        // With a valid encoded length, the existing PCM contract violation is terminal.
+        assert_eq!(
+            unsafe {
+                super::peer_send_prepared_timed(
+                    ptr::null_mut(),
+                    peer,
+                    bytes.as_ptr(),
+                    count,
+                    frames - 1,
+                    0,
+                    200,
+                )
+            },
+            -1
+        );
+        assert!(!shared.live());
+    }
 
     unsafe extern "C" fn current_no(_: *mut c_void) -> u32 {
         0

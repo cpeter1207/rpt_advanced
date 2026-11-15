@@ -659,3 +659,60 @@ fn every_packet_size_keeps_one_bounded_immutable_retry_buffer() {
         );
     }
 }
+
+#[test]
+fn audio_encoding_names_are_case_insensitive_without_changing_clock_or_channels() {
+    let local = "127.0.0.1:9999".parse().unwrap();
+    for codec in AudioProfile::ALL {
+        let description = MediaDescription {
+            remote: local,
+            codec,
+            receive_payload: codec.payload(),
+            send_payload: codec.payload(),
+            telephone_events: [None, None],
+        };
+        let source = String::from_utf8(description.answer(local, 1).unwrap()).unwrap();
+        let lower = source.replace(codec.name(), &codec.name().to_ascii_lowercase());
+        for parse in [MediaDescription::parse, MediaDescription::parse_answer] {
+            assert_eq!(parse(lower.as_bytes()), Ok(description.clone()));
+            let wrong_clock =
+                lower.replace(&format!("/{}", codec.parameters().rtp_clock_hz), "/12000");
+            assert_eq!(
+                parse(wrong_clock.as_bytes()),
+                Err(MediaError::UnsupportedDescription)
+            );
+            let stereo = lower.replace(
+                &format!("/{}", codec.parameters().rtp_clock_hz),
+                &format!("/{}/2", codec.parameters().rtp_clock_hz),
+            );
+            assert_eq!(
+                parse(stereo.as_bytes()),
+                Err(MediaError::UnsupportedDescription)
+            );
+        }
+    }
+}
+
+#[test]
+fn event_encoding_names_are_case_insensitive_with_exact_directional_clocks() {
+    let local = "127.0.0.1:9999".parse().unwrap();
+    for codec in [AudioProfile::Mulaw, AudioProfile::L16Wideband] {
+        let description = MediaDescription {
+            remote: local,
+            codec,
+            receive_payload: codec.payload(),
+            send_payload: codec.payload(),
+            telephone_events: [
+                Some(TelephoneEvent::symmetric(101, 8000)),
+                Some(TelephoneEvent::symmetric(102, 16000)),
+            ],
+        };
+        let source = String::from_utf8(description.answer(local, 1).unwrap()).unwrap();
+        for spelling in ["TELEPHONE-EVENT", "Telephone-Event"] {
+            let changed = source.replace("telephone-event", spelling);
+            for parse in [MediaDescription::parse, MediaDescription::parse_answer] {
+                assert_eq!(parse(changed.as_bytes()), parse(source.as_bytes()));
+            }
+        }
+    }
+}
