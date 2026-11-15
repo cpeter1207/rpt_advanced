@@ -2,6 +2,9 @@
 """Check that standalone and Asterisk packages remain independently installable."""
 
 import json
+import subprocess
+import tarfile
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -205,8 +208,41 @@ def test_standalone_build_profile_excludes_asterisk_adapter_packages() -> None:
     assert "-Nlibrptadv-control-asterisk-adapter-dev" in rules
 
 
+def test_source_archive_retains_native_check_inputs() -> None:
+    """The real dist recipe must preserve every native test source byte."""
+    (ROOT / "build").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="dist-regression-", dir=ROOT / "build"
+    ) as directory:
+        name = Path(directory).name
+        archive = ROOT / "build" / f"{name}.tar.gz"
+        try:
+            subprocess.run(
+                ["make", "--no-print-directory", "dist", f"DIST_NAME={name}"],
+                cwd=ROOT,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            required = [
+                *sorted((ROOT / "tests").glob("*.c")),
+                ROOT / "rust/sip-adapter/native.c",
+                ROOT / "rust/sip-adapter/native.h",
+            ]
+            with tarfile.open(archive) as source:
+                for path in required:
+                    member = f"{name}/{path.relative_to(ROOT)}"
+                    assert member in source.getnames(), (
+                        f"missing archive input: {member}"
+                    )
+                    with source.extractfile(member) as archived:
+                        assert archived.read() == path.read_bytes(), member
+        finally:
+            archive.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     tests = (
+        test_source_archive_retains_native_check_inputs,
         test_standalone_package_is_independent_from_asterisk_adapter,
         test_each_install_set_contains_only_its_entrypoint,
         test_standalone_package_declares_its_native_runtime_providers,
