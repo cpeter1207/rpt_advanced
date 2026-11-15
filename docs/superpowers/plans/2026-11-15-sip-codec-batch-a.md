@@ -220,3 +220,23 @@ experiment is `host::tests::egress_load::egress_full_path_load`, invoked separat
 by `tests/peer_egress_load.py`. Product unit runtime was422.63s. Source was unchanged
 during the run; no stale16k test oracle failed. Standalone/C ABI/remaining union
 regressions and the native/coverage/package/hardware limits above remain open.
+
+
+### Frozen standalone, C ABI and strict checkpoint
+
+`batch-a-base-strict.log` exited0 on frozen `f97bbc8` (runtime source
+`ed73d27`), using freshly verified quality image
+`sha256:c3800ed0094d0d01284b70481d3189a76044042b2900594115db2e2a41f2d0fa`.
+The official alpha4 detector hash and the private product/SIP hashes were
+checked first; fresh product/SIP builds were byte-identical to the wire-tested
+artifacts. The real C ABI smoke passed. Standalone passed342 unit,2 binary,
+40 integration and1 documentation tests. Its22 outgoing namespace cases were
+explicitly excluded here and require their separate actual-wire receipts.
+Six-package all-target Clippy and Rustdoc with warnings denied, plus the
+non-mutating workspace format check, passed. Log SHA256:
+`2b1457d2a6fcb7761f18a1518c35fac3bbb6c635057b9bf75a2e10b0cf9e972f`.
+
+Current G711/G722/P14 and corrected L16 outgoing union regressions remain a
+separate pending checkpoint. These local results do not substitute for native
+arm64, production coverage, hosted PR gates, packaging, external interoperability
+or hardware validation. No public combined artifact, node or live state changed.
