@@ -44,6 +44,14 @@ fn fields(packet: &[u8]) -> (String, BTreeMap<String, String>) {
     (first, headers)
 }
 impl Caller {
+    fn packet_interval(&self) -> Duration {
+        let p = self.profile.parameters();
+        Duration::from_nanos(u64::from(p.packet_frames) * 1_000_000_000 / u64::from(p.pcm_rate_hz))
+    }
+    fn packet_ticks(&self) -> u32 {
+        let p = self.profile.parameters();
+        p.packet_frames * p.rtp_clock_hz / p.pcm_rate_hz
+    }
     fn answer_register(&self, fields: &BTreeMap<String, String>, target: SocketAddr) {
         let mut response = "SIP/2.0 200 OK\r\n".to_owned();
         for name in ["via", "from", "to", "call-id", "cseq"] {
@@ -203,9 +211,7 @@ impl Caller {
         wire[12..].copy_from_slice(&encoded);
         self.rtp.send_to(&wire, self.media).unwrap();
         self.sequence = self.sequence.wrapping_add(1);
-        self.timestamp = self
-            .timestamp
-            .wrapping_add(self.profile.parameters().rtp_clock_hz / 50);
+        self.timestamp = self.timestamp.wrapping_add(self.packet_ticks());
     }
     fn prompt(&mut self, codec: &mut AudioCodec, stage: &str) -> Vec<f32> {
         let source_start = self.timestamp;
@@ -220,7 +226,7 @@ impl Caller {
                     codec,
                     &vec![0.0; self.profile.parameters().packet_frames as usize],
                 );
-                next_audio += Duration::from_millis(20);
+                next_audio += self.packet_interval();
             }
             self.service();
             let mut wire = [0; 2048];
@@ -275,14 +281,18 @@ impl Caller {
             let low = [697.0, 770.0, 852.0, 941.0][index / 4];
             let high = [1209.0, 1336.0, 1477.0, 1633.0][index % 4];
             // Existing test tone synthesis, at the negotiated source rate.
-            for packet in 0..10 {
+            // Keep the same100ms tone and at least100ms gap. The final native
+            // packet may contain additional silence; no coding unit is truncated.
+            let tone_frames = parameters.pcm_rate_hz as usize / 10;
+            let digit_packets = (parameters.pcm_rate_hz as usize / 5).div_ceil(frames);
+            for packet in 0..digit_packets {
                 if let Some(wait) = next.checked_duration_since(Instant::now()) {
                     thread::sleep(wait);
                 }
                 for (sample, value) in pcm.iter_mut().enumerate() {
                     let phase = (packet * frames + sample) as f32 * std::f32::consts::TAU
                         / parameters.pcm_rate_hz as f32;
-                    *value = if packet < 5 {
+                    *value = if packet * frames + sample < tone_frames {
                         0.2 * ((phase * low).sin() + (phase * high).sin())
                     } else {
                         0.0
@@ -290,7 +300,7 @@ impl Caller {
                 }
                 self.audio(codec, &pcm);
                 self.service();
-                next += Duration::from_millis(20);
+                next += self.packet_interval();
             }
         }
     }

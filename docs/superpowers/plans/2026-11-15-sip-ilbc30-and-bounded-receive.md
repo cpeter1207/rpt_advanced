@@ -132,3 +132,29 @@ CLOCK_RED_EXIT101; wrapper0 means expected-RED collection, not a passing test.
 Compilation took13.70s, the test0.04s. Mounted source checksums were verified and
 post-format compiled-input checksums retained independently of blank launcher
 revision metadata. No production source changed in this test-only increment.
+
+
+### Caller cadence focused GREEN and isolated target
+
+The reviewed test-only repair derives audio interval and RTP advance independently
+from negotiated PCM frames/rate and RTP clock. Existing eight profiles retain
+20ms; iLBC uses30ms/240 ticks. The initial quiet observation remains30 seconds
+(1500 old packets or1000 iLBC packets), followed by the unchanged100-packet strict
+post-rearm window. In-band input retains100ms tone and at least100ms silence,
+rounded only to complete coding units. Telephone-event timing is unchanged.
+
+The cold dedicated-target checkpoint ilbc-cold-green.log completed RUN_EXIT0.
+Compilation took1m41s; the real-UDP nine-profile timestamp/length test and the
+strict-cut negative control each passed, followed by formatting. The former
+proves packet clock values, not wall pacing; actual iLBC call cases remain unrun.
+Log SHA256: a27fa9206dfd4180bd75f7cfd26bf4a7154ca7b054103aaa1a46863e6f8d0f29.
+Compiled-input manifest SHA256:
+ac02481b68fa0db11f90f083f709bf811d0ea2a24b5a82e425abfbebf5ea0b22.
+
+This target uses jobs1/debug0/incremental0, separate from the frozen Batch A
+workspace artifacts. It occupies382MiB; measured minimum free space was
+3,091,607,552 bytes. A guard checks every2s and terminates only its owned child
+process group below1.25GiB. No shared artifact was copied, linked or deleted.
+The qualified test-only PCMA rearm-boundary repair was replayed unchanged from
+43d6c51 before this checkpoint; its original failure and two-process GREEN
+receipts remain separate from iLBC qualification.

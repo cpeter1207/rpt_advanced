@@ -346,14 +346,12 @@ fn quiet_media(
                     &vec![0.0; caller.profile.parameters().packet_frames as usize],
                     caller.profile.payload(),
                 );
-                next_input += Duration::from_millis(20);
+                next_input += caller.packet_interval();
                 // Preserve source gaps after missed slots, never burst old PCM.
                 while next_input <= Instant::now() {
                     QUIET_SKIPPED_INPUT.fetch_add(1, Ordering::Release);
-                    caller.timestamp = caller
-                        .timestamp
-                        .wrapping_add(caller.profile.parameters().rtp_clock_hz / 50);
-                    next_input += Duration::from_millis(20);
+                    caller.timestamp = caller.timestamp.wrapping_add(caller.packet_ticks());
+                    next_input += caller.packet_interval();
                 }
             }
             service(caller);
@@ -403,7 +401,7 @@ fn quiet_media(
         packet += 1;
         if packet % 50 == 0 {
             // Include ordinary OS scheduling tolerance without accepting a catch-up flood.
-            let expected = Duration::from_millis(packet * 20);
+            let expected = caller.packet_interval() * u32::try_from(packet).unwrap();
             let elapsed = started.elapsed();
             assert!(elapsed + Duration::from_millis(100) >= expected);
             assert!(elapsed <= expected + Duration::from_millis(500));
@@ -476,14 +474,12 @@ fn media(
         }
         service(caller);
         drain(caller, codec, returned);
-        next += Duration::from_millis(20);
+        next += caller.packet_interval();
         // This bounded fixture never catches up by emitting a burst of old media.
         // A missed source slot is explicit in its timestamp, not a renewed birth.
         while next <= Instant::now() {
-            caller.timestamp = caller
-                .timestamp
-                .wrapping_add(caller.profile.parameters().rtp_clock_hz / 50);
-            next += Duration::from_millis(20);
+            caller.timestamp = caller.timestamp.wrapping_add(caller.packet_ticks());
+            next += caller.packet_interval();
         }
     }
     // Preserve the final packet interval across consecutive media calls too.
@@ -714,17 +710,12 @@ fn product_outgoing_with_policy(
         } else if bypass_all == Some(false) {
             "host_services::product_phone_tests::sip::outgoing::actual_unlocked_phone_bypass_preserves_local_only_playout"
         } else if selected == AudioProfile::Ilbc30 {
-            match ivr {
-                IvrMode::Disabled => {
-                    "host_services::product_phone_tests::sip::outgoing::actual_ilbc_quiet_call_preserves_thirty_ms_rtp"
-                }
-                IvrMode::Events => {
-                    "host_services::product_phone_tests::sip::outgoing::actual_ilbc_radio_digits_preserve_private_native_events"
-                }
-                IvrMode::InBand => {
-                    "host_services::product_phone_tests::sip::outgoing::actual_ilbc_radio_digits_preserve_private_inband"
-                }
-                IvrMode::MixedClock => unreachable!("no new mixed-clock iLBC fixture"),
+            if ivr == IvrMode::Events {
+                "host_services::product_phone_tests::sip::outgoing::actual_ilbc_radio_digits_preserve_private_native_events"
+            } else if ivr == IvrMode::InBand {
+                "host_services::product_phone_tests::sip::outgoing::actual_ilbc_radio_digits_preserve_private_inband"
+            } else {
+                "host_services::product_phone_tests::sip::outgoing::actual_ilbc_quiet_call_preserves_thirty_ms_rtp"
             }
         } else if selected == AudioProfile::L16Wideband {
             match ivr {
@@ -794,7 +785,8 @@ fn product_outgoing_with_policy(
     };
     SELECTED_PAYLOAD.store(usize::from(remote_audio_payload), Ordering::Release);
     RTP_PACKET_TICKS.store(
-        (selected.parameters().rtp_clock_hz / 50) as usize,
+        (selected.parameters().packet_frames * selected.parameters().rtp_clock_hz
+            / selected.parameters().pcm_rate_hz) as usize,
         Ordering::Release,
     );
     let directory =
@@ -1083,7 +1075,10 @@ fn product_outgoing_with_policy(
         assert_eq!(LOCAL_RX_KEYED_TURNS.load(Ordering::Acquire), 0);
         caller.media = learned.unwrap();
         CONTINUOUS_RTP.store(true, Ordering::Release);
-        quiet_media(&mut caller, &mut codec, 1500, None);
+        let packets = Duration::from_secs(30)
+            .as_nanos()
+            .div_ceil(caller.packet_interval().as_nanos()) as u64;
+        quiet_media(&mut caller, &mut codec, packets, None);
         // An initial admission cut cannot excuse a later unrelated reset.
         LAST_MARKED_CUT.store(SOURCE_CUTS.load(Ordering::Acquire), Ordering::Release);
         ALLOW_SOURCE_CUT.store(true, Ordering::Release);
@@ -1535,12 +1530,10 @@ fn telephone_ivr(
                 decoder.process(&mut pcm, &mut decoded);
             }
         }
-        next += Duration::from_millis(20);
+        next += caller.packet_interval();
         while next <= Instant::now() {
-            caller.timestamp = caller
-                .timestamp
-                .wrapping_add(caller.profile.parameters().rtp_clock_hz / 50);
-            next += Duration::from_millis(20);
+            caller.timestamp = caller.timestamp.wrapping_add(caller.packet_ticks());
+            next += caller.packet_interval();
         }
     }
     LOCAL_DTMF.store(0, Ordering::Release);
