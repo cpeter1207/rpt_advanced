@@ -41,9 +41,9 @@ Exact profiles: GSM ID3, 8 kHz/160 PCM/33 bytes; G726 ID12 and AAL2 ID5, 8 kHz/1
 Files: `phone/media.rs`, `phone/media/tests.rs`, `phone/call_media.rs`, `phone/registration_calls.rs`, `host_services/product_sip_outgoing_tests.rs`, `tests/phone_media.rs` under `rust/standalone/src` or `rust/standalone/tests` as appropriate.
 
 - [x] Independent source/standards review selected separate receive mapping and matching-clock transmit eligibility. Multi-rate SDP lists do not constrain audio/event pairings.
-- [ ] Add RED cases for matched 8/16 kHz events, valid L16/16k plus event8k, event omission, directionally remapped PTs, malformed mappings and multiple event mappings.
-- [ ] Prove the same elapsed-time origin, fixed event onset across all updates/final repeats, shared sequence/SSRC, source timestamp gaps/wrap and immutable WouldBlock retries.
-- [ ] Reuse the current 200 ms digit/50 ms gap sender; do not add an event queue or sender.
+- [x] Add RED cases for matched 8/16 kHz events, valid L16/16k plus event8k, event omission, directionally remapped PTs, malformed mappings and multiple event mappings.
+- [x] Prove the same elapsed-time origin, fixed event onset across all updates/final repeats, shared sequence/SSRC, source timestamp gaps/wrap and immutable WouldBlock retries.
+- [x] Reuse the current 200 ms digit/50 ms gap sender; do not add an event queue or sender.
 
 Current source: audio timestamp milliseconds are anchored to peer elapsed time minus original source age (`product/link/outbound.rs`), while event onset uses that endpoint elapsed origin. Current profiles all use RTP8k, so this existing math is coherent. There is no RTCP report implementation or explicit RS/RR=0 SDP signaling.
 
@@ -59,12 +59,12 @@ Primary references: https://www.rfc-editor.org/rfc/rfc3551.html , https://www.rf
 
 Files: `phone/media.rs`, `phone/codec.rs`, `phone/call_media.rs`, `host_services.rs` and existing adjacent tests.
 
-- [ ] Extend `AudioProfile`/`AudioParameters` and the immutable owned-provider catalog with the five exact profiles.
-- [ ] Parse dynamic format identity separately from directional PT numbers; answer using the selected mapping, with no packet-driven mode change.
-- [ ] Replace the remaining fixed 160-byte receive/send signatures and 172-byte pending datagram with negotiated bounded storage allocated during setup. The batch maximum is 640 encoded bytes, not 65507 per queue slot.
-- [ ] Reuse `AudioCodec` finite PCM padding, inspection and native decode. Convert only PCM16's two-byte wire order at the SIP boundary, not PCM values or provider behavior.
-- [ ] Keep IAX's separate 160-byte private path unchanged when relaxing SIP host validation.
-- [ ] Extend finite-tail/source-credit, OutputFull, reset/cancel, malformed-size and provider-missing tests to every new profile. Run the seven initial tests GREEN.
+- [x] Extend `AudioProfile`/`AudioParameters` and the immutable owned-provider catalog with the five exact profiles.
+- [x] Parse dynamic format identity separately from directional PT numbers; answer using the selected mapping, with no packet-driven mode change.
+- [x] Replace the remaining fixed 160-byte receive/send signatures and 172-byte pending datagram with negotiated bounded storage allocated during setup. The batch maximum is 640 encoded bytes, not 65507 per queue slot.
+- [x] Reuse `AudioCodec` finite PCM padding, inspection and native decode. Convert only PCM16's two-byte wire order at the SIP boundary, not PCM values or provider behavior.
+- [x] Keep IAX's separate 160-byte private path unchanged when relaxing SIP host validation.
+- [x] Extend finite-tail/source-credit, OutputFull, reset/cancel, malformed-size and provider-missing tests to every new profile. Run the seven initial tests GREEN.
 - [ ] Run actual two-way, continuous silence/first utterance, private authentication and IVR fixtures with rate-derived physical durations; retain G711/G722 and P14 controls. Run strict and independent review before the local recovery commit.
 
 Estimate: 3-5 active hours for fixed-profile plumbing/tests, plus approximately 1-2 hours for the event-policy review and qualified same-clock/mixed-answer fallback if accepted. A new suppression protocol is a separate estimate, not hidden in this range. Serial waiting, full native gates and hardware validation are additional.
@@ -172,3 +172,39 @@ Bad encoded length now returns the same nonterminal-1 before frame validation;
 valid-length wrong PCM frames still retire the call. ASCII-insensitive name
 comparisons retain exact numeric clock, channel, payload and format-shape checks.
 No new codec, state, queue, dependency or runtime API was introduced by this repair.
+
+### Eight-profile local wire milestone
+
+On clean runtime source `ed73d2704fc24563cdecbe80def6941c8144e27b`,
+`batch-a-six-wire.log` exited0 with the existing per-case bounds and assertions:
+
+- GSM full-rate quiet/two-way/successor:70.55s.
+- Standard G726-32 quiet/two-way/successor:70.51s.
+- AAL2-G726-32 quiet/two-way/successor:70.42s.
+- L16/8k quiet/two-way/successor:70.43s.
+- L16/16k private incoming authentication with matched16k events:19.96s.
+- L16/16k private incoming authentication with in-band digits:22.71s.
+
+The four outgoing cases retain the original30-second continuous-silence RTP,
+zero receiver-key, first utterance, two-way signal and exact successor/hangup
+controls. The incoming cases retain private prompt/control and no-radio-output
+assertions. The L16 directional mixed/matched, absent-event and quiet receipts
+are separately described above. Existing package manifests already include GSM,
+PCM and SpanDSP providers; this batch adds no dependency.
+
+These are real loopback SIP/RTP/controller-path tests with a synthetic endpoint
+using the same released owned codecs. They are not independent third-party
+interoperability or hardware proof. The G726 provider-boundary test checks the
+nibble-order relationship and equal decoded PCM, not an external conformance
+vector. RFC3551 section4.5.4 specifies low-first G726 packing and its difference
+from I.366.2 AnnexE AAL2 packing; external peer/vector validation remains a
+separate qualification limit.
+https://www.rfc-editor.org/rfc/rfc3551.html#section-4.5.4
+
+Full coherent core/product, standalone/C ABI/strict, and current G711/G722/P14
+outgoing union regressions remain queued. Native arm64, coverage, packaging,
+hosted checks, external endpoints and hardware have not been qualified by these
+receipts. No public combined artifact or live configuration changed. This is
+eight of sixteen ordinary IAX profiles, not complete parity. iLBC30 is the next
+isolated packet-duration increment; the six remaining conventional profiles
+and two legacy wire ambiguities remain open.
