@@ -142,7 +142,12 @@ fn outgoing_engine_reserves_before_factory_and_cancels_only_the_exact_call() {
         std::thread::sleep(Duration::from_millis(1));
     }
     let reply = engine
-        .run(|host| Ok(crate::host::tests::phone::outgoing_media_reply(host, "1000").unwrap()))
+        .run(|host| {
+            Ok(
+                crate::host::tests::phone::outgoing_media_reply(host, "1000")
+                    .expect("admitted call must survive an unrelated graph refresh"),
+            )
+        })
         .unwrap();
     assert!(reply.phone_outgoing() && !reply.phone_authenticated());
     engine.hangup_phone("1000".into(), second).unwrap();
@@ -545,6 +550,7 @@ fn radio_phone_acknowledgment_precedes_factory_and_answer_never_repeats_it() {
         .unwrap_or_else(|e| e.into_inner());
     for mode in [
         "answer",
+        "graph",
         "refusal",
         "spawn",
         "canceled",
@@ -687,6 +693,14 @@ fn radio_phone_acknowledgment_precedes_factory_and_answer_never_repeats_it() {
             );
             engine.revision.fetch_add(1, Ordering::AcqRel);
         }
+        if mode == "graph" {
+            let owner = Arc::clone(&engine);
+            engine
+                .run(move |host| {
+                    crate::host::tests::phone::refresh_outgoing_test_graph(host, owner.clock())
+                })
+                .unwrap();
+        }
         factory.answer.store(mode != "refusal", Ordering::Release);
         factory.released.store(true, Ordering::Release);
         let jobs = std::mem::take(&mut *engine.jobs.lock().unwrap());
@@ -746,12 +760,15 @@ fn radio_phone_acknowledgment_precedes_factory_and_answer_never_repeats_it() {
                 "stale outcome cannot cancel successor: {mode}"
             );
         }
-        if matches!(mode, "answer" | "administrative" | "macro") {
+        if matches!(mode, "answer" | "graph" | "administrative" | "macro") {
             let reply = engine
                 .run(|host| {
-                    Ok(crate::host::tests::phone::outgoing_media_reply(host, "1000").unwrap())
+                    Ok(crate::host::tests::phone::outgoing_media_reply(
+                        host, "1000",
+                    ))
                 })
-                .unwrap();
+                .unwrap()
+                .expect("admitted call must survive an unrelated graph refresh");
             assert!(
                 reply.phone_media_authorized() && !reply.phone_authenticated() && !reply.ended()
             );
@@ -776,19 +793,29 @@ fn delayed_radio_ringing_cannot_target_a_successor_or_reloaded_generation() {
     );
     let revision = engine.revision.load(Ordering::Acquire);
     let owner = Arc::clone(&engine);
-    let (first, generation) = engine
+    let (first, source) = engine
         .run(move |host| {
-            let generation = host
-                .runtime
-                .node("1000")
-                .unwrap()
-                .status(owner.clock().now_ms)
-                .active;
+            let clock = owner.clock();
+            let LinkEffect::Phone(source) = host.runtime.command(
+                "1000",
+                DigitOperation::new(
+                    Command {
+                        action: LinkAction::PhoneDial,
+                        node: "00123".into(),
+                    },
+                    None,
+                ),
+                clock,
+                false,
+            )?
+            else {
+                return Err(RuntimeError::Rejected);
+            };
             let claim = host.reserve_outgoing_phone(
                 rpt_advanced_core::link::PhoneAccountId::new("provider").unwrap(),
                 "1000",
             )?;
-            Ok((claim, generation))
+            Ok((claim, source.admit(clock.now_ms).unwrap()))
         })
         .unwrap();
     let first_id = first.id();
@@ -803,7 +830,7 @@ fn delayed_radio_ringing_cannot_target_a_successor_or_reloaded_generation() {
         .unwrap();
     assert!(
         engine
-            .queue_radio_ringback(revision, generation, first)
+            .queue_radio_ringback(revision, Some(source.clone()), first)
             .is_err()
     );
     assert!(
@@ -814,7 +841,7 @@ fn delayed_radio_ringing_cannot_target_a_successor_or_reloaded_generation() {
     engine.revision.fetch_add(1, Ordering::AcqRel);
     assert!(
         engine
-            .queue_radio_ringback(revision, generation, Arc::clone(&second))
+            .queue_radio_ringback(revision, Some(source), Arc::clone(&second))
             .is_err()
     );
     assert!(second.current());

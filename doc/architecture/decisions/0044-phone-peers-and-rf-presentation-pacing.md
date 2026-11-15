@@ -2066,3 +2066,20 @@ The receive worker zeros command-interval PCM before the existing delay ring.
 This prevents replay after control release without another PCM buffer or parser.
 Detection qualification latency is not a new zero-delay guarantee; deployed RF
 reserve and existing detector suppression remain part of the audio boundary.
+### Admitted outgoing source versus audio topology (2026-11-15)
+
+A telephone command retains its original graph work until serialized admission
+has validated the source and reserved an exact outgoing call. It then consumes
+that work into the original source permit, retaining the same macro cancellation,
+inclusive deadline and source custody. The dial job separately retains the
+original Engine configuration revision and exact call claim. Ordinary graph
+replacement can reclaim its old storage without canceling that admitted call or
+renewing its authority. Reload, stop, source cancellation and deadline still
+prevent provider work/adoption. Ringback and failed-submission outcomes use this
+same source/configuration/call tuple rather than an obsolete audio generation.
+
+The source test proves old-graph reclamation after actual callback adoption,
+original macro expiry/cancellation and refusal to newly admit retired work. The
+Engine/factory matrix proves a graph-only refresh while ringing survives, while
+revision changes and exact cancellation remain terminal. This is a prerequisite
+for P13 linked-peer isolation, not a claim that isolation is implemented.

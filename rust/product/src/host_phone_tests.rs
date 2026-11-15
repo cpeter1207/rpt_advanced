@@ -1717,3 +1717,41 @@ pub(crate) fn has_phone_attachment(host: &Host, source: &PhoneSource, reply: &Pe
         .iter()
         .any(|(actual, owner)| actual == source && owner == reply)
 }
+
+/// Test-only topology cut using the same production graph replacement.
+pub(crate) fn refresh_outgoing_test_graph(
+    host: &mut Host,
+    clock: RuntimeClock,
+) -> Result<(), RuntimeError> {
+    host.refresh("1000", clock)?;
+    // The finite RF probe deliberately holds these callback owners. A real
+    // device adopts asynchronously; perform that exact handoff in this fixture.
+    let lease = Arc::clone(
+        &host
+            .leases
+            .iter()
+            .find(|(local, _)| local == "1000")
+            .unwrap()
+            .1,
+    );
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    let active = host
+        .runtime
+        .node("1000")
+        .unwrap()
+        .status(clock.now_ms)
+        .active
+        .unwrap();
+    assert_eq!(owners.0.acquire().unwrap().id(), active);
+    assert_eq!(owners.1.acquire().unwrap().id(), active);
+    lease.lock().unwrap().owners = Some(owners);
+    pump_until(host, |host| {
+        host.runtime
+            .node("1000")
+            .unwrap()
+            .status(clock.now_ms)
+            .retiring
+            .is_none()
+    });
+    Ok(())
+}

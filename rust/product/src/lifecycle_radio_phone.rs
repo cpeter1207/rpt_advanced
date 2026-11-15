@@ -37,6 +37,13 @@ impl Engine {
                 if available {
                     host.prepare_radio_phone(&local, &source.operation().command.node)
                         .and_then(|(claim, destination)| {
+                            let source = match source.admit(owner.clock().now_ms) {
+                                Ok(source) => source,
+                                Err(_) => {
+                                    let _ = host.cancel_outgoing_phone(&local, claim.id());
+                                    return Err(RuntimeError::Rejected);
+                                }
+                            };
                             let acknowledgment = if report {
                                 match host.runtime.queue_operation_acknowledgment(&local) {
                                     Ok(completion) => Some(completion),
@@ -91,19 +98,14 @@ impl Engine {
     pub(super) fn queue_radio_ringback(
         self: &Arc<Self>,
         revision: u64,
-        generation: Option<u64>,
+        source: Option<rpt_advanced_core::runtime::links::AdmittedPhoneSource>,
         claim: Arc<crate::phone::OutgoingClaim>,
     ) -> Result<rpt_advanced_core::controller::PlaybackCompletion, RuntimeError> {
         let owner = Arc::clone(self);
         self.run_inner(true, move |host| {
             if !owner.current(revision)
                 || !claim.current()
-                || !generation.is_some_and(|generation| {
-                    host.runtime
-                        .node(claim.local())
-                        .and_then(|node| node.status(owner.clock().now_ms).active)
-                        == Some(generation)
-                })
+                || !source.is_some_and(|source| source.current(owner.clock().now_ms))
             {
                 return Err(RuntimeError::Rejected);
             }

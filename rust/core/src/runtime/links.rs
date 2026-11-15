@@ -151,13 +151,33 @@ impl PhoneCommand {
     pub fn local_operation_result(&self) -> bool {
         pending_local_result(Some(&self.operation))
     }
-    /// Original generation, also used to qualify a failed job submission.
-    pub fn generation(&self) -> u64 {
-        self.work.id()
-    }
     /// Revalidate source lifetime at the original bounded macro deadline.
     pub fn current(&self, now_ms: u64) -> bool {
         self.work.is_current() && pending_source_current(Some(&self.operation), Some(now_ms))
+    }
+    /// Transfer only after serialized current validation and exact call reservation.
+    /// The product retains its configuration revision and call identity separately.
+    /// Topology replacement may then retire the old graph without reauthorizing
+    /// the original source or extending a macro's bounded lifetime.
+    pub fn admit(self, now_ms: u64) -> Result<AdmittedPhoneSource, AdmissionError> {
+        if !self.current(now_ms) {
+            return Err(AdmissionError::Stale);
+        }
+        Ok(AdmittedPhoneSource {
+            operation: self.operation,
+        })
+    }
+}
+
+/// Original source custody after telephone admission, independent of audio topology.
+#[derive(Clone)]
+pub struct AdmittedPhoneSource {
+    operation: DigitOperation,
+}
+impl AdmittedPhoneSource {
+    /// Recheck the original source lifetime, macro cancellation and deadline.
+    pub fn current(&self, now_ms: u64) -> bool {
+        pending_source_current(Some(&self.operation), Some(now_ms))
     }
 }
 

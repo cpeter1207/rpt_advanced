@@ -3728,3 +3728,101 @@ fn radio_phone_actions_retain_local_generation_without_peer_authority() {
     ));
     assert!(links.manager().snapshot().is_empty());
 }
+
+#[test]
+fn admitted_phone_source_survives_graph_retirement_but_not_its_macro() {
+    for cancel in [false, true] {
+        let document =
+            crate::config::ConfigDocument::parse("[524950]\nlink_command_phone_dial=6\n").unwrap();
+        let map = crate::config::ResolvedNodeSettings::resolve(
+            &document,
+            &crate::config::NodeId::new("524950").unwrap(),
+        )
+        .unwrap()
+        .value
+        .command_map()
+        .unwrap();
+        let mut links = NodeLinkControl::new(
+            "524950",
+            AccessPolicy::new("", "").unwrap(),
+            map.clone(),
+            None,
+        )
+        .unwrap();
+        let limits = crate::dtmf_macro::DtmfMacroLimits {
+            max_duration_ms: 1000,
+            ..Default::default()
+        };
+        let definition = crate::config::ResolvedDtmfMacroSettings {
+            name: "dial".into(),
+            trigger: "*95".into(),
+            protected: false,
+            commands: "*600123#".into(),
+        };
+        links
+            .commands
+            .configure_macros(
+                vec![
+                    crate::dtmf_macro::compile(
+                        &definition,
+                        limits,
+                        &map,
+                        "524950",
+                        &["*95".into()],
+                    )
+                    .unwrap(),
+                ],
+                limits,
+            )
+            .unwrap();
+        for digit in "*95".chars() {
+            links.digit(DigitEvent::Digit { digit, now_ms: 10 });
+        }
+        let DigitOutcome::Operation(request) = links.advance_macros(10).remove(0) else {
+            panic!("original macro command");
+        };
+        let mut host = NodeHost::new(generation(1));
+        let (mut receive, mut transmit) = host.register_audio().unwrap();
+        let LinkEffect::Phone(command) = links
+            .command(request, host.control().work().unwrap(), 10, false)
+            .unwrap()
+        else {
+            panic!("typed phone command");
+        };
+        let source = command.admit(10).unwrap();
+        host.control().publish(generation(2), 11).unwrap();
+        assert_eq!(receive.acquire().unwrap().id(), 2);
+        assert_eq!(transmit.acquire().unwrap().id(), 2);
+        host.control().mark_detached(1).unwrap();
+        assert!(
+            host.control().reclaim(),
+            "admitted source must release graph custody"
+        );
+        assert!(source.current(11), "audio topology is not call authority");
+        assert!(source.current(1010), "original inclusive deadline");
+        assert!(!source.current(1011), "no fresh or extended macro permit");
+        if cancel {
+            links.commands.cancel_macro();
+            assert!(
+                !source.current(11),
+                "original cancellation remains authoritative"
+            );
+        }
+        let LinkEffect::Phone(stale) = links
+            .command(
+                operation(LinkAction::PhoneDial, "00123"),
+                host.control().work().unwrap(),
+                12,
+                false,
+            )
+            .unwrap()
+        else {
+            panic!("typed phone command");
+        };
+        host.control().publish(generation(3), 13).unwrap();
+        assert!(
+            stale.admit(13).is_err(),
+            "retired work cannot be newly admitted"
+        );
+    }
+}

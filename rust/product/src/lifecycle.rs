@@ -201,13 +201,13 @@ impl Engine {
         claim: Arc<crate::phone::OutgoingClaim>,
         revision: u64,
         destination: String,
-        source: Option<rpt_advanced_core::runtime::links::PhoneCommand>,
+        source: Option<rpt_advanced_core::runtime::links::AdmittedPhoneSource>,
         acknowledgment: Option<rpt_advanced_core::controller::PlaybackCompletion>,
     ) -> Result<u64, RuntimeError> {
         let id = claim.id();
         let report = acknowledgment.is_some();
         let cancel_acknowledgment = acknowledgment.clone();
-        let source_generation = source.as_ref().map(|source| source.generation());
+        let failed_source = source.clone();
         let pending = Arc::clone(&claim);
         let engine = Arc::clone(self);
         let operation = move || {
@@ -260,7 +260,7 @@ impl Engine {
                                 }
                                 let queued = engine.queue_radio_ringback(
                                     revision,
-                                    source_generation,
+                                    source.clone(),
                                     Arc::clone(&pending),
                                 );
                                 match queued {
@@ -335,12 +335,7 @@ impl Engine {
                 let _ = self.run_inner(true, move |host| {
                     let current = owner.current(revision)
                         && claim.current()
-                        && source_generation.is_some_and(|generation| {
-                            host.runtime
-                                .node(claim.local())
-                                .and_then(|node| node.status(owner.clock().now_ms).active)
-                                == Some(generation)
-                        });
+                        && failed_source.is_some_and(|source| source.current(owner.clock().now_ms));
                     claim.cancel();
                     let _ = host.cancel_outgoing_phone(claim.local(), id);
                     if report && current {
