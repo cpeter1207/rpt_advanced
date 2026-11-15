@@ -37,6 +37,7 @@ unsafe extern "C" fn capture_radio_metadata(
     0
 }
 static PUBLIC_OUTPUT: AtomicUsize = AtomicUsize::new(0);
+static PUBLIC_PCM_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 static LAST_PTT: AtomicBool = AtomicBool::new(false);
 // Test-only local RF input; the existing callback scratch remains the sole PCM block.
 static LOCAL_INPUT: AtomicBool = AtomicBool::new(false);
@@ -161,14 +162,12 @@ unsafe extern "C" fn activate(
                     LINKED_OUTPUT_TURNS.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            PUBLIC_OUTPUT.fetch_add(
-                samples
-                    .iter()
-                    .filter(|sample| sample.abs() > 0.0001)
-                    .count()
-                    + usize::from(keyed != 0),
-                Ordering::Relaxed,
-            );
+            let nonzero = samples
+                .iter()
+                .filter(|sample| sample.abs() > 0.0001)
+                .count();
+            PUBLIC_PCM_OUTPUT.fetch_add(nonzero, Ordering::Relaxed);
+            PUBLIC_OUTPUT.fetch_add(nonzero + usize::from(keyed != 0), Ordering::Relaxed);
             LAST_PTT.store(keyed != 0, Ordering::Release);
             RADIO_TURNS.fetch_add(1, Ordering::Relaxed);
             first += 960;

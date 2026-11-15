@@ -1,5 +1,14 @@
 //! Actual typed product origination through the registered SIP reactor and radio mixer.
 use super::*;
+#[path = "product_sip_ivr_decoder.rs"]
+mod ivr_decoder;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IvrMode {
+    Disabled,
+    Events,
+    InBand,
+}
+
 use crate::phone::{
     media::MediaDescription,
     sip_test_registrar::{receive_register, response},
@@ -423,10 +432,34 @@ fn latch(caller: &Caller) -> Option<SocketAddr> {
     None
 }
 
+#[test]
+fn actual_radio_digits_reach_telephone_ivr_without_control_or_audio_leak() {
+    product_outgoing_with_ivr(true, true, false, G711::Mulaw, IvrMode::Events);
+}
+
+#[test]
+fn actual_radio_digits_use_private_inband_when_event_payload_is_absent() {
+    product_outgoing_with_ivr(true, true, false, G711::Mulaw, IvrMode::InBand);
+}
+
 fn product_outgoing(radio: bool, immediate: bool, latching: bool, selected: G711) {
+    product_outgoing_with_ivr(radio, immediate, latching, selected, IvrMode::Disabled);
+}
+
+fn product_outgoing_with_ivr(
+    radio: bool,
+    immediate: bool,
+    latching: bool,
+    selected: G711,
+    ivr: IvrMode,
+) {
     const CHILD: &str = "RPTADV_TEST_OUTGOING_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
-        let name = if selected == G711::Alaw {
+        let name = if ivr == IvrMode::InBand {
+            "host_services::product_phone_tests::sip::outgoing::actual_radio_digits_use_private_inband_when_event_payload_is_absent"
+        } else if ivr == IvrMode::Events {
+            "host_services::product_phone_tests::sip::outgoing::actual_radio_digits_reach_telephone_ivr_without_control_or_audio_leak"
+        } else if selected == G711::Alaw {
             "host_services::product_phone_tests::sip::outgoing::actual_alaw_quiet_call_sends_continuous_silence_without_receiver_key"
         } else if latching {
             "host_services::product_phone_tests::sip::outgoing::actual_answered_quiet_call_opens_symmetric_rtp_before_any_receiver_key"
@@ -599,6 +632,11 @@ fn product_outgoing(radio: bool, immediate: bool, latching: bool, selected: G711
     assert!(worker.incoming().is_none());
     let answer = MediaDescription {
         codec: selected,
+        telephone_event: if ivr == IvrMode::InBand {
+            None
+        } else {
+            offer.telephone_event
+        },
         ..offer.clone()
     }
     .answer(rtp.local_addr().unwrap(), 99)
@@ -754,6 +792,9 @@ fn product_outgoing(radio: bool, immediate: bool, latching: bool, selected: G711
         "known1kHz return pattern, not a status prompt"
     );
     CONTINUOUS_RTP.store(false, Ordering::Release);
+    if ivr != IvrMode::Disabled {
+        telephone_ivr(&mut caller, &mut codec, ivr);
+    }
     if radio {
         radio_digits(b"*0#");
     } else {
@@ -839,4 +880,138 @@ fn product_outgoing(radio: bool, immediate: bool, latching: bool, selected: G711
     worker.stop().unwrap();
     assert_radio_stopped(true);
     fs::remove_dir_all(directory).unwrap();
+}
+
+fn telephone_ivr(caller: &mut Caller, codec: &mut G711Codec, mode: IvrMode) {
+    let input = b"12***4**#";
+    let expected = b"12*4#";
+    let start = Instant::now();
+    let duration = Duration::from_millis(100 + input.len() as u64 * 280 + 1000);
+    let mut next = start;
+    let mut last = None;
+    let mut events: Vec<(u32, u8, u16, u8)> = Vec::new();
+    let mut decoder = ivr_decoder::Decoder::new();
+    let mut decoded = Vec::with_capacity(16);
+    let mut maximum_audio = 0.0f32;
+    let mut nonzero_by_slot = [0usize; 12];
+    let before_pcm = PUBLIC_PCM_OUTPUT.load(Ordering::Acquire);
+    while start.elapsed() < duration {
+        if let Some(wait) = next.checked_duration_since(Instant::now()) {
+            thread::sleep(wait);
+        }
+        let elapsed = start.elapsed().as_millis() as usize;
+        let symbol = if elapsed < 100 {
+            b' '
+        } else {
+            let index = (elapsed - 100) / 280;
+            if index >= input.len() {
+                0
+            } else if (elapsed - 100) % 280 < 160 {
+                input[index]
+            } else {
+                b' '
+            }
+        };
+        LOCAL_DTMF.store(usize::from(symbol), Ordering::Release);
+        caller.audio_payload(
+            codec,
+            &[0.0; 160],
+            SELECTED_PAYLOAD.load(Ordering::Acquire) as u8,
+        );
+        service(caller);
+        let mut wire = [0; 2048];
+        while let Ok((length, source)) = caller.rtp.recv_from(&mut wire) {
+            assert_eq!(source, caller.media);
+            assert_eq!(wire[0], 0x80);
+            let sequence = u16::from_be_bytes(wire[2..4].try_into().unwrap());
+            let timestamp = u32::from_be_bytes(wire[4..8].try_into().unwrap());
+            let ssrc = u32::from_be_bytes(wire[8..12].try_into().unwrap());
+            if let Some((previous, original_ssrc)) = last {
+                assert_eq!(sequence, u16::wrapping_add(previous, 1));
+                assert_eq!(ssrc, original_ssrc);
+            }
+            last = Some((sequence, ssrc));
+            if wire[1] & 0x7f == 101 {
+                assert_eq!(length, 16);
+                let ended = wire[13] & 0x80 != 0;
+                let duration = u16::from_be_bytes(wire[14..16].try_into().unwrap());
+                if events.last().is_none_or(|event| event.0 != timestamp) {
+                    assert!(wire[1] & 0x80 != 0, "event onset marker");
+                    if let Some(previous) = events.last() {
+                        assert_eq!(previous.3, 3);
+                    }
+                    events.push((timestamp, wire[12], 0, 0));
+                } else {
+                    assert_eq!(wire[1] & 0x80, 0);
+                }
+                let event = events.last_mut().unwrap();
+                assert_eq!(event.1, wire[12]);
+                assert!(duration >= event.2 && duration <= 1600);
+                event.2 = duration;
+                if ended {
+                    assert_eq!(duration, 1600);
+                    event.3 += 1;
+                }
+                assert!(event.3 <= 3);
+            } else {
+                assert_eq!(length, 172);
+                assert_eq!(
+                    wire[1] & 0x7f,
+                    SELECTED_PAYLOAD.load(Ordering::Acquire) as u8
+                );
+                let mut pcm = [0.0; 160];
+                codec
+                    .decode(wire[12..172].try_into().unwrap(), &mut pcm)
+                    .unwrap();
+                if pcm.iter().any(|sample| sample.abs() > 0.01) {
+                    nonzero_by_slot[(elapsed / 280).min(11)] += 1;
+                }
+                for sample in pcm {
+                    maximum_audio = maximum_audio.max(sample.abs());
+                }
+                decoder.process(&mut pcm, &mut decoded);
+            }
+        }
+        next += Duration::from_millis(20);
+        while next <= Instant::now() {
+            caller.timestamp = caller.timestamp.wrapping_add(160);
+            next += Duration::from_millis(20);
+        }
+    }
+    LOCAL_DTMF.store(0, Ordering::Release);
+    let symbols: Vec<u8> = events
+        .iter()
+        .map(|event| b"0123456789*#ABCD"[usize::from(event.1)])
+        .collect();
+    if mode == IvrMode::Events {
+        assert_eq!(
+            symbols, expected,
+            "actual RF parser and SIP event destination"
+        );
+        assert!(events.iter().all(|event| event.3 == 3));
+        assert!(
+            decoded.is_empty(),
+            "negotiated events must not duplicate as in-band digits"
+        );
+        assert!(
+            maximum_audio <= 0.01,
+            "RF DTMF leaked into telephone programme instead of negotiated events: max={maximum_audio}, nonzero_by_slot={nonzero_by_slot:?}"
+        );
+    } else {
+        assert!(
+            events.is_empty(),
+            "unnegotiated telephone-event payload was sent"
+        );
+        assert_eq!(
+            decoded, expected,
+            "released detector decodes the private regenerated in-band digits"
+        );
+    }
+    // Actual RF input may still key the local transmitter. Count audible PCM,
+    // not the older combined PCM/PTT counter, to reject regenerated feedback.
+    assert_eq!(
+        PUBLIC_PCM_OUTPUT.load(Ordering::Acquire),
+        before_pcm,
+        "IVR digits created RF results/audio"
+    );
 }

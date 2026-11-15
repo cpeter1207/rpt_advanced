@@ -98,3 +98,26 @@ and strict all-target core/product Clippy passed with launcher exit 0 in
 `.work/phone-ivr-hold-green2.log`. Independent source review is clear, including
 selected-remote unkey/timeout behavior. Actual event/in-band wire privacy and
 full affected/union gates remain pending, so this is a local recovery checkpoint.
+
+
+## Actual RF IVR checkpoint
+
+The actual ProductRuntime, simulated native RF callback, registered SIP reactor
+and received RTP now compose both negotiated telephone-event and genuinely
+in-band-only delivery. The same physical input covers digits, quoted star and
+hash; the callee has no command authority. An independent released 8 kHz DTMF
+detector decodes only the regenerated in-band fallback. Event mode requires
+zero telephone PCM, no decoded duplicate and the exact sequence of events with
+three final reports, sharing the established socket/SSRC/sequence owner.
+
+Both cases retain the original speech, no-echo, RF return, exact local hangup
+and normal account teardown. They use the existing deployed-equivalent
+kerchunk/effective 160 ms reserve and 30 ms configured delay, not a new delay.
+The test counter originally combined nonzero PCM with keyed callbacks; the
+classification run separately recorded zero RF PCM and 131 keyed callbacks in
+each mode. The final privacy oracle measures PCM, preserving actual RF-driven
+PTT and all older combined-counter assertions.
+
+Mu-law cases passed in 50.40 and 50.41 seconds with launcher exit 0 in
+`.work/phone-ivr-wire-green.log`. A-law composition and remaining full/static
+gates are still pending. No live call or node change was made.
