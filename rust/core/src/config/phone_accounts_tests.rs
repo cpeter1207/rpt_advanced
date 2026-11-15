@@ -288,3 +288,157 @@ fn phone_interdigit_config_bounds_and_warning_defaults() {
         assert_eq!(resolved.value[0].authentication_timeout_ms, 30000);
     }
 }
+
+#[test]
+fn phone_speech_options_are_validated_per_exact_account() {
+    let valid = account(
+        "speech_preprocessing_enabled=yes\nspeech_bandpass_enabled=no\nspeech_bandpass_low_hz=250\nspeech_bandpass_high_hz=3200\nspeech_rnnoise_enabled=yes\nspeech_threshold=0.75\nspeech_onset_frames=4294967295\nspeech_preroll_ms=0\nspeech_hold_ms=4294967295\nspeech_reserve_ms=160",
+    );
+    assert!(Schema::validate(&valid).unwrap().warnings.is_empty());
+    let defaults = resolve_phone_accounts(&account("")).value;
+    assert_eq!(
+        resolve_phone_accounts(&valid).value,
+        defaults,
+        "speech tuning must not change account transport identity"
+    );
+}
+
+#[test]
+fn phone_speech_invalid_preset_values_warn_with_the_effective_fallback() {
+    for (key, value, fallback) in [
+        ("speech_preprocessing_enabled", "invalid", "no"),
+        ("speech_bandpass_enabled", "invalid", "yes"),
+        ("speech_rnnoise_enabled", "invalid", "yes"),
+        ("speech_threshold", "NaN", "0.75"),
+        ("speech_onset_frames", "0", "2"),
+        ("speech_bandpass_low_hz", "0", "300"),
+        ("speech_bandpass_high_hz", "24000", "3000"),
+        ("speech_preroll_ms", "301", "160"),
+        ("speech_reserve_ms", "85", "160"),
+        ("speech_reserve_ms", "281", "160"),
+        ("speech_hold_ms", "-1", "1000"),
+    ] {
+        let document = account(&format!("speech_preprocessing_enabled=yes\n{key}={value}"));
+        let warnings = Schema::validate(&document).unwrap().warnings;
+        assert_eq!(warnings.len(), 1, "{key}");
+        assert_eq!(warnings[0].fallback, fallback, "{key}");
+    }
+}
+
+#[test]
+fn phone_speech_preset_overrides_and_timings_are_independent() {
+    let id = crate::link::PhoneAccountId::new("trunk").unwrap();
+    let plain = PhoneSpeechSettings::resolve(&account(""), &id);
+    assert_eq!(plain, PhoneSpeechSettings::default());
+    let selected = PhoneSpeechSettings::resolve(&account("speech_preprocessing_enabled=yes"), &id);
+    assert!(
+        selected.preprocessing_enabled && selected.bandpass_enabled && selected.rnnoise_enabled
+    );
+    assert_eq!((selected.threshold, selected.onset_frames), (0.75, 2));
+    assert_eq!(
+        (selected.bandpass_low_hz, selected.bandpass_high_hz),
+        (300.0, 3000.0)
+    );
+    assert_eq!(
+        (selected.preroll_ms, selected.hold_ms, selected.reserve_ms),
+        (160, 1000, 160)
+    );
+    for enabled in ["yes", "no"] {
+        let document = account(&format!(
+            "speech_preprocessing_enabled={enabled}\nspeech_threshold=0.3\nspeech_onset_frames=4294967295\nspeech_preroll_ms=0\nspeech_hold_ms=0\nspeech_reserve_ms=86\nspeech_bandpass_enabled=no\nspeech_rnnoise_enabled=no\nspeech_bandpass_low_hz=200\nspeech_bandpass_high_hz=3500"
+        ));
+        let explicit = PhoneSpeechSettings::resolve(&document, &id);
+        assert_eq!((explicit.threshold, explicit.onset_frames), (0.3, u32::MAX));
+        assert_eq!(
+            (explicit.preroll_ms, explicit.hold_ms, explicit.reserve_ms),
+            (0, 0, 86)
+        );
+        assert!(!explicit.bandpass_enabled && !explicit.rnnoise_enabled);
+        assert_eq!(
+            (explicit.bandpass_low_hz, explicit.bandpass_high_hz),
+            (200.0, 3500.0)
+        );
+    }
+    let largest = PhoneSpeechSettings::resolve(
+        &account(
+            "speech_threshold=1\nspeech_preroll_ms=300\nspeech_reserve_ms=280\nspeech_hold_ms=4294967295",
+        ),
+        &id,
+    );
+    assert_eq!(
+        (
+            largest.threshold,
+            largest.preroll_ms,
+            largest.reserve_ms,
+            largest.hold_ms
+        ),
+        (1.0, 300, 280, u32::MAX)
+    );
+}
+
+#[test]
+fn phone_speech_cutoff_order_warns_and_restores_a_valid_pair() {
+    let id = crate::link::PhoneAccountId::new("trunk").unwrap();
+    for options in [
+        "speech_bandpass_low_hz=4000",
+        "speech_bandpass_high_hz=200",
+        "speech_bandpass_low_hz=1500\nspeech_bandpass_high_hz=1500",
+        "speech_bandpass_low_hz=2000\nspeech_bandpass_high_hz=1000",
+    ] {
+        let document = account(options);
+        let settings = PhoneSpeechSettings::resolve(&document, &id);
+        assert_eq!(
+            (settings.bandpass_low_hz, settings.bandpass_high_hz),
+            (300.0, 3000.0)
+        );
+        let warnings = Schema::validate(&document).unwrap().warnings;
+        assert_eq!(warnings.len(), options.lines().count());
+        assert!(
+            warnings
+                .iter()
+                .all(|warning| warning.message.contains("lower cutoff"))
+        );
+    }
+}
+
+#[test]
+fn phone_speech_invalid_values_never_escape_the_exact_account_defaults() {
+    let id = crate::link::PhoneAccountId::new("trunk").unwrap();
+    for (key, values) in [
+        ("speech_threshold", vec!["NaN", "inf", "-0.1", "1.1", ""]),
+        (
+            "speech_onset_frames",
+            vec!["0", "-1", "1.5", "4294967296", ""],
+        ),
+        ("speech_preroll_ms", vec!["-1", "301", "1.5", ""]),
+        ("speech_reserve_ms", vec!["0", "85", "281", ""]),
+        ("speech_hold_ms", vec!["-1", "4294967296", "1.5", ""]),
+        (
+            "speech_bandpass_low_hz",
+            vec!["0", "NaN", "inf", "-1", "24000", ""],
+        ),
+        (
+            "speech_bandpass_high_hz",
+            vec!["0", "NaN", "inf", "-1", "24000", ""],
+        ),
+    ] {
+        for value in values {
+            let document = account(&format!("{key}={value}"));
+            assert_eq!(
+                PhoneSpeechSettings::resolve(&document, &id),
+                PhoneSpeechSettings::default(),
+                "{key}={value}"
+            );
+            assert_eq!(
+                Schema::validate(&document).unwrap().warnings.len(),
+                1,
+                "{key}={value}"
+            );
+        }
+    }
+    let document = ConfigDocument::parse("[general]\nspeech_preprocessing_enabled=yes\n[station]\nspeech_threshold=0.9\n[phone_account other]\nspeech_preprocessing_enabled=yes\n[phone_account trunk]\nlocal_node=station\nserver=pbx:4569\nusername=user\nsecrets_file=/secret").unwrap();
+    assert_eq!(
+        PhoneSpeechSettings::resolve(&document, &id),
+        PhoneSpeechSettings::default()
+    );
+}

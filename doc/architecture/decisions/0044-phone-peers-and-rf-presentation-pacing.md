@@ -2213,3 +2213,41 @@ source-private results, then proves ordinary media stays restored after the
 unlock grant expires. It retains the existing call/hangup, mix-minus and bounded
 watchdogs. The separate linked-IVR case preserves default isolation and exact
 telephone digit privacy; these are synthetic composition checks, not deployment.
+
+## Per-account analysis preprocessing settings — 2026-11-15 preparation
+
+Phone speech settings are an exact-account analysis snapshot, separate from
+transport identity and registration settings. This checkpoint parses them; the
+configured shared-provider and prepared-media consumers are a following
+integration step, not a claim of deployed preprocessing.
+
+The explicit preprocessing opt-in defaults off. Plain analysis retains threshold
+0.5 and one 16-ms onset frame. Enabling preprocessing selects threshold 0.75 and
+two onset frames unless those values were explicitly configured. The shared
+analysis branch uses the existing 300–3000 Hz bandpass before RNNoise; either
+stage can be disabled independently. Finite threshold is inclusive 0–1 and onset
+is any positive u32 frame count. Cutoffs must be finite, ordered and below 24 kHz;
+provider preparation must additionally enforce the negotiated decoded source's
+Nyquist limit and fail explicitly rather than clamp or bypass selected filtering.
+
+Backward voice marking, future voice hold, and programme reserve are independent:
+defaults are 160, 1000, and 160 ms. Marking may be zero and is bounded by the
+existing 300-ms programme capacity. A marking request larger than reserve does
+not promise that already rendered history is recoverable. Hold is a u32
+millisecond source-clock deadline and allocates no history. The reserve range is
+86–280 ms: the released ring requires worst-ratio headroom for 4096 output frames
+at 48 kHz and room for a 20-ms producer quantum within its 300-ms capacity.
+The existing 64 receipt buckets cover 1280 ms, so programme capacity is the tighter
+lookback bound. None of these settings adds another PCM buffer.
+
+Unknown/malformed values retain the normal exact-account defaults with warnings.
+An invalid cutoff order restores the complete 300–3000 Hz pair with warnings.
+Warnings for threshold/onset name the effective selected preset. No node/general
+inheritance is introduced and tuning does not change account equality.
+
+Existing controlled reload semantics remain authoritative: a successful reload
+retires the current private call generation, and the next call/attachment uses
+the new committed configuration. Failed reload retains the prior configuration
+and call. Analysis objects must be prepared outside callbacks; no tuning mutates
+a live graph or recreates it from a source callback. Original accepted programme
+PCM remains the only ring input. Preprocessing is analysis-only.
