@@ -892,13 +892,18 @@ fn private_source_analysis_retires_onset_but_native_digit_remains_the_only_comma
 }
 
 #[test]
+fn private_source_analysis_retires_onset_but_native_digit_remains_the_only_command_16000() {
+    assert_native_source_onset(16000);
+}
+
+#[test]
 fn private_source_analysis_retires_onset_but_native_digit_remains_the_only_command_48000() {
     assert_native_source_onset(48000);
 }
 
 #[test]
 fn private_source_analysis_rejects_unsupported_detector_rate_without_legacy_regression() {
-    let (io, _state) = crate::link::session::tests::phone_source_peer_at_rate(16000);
+    let (io, _state) = crate::link::session::tests::phone_source_peer_at_rate(12000);
     let (account, call) = io.generations();
     let source = PhoneSource::new(
         io.phone_account().unwrap().clone(),
