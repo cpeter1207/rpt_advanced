@@ -126,3 +126,26 @@ A-law uses the identical actual-wire oracle and completed in 50.82 seconds
 (events) and 50.39 seconds (in-band), launcher exit 0 in
 `.work/phone-ivr-alaw-green.log`. Thus both G.711 profiles are composed; full
 affected suites/static and the later isolation union are still pending.
+
+
+## Qualified IVR leaf
+
+Clean implementation/test head `210a1cba551ef305ac836c0e0ad39a43e2529d16`
+passed the full affected core/product gate: 818 core unit plus 94 integration;
+875 product unit plus 5 integration, with the existing opt-in load test ignored.
+Standalone base passed 324 library, 2 binary, 30 integration and 1 doc test,
+including actual incoming/ordinary-link compositions and host digit admission.
+The four new outgoing IVR cases were separately qualified above rather than
+repeated in this base run. Asterisk compatibility passed 66, peer support
+13 plus 82 integration, and SIP adapter 13 cases. Product C ABI, six-package
+all-target Clippy with warnings denied, Rustdoc with warnings denied and fmt
+check passed. Both bounded aggregate launchers exited 0.
+
+Evidence: `.work/phone-ivr-full-core-product2.log` and
+`.work/phone-ivr-host-strict.log`. Exact rebuilt product and SIP adapter hashes
+match the four wire cases. This is a developer qualification checkpoint, not
+new hardware validation or the full two-platform PR/coverage/package gate.
+Default linked-peer isolation is still a separate qualified leaf; optional
+bypass must not delay the initial IVR/default-isolation union. That union should
+add the known 1 kHz RF-return assertion after IVR to directly prove the finite
+private fallback yields back to normal programme media. No node was changed.
