@@ -8,6 +8,16 @@ mod outgoing;
 #[path = "product_sip_vox_tests.rs"]
 mod vox;
 
+// iLBC uses the normal configured 20-WPM speed so a Morse unit spans two
+// codec frames. Earlier codec fixtures retain their exact 40-WPM setup.
+fn prompt_speed(profile: AudioProfile) -> u32 {
+    if profile == AudioProfile::Ilbc30 {
+        20
+    } else {
+        40
+    }
+}
+
 struct Caller {
     sip: UdpSocket,
     rtp: UdpSocket,
@@ -242,7 +252,10 @@ impl Caller {
                 }
                 result.extend_from_slice(&pcm);
             }
-            if !result.is_empty() && last_tone.elapsed() > Duration::from_millis(400) {
+            if !result.is_empty()
+                && last_tone.elapsed()
+                    > Duration::from_millis(16_000 / u64::from(prompt_speed(self.profile)))
+            {
                 if !self.events {
                     let ticks = self.timestamp.wrapping_sub(source_start);
                     assert!(
@@ -346,13 +359,13 @@ fn call_flow_profile(
     let mut caller = Caller::establish_profile(sip, registered, profile, events);
     let mut codec = AudioCodec::load(profile).unwrap();
     let assert_prompt = |pcm: &[f32], expected: &str| {
-        // Envelope-only observation reuses the unchanged 8 kHz Morse assertion.
+        // Preserve the raw envelope oracle at the configured speed and 8 kHz.
         let observed: Vec<_> = pcm
             .iter()
             .step_by((profile.parameters().pcm_rate_hz / 8000) as usize)
             .copied()
             .collect();
-        super::assert_prompt(&observed, expected);
+        super::assert_prompt_at_speed(&observed, expected, prompt_speed(profile));
     };
     let login = caller.prompt(&mut codec, "login");
     if !login_only {
@@ -480,7 +493,8 @@ fn product_call_profile(
     let sip = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut remote = voice.then(vox::Remote::new);
     let configuration = format!(
-        "[general]\nnode_enabled=yes\n[desk]\nradio_channel=fixture\nduplex=full\n[morse]\nspeed_wpm=40\nfrequency_hz=800\nlevel_db=-6\n[phone_account office]\nlocal_node=desk\nenabled=yes\nprotocol=sip\nserver={}\nusername=fixture-user\nsecrets_file=phone.secret\nregister=yes\n{}",
+        "[general]\nnode_enabled=yes\n[desk]\nradio_channel=fixture\nduplex=full\n[morse]\nspeed_wpm={}\nfrequency_hz=800\nlevel_db=-6\n[phone_account office]\nlocal_node=desk\nenabled=yes\nprotocol=sip\nserver={}\nusername=fixture-user\nsecrets_file=phone.secret\nregister=yes\n{}",
+        prompt_speed(profile),
         sip.local_addr().unwrap(),
         if no_mailbox {
             ""

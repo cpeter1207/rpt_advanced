@@ -158,3 +158,41 @@ process group below1.25GiB. No shared artifact was copied, linked or deleted.
 The qualified test-only PCMA rearm-boundary repair was replayed unchanged from
 43d6c51 before this checkpoint; its original failure and two-process GREEN
 receipts remain separate from iLBC qualification.
+
+
+### iLBC prompt fixture and first actual call
+
+The first actual call reached password audio but failed the existing explicitly
+G.711-specific 40-WPM raw-envelope oracle. An unchanged-assertion diagnostic
+confirmed 141 complete password packets with consecutive sequence numbers,
+240-tick steps and one SSRC. The independent released Morse/SRC/iLBC reference
+reproduced fragmented raw elements; the later SIP cleanup response was not the
+cause. The initial 10 ms block-RMS candidate failed its offset/suffix controls
+and was not adopted. Original failure and diagnostic receipts remain retained.
+
+Morse speed is an existing configuration choice, with a normal default of
+20 WPM. The final raw-only reference proof at that speed passed all 48
+message/offset/finite/suffix combinations, four wrong/missing/duplicated-character
+controls and three silence offsets. Its original four messages are pinned to
+literal expected Morse strings. Log SHA256:
+d1b9e41c8cce83d73ca88e6eace48f72397f93012520a8ee239be97cf86601eb.
+
+The reviewed test-only correction selects 20 WPM for iLBC, retaining 40 WPM for
+every previous profile. Generated configuration, relative raw-envelope symbol
+boundaries and the existing silence completion delimiter use that same speed.
+The iLBC delimiter is 800 ms, longer than its 420 ms inter-word gap; existing
+fixtures remain at 400 ms. The 15-second prompt and 60-second call watchdogs,
+raw amplitude threshold and 10-sample observation resolution are unchanged.
+No RMS filter, new recognizer, production behavior or default was changed.
+
+The exact formatted fixture passed its scalar symbol-boundary control and the
+actual native-event iLBC authentication/status/privacy/teardown call in 38.49 s.
+Compilation took 14.49 s; the simulated radio reported zero skipped slots.
+ilbc-speed20-wire.log completed RUN_EXIT0, SHA256:
+a4e6ee64cc55c673f671cff89b15ab2e4f112fe4b4df2131bd1511c6eb4f1ef1.
+The compiled-input manifest is
+fb23c83115bd09cfea724ad5ebc72ee35deebc5e679432d492ed6580e76e9da5.
+The executable hash and unchanged private runtime/official alpha4 DSO hashes
+are retained in the receipt. This paragraph is a documentation-only addition
+after execution. Four actual iLBC cases, full aggregate/native/coverage and
+independent third-party interoperability remain unqualified.
