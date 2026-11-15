@@ -615,8 +615,18 @@ fn product_outgoing_with_policy(
                 IvrMode::InBand => {
                     "host_services::product_phone_tests::sip::outgoing::actual_l16_absent_events_preserve_private_inband"
                 }
-                IvrMode::Disabled => "host_services::product_phone_tests::sip::outgoing::actual_l16_quiet_call_preserves_zero_receiver_key_and_continuous_rtp",
+                IvrMode::Disabled => {
+                    "host_services::product_phone_tests::sip::outgoing::actual_l16_quiet_call_preserves_zero_receiver_key_and_continuous_rtp"
+                }
             }
+        } else if selected == AudioProfile::Gsm {
+            "host_services::product_phone_tests::sip::outgoing::actual_gsm_two_way_phone_preserves_quiet_rtp"
+        } else if selected == AudioProfile::G726 {
+            "host_services::product_phone_tests::sip::outgoing::actual_g726_two_way_phone_preserves_quiet_rtp"
+        } else if selected == AudioProfile::G726Aal2 {
+            "host_services::product_phone_tests::sip::outgoing::actual_aal2_g726_two_way_phone_preserves_quiet_rtp"
+        } else if selected == AudioProfile::L16Narrowband {
+            "host_services::product_phone_tests::sip::outgoing::actual_l16_narrowband_two_way_phone_preserves_quiet_rtp"
         } else if selected == AudioProfile::G722 {
             "host_services::product_phone_tests::sip::outgoing::actual_product_g722_two_way_phone_preserves_wideband_pcm"
         } else if isolated {
@@ -1591,7 +1601,7 @@ fn actual_product_g722_two_way_phone_preserves_wideband_pcm() {
 fn actual_l16_mixed_event_answer_keeps_native_receive_and_private_inband_transmit() {
     product_outgoing_with_policy(
         true,
-        true,
+        false,
         false,
         AudioProfile::L16Wideband,
         IvrMode::MixedClock,
@@ -1603,7 +1613,7 @@ fn actual_l16_mixed_event_answer_keeps_native_receive_and_private_inband_transmi
 fn actual_l16_matched_events_preserve_native_digits_and_clock() {
     product_outgoing_with_policy(
         true,
-        true,
+        false,
         false,
         AudioProfile::L16Wideband,
         IvrMode::Events,
@@ -1615,7 +1625,7 @@ fn actual_l16_matched_events_preserve_native_digits_and_clock() {
 fn actual_l16_absent_events_preserve_private_inband() {
     product_outgoing_with_policy(
         true,
-        true,
+        false,
         false,
         AudioProfile::L16Wideband,
         IvrMode::InBand,
@@ -1629,4 +1639,24 @@ fn actual_l16_quiet_call_preserves_zero_receiver_key_and_continuous_rtp() {
     // Quiet/latch requires no earlier RF activity; isolation fixtures deliberately
     // key RF before origination to prove the ordinary peer works before the cut.
     product_outgoing(false, true, true, AudioProfile::L16Wideband, false);
+}
+
+#[test]
+fn actual_gsm_two_way_phone_preserves_quiet_rtp() {
+    product_outgoing(false, true, true, AudioProfile::Gsm, false);
+}
+
+#[test]
+fn actual_g726_two_way_phone_preserves_quiet_rtp() {
+    product_outgoing(false, true, true, AudioProfile::G726, false);
+}
+
+#[test]
+fn actual_aal2_g726_two_way_phone_preserves_quiet_rtp() {
+    product_outgoing(false, true, true, AudioProfile::G726Aal2, false);
+}
+
+#[test]
+fn actual_l16_narrowband_two_way_phone_preserves_quiet_rtp() {
+    product_outgoing(false, true, true, AudioProfile::L16Narrowband, false);
 }

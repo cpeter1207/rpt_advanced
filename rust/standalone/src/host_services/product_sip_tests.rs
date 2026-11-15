@@ -420,7 +420,11 @@ fn product_call_profile(
 ) {
     const CHILD: &str = "RPTADV_TEST_REAL_SIP_PHONE_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
-        let test = if profile == AudioProfile::G722 && events {
+        let test = if profile == AudioProfile::L16Wideband && events {
+            "host_services::product_phone_tests::sip::real_product_l16_private_call_authenticates_with_matching_events"
+        } else if profile == AudioProfile::L16Wideband {
+            "host_services::product_phone_tests::sip::real_product_l16_private_call_authenticates_inband"
+        } else if profile == AudioProfile::G722 && events {
             "host_services::product_phone_tests::sip::real_product_g722_private_call_authenticates_with_events"
         } else if profile == AudioProfile::G722 {
             "host_services::product_phone_tests::sip::real_product_g722_private_call_authenticates_inband"
@@ -606,4 +610,13 @@ fn product_call_profile(
     drop(remote);
     fs::remove_dir_all(directory).unwrap();
     result.unwrap();
+}
+
+#[test]
+fn real_product_l16_private_call_authenticates_with_matching_events() {
+    product_call_profile(false, false, false, AudioProfile::L16Wideband, true);
+}
+#[test]
+fn real_product_l16_private_call_authenticates_inband() {
+    product_call_profile(false, false, false, AudioProfile::L16Wideband, false);
 }

@@ -106,3 +106,42 @@ retains the original lifetime-zero assertions and30-second cadence test. These
 four actual cases and strict qualification are still pending at this checkpoint.
 The synthetic mixed-event input proves RX identity/credit and TX fallback, not
 an independently generated RFC7160 mixed-clock sender timeline.
+
+### L16 real-call checkpoint and isolated measurement correction
+
+Mixed8k receive/private in-band transmit and matched16k events each passed71.51s
+in `l16-wire-fixture-retry.log`. No-event then failed the isolated RF-output
+assertion by729 aggregate output counts before the separate quiet case ran.
+Read-only review found that immediate=true snapshots output immediately after
+sending200, before ACK/try_complete/progress0 cancels authorized local ringing.
+The linked fixture also sends1s silence before the greeting, so this combination
+does not measure immediate first-utterance behavior.
+
+A separate unchanged-assertion diagnostic passed quiet70.45s and no-event71.45s
+(`l16-quiet-diagnostic.log`). The latter captured ACKs=0/PTT=true at the privacy
+baseline and ACKs=1/PTT=false afterward, with no added PCM or linked turns. This
+confirms the invalid pre-answer measurement boundary, but cannot retrospectively
+attribute the earlier729 samples. The three isolated L16 scenarios now reuse the
+established immediate=false setup, including its0.5s media transition followed
+by the strict0.2s post-answer ringback-stability assertion, before the unchanged
+peer-privacy measurement. Temporary diagnostics are removed. No production code,
+privacy threshold, source deadline or per-case timeout changed. Separate quiet
+zero-key/30-second RTP and existing immediate first-utterance controls remain.
+The corrected no-event fixture subsequently passed73.14s in `l16-settled.log`,
+with diagnostics removed and all privacy/ringback assertions unchanged. The
+separate quiet control previously passed70.45s. Four additional outgoing profile
+selectors and two incoming L16 authentication selectors compile but still await
+execution; their presence is not passing wire evidence.
+
+### Strict source checkpoint
+
+The first strict run stopped on two stale check metadata files from the separate
+manifest-only cohort checkout. After deleting only their verified16-byte Cargo
+completion markers, the bounded retry regenerated both metadata files from this
+Batch A source and checked the embedded origin and hashes. No production change
+was used to repair that tooling failure. `batch-a-strict-retry.log` records exit0:
+formatting, four-package all-target Clippy, Rustdoc, five directional product
+checks, twenty outbound source/age/cancellation checks and the catalog-lifetime
+check passed. This receipt precedes the newly prepared malformed-length host
+regression; the settled no-event rerun is recorded above, and remaining codec wire cases
+are pending.
