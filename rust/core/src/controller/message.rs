@@ -68,6 +68,11 @@ impl MessagePreparation {
 
     /// Allocate only at configuration admission, before the audio owner starts.
     pub fn register(&mut self, content_index: usize) -> Result<PreparedMedia, ControllerError> {
+        // The equality-only identity fits one word; requests keep the original index.
+        let recipe = content_index
+            .checked_add(1)
+            .and_then(std::num::NonZeroUsize::new)
+            .ok_or(ControllerError)?;
         let (requests, receiver) = RingBuffer::new(1);
         let (ready, consumer) = RingBuffer::new(1);
         let (retired, reclaimer) = RingBuffer::new(1);
@@ -93,7 +98,7 @@ impl MessagePreparation {
             retired,
         }))?;
         // Manual and recurring readers retain the same immutable recipe identity.
-        media.8 = Some(content_index);
+        media.8 = Some(recipe);
         Ok(media)
     }
 

@@ -116,7 +116,8 @@ pub struct PreparedMedia(
     pub(super) Option<(u64, PoliteDelivery, bool)>,
     pub(super) Option<Arc<MessageOccurrence>>,
     pub(super) Option<PlaybackPolicy>,
-    pub(super) Option<usize>,
+    // Encoded recipe index plus one, compared only for exact identity.
+    pub(super) Option<std::num::NonZeroUsize>,
     Option<PlaybackCompletion>,
 );
 

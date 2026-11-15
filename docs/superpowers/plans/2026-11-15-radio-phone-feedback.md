@@ -65,3 +65,19 @@ checks then passed in `radio-feedback-strict.log`, followed by the Asterisk, pee
 support and SIP suites. Clippy stopped on the new completion envelope reaching
 128 bytes; an allocation-free layout repair and remaining strict checks are pending.
 This does not claim an aggregate pass yet.
+
+
+## Compact completion envelope
+
+The focused layout RED measured a 128-byte MessageCompletion after adding the
+finite receipt. The existing optional recipe identity now stores checked index+1
+as NonZeroUsize, reducing that identity to one word without a box or new allocation.
+Only equality uses the encoded identity; the producer's MessageRequest retains
+the original index. The impossible Vec index usize::MAX fails before port/ring
+allocation. The regression checks compact size, unchanged requests for zero and
+usize::MAX-1, and refusal without adding a port.
+
+`radio-feedback-layout-green.log` passes all 808 core tests, all-target Clippy for
+core/product/standalone/Asterisk/peer-support/SIP, warning-fatal Rustdoc and fmt.
+Runner exit 0, with independent exact-source review clear. Aggregate product and
+standalone verification of the final continuous-media union remain pending.

@@ -186,3 +186,22 @@ fn composition_handoff_stale_failure_cannot_fail_a_new_attempt() {
     assert_eq!(media.select_morse_fallback(), MorseSwitch::Unavailable);
     assert_eq!(media.render(&mut [0.0]), PcmRead::Failed);
 }
+
+#[test]
+fn finite_completion_recipe_identity_preserves_compact_envelope() {
+    assert!(
+        std::mem::size_of::<MessageCompletion>() < 128,
+        "control completion envelope grew to {} bytes",
+        std::mem::size_of::<MessageCompletion>()
+    );
+    let mut control = MessagePreparation::new(7);
+    for index in [0, usize::MAX - 1] {
+        let mut media = control.register(index).unwrap();
+        assert!(media.8.is_some());
+        media.0.render(false, &mut [0.0]);
+        assert_eq!(control.take_request().unwrap().content_index, index);
+    }
+    let ports = control.ports.len();
+    assert!(control.register(usize::MAX).is_err());
+    assert_eq!(control.ports.len(), ports);
+}
