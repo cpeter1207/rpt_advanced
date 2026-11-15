@@ -195,6 +195,7 @@ pub(crate) struct Shared {
     pub(crate) source: std::net::SocketAddr,
     pub(crate) media: Mutex<Media>,
     pub(crate) inband: bool,
+    pub(crate) pcm_rate: u32,
     pub(crate) direction: Direction,
     state: AtomicU32,
     close: Arc<AtomicBool>,
@@ -523,6 +524,7 @@ impl Reactor {
                         remote: format!("{:016x}{token:016x}", account.generation()),
                         source,
                         inband: media.inband,
+                        pcm_rate: media.pcm_rate(),
                         direction: Direction::Outgoing,
                         media: Mutex::new(media),
                         state: AtomicU32::new(3),
@@ -588,7 +590,7 @@ impl Reactor {
                         }
                         entry.settings.remote()
                     };
-                    let offer = Offer::new(route, generation)
+                    let offer = Offer::new(route, generation, Arc::clone(&self.catalog))
                         .await
                         .map_err(|_| Error::Call)?;
                     #[cfg(test)]
@@ -649,7 +651,7 @@ impl Reactor {
                         }
                         slot.observation.offer().to_vec()
                     };
-                    let media = Media::new(&offer, key.call, jitter)
+                    let media = Media::new(&offer, key.call, jitter, &self.catalog)
                         .await
                         .map_err(|_| Error::Call)?;
                     let mut entry = owner.borrow_mut();
@@ -662,6 +664,7 @@ impl Reactor {
                         remote,
                         source: slot.observation.source()?,
                         inband: media.inband,
+                        pcm_rate: media.pcm_rate(),
                         direction: Direction::Incoming,
                         media: Mutex::new(media),
                         state: AtomicU32::new(slot.observation.state),

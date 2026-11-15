@@ -157,6 +157,12 @@ fn private_inband_capability_requires_the_complete_timed_phone_profile() {
     for (capabilities, expected) in [
         (51, true),
         (115, true),
+        (307, true), // finite negotiated packets without inband digits
+        (371, true), // complete phone group plus both optional promises
+        (256, false),
+        (306, false),
+        (291, false),
+        (563, false), // next unknown capability remains rejected
         (64, false),
         (96, false),
         (99, false),

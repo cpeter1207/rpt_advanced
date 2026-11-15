@@ -71,6 +71,7 @@ pub(crate) struct Worker {
     thread: Option<JoinHandle<Result<(), Error>>>,
     // Retain code beyond join, including Rust thread-local cleanup in the host.
     _provider: Arc<Provider>,
+    _catalog: Arc<rptadv_codec_client::CodecCatalog>,
     resolver: Arc<crate::providers::ResolverLibrary>,
     runtime: tokio::runtime::Handle,
     preparation: Option<tokio::task::JoinHandle<()>>,
@@ -83,6 +84,7 @@ impl Worker {
         Self::from_provider(unsafe { Provider::load(path) }?)
     }
     pub(crate) fn from_provider(provider: Arc<Provider>) -> Result<Self, Error> {
+        let catalog = Arc::new(super::codec::load_catalog().map_err(|_| Error::Owner)?);
         let resolver =
             Arc::new(crate::providers::ResolverLibrary::load().map_err(|_| Error::Owner)?);
         let (sender, receiver) = mailbox::channel(1);
@@ -90,6 +92,7 @@ impl Worker {
         let client = calls.clone();
         let (incoming, receipts) = mpsc::sync_channel(8);
         let owned = Arc::clone(&provider);
+        let owned_catalog = Arc::clone(&catalog);
         let (ready, started) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("rpt-sip-accounts".into())
@@ -107,7 +110,8 @@ impl Worker {
                         .map_err(|error| *error),
                 );
                 let runtime = runtime?;
-                let result = runtime.block_on(Reactor::new(owned, calls, incoming).run(receiver));
+                let result = runtime
+                    .block_on(Reactor::new(owned, calls, incoming, owned_catalog).run(receiver));
                 // A timed-out system lookup cannot be canceled. Its actual job owns
                 // the resolver lease and allocator until it finishes; never block SIP teardown.
                 runtime.shutdown_background();
@@ -119,6 +123,7 @@ impl Worker {
                 sender,
                 thread: Some(thread),
                 _provider: provider,
+                _catalog: catalog,
                 resolver,
                 runtime,
                 preparation: None,
@@ -256,6 +261,7 @@ struct Candidate {
     removed: Vec<Owner>,
 }
 struct Reactor {
+    catalog: Arc<rptadv_codec_client::CodecCatalog>,
     provider: Arc<Provider>,
     active: BTreeMap<String, Owner>,
     candidate: Option<Candidate>,
@@ -269,8 +275,10 @@ impl Reactor {
         provider: Arc<Provider>,
         calls: calls::Client,
         incoming: mpsc::SyncSender<calls::Receipt>,
+        catalog: Arc<rptadv_codec_client::CodecCatalog>,
     ) -> Self {
         Self {
+            catalog,
             provider,
             active: BTreeMap::new(),
             candidate: None,

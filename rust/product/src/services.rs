@@ -981,7 +981,7 @@ impl HostServices {
         };
         if identity.wire_identity() != remote
             || !local_valid
-            || capabilities & !255 != 0
+            || capabilities & !511 != 0
             || (capabilities & abi::RPTADV_PEER_TIMED_G711_EGRESS != 0
                 && (protocol != ProtocolId::AllStarLink
                     || capabilities & 3 != 3
@@ -989,9 +989,11 @@ impl HostServices {
             || (protocol != ProtocolId::Phone && capabilities & 96 != 0)
             || (protocol == ProtocolId::Phone
                 && (capabilities & 32 == 0
-                    || capabilities & !115 != 0
+                    || capabilities & !371 != 0
                     || raw.account_generation == 0
                     || raw.qso_generation == 0))
+            || (capabilities & abi::RPTADV_PEER_FINITE_PACKET_EGRESS != 0
+                && (protocol != ProtocolId::Phone || capabilities & 51 != 51))
             || (capabilities & abi::RPTADV_PEER_PHONE_INBAND_DIGITS != 0 && capabilities & 51 != 51)
             || (capabilities & 1 != 0 && !self.peer_step_available())
             || (capabilities & 2 != 0
@@ -2008,6 +2010,10 @@ impl PeerIo {
     /// Exact host guarantee for the restricted ordinary IAX timed-send profile.
     pub(crate) fn timed_g711_egress(&self) -> bool {
         self.capabilities & abi::RPTADV_PEER_TIMED_G711_EGRESS != 0
+    }
+    /// Protocol-owned finite PCM padding; packet duration remains in peer PCM units.
+    pub(crate) fn finite_packet_egress(&self) -> bool {
+        self.capabilities & abi::RPTADV_PEER_FINITE_PACKET_EGRESS != 0
     }
     /// Whether this host supports source-timed prepared media and readiness deadlines.
     pub(crate) fn prepared_media(&self) -> bool {

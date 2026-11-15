@@ -4,8 +4,9 @@ use super::media::{
     TimedAudio,
 };
 use crate::abi;
+use rptadv_codec_client::CodecCatalog;
 use rptadv_jitter_client::{Admission, Jitter, Kind};
-use std::{mem::size_of, net::SocketAddr};
+use std::{mem::size_of, net::SocketAddr, sync::Arc};
 
 enum Pending {
     Audio {
@@ -25,9 +26,14 @@ enum Pending {
 pub(crate) struct Offer {
     endpoint: RtpEndpoint,
     description: Vec<u8>,
+    catalog: Arc<CodecCatalog>,
 }
 impl Offer {
-    pub(crate) async fn new(route: SocketAddr, session: u64) -> Result<Self, MediaError> {
+    pub(crate) async fn new(
+        route: SocketAddr,
+        session: u64,
+        catalog: Arc<CodecCatalog>,
+    ) -> Result<Self, MediaError> {
         let media = MediaDescription {
             remote: route,
             codec: super::media::AudioProfile::Mulaw,
@@ -47,6 +53,7 @@ impl Offer {
         Ok(Self {
             endpoint,
             description,
+            catalog,
         })
     }
     pub(crate) fn description(&self) -> &[u8] {
@@ -59,7 +66,7 @@ impl Offer {
     ) -> Result<Media, MediaError> {
         let description = MediaDescription::parse_answer(answer)?;
         let endpoint = self.endpoint.select_answer(description.clone()).await?;
-        Media::from_endpoint(endpoint, description, Vec::new(), jitter)
+        Media::from_endpoint(endpoint, description, Vec::new(), jitter, &self.catalog)
     }
 }
 
@@ -86,12 +93,13 @@ pub(crate) struct Media {
     pub(crate) inband: bool,
 }
 impl Media {
-    /// Prepare only the already-selected G.711 profile on the existing I/O runtime.
+    /// Prepare only the already-selected verified profile on the existing I/O runtime.
     /// The host retains the released jitter descriptor through call destruction.
     pub(crate) async fn new(
         offer: &[u8],
         call: u64,
         jitter: &'static abi::rptadv_jitter_descriptor_v1,
+        catalog: &CodecCatalog,
     ) -> Result<Self, MediaError> {
         let description = MediaDescription::parse(offer)?;
         let local: SocketAddr = if description.remote.is_ipv4() {
@@ -103,17 +111,18 @@ impl Media {
         .expect("literal endpoint");
         let endpoint = RtpEndpoint::bind(local, description.clone(), call as u32, 0).await?;
         let answer = description.answer(endpoint.local_addr()?, call)?;
-        Self::from_endpoint(endpoint, description, answer, jitter)
+        Self::from_endpoint(endpoint, description, answer, jitter, catalog)
     }
     fn from_endpoint(
         endpoint: RtpEndpoint,
         description: MediaDescription,
         answer: Vec<u8>,
         jitter: &'static abi::rptadv_jitter_descriptor_v1,
+        catalog: &CodecCatalog,
     ) -> Result<Self, MediaError> {
         let inband = description.telephone_event.is_none();
         let profile = description.codec.parameters();
-        let codec = AudioCodec::load(description.codec)?;
+        let codec = AudioCodec::from_catalog(catalog, description.codec)?;
         let jitter = unsafe {
             Jitter::phone_at_rate(
                 std::ptr::from_ref(jitter).cast(),
@@ -143,6 +152,12 @@ impl Media {
             answer,
             inband,
         })
+    }
+    pub(crate) fn pcm_rate(&self) -> u32 {
+        self.profile.pcm_rate_hz
+    }
+    pub(crate) fn packet_frames(&self) -> u32 {
+        self.profile.packet_frames
     }
     pub(crate) fn answer(&self) -> &[u8] {
         &self.answer

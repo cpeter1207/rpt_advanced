@@ -310,3 +310,20 @@ fn stopped_reactor_reports_and_retains_a_still_blocked_preparation_job() {
     );
     assert!(job.is_finished() && weak.upgrade().is_none());
 }
+
+#[test]
+fn codec_catalog_outlives_reactor_join_and_is_released_with_worker() {
+    let path = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_sip_adapter.so.1");
+    let mut worker = Worker::start(&path).unwrap();
+    let retained = Arc::downgrade(&worker._catalog);
+    worker.stop().unwrap();
+    assert!(
+        retained.upgrade().is_some(),
+        "codec code lease must survive reactor and TLS teardown"
+    );
+    drop(worker);
+    assert!(
+        retained.upgrade().is_none(),
+        "joined worker releases its final catalog lease"
+    );
+}

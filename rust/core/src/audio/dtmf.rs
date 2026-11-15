@@ -113,7 +113,7 @@ impl DtmfDetector {
         Ok(detector)
     }
 
-    /// Allocate an 8 or 48 kHz detector and require source-interval support.
+    /// Allocate an 8, 16 or 48 kHz detector and require source-interval support.
     /// Validate the extension before publishing the peer's media worker.
     pub fn at_rate(muting: bool, sample_rate: u32) -> Result<Self, DtmfError> {
         let api = provider_api()?;

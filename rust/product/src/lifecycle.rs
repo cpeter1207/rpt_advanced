@@ -1217,6 +1217,18 @@ fn capture_at(origin: Instant, wall: SystemTime, services: HostServices) -> Runt
 fn document(text: &str) -> Result<ConfigDocument, RuntimeError> {
     let document = ConfigDocument::parse(text)?;
     Schema::validate(&document)?;
+    // Dormant host accounts cannot publish SIP until this initial/reload
+    // preparation succeeds. Only enabled SIP needs the catalog's 16 kHz path.
+    if rpt_advanced_core::config::resolve_phone_accounts(&document)
+        .value
+        .iter()
+        .any(|account| {
+            account.enabled
+                && account.protocol == rpt_advanced_core::config::PhoneAccountProtocol::Sip
+        })
+    {
+        drop(DtmfDetector::at_rate(true, 16000).map_err(|_| RuntimeError::Preparation)?);
+    }
     Ok(document)
 }
 

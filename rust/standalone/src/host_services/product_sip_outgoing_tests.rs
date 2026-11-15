@@ -255,7 +255,7 @@ fn quiet_media(caller: &mut Caller, codec: &mut AudioCodec, packets: u64, incomi
             if incoming && Instant::now() >= next_input {
                 caller.audio_payload(
                     codec,
-                    &[0.0; 160],
+                    &vec![0.0; caller.profile.parameters().packet_frames as usize],
                     SELECTED_PAYLOAD.load(Ordering::Acquire) as u8,
                 );
                 next_input += Duration::from_millis(20);
@@ -281,7 +281,7 @@ fn quiet_media(caller: &mut Caller, codec: &mut AudioCodec, packets: u64, incomi
             SELECTED_PAYLOAD.load(Ordering::Acquire) as u8
         );
         observe_rtp(&wire[..length]);
-        let mut pcm = [0.0; 160];
+        let mut pcm = vec![0.0; caller.profile.parameters().packet_frames as usize];
         codec
             .decode(wire[12..172].try_into().unwrap(), &mut pcm)
             .unwrap();
@@ -335,7 +335,7 @@ fn drain(caller: &Caller, codec: &mut AudioCodec, returned: &mut Vec<f32>) {
             (0x80, SELECTED_PAYLOAD.load(Ordering::Acquire) as u8)
         );
         observe_rtp(&wire[..length]);
-        let mut pcm = [0.0; 160];
+        let mut pcm = vec![0.0; caller.profile.parameters().packet_frames as usize];
         codec
             .decode(wire[12..172].try_into().unwrap(), &mut pcm)
             .unwrap();
@@ -350,11 +350,11 @@ fn media(
     mut linked: Option<&mut vox::Remote>,
 ) {
     let mut next = Instant::now();
-    for chunk in samples.chunks(160) {
+    for chunk in samples.chunks(caller.profile.parameters().packet_frames as usize) {
         if let Some(wait) = next.checked_duration_since(Instant::now()) {
             thread::sleep(wait);
         }
-        let mut pcm = [0.0; 160];
+        let mut pcm = vec![0.0; caller.profile.parameters().packet_frames as usize];
         pcm[..chunk.len()].copy_from_slice(chunk);
         caller.audio_payload(codec, &pcm, SELECTED_PAYLOAD.load(Ordering::Acquire) as u8);
         if let Some(remote) = linked.as_mut() {
@@ -555,7 +555,9 @@ fn product_outgoing_with_ivr(
 ) {
     const CHILD: &str = "RPTADV_TEST_OUTGOING_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
-        let name = if isolated {
+        let name = if selected == AudioProfile::G722 {
+            "host_services::product_phone_tests::sip::outgoing::actual_product_g722_two_way_phone_preserves_wideband_pcm"
+        } else if isolated {
             "host_services::product_phone_tests::sip::outgoing::actual_outgoing_call_isolates_and_restores_existing_ordinary_link"
         } else if ivr == IvrMode::InBand && selected == AudioProfile::Alaw {
             "host_services::product_phone_tests::sip::outgoing::actual_alaw_radio_digits_use_private_inband"
@@ -591,14 +593,7 @@ fn product_outgoing_with_ivr(
         );
         return;
     }
-    SELECTED_PAYLOAD.store(
-        if selected == AudioProfile::Mulaw {
-            0
-        } else {
-            8
-        },
-        Ordering::Release,
-    );
+    SELECTED_PAYLOAD.store(usize::from(selected.payload()), Ordering::Release);
     let directory =
         std::env::temp_dir().join(format!("rpt-outgoing-product-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
@@ -834,6 +829,8 @@ fn product_outgoing_with_ivr(
         sequence: 0,
         timestamp: 0,
         keepalive: false,
+        profile: selected,
+        events: ivr != IvrMode::InBand,
     };
     let mut codec = AudioCodec::load(selected).unwrap();
     let mut returned = Vec::new();
@@ -868,7 +865,7 @@ fn product_outgoing_with_ivr(
         media(
             &mut caller,
             &mut codec,
-            &[0.0; 4000],
+            &vec![0.0; selected.parameters().pcm_rate_hz as usize / 2],
             &mut returned,
             linked.as_mut(),
         );
@@ -885,7 +882,7 @@ fn product_outgoing_with_ivr(
         media(
             &mut caller,
             &mut codec,
-            &[0.0; 1600],
+            &vec![0.0; selected.parameters().pcm_rate_hz as usize / 5],
             &mut returned,
             linked.as_mut(),
         );
@@ -901,7 +898,7 @@ fn product_outgoing_with_ivr(
         media(
             &mut caller,
             &mut codec,
-            &[0.0; 8000],
+            &vec![0.0; selected.parameters().pcm_rate_hz as usize],
             &mut returned,
             Some(&mut *remote),
         );
@@ -919,7 +916,7 @@ fn product_outgoing_with_ivr(
     let before_voice = PUBLIC_OUTPUT.load(Ordering::Acquire);
     let speech: Vec<f32> =
         include_bytes!("../../../product/src/tests/fixtures/phone-speech/yes-48000-s16le.pcm")
-            .chunks_exact(12)
+            .chunks_exact((48000 / selected.parameters().pcm_rate_hz * 2) as usize)
             .map(|bytes| f32::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32768.0)
             .collect();
     media(
@@ -932,7 +929,7 @@ fn product_outgoing_with_ivr(
     media(
         &mut caller,
         &mut codec,
-        &[0.0; 16000],
+        &vec![0.0; selected.parameters().pcm_rate_hz as usize * 2],
         &mut returned,
         linked.as_mut(),
     );
@@ -973,7 +970,7 @@ fn product_outgoing_with_ivr(
     media(
         &mut caller,
         &mut codec,
-        &[0.0; 4000],
+        &vec![0.0; selected.parameters().pcm_rate_hz as usize / 2],
         &mut returned,
         linked.as_mut(),
     );
@@ -1094,7 +1091,7 @@ fn product_outgoing_with_ivr(
     media(
         &mut caller,
         &mut codec,
-        &[0.0; 1600],
+        &vec![0.0; selected.parameters().pcm_rate_hz as usize / 5],
         &mut Vec::new(),
         linked.as_mut(),
     );
@@ -1140,16 +1137,23 @@ fn assert_radio_return(
     mut linked: Option<&mut vox::Remote>,
 ) {
     let mut returned = Vec::new();
+    let pcm_rate = caller.profile.parameters().pcm_rate_hz as usize;
     LOCAL_INPUT.store(true, Ordering::Release);
     media(
         caller,
         codec,
-        &[0.0; 8000],
+        &vec![0.0; pcm_rate],
         &mut returned,
         linked.as_deref_mut(),
     );
     LOCAL_INPUT.store(false, Ordering::Release);
-    media(caller, codec, &[0.0; 4000], &mut returned, linked);
+    media(
+        caller,
+        codec,
+        &vec![0.0; pcm_rate / 2],
+        &mut returned,
+        linked,
+    );
     let energy: f32 = returned.iter().map(|sample| sample * sample).sum();
     let correlation = |lag: usize| {
         returned
@@ -1159,11 +1163,12 @@ fn assert_radio_return(
             .sum::<f32>()
     };
     assert!(
-        returned.iter().filter(|sample| sample.abs() > 0.01).count() > 160,
+        returned.iter().filter(|sample| sample.abs() > 0.01).count()
+            > caller.profile.parameters().packet_frames as usize,
         "actual local RF input returns to the called telephone"
     );
     assert!(
-        correlation(8) > energy * 0.5 && correlation(4) < -energy * 0.5,
+        correlation(pcm_rate / 1000) > energy * 0.5 && correlation(pcm_rate / 2000) < -energy * 0.5,
         "known1kHz return pattern, not a status prompt"
     );
 }
@@ -1206,7 +1211,7 @@ fn telephone_ivr(
         LOCAL_DTMF.store(usize::from(symbol), Ordering::Release);
         caller.audio_payload(
             codec,
-            &[0.0; 160],
+            &vec![0.0; caller.profile.parameters().packet_frames as usize],
             SELECTED_PAYLOAD.load(Ordering::Acquire) as u8,
         );
         if let Some(remote) = linked.as_mut() {
@@ -1260,14 +1265,14 @@ fn telephone_ivr(
                     wire[1] & 0x7f,
                     SELECTED_PAYLOAD.load(Ordering::Acquire) as u8
                 );
-                let mut pcm = [0.0; 160];
+                let mut pcm = vec![0.0; caller.profile.parameters().packet_frames as usize];
                 codec
                     .decode(wire[12..172].try_into().unwrap(), &mut pcm)
                     .unwrap();
                 if pcm.iter().any(|sample| sample.abs() > 0.01) {
                     nonzero_by_slot[(elapsed / 280).min(11)] += 1;
                 }
-                for sample in pcm {
+                for sample in &pcm {
                     maximum_audio = maximum_audio.max(sample.abs());
                 }
                 decoder.process(&mut pcm, &mut decoded);
@@ -1315,4 +1320,9 @@ fn telephone_ivr(
         before_pcm,
         "IVR digits created RF results/audio"
     );
+}
+
+#[test]
+fn actual_product_g722_two_way_phone_preserves_wideband_pcm() {
+    product_outgoing(false, true, true, AudioProfile::G722, false);
 }

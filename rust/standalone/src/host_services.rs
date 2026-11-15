@@ -559,7 +559,8 @@ unsafe extern "C" fn peer_info(
                     let (account, generation) = call.generations();
                     (
                         3,
-                        51 | if call.inband { 64 } else { 0 },
+                        51 | abi::RPTADV_PEER_FINITE_PACKET_EGRESS
+                            | if call.inband { 64 } else { 0 },
                         account,
                         generation,
                         call.remote.as_str(),
@@ -1166,7 +1167,8 @@ fn parse_destination(
 
 unsafe extern "C" fn peer_rate(_: *mut c_void, peer: *const c_void) -> u32 {
     match unsafe { peer.cast::<PeerHandle>().as_ref() } {
-        Some(PeerHandle::Echo(_) | PeerHandle::Sip(_)) => 8000,
+        Some(PeerHandle::Echo(_)) => 8000,
+        Some(PeerHandle::Sip(handle)) => handle.shared.pcm_rate,
         Some(PeerHandle::Iax(peer)) => peer.peer.sample_rate_hz(),
         None => 0,
     }
@@ -1423,17 +1425,23 @@ unsafe extern "C" fn peer_send_prepared_timed(
     deadline: u32,
 ) -> i32 {
     boundary(-1, || {
-        // This released private profile is exactly G.711 8 kHz / 20 ms. Empty
-        // radio end markers never become telephone protocol or PCM traffic.
-        if count != 160 || frames != 160 || bytes.is_null() {
+        // These verified SIP profiles and private IAX use 160 encoded bytes.
+        // PCM frame counts are checked independently against the owning protocol.
+        if count != 160 || bytes.is_null() {
             return -1;
         }
         if let Some(shared) = unsafe { sip_phone::shared(peer) } {
             let bytes: &[u8; 160] = unsafe { &*bytes.cast() };
             return sip_phone::media(shared, "send", |media| {
+                if frames != media.packet_frames() {
+                    return Err(crate::phone::media::MediaError::Codec);
+                }
                 media.send(bytes, timestamp, deadline)
             })
             .unwrap_or(-1);
+        }
+        if frames != 160 {
+            return -1;
         }
         let Some(peer) = (unsafe { iax_peer_mut(peer) }) else {
             return -1;

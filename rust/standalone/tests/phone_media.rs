@@ -579,3 +579,38 @@ async fn telephone_events_reject_malformed_updates_and_deduplicate_only_the_same
         assert_eq!(output, [0x55; 160]);
     }
 }
+
+#[test]
+fn g722_negotiates_8000_rtp_clock_and_16000_pcm_without_changing_g711() {
+    use rpt_advanced_standalone::phone::media::AudioCodec;
+    let source = b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5000 RTP/AVP 9 0\r\na=rtpmap:9 G722/8000\r\na=ptime:20\r\n";
+    let media = MediaDescription::parse(source).unwrap();
+    assert_eq!(media.codec, AudioProfile::G722);
+    assert_eq!((media.receive_payload, media.send_payload), (9, 9));
+    let profile = media.codec.parameters();
+    assert_eq!((profile.pcm_rate_hz, profile.rtp_clock_hz), (16000, 8000));
+    assert_eq!((profile.packet_frames, profile.packet_bytes), (320, 160));
+    let answer = media.answer("127.0.0.1:6000".parse().unwrap(), 2).unwrap();
+    assert!(
+        String::from_utf8(answer)
+            .unwrap()
+            .contains("a=rtpmap:9 G722/8000\r\n")
+    );
+    let wrong_clock = String::from_utf8(source.to_vec())
+        .unwrap()
+        .replace("G722/8000", "G722/16000");
+    assert_eq!(
+        MediaDescription::parse(wrong_clock.as_bytes()),
+        Err(MediaError::UnsupportedDescription)
+    );
+    let mut codec = AudioCodec::load(AudioProfile::G722).unwrap();
+    let pcm: Vec<f32> = (0..320)
+        .map(|index| (index as f32 * std::f32::consts::TAU * 1000.0 / 16000.0).sin() * 0.25)
+        .collect();
+    let mut packet = [0; 160];
+    codec.encode(&pcm, &mut packet).unwrap();
+    let mut decoded = [0.0; 320];
+    codec.decode(&packet, &mut decoded).unwrap();
+    assert!(decoded.iter().all(|sample| sample.is_finite()));
+    assert!(decoded.iter().any(|sample| sample.abs() > 0.1));
+}

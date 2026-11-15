@@ -445,3 +445,35 @@ fn negotiated_g711_profiles_keep_pcm_and_rtp_clocks_explicit() {
         );
     }
 }
+
+#[test]
+fn advertised_profiles_have_verified_bidirectional_provider_metadata() {
+    let catalog = super::super::codec::load_catalog().unwrap();
+    for codec in AudioProfile::ALL {
+        let expected = codec.parameters();
+        let profile = catalog.profile(expected.provider_profile).unwrap();
+        assert_eq!(profile.sample_rate_hz, expected.pcm_rate_hz);
+        assert_eq!(profile.lookahead_frames, 0);
+        assert!(
+            catalog
+                .encoder(
+                    expected.provider_profile,
+                    expected.mode_id,
+                    expected.packet_frames,
+                    expected.packet_bytes
+                )
+                .is_ok()
+        );
+        assert!(
+            catalog
+                .decoder(
+                    expected.provider_profile,
+                    expected.mode_id,
+                    expected.packet_frames,
+                    expected.packet_bytes
+                )
+                .is_ok()
+        );
+    }
+    assert_eq!(catalog.profiles().count(), 3);
+}

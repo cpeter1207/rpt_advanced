@@ -84,7 +84,7 @@ impl SourceIngress {
 impl<const N: usize> SourceIngress<N> {
     /// Prepare one released source-rate detector and an exact bounded offer profile.
     pub(crate) fn at_rate(muting: bool, rate: u32, maximum: usize) -> Result<Self, Error> {
-        if !matches!(rate, 8000 | 48000) {
+        if !matches!(rate, 8000 | 16000 | 48000) {
             return Err(Error::UnsupportedFormat);
         }
         let partition = rate as usize / 125;
@@ -812,7 +812,7 @@ mod tests {
     fn private_collection_pending_tail_delays_release_without_growing_profiles() {
         assert_eq!(std::mem::size_of::<SourceIngress>(), 1224);
         assert_eq!(std::mem::size_of::<SourceIngress<4>>(), 264);
-        for rate in [8000, 48000] {
+        for rate in [8000, 16000, 48000] {
             let part = rate as usize / 50;
             let interval = rate as usize * 1275 / 100_000;
             let mut source = SourceIngress::<4>::at_rate(true, rate, part).unwrap();
@@ -881,7 +881,7 @@ mod tests {
 
     #[test]
     fn replacement_tone_retains_qualified_tail_after_ordinary_timeout() {
-        for rate in [8000, 48000] {
+        for rate in [8000, 16000, 48000] {
             let part = rate as usize / 50;
             let interval = rate as usize * 1275 / 100_000;
             let mut source = SourceIngress::<4>::at_rate(true, rate, part).unwrap();
@@ -962,7 +962,7 @@ mod tests {
 
     #[test]
     fn source_reset_completes_once_while_cancelling_partial_retry_without_allocation() {
-        for rate in [8000, 48000] {
+        for rate in [8000, 16000, 48000] {
             for accepted in [0, 1] {
                 let part = rate as usize / 50;
                 let mut source = SourceIngress::<4>::at_rate(true, rate, part).unwrap();
@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn source_profile_and_offer_validation_preserve_unaccepted_retry() {
-        for rate in [8000, 48000] {
+        for rate in [8000, 16000, 48000] {
             let partition = rate as usize / 125;
             for maximum in [0, partition * 4 + 1] {
                 assert!(matches!(

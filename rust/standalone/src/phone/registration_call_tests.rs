@@ -18,11 +18,12 @@ async fn failed_native_close_before_ack_still_retires_the_product_step() {
     // All media and callback leases are dropped before the descriptor provider.
     let jitter = unsafe { &*std::ptr::from_ref(providers.jitter_descriptor().unwrap()) };
     let offer = b"v=0\r\no=fixture 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 9999 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\na=sendrecv\r\n";
-    let media = Media::new(offer, 1, jitter).await.unwrap();
+    let catalog = Arc::new(crate::phone::codec::load_catalog().unwrap());
+    let media = Media::new(offer, 1, jitter, &catalog).await.unwrap();
     let (sender, _receiver) = mpsc::channel(1);
     let client = Client::new(sender);
     let (incoming, _receipts) = std::sync::mpsc::sync_channel(8);
-    let mut reactor = Reactor::new(provider, client.clone(), incoming);
+    let mut reactor = Reactor::new(provider, client.clone(), incoming, catalog);
     let closed = Arc::new(AtomicBool::new(true));
     let shared = Arc::new(Shared {
         key: Key {
@@ -36,6 +37,7 @@ async fn failed_native_close_before_ack_still_retires_the_product_step() {
         source: "127.0.0.1:9999".parse().unwrap(),
         media: Mutex::new(media),
         inband: true,
+        pcm_rate: 8000,
         direction: Direction::Incoming,
         state: AtomicU32::new(2),
         close: Arc::clone(&closed),

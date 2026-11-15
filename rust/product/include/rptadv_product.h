@@ -79,10 +79,19 @@ struct UrpAstSiteSnapshot;
  * SOURCE_MEDIA and PRIVATE_CALL together. Absence selects native source events,
  * never an event-absence fallback. Both modes retain the source digit callback;
  * the private owner consumes and ignores native symbols in this mode.
- * Current timed private analysis supports exactly 8000 or 48000 Hz. */
+ * Current timed private analysis supports exactly 8000, 16000 or 48000 Hz. */
 #define RPTADV_PEER_PHONE_INBAND_DIGITS 64U
 /** Ordinary ASL peer with proven G.711 catalog and lifetime timed egress ownership. */
 #define RPTADV_PEER_TIMED_G711_EGRESS 128U
+/** PHONE with ASYNC, PREPARED, SOURCE_MEDIA and PRIVATE_CALL together: the
+ * protocol owner completes finite PCM tails into negotiated packets before
+ * native codec flush. consumed_frames/source_frames count only real PCM;
+ * packet_frames counts decoded PCM including padding, never bytes or RTP ticks.
+ * Output-full consumes no input/state; at most one packet is returned per call.
+ * Product must not add its legacy G.711 tail silence. Older hosts omit this bit
+ * and retain that legacy behavior; older products reject this unknown bit.
+ * This is an additive semantic contract, without a record/layout change. */
+#define RPTADV_PEER_FINITE_PACKET_EGRESS 256U
 
 /** Borrowed immutable bytes. Null is valid only with zero length. */
 struct rptadv_peer_bytes_v1 {

@@ -6,6 +6,7 @@ use std::{ffi::c_void, net::UdpSocket, ptr, time::Duration};
 #[derive(Default)]
 struct Sink {
     credit: usize,
+    allow_zero: bool,
     refuse_digit: bool,
     audio: Vec<(u64, usize, u64)>,
     pcm: Vec<f32>,
@@ -27,7 +28,7 @@ unsafe extern "C" fn audio(
     assert!(
         unsafe { std::slice::from_raw_parts(samples, count) }
             .iter()
-            .all(|value| value.is_finite() && *value != 0.0)
+            .all(|value| value.is_finite() && (sink.allow_zero || *value != 0.0))
     );
     sink.audio
         .push((start, accepted, unsafe { (*birth).born_ns }));
@@ -92,7 +93,14 @@ async fn fixture_media(
         "v=0\r\no=fixture 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=sendrecv\r\n",
         sender.local_addr().unwrap().port()
     );
-    Media::new(offer.as_bytes(), 1, jitter).await.unwrap()
+    Media::new(
+        offer.as_bytes(),
+        1,
+        jitter,
+        &super::super::codec::load_catalog().unwrap(),
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -442,13 +450,17 @@ async fn outgoing_offer_keeps_one_port_selects_answer_and_discards_preanswer_pac
     let route = UdpSocket::bind("127.0.0.1:0").unwrap();
     let recipient = UdpSocket::bind("127.0.0.1:0").unwrap();
     recipient.set_nonblocking(true).unwrap();
-    let offer = Offer::new(route.local_addr().unwrap(), 77)
-        .await
-        .expect("outgoing call must reserve its RTP port before INVITE");
+    let offer = Offer::new(
+        route.local_addr().unwrap(),
+        77,
+        Arc::new(super::super::codec::load_catalog().unwrap()),
+    )
+    .await
+    .expect("outgoing call must reserve its RTP port before INVITE");
     let description = MediaDescription::parse(offer.description()).unwrap();
     let offered = description.remote;
     let text = std::str::from_utf8(offer.description()).unwrap();
-    assert!(text.contains("RTP/AVP 0 8 101"));
+    assert!(text.contains("RTP/AVP 0 8 9 101"));
     assert_eq!(description.telephone_event, Some(101));
     // This came from the temporary route before final-answer adoption, not the recipient.
     route
@@ -500,7 +512,13 @@ async fn outgoing_offer_refuses_unoffered_events_and_uncleared_receive_backlog()
     let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
     let route = UdpSocket::bind("127.0.0.1:0").unwrap();
     for crowded in [false, true] {
-        let offer = Offer::new(route.local_addr().unwrap(), 78).await.unwrap();
+        let offer = Offer::new(
+            route.local_addr().unwrap(),
+            78,
+            Arc::new(super::super::codec::load_catalog().unwrap()),
+        )
+        .await
+        .unwrap();
         let target = MediaDescription::parse(offer.description()).unwrap().remote;
         if crowded {
             for sequence in 0..80 {
@@ -541,9 +559,13 @@ async fn outgoing_answer_cannot_reinterpret_an_advertised_format_as_inband_fallb
         ("RTP/AVP 0 101", "RTP/AVP 0 101 110"),
         ("a=fmtp:101 0-15", "a=fmtp:101 0-9"),
     ] {
-        let offer = Offer::new(recipient.local_addr().unwrap(), 79)
-            .await
-            .unwrap();
+        let offer = Offer::new(
+            recipient.local_addr().unwrap(),
+            79,
+            Arc::new(super::super::codec::load_catalog().unwrap()),
+        )
+        .await
+        .unwrap();
         assert!(
             offer
                 .accept(valid.replace(from, to).as_bytes(), jitter)
@@ -552,9 +574,13 @@ async fn outgoing_answer_cannot_reinterpret_an_advertised_format_as_inband_fallb
             "unoffered answer format must be refused, not silently treated as inband DTMF"
         );
     }
-    let offer = Offer::new(recipient.local_addr().unwrap(), 80)
-        .await
-        .unwrap();
+    let offer = Offer::new(
+        recipient.local_addr().unwrap(),
+        80,
+        Arc::new(super::super::codec::load_catalog().unwrap()),
+    )
+    .await
+    .unwrap();
     let no_events = valid
         .replace("RTP/AVP 0 101", "RTP/AVP 0")
         .replace("a=rtpmap:101 telephone-event/8000\r\n", "")
@@ -567,4 +593,63 @@ async fn outgoing_answer_cannot_reinterpret_an_advertised_format_as_inband_fallb
             .inband,
         "genuine omission of events retains the existing inband fallback"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn g722_source_credit_uses_pcm_clock_and_keeps_receipt_birth_through_wrap() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let offer = format!(
+        "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 9 101\r\na=rtpmap:9 G722/8000\r\na=rtpmap:101 telephone-event/8000\r\na=ptime:20\r\n",
+        sender.local_addr().unwrap().port()
+    );
+    let mut media = Media::new(
+        offer.as_bytes(),
+        1,
+        jitter,
+        &super::super::codec::load_catalog().unwrap(),
+    )
+    .await
+    .unwrap();
+    let target = media.endpoint.local_addr().unwrap();
+    let mut encoder = AudioCodec::load(super::super::media::AudioProfile::G722).unwrap();
+    let mut payload = [0; 160];
+    encoder.encode(&[0.125; 320], &mut payload).unwrap();
+    let timestamp = u32::MAX - 79;
+    sender
+        .send_to(&packet(1, timestamp, 9, &payload), target)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let mut sink = Sink {
+        allow_zero: true,
+        ..Default::default()
+    };
+    let born = 1_000_000_000;
+    assert_eq!(read(&mut media, &mut sink, born), 0);
+    let receipt = media.births.iter().flatten().next().unwrap().1;
+    assert!(receipt <= born);
+    assert_eq!(read(&mut media, &mut sink, born + 40_000_000), 2);
+    sink.credit = 120;
+    assert_eq!(read(&mut media, &mut sink, born + 80_000_000), 2);
+    sink.credit = 320;
+    assert_eq!(read(&mut media, &mut sink, born + 120_000_000), 1);
+    let start = ((1u64 << 32) + u64::from(timestamp)) * 2;
+    assert_eq!(
+        sink.audio,
+        [
+            (start, 0, receipt),
+            (start, 120, receipt),
+            (start + 120, 200, receipt)
+        ]
+    );
+    assert_eq!(media.timestamp(80), Ok(start + 320));
+    assert_eq!(sink.pcm.len(), 320);
+    media.reset().unwrap();
+    assert_eq!(media.send(&payload, 20, media.elapsed_ms() + 100), Ok(0));
+    let mut wire = [0; 2048];
+    let count = sender.recv(&mut wire).unwrap();
+    assert_eq!(count, 172);
+    assert_eq!(wire[1] & 0x7f, 9);
+    assert_eq!(u32::from_be_bytes(wire[4..8].try_into().unwrap()), 160);
 }

@@ -1695,3 +1695,26 @@ fn private_command_rejection_categories_never_format_error_payloads() {
     assert!(scheduler_notices().is_empty());
     assert!(engine.stop());
 }
+
+#[test]
+fn sip_rate_readiness_matches_the_installed_provider_before_publication() {
+    // This same test is also run with the pinned old provider in the local
+    // qualification lane. No callback/REGISTER can be published by document().
+    let ready = DtmfDetector::at_rate(true, 16000).is_ok();
+    eprintln!("installed 16 kHz source detector ready: {ready}");
+    for (protocol, enabled, requires_wideband) in [
+        ("sip", "yes", true),
+        ("sip", "no", false),
+        ("iax", "yes", false),
+        ("iax", "no", false),
+    ] {
+        let source = format!(
+            "[1000]\n[phone_account rate-check]\nlocal_node=1000\nserver=127.0.0.1:5060\nusername=fixture\nsecrets_file=/unused\nprotocol={protocol}\nenabled={enabled}\n"
+        );
+        assert_eq!(
+            document(&source).is_ok(),
+            !requires_wideband || ready,
+            "{protocol}/{enabled} initial and reload validation must precede publication"
+        );
+    }
+}

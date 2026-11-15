@@ -598,7 +598,11 @@ impl Outbound {
         // Released timed G.711 requires complete 160-frame packets. Complete
         // the retained finite tail with PCM silence before asking the codec to
         // flush; encoded-byte padding would not represent codec silence.
-        let padding = if self.timed_clock.is_some() && self.rate == 8000 && flush {
+        let padding = if self.timed_clock.is_some()
+            && self.rate == 8000
+            && flush
+            && !io.finite_packet_egress()
+        {
             if (self.private && !self.private_finishing)
                 || self.pcm_position != self.pcm_used
                 || !self.conversion.as_ref().is_some_and(|value| value.drained)

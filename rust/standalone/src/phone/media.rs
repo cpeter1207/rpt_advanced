@@ -10,6 +10,8 @@ pub enum AudioProfile {
     Mulaw,
     /// RTP payload 8, PCMA at 8000 Hz.
     Alaw,
+    /// RTP payload 9, 16 kHz PCM with the standard 8 kHz RTP clock.
+    G722,
 }
 /// Negotiated unencrypted media; no implicit SRTP downgrade.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,17 +68,20 @@ pub struct AudioParameters {
     pub packet_bytes: usize,
 }
 impl AudioProfile {
+    /// Verified SIP profiles, retaining PCMU as the outbound preference.
+    pub const ALL: [Self; 3] = [Self::Mulaw, Self::Alaw, Self::G722];
     /// Current bounded packet policy, validated against the released provider.
     pub fn parameters(self) -> AudioParameters {
         AudioParameters {
             provider_profile: match self {
                 Self::Mulaw => rptadv_codec_client::ProfileId::G711Mu,
                 Self::Alaw => rptadv_codec_client::ProfileId::G711A,
+                Self::G722 => rptadv_codec_client::ProfileId::G722,
             },
             mode_id: 0,
-            pcm_rate_hz: 8000,
+            pcm_rate_hz: if self == Self::G722 { 16000 } else { 8000 },
             rtp_clock_hz: 8000,
-            packet_frames: 160,
+            packet_frames: if self == Self::G722 { 320 } else { 160 },
             packet_bytes: 160,
         }
     }
@@ -85,12 +90,14 @@ impl AudioProfile {
         match self {
             Self::Mulaw => 0,
             Self::Alaw => 8,
+            Self::G722 => 9,
         }
     }
     fn name(self) -> &'static str {
         match self {
             Self::Mulaw => "PCMU",
             Self::Alaw => "PCMA",
+            Self::G722 => "G722",
         }
     }
 }
@@ -128,7 +135,7 @@ impl MediaDescription {
             && name
                 .formats
                 .iter()
-                .any(|pt| !matches!(pt.as_str(), "0" | "8" | "101"))
+                .any(|pt| !matches!(pt.as_str(), "0" | "8" | "9" | "101"))
         {
             return Err(invalid);
         }
@@ -192,6 +199,7 @@ impl MediaDescription {
             .find_map(|value| match value.as_str() {
                 "0" => Some(AudioProfile::Mulaw),
                 "8" => Some(AudioProfile::Alaw),
+                "9" => Some(AudioProfile::G722),
                 _ => None,
             })
             .ok_or(invalid)?;
@@ -210,6 +218,7 @@ impl MediaDescription {
                 let offered = match pt {
                     "0" => "PCMU/8000",
                     "8" => "PCMA/8000",
+                    "9" => "G722/8000",
                     "101" => "telephone-event/8000",
                     _ => return Err(invalid),
                 };
@@ -247,14 +256,9 @@ impl MediaDescription {
     pub fn answer(&self, local: SocketAddr, session: u64) -> Result<Vec<u8>, MediaError> {
         Self::describe(local, session, &[self.codec], self.telephone_event)
     }
-    /// Offer the two existing G.711 profiles and the fixed telephone-event map.
+    /// Offer the composition-verified profiles and the fixed telephone-event map.
     pub(crate) fn offer(local: SocketAddr, session: u64) -> Result<Vec<u8>, MediaError> {
-        Self::describe(
-            local,
-            session,
-            &[AudioProfile::Mulaw, AudioProfile::Alaw],
-            Some(101),
-        )
+        Self::describe(local, session, &AudioProfile::ALL, Some(101))
     }
     fn describe(
         local: SocketAddr,
@@ -318,7 +322,7 @@ fn complete_dtmf_range(value: &str) -> bool {
 pub enum RtpEvent {
     /// Duplicate telephone event, with no newly actionable transition.
     None,
-    /// One complete encoded 20 ms G.711 packet.
+    /// One complete encoded packet in the selected 20 ms profile.
     Audio {
         /// Original wrapping packet sequence number.
         sequence: u16,
@@ -338,11 +342,11 @@ pub enum RtpEvent {
 /// Encoded source media; timing is fixed before its first submission.
 #[derive(Clone, Copy)]
 pub struct TimedAudio<'a> {
-    /// Exactly one 20 ms packet from the released G.711 encoder.
+    /// Exactly one 20 ms packet from the negotiated released encoder.
     pub payload: &'a [u8; 160],
     /// First packet following a source discontinuity.
     pub marker: bool,
-    /// Original wrapping 8 kHz source sample position, including discarded gaps.
+    /// Original wrapping RTP-clock position, including discarded gaps.
     pub timestamp: u32,
     /// Immutable deadline in this endpoint's nonwrapping elapsed milliseconds.
     pub deadline_ms: u32,

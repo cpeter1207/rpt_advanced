@@ -16,6 +16,8 @@ struct Caller {
     sequence: u16,
     timestamp: u32,
     keepalive: bool,
+    profile: AudioProfile,
+    events: bool,
 }
 
 fn fields(packet: &[u8]) -> (String, BTreeMap<String, String>) {
@@ -68,6 +70,14 @@ impl Caller {
         self.sip.send_to(wire.as_bytes(), self.target).unwrap();
     }
     fn establish(sip: UdpSocket, registered: Option<SocketAddr>) -> Self {
+        Self::establish_profile(sip, registered, AudioProfile::Mulaw, true)
+    }
+    fn establish_profile(
+        sip: UdpSocket,
+        registered: Option<SocketAddr>,
+        profile: AudioProfile,
+        events: bool,
+    ) -> Self {
         sip.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let rtp = UdpSocket::bind("127.0.0.1:0").unwrap();
         rtp.set_nonblocking(true).unwrap();
@@ -80,7 +90,11 @@ impl Caller {
             to: "<sip:fixture-user@127.0.0.1>".into(),
             sequence: 0,
             timestamp: 0,
-            keepalive: false,
+            // Inband digits share the continuous audio source clock. Silence
+            // during prompt waits prevents the next digit from being stale RTP.
+            keepalive: !events,
+            profile,
+            events,
         };
         let mut packet = [0; 8192];
         if registered.is_none() {
@@ -92,11 +106,17 @@ impl Caller {
             // Let the existing account owner adopt its registration acknowledgement.
             thread::sleep(Duration::from_millis(30));
         }
-        let port = owner.rtp.local_addr().unwrap().port();
-        let offer = format!(
-            "v=0\r\no=fixture 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {port} RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=sendrecv\r\n"
-        );
-        owner.request("INVITE", &offer);
+        let offer = crate::phone::media::MediaDescription {
+            remote: owner.rtp.local_addr().unwrap(),
+            codec: profile,
+            receive_payload: profile.payload(),
+            send_payload: profile.payload(),
+            telephone_event: events.then_some(101),
+        }
+        .answer(owner.rtp.local_addr().unwrap(), 1)
+        .unwrap();
+        let offer = std::str::from_utf8(&offer).unwrap();
+        owner.request("INVITE", offer);
         let deadline = Instant::now() + Duration::from_secs(6);
         loop {
             let (count, source) = owner
@@ -126,7 +146,10 @@ impl Caller {
                     .find_map(|line| line.strip_prefix("m=audio "))
                     .unwrap();
                 let port: u16 = media.split_whitespace().next().unwrap().parse().unwrap();
-                assert!(body.contains("PCMU/8000") && body.contains("telephone-event/8000"));
+                let selected =
+                    crate::phone::media::MediaDescription::parse(body.as_bytes()).unwrap();
+                assert_eq!(selected.codec, profile);
+                assert_eq!(selected.telephone_event, events.then_some(101));
                 owner.media = SocketAddr::new(address.trim().parse().unwrap(), port);
                 owner.request("ACK", "");
                 owner.sip.set_nonblocking(true).unwrap();
@@ -149,10 +172,10 @@ impl Caller {
             }
         }
     }
-    fn audio(&mut self, codec: &mut AudioCodec, pcm: &[f32; 160]) {
-        self.audio_payload(codec, pcm, 0);
+    fn audio(&mut self, codec: &mut AudioCodec, pcm: &[f32]) {
+        self.audio_payload(codec, pcm, self.profile.payload());
     }
-    fn audio_payload(&mut self, codec: &mut AudioCodec, pcm: &[f32; 160], payload: u8) {
+    fn audio_payload(&mut self, codec: &mut AudioCodec, pcm: &[f32], payload: u8) {
         let mut encoded = [0; 160];
         codec.encode(pcm, &mut encoded).unwrap();
         let mut wire = [0; 172];
@@ -167,13 +190,18 @@ impl Caller {
         self.timestamp = self.timestamp.wrapping_add(160);
     }
     fn prompt(&mut self, codec: &mut AudioCodec, stage: &str) -> Vec<f32> {
+        let source_start = self.timestamp;
+        let started = Instant::now();
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut last_tone = Instant::now();
         let mut result = Vec::new();
         let mut next_audio = Instant::now();
         loop {
             if self.keepalive && Instant::now() >= next_audio {
-                self.audio(codec, &[0.0; 160]);
+                self.audio(
+                    codec,
+                    &vec![0.0; self.profile.parameters().packet_frames as usize],
+                );
                 next_audio += Duration::from_millis(20);
             }
             self.service();
@@ -182,8 +210,8 @@ impl Caller {
                 assert_eq!(source, self.media);
                 assert_eq!(length, 172);
                 assert_eq!(wire[0], 0x80);
-                assert_eq!(wire[1] & 0x7f, 0);
-                let mut pcm = [0.0; 160];
+                assert_eq!(wire[1] & 0x7f, self.profile.payload());
+                let mut pcm = vec![0.0; self.profile.parameters().packet_frames as usize];
                 codec
                     .decode(wire[12..172].try_into().unwrap(), &mut pcm)
                     .unwrap();
@@ -193,6 +221,18 @@ impl Caller {
                 result.extend_from_slice(&pcm);
             }
             if !result.is_empty() && last_tone.elapsed() > Duration::from_millis(400) {
+                if !self.events {
+                    let ticks = self.timestamp.wrapping_sub(source_start);
+                    assert!(
+                        ticks > 0,
+                        "inband prompt waits retain a progressing RTP source clock"
+                    );
+                    eprintln!(
+                        "inband {stage} source timeline: {} ms, {ticks} RTP8k ticks, {} PCM Hz",
+                        started.elapsed().as_millis(),
+                        self.profile.parameters().pcm_rate_hz
+                    );
+                }
                 return result;
             }
             assert!(
@@ -200,6 +240,42 @@ impl Caller {
                 "private SIP {stage} prompt PCM did not arrive"
             );
             thread::sleep(Duration::from_millis(1));
+        }
+    }
+    fn control_digits(&mut self, codec: &mut AudioCodec, digits: &[u8]) {
+        if self.events {
+            self.digits(digits);
+            return;
+        }
+        let parameters = self.profile.parameters();
+        let frames = parameters.packet_frames as usize;
+        let mut pcm = vec![0.0; frames];
+        let mut next = Instant::now();
+        for digit in digits {
+            let index = b"123A456B789C*0#D"
+                .iter()
+                .position(|symbol| symbol == digit)
+                .unwrap();
+            let low = [697.0, 770.0, 852.0, 941.0][index / 4];
+            let high = [1209.0, 1336.0, 1477.0, 1633.0][index % 4];
+            // Existing test tone synthesis, at the negotiated source rate.
+            for packet in 0..10 {
+                if let Some(wait) = next.checked_duration_since(Instant::now()) {
+                    thread::sleep(wait);
+                }
+                for (sample, value) in pcm.iter_mut().enumerate() {
+                    let phase = (packet * frames + sample) as f32 * std::f32::consts::TAU
+                        / parameters.pcm_rate_hz as f32;
+                    *value = if packet < 5 {
+                        0.2 * ((phase * low).sin() + (phase * high).sin())
+                    } else {
+                        0.0
+                    };
+                }
+                self.audio(codec, &pcm);
+                self.service();
+                next += Duration::from_millis(20);
+            }
         }
     }
     fn digits(&mut self, digits: &[u8]) {
@@ -229,19 +305,37 @@ pub(crate) fn caller(sip: UdpSocket, registered: Option<SocketAddr>) {
     call_flow(sip, registered, false);
 }
 fn call_flow(sip: UdpSocket, registered: Option<SocketAddr>, login_only: bool) {
-    let mut caller = Caller::establish(sip, registered);
-    let mut codec = AudioCodec::load(AudioProfile::Mulaw).unwrap();
+    call_flow_profile(sip, registered, login_only, AudioProfile::Mulaw, true);
+}
+fn call_flow_profile(
+    sip: UdpSocket,
+    registered: Option<SocketAddr>,
+    login_only: bool,
+    profile: AudioProfile,
+    events: bool,
+) {
+    let mut caller = Caller::establish_profile(sip, registered, profile, events);
+    let mut codec = AudioCodec::load(profile).unwrap();
+    let assert_prompt = |pcm: &[f32], expected: &str| {
+        // Envelope-only observation reuses the unchanged 8 kHz Morse assertion.
+        let observed: Vec<_> = pcm
+            .iter()
+            .step_by((profile.parameters().pcm_rate_hz / 8000) as usize)
+            .copied()
+            .collect();
+        super::assert_prompt(&observed, expected);
+    };
     let login = caller.prompt(&mut codec, "login");
     if !login_only {
-        caller.digits(b"100#");
+        caller.control_digits(&mut codec, b"100#");
         let password = caller.prompt(&mut codec, "password");
         assert_prompt(
             &password,
             ".--. .- ... ... .-- --- .-. -../.--. --- ..- -. -..",
         );
-        caller.digits(b"1234#");
+        caller.control_digits(&mut codec, b"1234#");
         let authenticated = caller.prompt(&mut codec, "authenticated");
-        caller.digits(b"*4#*70");
+        caller.control_digits(&mut codec, b"*4#*70");
         let status = caller.prompt(&mut codec, "status");
         assert_prompt(&status, "-. ---/.-.. .. -. -.- ...");
         assert_prompt(
@@ -287,10 +381,31 @@ fn real_product_sip_call_connects_remote_and_transmits_voice() {
 fn real_product_sip_call_attaches_to_existing_ordinary_iax_link() {
     product_call(false, true, true);
 }
+#[test]
+fn real_product_g722_private_call_authenticates_with_events() {
+    product_call_profile(false, false, false, AudioProfile::G722, true);
+}
+#[test]
+fn real_product_g722_private_call_authenticates_inband() {
+    product_call_profile(false, false, false, AudioProfile::G722, false);
+}
 fn product_call(no_mailbox: bool, voice: bool, existing: bool) {
+    product_call_profile(no_mailbox, voice, existing, AudioProfile::Mulaw, true);
+}
+fn product_call_profile(
+    no_mailbox: bool,
+    voice: bool,
+    existing: bool,
+    profile: AudioProfile,
+    events: bool,
+) {
     const CHILD: &str = "RPTADV_TEST_REAL_SIP_PHONE_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
-        let test = if existing {
+        let test = if profile == AudioProfile::G722 && events {
+            "host_services::product_phone_tests::sip::real_product_g722_private_call_authenticates_with_events"
+        } else if profile == AudioProfile::G722 {
+            "host_services::product_phone_tests::sip::real_product_g722_private_call_authenticates_inband"
+        } else if existing {
             "host_services::product_phone_tests::sip::real_product_sip_call_attaches_to_existing_ordinary_iax_link"
         } else if voice {
             "host_services::product_phone_tests::sip::real_product_sip_call_connects_remote_and_transmits_voice"
@@ -425,7 +540,7 @@ fn product_call(no_mailbox: bool, voice: bool, existing: bool) {
         if let Some(observation) = observation {
             vox::call(sip, observation, existing);
         } else {
-            call_flow(sip, None, no_mailbox);
+            call_flow_profile(sip, None, no_mailbox, profile, events);
         }
     });
     // Keep the synthetic remote alive for the bounded caller scenario, including

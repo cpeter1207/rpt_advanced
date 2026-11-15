@@ -2136,3 +2136,37 @@ also qualify source-rate DTMF and the product's currently G.711-specific finite
 tail and timed-send boundaries before advertisement or hardware validation.
 Legacy Dialogic ADPCM and LPC10 wire mappings remain unresolved; IAX bitstream
 availability alone does not establish standard RTP interoperability.
+
+
+### SIP G.722 source milestone (qualification pending)
+
+The SIP composition retains one verified released-provider catalog before it
+publishes accounts. PCMU/PCMA remain preferred; G.722 uses static payload 9,
+16 kHz mono PCM and 320 PCM frames per 20 ms packet, but its RTP clock is 8 kHz
+and advances 160 ticks. The encoded bound is 160 bytes, never 320. Source,
+jitter and ring coordinates stay in PCM frames; telephone events retain their
+independent 8 kHz clock. No other codec or legacy ADPCM/LPC10 wire profile is
+advertised.
+
+Enabled SIP configuration preparation requires a 16 kHz source DTMF detector
+before initial/reload publication. Disabled SIP and IAX-only configurations do
+not acquire this requirement. The separately reviewed owned detector candidate
+adds 16 kHz within the existing ABI 1 descriptor, retaining 8/48 kHz behavior.
+Its alpha4 release must complete qualification and be pinned before deployment.
+Local qualification selects the exact unreleased candidate only through an
+isolated test library path. Later configurable codec sets must derive this
+preparation requirement from their actual PCM rates.
+
+`RPTADV_PEER_FINITE_PACKET_EGRESS` is an additive semantic host contract, not a
+layout change. Only a complete private PHONE source/prepared/async handle may
+claim it. It tells Outbound to omit its old G.711-specific prepadding. The SIP
+owner consumes real PCM with native flush disabled, pads precisely the retained
+packet with PCM silence through the same encoder, then performs native finite
+completion only after the packet is complete. It returns real consumption and
+source_frames separately from full decoded-PCM packet_frames, with unchanged
+source_start and original receipt age/cap. OutputFull consumes nothing; reset
+abandons retained PCM/history. Existing IAX and older hosts omit the bit and
+retain their old behavior. Older products reject the unknown bit safely.
+
+No new resampler, programme path, codec implementation or third-party dependency
+is introduced. This milestone is not full codec parity or hardware qualification.
