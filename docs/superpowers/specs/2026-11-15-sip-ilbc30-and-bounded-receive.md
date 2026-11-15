@@ -14,7 +14,10 @@ mode retains30. Do not infer mode from packet length. Preserve exact directional
 PT and offered-format validation. Unsupported modes do not become mode30.
 
 A peer's ptime is a send preference, not our receive limit. Validate its numeric
-syntax without forcing20. A peer's maxptime limits our fixed TX duration; skip
+syntax without forcing20. Accept harmless positive decimal receiver spellings
+such as20.0 as an explicit extension beyond canonical RFC8866 real syntax; emit
+canonical integer20/30. Validate every digit even when the whole part saturates
+for comparison, and keep positivity separate so0.5 remains valid. A peer's maxptime limits our fixed TX duration; skip
 an ineligible iLBC choice without rejecting an otherwise eligible20ms codec.
 Our SDP advertises maxptime:30 as OUR receive ceiling, independently of the
 peer's receive ceiling. Omit common ptime from a multi-duration offer; a selected

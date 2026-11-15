@@ -70,3 +70,18 @@ Baseline is immutable0d0e126 (runtime ed73d27), with coherent core/product and
 standalone/C ABI/strict GREEN. Eighteen excluded outgoing cases remain pending
 exact-runtime replay in the frozen Batch A tree; that backlog is not hidden by
 this new branch. No production change or new RED result exists at plan creation.
+
+
+### Initial behavioral RED receipt
+
+`ilbc-receive-red.log` completed its expected-RED collection with wrapper0 and
+four separate Cargo101 results. Receive tests:2 failures (PCMU10ms decode rejected,
+80-byte RTP rejected) and the unchanged GSM20ms control passed. Incoming SDP/profile
+3, outgoing SDP2 and the real variable-span source-credit1 failed as intended:
+missing iLBC mapping/offer, fixed packet-time rejection, absent receive maxptime,
+and rejection before the new source birth could be recorded. No compile/setup
+failure was substituted for these assertions. Log SHA256:
+`48d602fac7ff62807b2d4ba1d5e54f025c8afeb752b1630ec15f384ad518f10b`.
+Production remains identical to the frozen baseline at this recovery point.
+Native malformed-unit and provider-fault inspector rows, actual returned span/
+length, and untouched output suffix still need the mandatory inspector seam.

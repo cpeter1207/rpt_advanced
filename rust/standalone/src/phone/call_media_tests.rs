@@ -664,3 +664,50 @@ async fn g722_source_credit_uses_pcm_clock_and_keeps_receipt_birth_through_wrap(
     assert_eq!(wire[1] & 0x7f, 9);
     assert_eq!(u32::from_be_bytes(wire[4..8].try_into().unwrap()), 160);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn variable_source_spans_keep_original_birth_across_refused_prefixes() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    for frames in [80_usize, 240] {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut media = fixture_media(&sender, jitter).await;
+        let target = media.endpoint.local_addr().unwrap();
+        sender
+            .send_to(&packet(1, 1000, 0, &vec![0xa5; frames]), target)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let mut sink = Sink::default();
+        let born = 1_000_000_000;
+        assert_eq!(read(&mut media, &mut sink, born), 0);
+        let receipt = media
+            .births
+            .iter()
+            .flatten()
+            .next()
+            .expect("valid variable packet admitted")
+            .1;
+        assert!(receipt <= born);
+        assert_eq!(read(&mut media, &mut sink, born + 40_000_000), 2);
+        let storage = media.pcm.as_ptr();
+        sink.credit = frames / 3;
+        assert_eq!(read(&mut media, &mut sink, born + 50_000_000), 2);
+        sink.credit = frames;
+        assert_eq!(read(&mut media, &mut sink, born + 60_000_000), 1);
+        let start = (1_u64 << 32) + 1000;
+        assert_eq!(
+            sink.audio,
+            [
+                (start, 0, receipt),
+                (start, frames / 3, receipt),
+                (start + (frames / 3) as u64, frames - frames / 3, receipt),
+            ]
+        );
+        assert_eq!(sink.pcm.len(), frames);
+        assert_eq!(media.source_end, Some(start + frames as u64));
+        assert_eq!(media.pcm.as_ptr(), storage);
+        assert!(sink.gaps.is_empty());
+        assert_eq!(sink.discontinuities, 1);
+        drop(media);
+    }
+}

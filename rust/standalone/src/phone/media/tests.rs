@@ -716,3 +716,56 @@ fn event_encoding_names_are_case_insensitive_with_exact_directional_clocks() {
         }
     }
 }
+
+#[test]
+fn ilbc_offer_advertises_independent_receive_ceiling_without_common_ptime() {
+    let offer =
+        String::from_utf8(MediaDescription::offer("127.0.0.1:43000".parse().unwrap(), 1).unwrap())
+            .unwrap();
+    assert!(offer.contains("a=rtpmap:100 iLBC/8000\r\n"));
+    assert!(offer.contains("a=fmtp:100 mode=30\r\n"));
+    assert!(offer.contains("a=maxptime:30\r\n"));
+    assert!(!offer.lines().any(|line| line.starts_with("a=ptime:")));
+    for profile in AudioProfile::ALL {
+        assert!(offer.contains(&format!(
+            "a=rtpmap:{} {}/{}\r\n",
+            profile.payload(),
+            profile.name(),
+            profile.parameters().rtp_clock_hz
+        )));
+    }
+}
+
+#[test]
+fn ilbc_answers_keep_mode_thirty_and_directional_payload_identity() {
+    for mode in ["", "a=fmtp:110 mode=20\r\n", "a=fmtp:110 mode=30\r\n"] {
+        let answer = format!(
+            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 42000 RTP/AVP 110 120\r\na=rtpmap:110 iLBC/8000\r\n{mode}a=rtpmap:120 telephone-event/8000\r\na=fmtp:120 0-15\r\na=ptime:20.5\r\na=maxptime:30\r\n"
+        );
+        let media = MediaDescription::parse_answer(answer.as_bytes()).unwrap();
+        assert_eq!((media.receive_payload, media.send_payload), (100, 110));
+        assert_eq!(
+            (
+                media.codec.parameters().mode_id,
+                media.codec.parameters().packet_frames
+            ),
+            (30, 240)
+        );
+        assert_eq!(
+            media.transmit_event(),
+            Some(TelephoneEvent {
+                receive_payload: 101,
+                send_payload: 120,
+                clock_rate_hz: 8000
+            })
+        );
+        assert!(
+            MediaDescription::parse_answer(answer.replace("110", "99").as_bytes()).is_err(),
+            "an offered L16 PT cannot be reinterpreted as iLBC"
+        );
+        assert!(
+            MediaDescription::parse_answer(answer.replace("iLBC/8000", "iLBC/16000").as_bytes())
+                .is_err()
+        );
+    }
+}
