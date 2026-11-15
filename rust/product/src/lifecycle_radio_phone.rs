@@ -36,7 +36,20 @@ impl Engine {
             let admitted = if source.operation().command.action == LinkAction::PhoneDial {
                 if available {
                     host.prepare_radio_phone(&local, &source.operation().command.node)
-                        .map(|(claim, destination)| Some((claim, destination, source, report)))
+                        .and_then(|(claim, destination)| {
+                            let acknowledgment = if report {
+                                match host.runtime.queue_operation_acknowledgment(&local) {
+                                    Ok(completion) => Some(completion),
+                                    Err(error) => {
+                                        let _ = host.cancel_outgoing_phone(&local, claim.id());
+                                        return Err(error);
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            Ok(Some((claim, destination, source, acknowledgment)))
+                        })
                 } else {
                     Err(RuntimeError::Rejected)
                 }
@@ -59,8 +72,15 @@ impl Engine {
                 }
             }
         })?;
-        if let Some((claim, destination, source, report)) = prepared {
-            self.launch_phone(call, claim, revision, destination, Some(source), report)?;
+        if let Some((claim, destination, source, acknowledgment)) = prepared {
+            self.launch_phone(
+                call,
+                claim,
+                revision,
+                destination,
+                Some(source),
+                acknowledgment,
+            )?;
         }
         Ok(())
     }

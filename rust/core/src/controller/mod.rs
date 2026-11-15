@@ -31,8 +31,9 @@ use std::sync::{
 };
 pub(crate) use telemetry::MessageOccurrence;
 pub use telemetry::{
-    ActivitySnapshot, ControllerControl, ControllerError, MorseSettings, PlaybackDestination,
-    PlaybackPolicy, PoliteBusy, PoliteDelivery, PoliteExpiry, PreparedMedia, StatusRejected,
+    ActivitySnapshot, ControllerControl, ControllerError, MorseSettings, PlaybackCompletion,
+    PlaybackDestination, PlaybackPolicy, PoliteBusy, PoliteDelivery, PoliteExpiry, PreparedMedia,
+    StatusRejected,
 };
 use telemetry::{Source, TelemetryPlanner};
 use timeout::TimeoutPolicy;

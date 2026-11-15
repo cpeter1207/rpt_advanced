@@ -490,12 +490,13 @@ fn radio_phone_queued_macro_hangup_expires_before_mutating_its_call() {
 }
 
 #[test]
-fn radio_phone_results_follow_actual_current_outcome_not_submission_or_cleanup() {
+fn radio_phone_acknowledgment_precedes_factory_and_answer_never_repeats_it() {
     #[derive(Default)]
     struct Factory {
         entered: AtomicBool,
         released: AtomicBool,
         answer: AtomicBool,
+        timed_out: AtomicBool,
     }
     unsafe extern "C" fn dial(
         context: *mut c_void,
@@ -515,6 +516,7 @@ fn radio_phone_results_follow_actual_current_outcome_not_submission_or_cleanup()
         let until = Instant::now() + Duration::from_secs(5);
         while !state.released.load(Ordering::Acquire) {
             if Instant::now() >= until {
+                state.timed_out.store(true, Ordering::Release);
                 return -1;
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -540,6 +542,8 @@ fn radio_phone_results_follow_actual_current_outcome_not_submission_or_cleanup()
         "spawn",
         "canceled",
         "revision",
+        "cancel-before-ack",
+        "reload-before-ack",
         "administrative",
         "macro",
     ] {
@@ -597,19 +601,62 @@ fn radio_phone_results_follow_actual_current_outcome_not_submission_or_cleanup()
         };
         FAIL_DIAL_THREAD.store(false, Ordering::Release);
         assert_eq!(submitted.is_err(), mode == "spawn", "{mode}");
+        if matches!(mode, "cancel-before-ack" | "reload-before-ack") {
+            if mode == "cancel-before-ack" {
+                engine.run(|host| host.hangup_radio_phone("1000")).unwrap();
+            } else {
+                engine.revision.fetch_add(1, Ordering::AcqRel);
+            }
+            for job in std::mem::take(&mut *engine.jobs.lock().unwrap()) {
+                job.join().unwrap();
+            }
+            assert!(!factory.entered.load(Ordering::Acquire), "{mode}");
+            assert!(
+                !engine
+                    .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
+                    .unwrap(),
+                "{mode}"
+            );
+            assert!(voice.opened.lock().unwrap().is_empty(), "{mode}");
+            assert!(
+                !engine
+                    .run(|host| Ok(host.outgoing_phone_reserved("1000")))
+                    .unwrap(),
+                "{mode}"
+            );
+            assert!(engine.stop());
+            continue;
+        }
         if mode != "spawn" {
+            if !matches!(mode, "administrative" | "macro") {
+                let entered_before_audio = factory.entered.load(Ordering::Acquire);
+                let acknowledged = engine
+                    .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
+                    .unwrap();
+                assert!(
+                    !entered_before_audio && acknowledged,
+                    "finite acknowledgment must precede factory entry: {mode}, entered={entered_before_audio}, acknowledged={acknowledged}"
+                );
+            }
             let until = Instant::now() + Duration::from_secs(3);
             while !factory.entered.load(Ordering::Acquire) {
                 assert!(Instant::now() < until, "factory admission: {mode}");
                 std::thread::yield_now();
             }
-            assert!(
-                !engine
-                    .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
-                    .unwrap(),
-                "submission is not completed: {mode}"
-            );
-            assert!(voice.opened.lock().unwrap().is_empty());
+            if matches!(mode, "administrative" | "macro") {
+                assert!(
+                    !engine
+                        .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
+                        .unwrap(),
+                    "non-RF submission has no acknowledgment: {mode}"
+                );
+            }
+            let expected = if matches!(mode, "administrative" | "macro") {
+                Vec::new()
+            } else {
+                vec!["Command completed".to_owned()]
+            };
+            assert_eq!(*voice.opened.lock().unwrap(), expected, "{mode}");
         }
         let successor = if mode == "canceled" {
             engine
@@ -639,15 +686,23 @@ fn radio_phone_results_follow_actual_current_outcome_not_submission_or_cleanup()
         for job in jobs {
             job.join().unwrap();
         }
+        assert!(
+            !factory.timed_out.load(Ordering::Acquire),
+            "fixture factory deadline: {mode}"
+        );
         let expected = match mode {
-            "answer" => Some("Command completed"),
             "refusal" | "spawn" => Some("Requested operation is unavailable"),
             _ => None,
         };
         let rendered = engine
             .run(|host| Ok(crate::host::tests::probe_public_phone_media(host, "1000")))
             .unwrap();
-        assert_eq!(rendered, expected.is_some(), "{mode}");
+        assert_eq!(
+            rendered,
+            expected.is_some(),
+            "{mode}, opened={:?}",
+            voice.opened.lock().unwrap()
+        );
         assert_eq!(
             voice
                 .opened
@@ -656,7 +711,11 @@ fn radio_phone_results_follow_actual_current_outcome_not_submission_or_cleanup()
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            expected.into_iter().collect::<Vec<_>>(),
+            (!matches!(mode, "administrative" | "macro" | "spawn"))
+                .then_some("Command completed")
+                .into_iter()
+                .chain(expected)
+                .collect::<Vec<_>>(),
             "{mode}"
         );
         if mode == "revision" {

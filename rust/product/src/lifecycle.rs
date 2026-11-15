@@ -192,7 +192,7 @@ impl Engine {
             }
             host.reserve_outgoing_phone(account, &local)
         })?;
-        self.launch_phone(call, claim, revision, destination, None, false)
+        self.launch_phone(call, claim, revision, destination, None, None)
     }
     /// Share the existing dial job between administrative and admitted RF commands.
     fn launch_phone(
@@ -202,9 +202,11 @@ impl Engine {
         revision: u64,
         destination: String,
         source: Option<rpt_advanced_core::runtime::links::PhoneCommand>,
-        report: bool,
+        acknowledgment: Option<rpt_advanced_core::controller::PlaybackCompletion>,
     ) -> Result<u64, RuntimeError> {
         let id = claim.id();
+        let report = acknowledgment.is_some();
+        let cancel_acknowledgment = acknowledgment.clone();
         let source_generation = source.as_ref().map(|source| source.generation());
         let pending = Arc::clone(&claim);
         let engine = Arc::clone(self);
@@ -217,16 +219,33 @@ impl Engine {
                         .as_ref()
                         .is_none_or(|source| source.current(engine.clock().now_ms))
             };
-            let io = engine
-                .services
-                .dial_phone(
-                    pending.account(),
-                    pending.local(),
-                    &destination,
-                    crate::host::MAXIMUM_FRAMES,
-                    current,
-                )
-                .ok();
+            // Wait on the existing dial worker, never the serialized or audio owner.
+            // Queue admission alone does not mean the finite acknowledgment played.
+            let acknowledged = acknowledgment.as_ref().is_none_or(|completion| {
+                use rpt_advanced_core::audio::PlaybackOutcome;
+                while current() && completion.outcome() == PlaybackOutcome::Active {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                if !current() {
+                    completion.cancel();
+                    return false;
+                }
+                completion.outcome() == PlaybackOutcome::Succeeded
+            });
+            let io = if acknowledged && current() {
+                engine
+                    .services
+                    .dial_phone(
+                        pending.account(),
+                        pending.local(),
+                        &destination,
+                        crate::host::MAXIMUM_FRAMES,
+                        current,
+                    )
+                    .ok()
+            } else {
+                None
+            };
             let owner = Arc::clone(&engine);
             let retained = Arc::clone(&pending);
             let completed = engine.run_inner(true, move |host| {
@@ -246,8 +265,8 @@ impl Engine {
                 if !answered {
                     let _ = host.cancel_outgoing_phone(retained.local(), retained.id());
                 }
-                if report {
-                    host.radio_phone_result(retained.local(), answered);
+                if report && !answered {
+                    host.radio_phone_result(retained.local(), false);
                 }
                 // Known failure/cleanup is not uncertain admission. A failed RF
                 // result must never retire successfully adopted telephone media.
@@ -265,6 +284,9 @@ impl Engine {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(thread),
             Err(_) => {
+                if let Some(completion) = cancel_acknowledgment {
+                    completion.cancel();
+                }
                 let owner = Arc::clone(self);
                 let failed = Arc::clone(&claim);
                 let _ = self.run_inner(true, move |host| {

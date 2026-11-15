@@ -1598,6 +1598,43 @@ impl<A: Send, C: Send> Runtime<A, C> {
     ) -> Result<(), RuntimeError> {
         self.queue_link_rejection(local, "", None, Message::OperationResult { result })
     }
+    /// Queue a finite LOCAL acknowledgment and observe its existing control-side return.
+    /// This is controller playback completion, not a hardware delivery certification.
+    pub fn queue_operation_acknowledgment(
+        &mut self,
+        local: &str,
+    ) -> Result<crate::controller::PlaybackCompletion, RuntimeError> {
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let forms = node
+            .control
+            .catalog
+            .format(&Message::OperationResult {
+                result: crate::messages::OperationResult::Completed,
+            })
+            .map_err(|_| RuntimeError::Preparation)?;
+        let media = prepare::streamed_status(
+            node.control
+                .media_session
+                .as_mut()
+                .ok_or(RuntimeError::Preparation)?
+                .as_mut(),
+            &node.status,
+            &forms.morse,
+            &forms.tts,
+        )?;
+        let completion = crate::controller::PlaybackCompletion::default();
+        let telemetry = &mut node.control.telemetry;
+        telemetry.reclaim().for_each(drop);
+        if telemetry.queue_prepared_status(media.with_completion(completion.clone())) {
+            Ok(completion)
+        } else {
+            Err(RuntimeError::Rejected)
+        }
+    }
     /// Prepare credential-free authentication wording for a live private Phone token.
     /// The caller must retain its exact call owner and queue this stream only to
     /// that call. Login deliberately needs no prior mailbox authentication.

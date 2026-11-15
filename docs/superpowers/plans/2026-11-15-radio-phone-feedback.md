@@ -1,0 +1,31 @@
+# Radio telephone acknowledgment and ringing repair
+
+**Goal:** Render the requested LOCAL command acknowledgment before outgoing dialing starts, then provide ringing feedback only from actual provider progress. Answer must not repeat the acknowledgment.
+
+**Architecture:** Keep the exact existing outgoing claim and lifecycle job. Observe completion of the finite status through its existing playback/reclamation owner; do not sleep for an estimated speech duration. Preserve cancellation/reload and source-only routing. Relay actual provisional state from the existing SIP slot; no second media queue or reactor.
+
+**Source:** Owner report on 2026-11-15, after live 5bc: acknowledgment occurs after answer and ringing is silent. The separately assigned answer-media repair must connect callee media without local RX; this branch does not own that correction.
+
+## Evidence and scope
+
+Current lifecycle.rs calls dial_phone before radio_phone_result and reports Completed only after adoption. Native SIP records180/183, but the existing synchronous established-only host factory cannot expose provisional state to product. Existing current/peer_observe contracts cannot be repurposed to report SIP progress for a handle which does not yet exist.
+
+## Sequence
+
+- [x] Behavioral RED: actual RF request must emit its finite acknowledgment before the factory is entered; no duplicate Completed on answer. Retain administrative/macro silence and current refusal/cancellation/revision checks.
+- [x] Reuse prepared status and its existing completed-media return path for a scalar completion receipt. Failed/canceled/reloaded acknowledgment cannot launch a stale call. No PCM copy or guessed timing.
+- [ ] Focused GREEN and independent review; checkpoint acknowledgment separately.
+- [ ] Prove actual180 progress reaches a bounded LOCAL tone source and stops on answer/failure/cancel/reload. Check complete existing interfaces before selecting a nullable sized progress extension; preserve old complete-prefix rejection rules and both hosts.
+- [ ] Actual wire sequence: acknowledgment finishes before INVITE,180 produces ringback before200, answer ends ringback and does not repeat acknowledgment. Wrong/stale progress cannot affect a successor.
+- [ ] Affected full suites, strict checks, independent review and verified bundle. No live/config/provider changes or public publication.
+
+## Review focus
+
+A queued notification is not audible completion. Completion here describes finite controller playback/reclamation, not a physical DAC/RF delivery guarantee. A canceled acknowledgment must not leave a worker waiting indefinitely. Ringback cannot precede actual ringing evidence, overlap accepted call media after answer, or enter network/private control output. Incoming explicit attachment and callee no-login authority remain unchanged.
+
+## Acknowledgment recovery checkpoint
+
+Exact5bc baseline reproduced missing pre-dial acknowledgment in `radio-feedback-red.log`.
+`radio-feedback-green-progress-red2.log` then passed all three finite-completion tests and the nine-mode real Engine matrix (39.46s): answer, refusal, spawn failure, canceled successor, independent revision change, cancellation/reload before playback, administrative and macro silence. The existing five-second factory deadline remains asserted. Only the obsolete second pre-answer RF drain was removed; the actual finite drain, exact catalog-count and no-duplicate-after-answer checks remain.
+
+Independent source review cleared the completion ownership and lifecycle delta. This checkpoint is not the complete ringing fix or full regression qualification; affected strict/full and actual wire sequencing remain pending. The later test in that same log is the intentional actual180 progress RED (0 versus180), separate from this checkpoint.

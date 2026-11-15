@@ -310,3 +310,93 @@ fn empty_parrot_planner_and_unconfigured_capture_recycle_are_noops() {
     planner.finish_parrot();
     assert!(planner.parrot.is_none());
 }
+
+#[test]
+fn finite_playback_completion_requires_control_return_and_preserves_failure() {
+    use crate::audio::PlaybackOutcome;
+    for failed in [false, true] {
+        let completion = PlaybackCompletion::default();
+        let mut media = PreparedMedia::new_stream(sequence_reader(&[0.25; 4], failed))
+            .unwrap()
+            .with_completion(completion.clone());
+        assert_eq!(completion.outcome(), PlaybackOutcome::Active);
+        let mut samples = [0.0; 4];
+        media.0.render(false, &mut samples);
+        media.0.render(false, &mut samples);
+        assert_eq!(completion.outcome(), PlaybackOutcome::Active);
+        drop(media);
+        assert_eq!(
+            completion.outcome(),
+            if failed {
+                PlaybackOutcome::Failed
+            } else {
+                PlaybackOutcome::Succeeded
+            }
+        );
+    }
+    let completion = PlaybackCompletion::default();
+    let media = PreparedMedia::new_stream(sequence_reader(&[0.25; 4], false))
+        .unwrap()
+        .with_completion(completion.clone());
+    drop(media);
+    assert_eq!(completion.outcome(), PlaybackOutcome::Cancelled);
+    let completion = PlaybackCompletion::default();
+    let mut media = PreparedMedia::new_stream(sequence_reader(&[0.25; 4], false))
+        .unwrap()
+        .with_completion(completion.clone());
+    completion.cancel();
+    media.0.render(false, &mut [0.0; 4]);
+    media.0.render(false, &mut [0.0; 4]);
+    drop(media);
+    assert_eq!(completion.outcome(), PlaybackOutcome::Cancelled);
+}
+
+#[test]
+fn finite_playback_completion_uses_existing_return_queue_and_exact_cancellation() {
+    use crate::audio::PlaybackOutcome;
+    for cancelled in [false, true] {
+        let (mut planner, mut control) = TelemetryPlanner::new(MorseSettings::default(), -6);
+        let completion = PlaybackCompletion::default();
+        let media = PreparedMedia::new_stream(sequence_reader(&[0.25; 4], false))
+            .unwrap()
+            .with_completion(completion.clone());
+        assert!(control.queue_prepared_status(media));
+        if cancelled {
+            completion.cancel();
+        }
+        planner.poll_status();
+        if !cancelled {
+            let media = planner.status.as_mut().unwrap();
+            media.0.render(false, &mut [0.0; 4]);
+            media.0.render(false, &mut [0.0; 4]);
+            planner.poll_status();
+            assert_eq!(completion.outcome(), PlaybackOutcome::Active);
+        }
+        assert!(planner.status.is_none());
+        let returned = control.reclaim().collect::<Vec<_>>();
+        assert_eq!(returned.len(), 1);
+        drop(returned);
+        assert_eq!(
+            completion.outcome(),
+            if cancelled {
+                PlaybackOutcome::Cancelled
+            } else {
+                PlaybackOutcome::Succeeded
+            }
+        );
+    }
+}
+
+#[test]
+fn finite_playback_completion_cannot_acknowledge_an_empty_stream() {
+    let completion = PlaybackCompletion::default();
+    let mut media = PreparedMedia::new_stream(sequence_reader(&[], false))
+        .unwrap()
+        .with_completion(completion.clone());
+    media.0.render(false, &mut [0.0; 4]);
+    drop(media);
+    assert_eq!(
+        completion.outcome(),
+        crate::audio::PlaybackOutcome::Cancelled
+    );
+}

@@ -117,7 +117,57 @@ pub struct PreparedMedia(
     pub(super) Option<Arc<MessageOccurrence>>,
     pub(super) Option<PlaybackPolicy>,
     pub(super) Option<usize>,
+    Option<PlaybackCompletion>,
 );
+
+/// Control-side receipt for one finite controller playback, not physical RF delivery.
+#[derive(Clone, Default)]
+pub struct PlaybackCompletion(Arc<AtomicU8>);
+
+impl PlaybackCompletion {
+    /// The complete stream must return to its control owner before success is visible.
+    pub fn outcome(&self) -> crate::audio::PlaybackOutcome {
+        use crate::audio::PlaybackOutcome;
+        match self.0.load(Ordering::Acquire) {
+            0 => PlaybackOutcome::Active,
+            1 => PlaybackOutcome::Succeeded,
+            2 => PlaybackOutcome::Failed,
+            _ => PlaybackOutcome::Cancelled,
+        }
+    }
+
+    /// Cancel this exact queued/active item without waiting for control queue capacity.
+    pub fn cancel(&self) {
+        self.resolve(crate::audio::PlaybackOutcome::Cancelled);
+    }
+
+    fn resolve(&self, outcome: crate::audio::PlaybackOutcome) {
+        use crate::audio::PlaybackOutcome;
+        let terminal = match outcome {
+            PlaybackOutcome::Succeeded => 1,
+            PlaybackOutcome::Failed => 2,
+            PlaybackOutcome::Active | PlaybackOutcome::Cancelled => 3,
+        };
+        let _ = self
+            .0
+            .compare_exchange(0, terminal, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
+
+impl Drop for PreparedMedia {
+    fn drop(&mut self) {
+        if let Some(completion) = &self.9 {
+            let outcome = self.0.outcome();
+            completion.resolve(
+                if outcome == crate::audio::PlaybackOutcome::Succeeded && !self.0.has_output() {
+                    crate::audio::PlaybackOutcome::Cancelled
+                } else {
+                    outcome
+                },
+            );
+        }
+    }
+}
 
 /// One occurrence's race-free transition: pending (0), audible (1), or cancelled (2).
 #[derive(Default)]
@@ -162,7 +212,14 @@ impl PreparedMedia {
             None,
             None,
             None,
+            None,
         ))
+    }
+
+    /// Observe this exact item only after finite playback and control-side return.
+    pub fn with_completion(mut self, completion: PlaybackCompletion) -> Self {
+        self.9 = Some(completion);
+        self
     }
 
     /// Retain the originating endpoint through playback and control-side reclamation.
@@ -243,6 +300,7 @@ impl PreparedMedia {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -287,6 +345,7 @@ impl PreparedMedia {
             })),
             available,
             MediaKind::Status,
+            None,
             None,
             None,
             None,
@@ -778,6 +837,9 @@ impl TelemetryPlanner {
             }
             let Some(media) = self.status.as_mut().filter(|media| {
                 media.0.is_finished()
+                    || media.9.as_ref().is_some_and(|completion| {
+                        completion.outcome() == crate::audio::PlaybackOutcome::Cancelled
+                    })
                     || media
                         .6
                         .as_ref()
@@ -790,7 +852,9 @@ impl TelemetryPlanner {
             }) else {
                 break;
             };
-            media.0.cancel();
+            if !media.0.is_finished() {
+                media.0.cancel();
+            }
             if self.active == Some(Source::Status) {
                 self.active = None;
             }
