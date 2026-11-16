@@ -115,7 +115,13 @@ static struct rptadv_radio_session *session(uint32_t encode, uint32_t decode, in
                      .dcs_code = dcs ? 23 : 0,
                      .dcs_peak = dcs ? 0.1f : 0,
                      .output_a_route = 2,
-                     .output_a_tone_gain = 1.0f}};
+                     .output_a_tone_gain = 1.0f},
+        .speech = {.speech_threshold = 0.5f,
+                   .speech_onset_frames = 1,
+                   .preprocess_flags = 6,
+                   .bandpass_low_hz = 300.0f,
+                   .bandpass_high_hz = 3000.0f,
+                   .retention_ms = 160}};
     const struct rptadv_radio_session_ports ports = {.struct_size = sizeof(ports)};
     const struct rptadv_radio_profile profile = {sizeof(profile), 1, 0, encode, decode};
     /* Unused external facilities are genuinely absent. */

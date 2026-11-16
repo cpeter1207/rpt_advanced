@@ -148,10 +148,18 @@ mod tests {
     #[test]
     fn copied_native_request_and_clone_own_all_borrowed_data() {
         // SAFETY: these C records contain only scalar fields and nullable pointers.
-        let mut radio: abi::rptadv_radio_session_config = unsafe { std::mem::zeroed() };
-        radio.struct_size = std::mem::size_of_val(&radio) as u32;
+        let mut radio = Box::new(unsafe { std::mem::zeroed::<abi::rptadv_radio_session_config>() });
+        radio.struct_size = std::mem::size_of_val(&*radio) as u32;
         radio.abi_version = 5;
         radio.receive_input_gain = 0.7943282;
+        radio.speech = abi::rptadv_radio_local_speech_config {
+            speech_threshold: 0.625,
+            speech_onset_frames: 4,
+            preprocess_flags: 6,
+            bandpass_low_hz: 400.0,
+            bandpass_high_hz: 2800.0,
+            retention_ms: 140,
+        };
         let receive = String::from("highpass=f=60,lowpass=f=5500");
         let transmit = String::from("volume=-2dB");
         let device = String::from("3-1");
@@ -159,7 +167,7 @@ mod tests {
         let mut request: abi::UrpNativeStationConfig = unsafe { std::mem::zeroed() };
         request.struct_size = std::mem::size_of_val(&request) as u32;
         request.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
-        request.radio = &radio;
+        request.radio = &*radio;
         request.device_identifier = device.as_ptr();
         request.device_identifier_length = device.len() as u32;
         request.receive_graph = receive.as_ptr();
@@ -185,11 +193,25 @@ mod tests {
         let cloned = owned.clone();
         assert_eq!(owned, cloned);
         assert_ne!(owned.request().radio, cloned.request().radio);
-        drop((device, receive, transmit, processing, node, owned));
+        radio.speech = abi::rptadv_radio_local_speech_config {
+            speech_threshold: 0.0,
+            speech_onset_frames: 0,
+            preprocess_flags: 0,
+            bandpass_low_hz: 0.0,
+            bandpass_high_hz: 0.0,
+            retention_ms: 0,
+        };
+        drop((device, receive, transmit, processing, node, radio, owned));
         let view = cloned.request();
         // SAFETY: the view borrows the still-live cloned owner.
         unsafe {
             assert_eq!((*view.radio).receive_input_gain, 0.7943282);
+            assert_eq!((*view.radio).speech.speech_threshold, 0.625);
+            assert_eq!((*view.radio).speech.speech_onset_frames, 4);
+            assert_eq!((*view.radio).speech.preprocess_flags, 6);
+            assert_eq!((*view.radio).speech.bandpass_low_hz, 400.0);
+            assert_eq!((*view.radio).speech.bandpass_high_hz, 2800.0);
+            assert_eq!((*view.radio).speech.retention_ms, 140);
             assert_eq!(
                 std::slice::from_raw_parts(view.receive_graph, view.receive_graph_length as usize),
                 b"highpass=f=60,lowpass=f=5500"
@@ -236,6 +258,26 @@ mod tests {
         assert!(
             unsafe { NativeRadioConfiguration::copy_from(std::ptr::from_ref(&short).cast()) }
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn copied_native_request_rejects_an_actual_short_radio_template() {
+        let mut short = Box::new([0_u32; 102]);
+        short[0] = 408;
+        short[1] = 5;
+        assert_eq!(std::mem::size_of_val(&*short), 408);
+        assert_eq!(std::mem::size_of::<abi::rptadv_radio_session_config>(), 432);
+        // SAFETY: this C request contains only scalar fields and nullable pointers.
+        let mut request: abi::UrpNativeStationConfig = unsafe { std::mem::zeroed() };
+        request.struct_size = std::mem::size_of_val(&request) as u32;
+        request.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
+        request.radio = short.as_ptr().cast();
+        // SAFETY: only 408 bytes exist, so copy_from must reject the readable size
+        // before accessing the current header's 432-byte template.
+        assert_eq!(
+            unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),
+            "short native radio session template"
         );
     }
 

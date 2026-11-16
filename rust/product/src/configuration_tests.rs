@@ -129,6 +129,16 @@ unsafe extern "C" fn node(
         },
     });
     let native = unsafe { &*record.radio };
+    // Reject a mismatched SDK template before copying the current header's full record.
+    if native.radio.is_null()
+        || unsafe { native.radio.cast::<u32>().read_unaligned() }
+            < size_of::<abi::rptadv_radio_session_config>() as u32
+    {
+        output
+            .diagnostics
+            .push("short native radio session template".into());
+        return -1;
+    }
     output.radios.push(CapturedRadio {
         request: *native,
         session: unsafe { *native.radio },
@@ -370,6 +380,36 @@ fn shared_radio_resolution_rejects_cpu_savers_and_preserves_asymmetric_map_and_n
     );
     assert_eq!(radio.processing_configuration, source);
     assert_eq!(radio.session.receive.native_squelch_delay_frames, 0);
+}
+
+#[test]
+fn native_requests_keep_local_speech_preprocessing_disabled_by_default() {
+    use rpt_advanced_core::config::{ConfigDocument, NodeId, ResolvedNodeSettings};
+    // Logical duplex/delay remain controller-owned; physical duplex remains in the SDK.
+    let source = "[524950]\nfull_duplex=yes\nsquelch_delay_ms=30\n[radio]\nsquelch_level=600\nradio_duplex_mode=half\n[radio 524950]\nvad_mode=kerchunk\nvad_hang_ms=1000\n";
+    let document = ConfigDocument::parse(source).unwrap();
+    let controller =
+        ResolvedNodeSettings::resolve(&document, &NodeId::new("524950".to_owned()).unwrap())
+            .unwrap()
+            .value;
+    assert!(controller.full_duplex);
+    assert_eq!(controller.squelch_delay_ms, 30);
+    let (result, output) = inspect(source, false);
+    assert_eq!(result, 0, "{output:?}");
+    assert_eq!(output.radios.len(), 1);
+    let session = &output.radios[0].session;
+    assert_eq!(size_of::<abi::rptadv_radio_session_config>(), 432);
+    assert_eq!(session.struct_size, 432);
+    assert_eq!(session.qualification.radio_duplex, 0);
+    assert_eq!(session.receive.vad_mode, 1);
+    assert_eq!(session.receive.vad_hang_ms, 1000);
+    assert_eq!(session.receive.native_squelch_delay_frames, 0);
+    assert_eq!(session.speech.speech_threshold, 0.5);
+    assert_eq!(session.speech.speech_onset_frames, 1);
+    assert_eq!(session.speech.preprocess_flags, 6);
+    assert_eq!(session.speech.bandpass_low_hz, 300.0);
+    assert_eq!(session.speech.bandpass_high_hz, 3000.0);
+    assert_eq!(session.speech.retention_ms, 160);
 }
 
 #[test]
