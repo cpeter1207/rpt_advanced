@@ -2517,7 +2517,11 @@ the existing 30 ms receive ceiling. The client validates the complete span map
 before any source delivery. Media retains both original PCM and original span
 offsets; it moves only accepted source credit, never shifts/relabels retained
 PCM on overlap or retries. Each offer stops at the current origin boundary.
-Artificial mixed-map cursor tests do not permit longer SIP packets.
+Artificial mixed-map cursor tests do not permit longer SIP packets. Composed
+product tests feed real iLBC decoded/recovered PCM through existing ingress,
+configured speech analysis and private in-band detection: recovered-only speech/
+tone grants no onset or command, original hold/age survives loss, and later
+valid speech requalifies at normal thresholds without clearing native history.
 
 NativeRecovered units traverse the existing concealed continuity callback using
 the conservative preceding admitted original birth. A corrupt packet's receipt

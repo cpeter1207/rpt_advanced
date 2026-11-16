@@ -1866,3 +1866,143 @@ fn configured_phone_media_defers_loss_reset_until_a_genuine_retry_is_accepted() 
         assert!(shared.active());
     }
 }
+
+#[test]
+fn native_ilbc_units_preserve_product_authority_hold_age_and_normal_requalification() {
+    use rpt_advanced_standalone::phone::media::{AudioCodec, AudioProfile, DecodeProvenance};
+
+    fn deliver(
+        ingress: &mut Ingress,
+        input: &mut PhoneMediaInput,
+        cursor: &mut u64,
+        pcm: &[f32],
+        origin: DecodeProvenance,
+        receipt: u64,
+        recovered_only: bool,
+    ) {
+        let mut offset = 0;
+        while offset != pcm.len() {
+            let (result, allocations) = crate::fixture::allocations(|| {
+                if origin == DecodeProvenance::Concealed {
+                    ingress.concealed(*cursor, &pcm[offset..], Some(birth(receipt)))
+                } else {
+                    ingress.audio(*cursor, &pcm[offset..], Some(birth(receipt)))
+                }
+            });
+            assert_eq!(allocations, 0);
+            let accepted = result.unwrap();
+            assert!(accepted > 0);
+            *cursor += accepted as u64;
+            offset += accepted;
+            for _ in 0..accepted * 6 {
+                if let Some(sample) = input.render_timed_sample() {
+                    if recovered_only {
+                        assert!(sample.provenance.is_none_or(|p| p.muted));
+                        assert_eq!(
+                            sample.sample, 0.0,
+                            "recovered-only audio cannot key programme output"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let speech: Vec<f32> = include_bytes!("../tests/fixtures/phone-speech/yes-48000-s16le.pcm")
+        .chunks_exact(2)
+        .step_by(6)
+        .map(|p| f32::from(i16::from_le_bytes([p[0], p[1]])) / 32768.0)
+        .collect();
+    let mut codec = AudioCodec::load(AudioProfile::Ilbc30).unwrap();
+    let mut packet = [0; 50];
+    let mut pcm = [0.0; 240];
+    // Preserve real native speech/enhancer history before the product sees only
+    // damaged units. This is intentionally not a fresh silent decoder.
+    for samples in speech.chunks(240) {
+        let mut padded = [0.0; 240];
+        padded[..samples.len()].copy_from_slice(samples);
+        codec.encode(&padded, &mut packet).unwrap();
+        codec.decode(&packet, &mut pcm).unwrap();
+    }
+    packet[49] |= 1;
+    let (mut ingress, mut input, shared) = super::prepare_voiced(
+        reply(),
+        8000,
+        NonZeroU32::MIN,
+        None,
+        PhoneSpeechSettings {
+            preprocessing_enabled: true,
+            threshold: 0.75,
+            onset_frames: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    adopt(&mut ingress, 1000, reference());
+    let mut cursor = 1000;
+    for _ in 0..8 {
+        let origin = codec.decode(&packet, &mut pcm).unwrap();
+        assert_eq!(origin, DecodeProvenance::Concealed);
+        deliver(
+            &mut ingress,
+            &mut input,
+            &mut cursor,
+            &pcm,
+            origin,
+            10,
+            true,
+        );
+        assert_eq!(
+            ingress.last_voice, None,
+            "native recovered units never enter speech analysis"
+        );
+        assert_eq!(ingress.voice_until, 0);
+    }
+    for repetition in 0..2 {
+        let original_start = cursor;
+        for samples in speech.chunks(240) {
+            let mut padded = [0.0; 240];
+            padded[..samples.len()].copy_from_slice(samples);
+            codec.encode(&padded, &mut packet).unwrap();
+            let origin = codec.decode(&packet, &mut pcm).unwrap();
+            assert_eq!(origin, DecodeProvenance::Original);
+            deliver(
+                &mut ingress,
+                &mut input,
+                &mut cursor,
+                &pcm,
+                origin,
+                20,
+                false,
+            );
+        }
+        assert!(
+            ingress
+                .last_voice
+                .is_some_and(|last| (original_start..cursor).contains(&last)),
+            "valid decoded speech requalifies at normal thresholds after native recovery: {repetition}"
+        );
+        let hold = (ingress.last_voice, ingress.voice_until);
+        let original_birth = shared.bound(cursor - 1).unwrap();
+        let loss_start = cursor;
+        packet[49] |= 1;
+        let origin = codec.decode(&packet, &mut pcm).unwrap();
+        assert_eq!(origin, DecodeProvenance::Concealed);
+        deliver(
+            &mut ingress,
+            &mut input,
+            &mut cursor,
+            &pcm,
+            origin,
+            99,
+            false,
+        );
+        assert_eq!((ingress.last_voice, ingress.voice_until), hold);
+        assert_eq!(
+            shared.bound(loss_start).unwrap(),
+            original_birth,
+            "damaged packet receipt cannot renew admitted original age"
+        );
+        assert!(shared.active());
+    }
+}

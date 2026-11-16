@@ -3274,3 +3274,69 @@ fn synthetic_continuity_matrix_cannot_survive_retirement_missing_time_reset_or_c
         }
     }
 }
+
+#[test]
+fn native_recovered_ilbc_tone_cannot_initiate_private_dtmf_or_speech() {
+    use rpt_advanced_core::{
+        config::{PhoneAccountProtocol, PhoneSpeechSettings},
+        link::{PeerInput as _, PhoneSpeechPhase},
+    };
+    use rpt_advanced_standalone::phone::media::{AudioCodec, AudioProfile, DecodeProvenance};
+    let mut codec = AudioCodec::load(AudioProfile::Ilbc30).unwrap();
+    let tone: Vec<f32> = (0..240)
+        .map(|n| {
+            let phase = n as f32 * std::f32::consts::TAU / 8000.0;
+            0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+        })
+        .collect();
+    let mut packet = [0; 50];
+    let mut pcm = [0.0; 240];
+    for _ in 0..4 {
+        codec.encode(&tone, &mut packet).unwrap();
+        codec.decode(&packet, &mut pcm).unwrap();
+    }
+    packet[49] |= 1;
+    let (mut session, mut control, state, reply) = source_session_with_protocol(
+        crate::link::session::tests::phone_source_peer_inband(8000),
+        true,
+        PhoneAccountProtocol::Sip,
+    );
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    let (pending, mut input) = control
+        .prepare_pending_voiced_media(None, PhoneSpeechSettings::default())
+        .unwrap();
+    control.adopt_media(pending).ok().unwrap();
+    session.step(0).unwrap();
+    let birth = state.lock().unwrap().source_reference.unwrap().1;
+    state.lock().unwrap().source_birth = Some(birth);
+    for _ in 0..8 {
+        assert_eq!(
+            codec.decode(&packet, &mut pcm),
+            Ok(DecodeProvenance::Concealed)
+        );
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Concealed(pcm.to_vec()));
+    }
+    for now in 1..50 {
+        session.step(now).unwrap();
+        for _ in 0..960 {
+            if let Some(sample) = input.render_timed_sample() {
+                assert!(sample.provenance.is_none_or(|p| p.muted));
+            }
+        }
+        assert!(
+            control.digit().is_none(),
+            "recovered tone cannot create a command"
+        );
+        assert_ne!(
+            input.phone_speech_state().unwrap().phase,
+            PhoneSpeechPhase::Open
+        );
+    }
+    assert!(state.lock().unwrap().input.is_empty());
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    assert!(!reply.ended(), "non-authority is not call termination");
+}
