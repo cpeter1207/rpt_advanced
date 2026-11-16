@@ -3435,3 +3435,6 @@ fn prepared_phone_media_awaiting_release_cannot_survive_cuts_or_stale_release() 
         }
     }
 }
+
+#[path = "phone_adaptation_tests.rs"]
+mod adaptation;

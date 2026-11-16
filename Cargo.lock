@@ -833,6 +833,7 @@ dependencies = [
  "rpt-advanced-standalone",
  "rptadv-control-standalone-adapter",
  "rptadv-file-adapter",
+ "rptadv-jitter-client",
  "rptadv-peer-support",
  "rptadv-speech-adapter",
  "rtrb",

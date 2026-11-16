@@ -20,6 +20,7 @@ ureq = { version = "2.12", default-features = false, features = ["tls"] }
 url = "2.5"
 
 [dev-dependencies]
+rptadv-jitter-client = { path = "../jitter-client" }
 libc = "0.2"
 rpt-advanced-standalone = { path = "../standalone" }
 rptadv-file-adapter = { path = "../file-adapter" }

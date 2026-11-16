@@ -629,6 +629,19 @@ pub(crate) fn controlled_source_session(rate: u32) -> ControlledSourceFixture {
 }
 
 pub(crate) fn controlled_source_session_mode(rate: u32, inband: bool) -> ControlledSourceFixture {
+    controlled_source_session_protocol(
+        rate,
+        inband,
+        rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+    )
+}
+
+/// Select the configured protocol without changing the authenticated owner fixture.
+pub(crate) fn controlled_source_session_protocol(
+    rate: u32,
+    inband: bool,
+    protocol: rpt_advanced_core::config::PhoneAccountProtocol,
+) -> ControlledSourceFixture {
     let (io, state) = if inband {
         crate::link::session::tests::phone_source_peer_inband(rate)
     } else {
@@ -641,12 +654,9 @@ pub(crate) fn controlled_source_session_mode(rate: u32, inband: bool) -> Control
         .authenticate(&source, &reply, &records(), "100", "1234", 0)
         .unwrap();
     let io = calls.calls[0].io.take().unwrap();
-    let (session, control) = crate::link::private_phone::PrivatePhoneSession::prepare(
-        io,
-        reply.clone(),
-        rpt_advanced_core::config::PhoneAccountProtocol::Iax,
-    )
-    .unwrap();
+    let (session, control) =
+        crate::link::private_phone::PrivatePhoneSession::prepare(io, reply.clone(), protocol)
+            .unwrap();
     calls.calls[0].owner = Some(control);
     calls.calls[0].grammar = Some(
         rpt_advanced_core::phone_dtmf::PhoneDtmfGrammar::new(
