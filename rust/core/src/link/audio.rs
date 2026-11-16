@@ -297,6 +297,10 @@ pub struct AudioPeer<P: PeerInput> {
     identity: PeerIdentity,
     phone: Option<PeerReply>,
     courtesy_key: Option<super::PhoneCourtesyKey>,
+    /// Last evidence from this exact input; generic activity never supplies a close.
+    phone_phase: PhoneSpeechPhase,
+    /// Actually rendered Open samples, excluding starvation and DSP-only drain.
+    phone_open_samples: u64,
     mode: Mode,
     input: P,
     outbound: Option<LinkAudioProducer>,
@@ -376,6 +380,8 @@ impl<P: PeerInput> AudioPeer<P> {
             identity,
             phone,
             courtesy_key,
+            phone_phase: PhoneSpeechPhase::Unavailable,
+            phone_open_samples: 0,
             mode,
             input,
             outbound: Some(outbound),
@@ -1010,9 +1016,6 @@ impl<P: PeerInput> LinkAudio<P> {
             self.rf_programme.private |= peer.rf_contributor && peer.phone.is_some();
             if active {
                 if !peer.reported_active {
-                    if let Some(key) = peer.courtesy_key {
-                        controller.phone_speech_rekeyed(key);
-                    }
                     if let Some(direct) = public {
                         controller.link_keyed(direct);
                         self.status.last_keyed.store(index + 1, Ordering::Release);
@@ -1035,6 +1038,43 @@ impl<P: PeerInput> LinkAudio<P> {
                     source,
                     peer.kerchunk_samples != 0 && peer.duration <= peer.kerchunk_samples,
                 );
+            }
+            // Observe the exact source only after its sole render. Neither an
+            // inactive edge, empty callback nor processor starvation proves close.
+            if let Some(key) = peer.courtesy_key.filter(|_| count != 0) {
+                let phase = if peer.ended() || !selected {
+                    Some(PhoneSpeechPhase::Unavailable)
+                } else {
+                    peer.input.phone_speech_state().map(|state| state.phase)
+                };
+                if let Some(phase) = phase {
+                    if phase == PhoneSpeechPhase::Unavailable {
+                        controller.phone_speech_rekeyed(key);
+                        peer.phone_open_samples = 0;
+                    } else if phase != peer.phone_phase {
+                        match phase {
+                            PhoneSpeechPhase::Open => {
+                                controller.phone_speech_rekeyed(key);
+                                if peer.phone_phase != PhoneSpeechPhase::Draining {
+                                    peer.phone_open_samples = 0;
+                                }
+                            }
+                            PhoneSpeechPhase::Closed if peer.phone_open_samples != 0 => {
+                                controller.phone_speech_closed(
+                                    key,
+                                    controller.is_kerchunk(peer.phone_open_samples),
+                                );
+                                peer.phone_open_samples = 0;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if phase == PhoneSpeechPhase::Open && peer.rf_contributor {
+                        peer.phone_open_samples =
+                            peer.phone_open_samples.saturating_add(count as u64);
+                    }
+                    peer.phone_phase = phase;
+                }
             }
             peer.reported_active = active;
             if active {

@@ -18,6 +18,16 @@ pub(crate) struct State {
 }
 
 impl State {
+    /// Report a temporary process turn without a verified delivered block.
+    pub(crate) fn set_output_pending(&self, pending: bool) {
+        if pending {
+            self.flags
+                .fetch_and(!abi::URP_PROGRAMME_LAST_BLOCK_VALID, Ordering::Relaxed);
+        } else {
+            self.flags
+                .fetch_or(abi::URP_PROGRAMME_LAST_BLOCK_VALID, Ordering::Relaxed);
+        }
+    }
     /// The one-frame fixture's actual filtered input retained for its next output.
     pub(crate) fn retained_sample(&self) -> f32 {
         f32::from_bits(self.previous.load(Ordering::Relaxed))

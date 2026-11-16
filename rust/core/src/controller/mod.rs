@@ -108,6 +108,7 @@ pub(crate) struct PeerReplySample {
 }
 
 struct ProgramSample<'a> {
+    phone_courtesy: &'a [crate::link::PhoneCourtesyFence],
     parrot: &'a mut f32,
     parrot_active: &'a mut bool,
     reply: Option<&'a mut PeerReplySample>,
@@ -375,6 +376,12 @@ impl NodeController {
         }
     }
 
+    /// Classify the rendered interval with the node's existing kerchunk policy.
+    pub(crate) fn is_kerchunk(&self, rendered_samples: u64) -> bool {
+        self.settings.kerchunk_max_ms != 0
+            && rendered_samples <= samples(self.settings.kerchunk_max_ms)
+    }
+
     /// Schedule only a proved, drained private speech close; this grants no call authority.
     /// Generic private inactivity must never call this method.
     pub fn phone_speech_closed(&mut self, key: crate::link::PhoneCourtesyKey, kerchunk: bool) {
@@ -545,6 +552,7 @@ impl NodeController {
         for (offset, sample) in audio.iter_mut().enumerate() {
             self.validate_phone_courtesy(phone_courtesy);
             let parrot_sample = parrot_output.as_mut().map(|output| ProgramSample {
+                phone_courtesy,
                 parrot: &mut output.samples[offset],
                 parrot_active: &mut *output.active,
                 reply: output
@@ -805,9 +813,7 @@ impl NodeController {
         }
         if !receiving && self.receiver {
             self.receiver_unkey = self.now;
-            let kerchunk = self.settings.kerchunk_max_ms != 0
-                && self.now.saturating_sub(self.receiver_key)
-                    <= samples(self.settings.kerchunk_max_ms);
+            let kerchunk = self.is_kerchunk(self.now.saturating_sub(self.receiver_key));
             self.receive_unkeyed(kerchunk);
             if !kerchunk {
                 self.courtesy.schedule(
@@ -1034,6 +1040,14 @@ impl NodeController {
         );
         let local_playback_allowed = may_transmit && (exempt || ordinary_playback_allowed);
         let force_morse = rendered_source == Some(Source::Status) && self.telemetry.status_morse();
+        // Retain only a borrowed exact fence across the nonblocking PCM read.
+        // Retirement during that read must cancel before this sample is mixed
+        // or its finite completion is credited. Public playback is unchanged.
+        let phone_fence = self.active_phone_courtesy.map(|key| {
+            parrot_output
+                .as_ref()
+                .and_then(|output| output.phone_courtesy.iter().find(|fence| fence.key == key))
+        });
         let playback = self
             .media(rendered_source)
             .map(|media| (&mut media.0, media.6.as_deref()));
@@ -1064,6 +1078,11 @@ impl NodeController {
                 made = playback.render(interrupt, &mut telemetry_sample);
             } else {
                 playback.defer(interrupt);
+            }
+            if phone_fence.is_some_and(|fence| !fence.is_some_and(|fence| fence.current())) {
+                playback.cancel();
+                telemetry_sample[0] = 0.0;
+                made = 0;
             }
             if first_output && made != 0 && occurrence.is_some_and(|occurrence| !occurrence.begin())
             {

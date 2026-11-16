@@ -336,17 +336,17 @@ mod descriptor_tests {
 }
 
 #[cfg(test)]
-mod loss_reset_contract_tests {
+pub(crate) mod loss_reset_contract_tests {
     use super::*;
 
     /// Use the dependency's native allocator guard alongside the Rust counter.
     /// The maintained constrained runner requires its real malloc/free control.
-    struct NativeGuard {
+    pub(crate) struct NativeGuard {
         begin: Option<unsafe extern "C" fn()>,
         end: Option<unsafe extern "C" fn()>,
     }
     impl NativeGuard {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let symbol = |name: &CStr| {
                 // SAFETY: the optional test preload has immutable process lifetime.
                 unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) }
@@ -377,7 +377,7 @@ mod loss_reset_contract_tests {
                 }
             }
         }
-        fn measure<T>(&self, operation: impl FnOnce() -> T) -> (T, usize) {
+        pub(crate) fn measure<T>(&self, operation: impl FnOnce() -> T) -> (T, usize) {
             // Initialize the Rust measurement TLS before the native guard is armed.
             crate::fixture::allocations(|| ());
             // SAFETY: begin/end are paired on this serial test thread.

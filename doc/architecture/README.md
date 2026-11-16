@@ -621,8 +621,11 @@ defines the full reload, hardware-handoff, and failure policy.
   speech cannot be prepared.
   Optional private-phone courtesy has its own typed ingress/media key and borrows
   control-retained exact call/input fences from the current mixer; retirement and
-  rekey cancel pending and active phone playback without completing it. Generic
-  private inactivity does not emit a speech closure. See ADR 0044.
+  rekey cancel pending and active phone playback without completing it. The sole
+  source render pairs phase-only held/processed-tail closure with that prepared
+  key; only a rendered Open interval followed by Closed schedules local courtesy.
+  Generic private inactivity never closes speech. Fences are checked before and
+  after each telephone courtesy PCM read, including its first/last sample. See ADR 0044.
 - A received-traffic timeout mutes receive and regenerated traffic only at
   local RF. Its local-only priority notice completes before PTT drops; recovery
   waits for every local and linked input to become inactive and completes the

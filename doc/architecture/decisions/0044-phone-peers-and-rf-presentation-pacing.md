@@ -2543,3 +2543,35 @@ native ARM64, complete coverage/package/hosted gates and real hardware acceptanc
 outstanding. ADR 0022 and debian/control retain explicit publication blocks until
 actual provenance-capable codec and reset-capable radio/RNNoise artifacts exist.
 Courtesy emission remains separate work.
+
+
+### Genuine held-close local courtesy (2026-11-16 local checkpoint)
+
+The existing prepared AudioPeer slot now retains its prior PhoneSpeechPhase and
+rendered Open-sample count beside its unique PhoneCourtesyKey. The sole render /
+active-edge loop consumes the exact paired input's phase after source/DSP work.
+A rendered Open interval followed by Closed schedules the configured phone
+courtesy once, with delay starting at that completed close. Draining is still
+programme; it neither starts the delay nor enlarges the kerchunk interval.
+Unavailable, retirement and fresh Open cancel only that exact key's pending or
+active tone. No global name lookup or second call/media identity is introduced.
+
+The node's existing kerchunk classifier uses rendered Open samples, not transport
+key duration, source starvation or pending DSP. Explicit closure is processed
+after generic activity release, retaining its zero-hang kerchunk decision while
+preserving the existing nameless watchdog/hang and public peer edges. Empty
+callbacks do not advance closure evidence. Source hold, immutable age, PLC,
+authority, retained programme and qualified DSP-tail owners are unchanged.
+
+Prepared local-only courtesy uses the existing telemetry producer and routing;
+it cannot enter telephone/ordinary-peer fanout or private DTMF input. Exact
+retained call/media membership is checked before each sample and again after
+the nonblocking PCM read, before mixing or finite-completion credit. Retirement
+during the first read cancels that sample rather than leaking it; unrelated
+retirement and public courtesy keep their existing behavior. All new callback
+state is scalar or borrowed, with no allocation, reclamation, lock or I/O.
+
+This implements the inactive development courtesy checkpoint only. It is not
+native ARM64, full coverage/package/hosted qualification, an operator config
+change, deployment authorization, or physical/RF acceptance. Those gates and
+the separately approved manual milestone remain required.

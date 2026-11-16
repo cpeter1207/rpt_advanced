@@ -840,16 +840,33 @@ fn voiced_phone_delayed_decision_preserves_short_onset_in_the_existing_ring() {
 fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
     use crate::link::input::AudioInput;
     use rpt_advanced_core::{
-        audio::LinkAudioQueue,
-        controller::{ControllerSettings, CourtesySettings, NodeController},
+        audio::{LinkAudioQueue, PcmRead, PcmStreamReader},
+        controller::{ControllerSettings, CourtesySettings, NodeController, PreparedMedia},
         link::{AudioPeer, LinkAudio, Mode, PeerIdentity, SourcePosition},
     };
+    struct Courtesy(usize);
+    impl PcmStreamReader for Courtesy {
+        fn start(&mut self) {
+            self.0 = 960;
+        }
+        fn render(&mut self, output: &mut [f32]) -> PcmRead {
+            let count = output.len().min(self.0);
+            output[..count].fill(0.4);
+            self.0 -= count;
+            if self.0 == 0 {
+                PcmRead::FinalSamples(count)
+            } else {
+                PcmRead::Samples(count)
+            }
+        }
+    }
     let speech: Vec<f32> = include_bytes!("../tests/fixtures/phone-speech/yes-48000-s16le.pcm")
         .chunks_exact(12)
         .map(|p| f32::from(i16::from_le_bytes([p[0], p[1]])) / 32768.0)
         .chain(std::iter::repeat_n(0.0, 12_000))
         .collect();
-    for credit in [160, 7] {
+    let guard = crate::link::phone_speech::loss_reset_contract_tests::NativeGuard::new();
+    for (credit, processed, loss) in [(160, false, false), (160, true, false), (7, true, true)] {
         let call = reply();
         let source = call.phone_source().unwrap().clone();
         let (_graph_state, graph) = crate::services::history_tests::processor_fixture(1, 1);
@@ -857,7 +874,7 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
             call.clone(),
             8000,
             NonZeroU32::MIN,
-            Some(graph),
+            processed.then_some(graph),
             PhoneSpeechSettings::default(),
         )
         .unwrap();
@@ -888,10 +905,16 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
         let (mut mixer, mut dispatcher): (crate::worker::Audio, _) =
             LinkAudio::new_in_domain(vec![phone, public], 480, domain.clone()).unwrap();
         let (mut controller, mut control) = NodeController::new(
-            ControllerSettings::default(),
+            ControllerSettings {
+                courtesy_delay_ms: 20,
+                ..Default::default()
+            },
             vec![],
             vec![],
-            CourtesySettings::default(),
+            CourtesySettings {
+                phone: Some(PreparedMedia::new_stream(Box::new(Courtesy(960))).unwrap()),
+                ..Default::default()
+            },
         )
         .unwrap();
         controller.bind_phone_retirement(&mut control, domain);
@@ -900,30 +923,39 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
         let mut voice = false;
         let mut remote_audio = false;
         let mut final_voice = false;
+        let mut courtesy_frames = 0;
+        let mut lost = false;
         for (block_index, block) in speech.chunks(160).enumerate() {
+            let conceal = loss && voice && !lost;
             let mut offset = 0;
             while offset < block.len() {
                 let end = (offset + credit).min(block.len());
                 let start = block_index * 160 + offset;
-                let (accepted, allocations) = crate::fixture::allocations(|| {
-                    ingress.audio(
-                        start as u64,
-                        &block[offset..end],
-                        Some(birth(10 + start as u64 * 125_000)),
-                    )
+                let (accepted, allocations) = guard.measure(|| {
+                    if conceal {
+                        ingress.concealed(start as u64, &block[offset..end], Some(birth(10)))
+                    } else {
+                        ingress.audio(
+                            start as u64,
+                            &block[offset..end],
+                            Some(birth(10 + start as u64 * 125_000)),
+                        )
+                    }
                 });
                 assert_eq!(allocations, 0);
                 let accepted = accepted.unwrap();
                 assert!(accepted > 0);
                 offset += accepted;
             }
+            lost |= conceal;
             for _ in 0..2 {
-                let (_, allocations) = crate::fixture::allocations(|| {
+                let mut rf = [0.0; 480];
+                let (_, allocations) = guard.measure(|| {
                     mixer
                         .process(
                             &mut controller,
                             false,
-                            &mut [0.0; 480],
+                            &mut rf,
                             SourcePosition {
                                 generation: 1,
                                 sample: native,
@@ -945,6 +977,13 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
                     );
                 }
                 final_voice = metadata.active;
+                if !metadata.active && rf.iter().any(|sample| *sample != 0.0) {
+                    assert_eq!(
+                        rf, [0.4; 480],
+                        "only the prepared local P follows genuine close"
+                    );
+                    courtesy_frames += 480;
+                }
                 let mut output = [0.0; 480];
                 while let Some(read) = public_reader.read_span(&mut output) {
                     assert_ne!(read.span.phone_expires_ns, 0);
@@ -952,6 +991,12 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
                         read.span.phone_expires_ns <= 500_000_010 + block_index as u64 * 20_000_000
                     );
                     remote_audio |= output.iter().any(|value| value.abs() > 0.01);
+                    if courtesy_frames != 0 {
+                        assert!(
+                            output.iter().all(|sample| sample.abs() < 0.01),
+                            "local courtesy cannot reach ordinary peer PCM"
+                        );
+                    }
                 }
                 native += 480;
             }
@@ -963,6 +1008,14 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
         assert!(
             !final_voice,
             "the existing source-coordinate hang closes after silence"
+        );
+        assert_eq!(
+            courtesy_frames, 960,
+            "one complete prepared P, no silence-triggered repeats ({credit}, {processed})"
+        );
+        assert_eq!(
+            lost, loss,
+            "loss case must traverse the real concealed source seam after rendered open"
         );
         shared.retire();
         assert!(!call.ended(), "retiring voice preserves private control");
@@ -2004,5 +2057,83 @@ fn native_ilbc_units_preserve_product_authority_hold_age_and_normal_requalificat
             "damaged packet receipt cannot renew admitted original age"
         );
         assert!(shared.active());
+    }
+}
+
+#[test]
+fn phone_speech_invalidation_starvation_and_temporary_processor_pending_are_not_close() {
+    use rpt_advanced_core::link::PhoneSpeechPhase;
+    for cut in 0..6 {
+        let call = reply();
+        let (state, graph) = crate::services::history_tests::processor_fixture(1, 1);
+        let (mut ingress, mut input, shared) = super::prepare_voiced(
+            call.clone(),
+            48000,
+            NonZeroU32::MIN,
+            Some(graph),
+            PhoneSpeechSettings::default(),
+        )
+        .unwrap();
+        adopt(&mut ingress, 0, reference());
+        ingress.speech = None;
+        for block in 0..10 {
+            assert_eq!(
+                ingress.audio(block * 960, &[0.25; 960], Some(birth(10))),
+                Ok(960)
+            );
+        }
+        ingress.voice_decision(Some(1919));
+        for _ in 0..9600 {
+            input.render_timed_block(&mut [0.0]);
+            if input.phone_speech_state().unwrap().phase == PhoneSpeechPhase::Open {
+                break;
+            }
+        }
+        assert_eq!(
+            input.phone_speech_state().unwrap().phase,
+            PhoneSpeechPhase::Open
+        );
+        match cut {
+            0 => shared.retire(),
+            1 => call.retire(),
+            2 => input.signals().set_dtmf_muted(true),
+            3 => {
+                ingress
+                    .audio(
+                        9600,
+                        &[0.25],
+                        Some(SourceBirth {
+                            host_clock_epoch: 8,
+                            born_ns: 10,
+                        }),
+                    )
+                    .unwrap();
+            }
+            4 => input.silence(&mut [0.0]),
+            _ => {
+                state.set_output_pending(true);
+                input.render_timed_block(&mut [0.0]);
+            }
+        }
+        assert_eq!(
+            input.phone_speech_state().unwrap().phase,
+            PhoneSpeechPhase::Unavailable,
+            "cut {cut} cannot fabricate Closed"
+        );
+        state.set_output_pending(false);
+        for _ in 0..16 {
+            input.render_timed_block(&mut [0.0]);
+            assert_ne!(
+                input.phone_speech_state().unwrap().phase,
+                PhoneSpeechPhase::Closed,
+                "neither no output nor its recovery proves original hold expiry"
+            );
+        }
+        if cut == 5 {
+            assert_eq!(
+                input.phone_speech_state().unwrap().phase,
+                PhoneSpeechPhase::Open
+            );
+        }
     }
 }

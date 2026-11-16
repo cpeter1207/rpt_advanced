@@ -1,4 +1,5 @@
 use super::*;
+use crate::audio::LinkAudioConsumer;
 use crate::link::{PeerIdentity, PeerReply, PhoneAccountId, PhoneCallId, PhoneSource, ProtocolId};
 
 struct PhoneInput {
@@ -8,8 +9,12 @@ struct PhoneInput {
     age: Option<SourceTimeBound>,
     public: bool,
     quiet: bool,
+    phase: Option<PhoneSpeechPhase>,
 }
 impl PeerInput for PhoneInput {
+    fn phone_speech_state(&self) -> Option<PhoneSpeechState> {
+        self.phase.map(|phase| PhoneSpeechState { phase })
+    }
     fn phone_reply(&self) -> Option<&PeerReply> {
         (!self.public).then_some(&self.reply)
     }
@@ -68,6 +73,7 @@ fn input(reply: PeerReply) -> PhoneInput {
         age: None,
         public: false,
         quiet: false,
+        phase: None,
     }
 }
 
@@ -873,4 +879,266 @@ fn phone_courtesy_prepared_membership_replacement_and_no_generic_close() {
         "input retirement cancels even while the call remains live"
     );
     assert!(call.phone_media_authorized());
+}
+
+/// The source fixture controls explicit evidence, independently of generic activity.
+fn courtesy_fixture(
+    delay_ms: u64,
+    kerchunk_ms: u64,
+) -> (
+    LinkAudio<PhoneInput>,
+    LinkDispatcher,
+    LinkAudioConsumer,
+    NodeController,
+) {
+    use crate::controller::{MorseSettings, PreparedMedia};
+    let source = source(7, 9, 13);
+    let call = reply(source.clone(), true);
+    let (writer, output) = LinkAudioQueue::new(1024, 48).unwrap().into_endpoints();
+    let peer = AudioPeer::for_phone(
+        &source,
+        &call,
+        Mode::TRANSCEIVE,
+        input(call.clone()),
+        writer,
+        48,
+    )
+    .unwrap();
+    let (links, dispatcher) = LinkAudio::new(vec![peer], 48).unwrap();
+    let (controller, _) = NodeController::new(
+        ControllerSettings {
+            courtesy_delay_ms: delay_ms,
+            hang_ms: 5,
+            kerchunk_max_ms: kerchunk_ms,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings {
+            phone: Some(
+                PreparedMedia::new(Some(vec![0.4; 96]), "P", MorseSettings::default()).unwrap(),
+            ),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    (links, dispatcher, output, controller)
+}
+
+fn phone_turn(
+    links: &mut LinkAudio<PhoneInput>,
+    controller: &mut NodeController,
+    phase: PhoneSpeechPhase,
+    rendered: bool,
+) -> [f32; 48] {
+    let input = &mut links.peers[0].input;
+    input.phase = Some(phase);
+    input.quiet = !rendered;
+    input.signals.set_radio_keyed(rendered);
+    let mut rf = [0.0; 48];
+    links
+        .process(controller, false, &mut rf, SourcePosition::default())
+        .unwrap();
+    rf
+}
+
+#[test]
+fn phone_courtesy_uses_only_completed_close_delay_once_and_stays_off_egress() {
+    use PhoneSpeechPhase::*;
+    let (mut links, mut dispatcher, mut output, mut controller) = courtesy_fixture(2, 0);
+    assert_eq!(
+        phone_turn(&mut links, &mut controller, Open, true),
+        [0.25; 48]
+    );
+    // Qualified post-DSP tail is still programme, not a completed closure.
+    for _ in 0..5 {
+        assert_eq!(
+            phone_turn(&mut links, &mut controller, Draining, true),
+            [0.25; 48]
+        );
+    }
+    for expected in [0.0, 0.0, 0.4, 0.4, 0.0, 0.0] {
+        assert_eq!(
+            phone_turn(&mut links, &mut controller, Closed, false),
+            [expected; 48]
+        );
+        dispatcher.dispatch(1);
+        let mut sent = [0.0; 48];
+        output.read(&mut sent);
+        assert_eq!(sent, [0.0; 48], "local courtesy is not telephone media");
+    }
+    assert!(
+        !links.peer_source_active(),
+        "courtesy cannot reopen source speech"
+    );
+    assert!(links.status().last_keyed().is_none());
+}
+
+#[test]
+fn phone_courtesy_never_converts_unavailable_starvation_or_unobserved_drain_to_close() {
+    use PhoneSpeechPhase::*;
+    for phases in [
+        vec![Unavailable, Closed],
+        vec![Draining, Closed],
+        vec![Open, Unavailable, Closed],
+        vec![Open; 8],
+    ] {
+        let (mut links, _, _, mut controller) = courtesy_fixture(0, 0);
+        for phase in phases {
+            let rendered = phase == Open;
+            let rf = phone_turn(&mut links, &mut controller, phase, rendered);
+            assert_eq!(rf, [if rendered { 0.25 } else { 0.0 }; 48]);
+        }
+        for _ in 0..8 {
+            assert_eq!(
+                phone_turn(&mut links, &mut controller, Open, false),
+                [0.0; 48],
+                "starvation alone is not close"
+            );
+        }
+    }
+}
+
+#[test]
+fn phone_courtesy_exact_rekey_or_unavailable_cancels_pending_and_audible_tone() {
+    use PhoneSpeechPhase::*;
+    for phase in [Open, Unavailable] {
+        for before_due in [false, true] {
+            let (mut links, _, _, mut controller) = courtesy_fixture(u64::from(before_due) * 10, 0);
+            phone_turn(&mut links, &mut controller, Open, true);
+            let rf = phone_turn(&mut links, &mut controller, Closed, false);
+            assert_eq!(rf, [if before_due { 0.0 } else { 0.4 }; 48]);
+            assert_eq!(
+                phone_turn(&mut links, &mut controller, phase, false),
+                [0.0; 48]
+            );
+            for _ in 0..12 {
+                assert_eq!(
+                    phone_turn(&mut links, &mut controller, phase, false),
+                    [0.0; 48]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn phone_kerchunk_counts_rendered_open_not_transport_activity_or_dsp_drain() {
+    use PhoneSpeechPhase::*;
+    for open_turns in [1, 2] {
+        let (mut links, _, _, mut controller) = courtesy_fixture(0, 1);
+        for _ in 0..open_turns {
+            phone_turn(&mut links, &mut controller, Open, true);
+        }
+        for _ in 0..5 {
+            phone_turn(&mut links, &mut controller, Open, false);
+        }
+        for _ in 0..5 {
+            phone_turn(&mut links, &mut controller, Draining, true);
+        }
+        assert_eq!(
+            phone_turn(&mut links, &mut controller, Closed, false),
+            [if open_turns == 1 { 0.0 } else { 0.4 }; 48]
+        );
+    }
+}
+
+#[test]
+fn phone_kerchunk_suppresses_transmitter_hang_at_the_completed_close() {
+    let (mut links, _, _, mut controller) = courtesy_fixture(0, 1);
+    phone_turn(&mut links, &mut controller, PhoneSpeechPhase::Open, true);
+    let input = &mut links.peers[0].input;
+    input.phase = Some(PhoneSpeechPhase::Closed);
+    input.quiet = true;
+    input.signals.set_radio_keyed(false);
+    assert!(
+        !links
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0; 48],
+                SourcePosition::default()
+            )
+            .unwrap(),
+        "rendered kerchunk has zero hang, not generic private unkey hang"
+    );
+}
+
+#[test]
+fn phone_courtesy_retirement_during_first_or_second_pcm_read_never_escapes_the_fence() {
+    use crate::{
+        audio::{PcmRead, PcmStreamReader},
+        controller::PreparedMedia,
+    };
+    struct RetiringTone {
+        target: PeerReply,
+        at: usize,
+        reads: usize,
+    }
+    impl PcmStreamReader for RetiringTone {
+        fn render(&mut self, output: &mut [f32]) -> PcmRead {
+            output.fill(0.4);
+            if self.reads == self.at {
+                self.target.retire();
+            }
+            self.reads += 1;
+            PcmRead::Samples(output.len())
+        }
+    }
+    for target in 0..3 {
+        for at in [0, 1] {
+            let (mut links, _, _, _) = courtesy_fixture(0, 0);
+            let retired = match target {
+                0 => links.phone_courtesy[0].call.clone(),
+                1 => links.phone_courtesy[0].media.clone(),
+                _ => PeerSignals::new().reply_target(),
+            };
+            let (mut controller, _) = NodeController::new(
+                ControllerSettings::default(),
+                vec![],
+                vec![],
+                CourtesySettings {
+                    phone: Some(
+                        PreparedMedia::new_stream(Box::new(RetiringTone {
+                            target: retired,
+                            at,
+                            reads: 0,
+                        }))
+                        .unwrap(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            phone_turn(&mut links, &mut controller, PhoneSpeechPhase::Open, true);
+            let rf = phone_turn(&mut links, &mut controller, PhoneSpeechPhase::Closed, false);
+            if target == 2 {
+                assert_eq!(rf, [0.4; 48], "unrelated retirement does not cancel P");
+            } else {
+                assert_eq!(&rf[..at], &[0.4; 48][..at]);
+                assert_eq!(
+                    &rf[at..],
+                    &[0.0; 48][at..],
+                    "target={target}, at={at}: retired read must not publish PCM"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn phone_courtesy_graph_replacement_cancels_genuine_pending_and_audible_close() {
+    for delay in [0, 10] {
+        let (mut links, _, _, mut controller) = courtesy_fixture(delay, 0);
+        phone_turn(&mut links, &mut controller, PhoneSpeechPhase::Open, true);
+        phone_turn(&mut links, &mut controller, PhoneSpeechPhase::Closed, false);
+        let (mut next, _, _, _) = courtesy_fixture(0, 0);
+        assert_ne!(links.phone_courtesy[0].key, next.phone_courtesy[0].key);
+        for _ in 0..12 {
+            assert_eq!(
+                phone_turn(&mut next, &mut controller, PhoneSpeechPhase::Closed, false),
+                [0.0; 48]
+            );
+        }
+    }
 }
