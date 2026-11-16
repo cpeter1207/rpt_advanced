@@ -2468,3 +2468,20 @@ is still no production call to phone_speech_closed and no courtesy emission.
 Explicit recovery provenance cannot classify libilbc2.0.2's internally recovered
 complete units under the current provider result contract; no private-state
 inspection or heuristic classification is claimed.
+
+
+The processing history's conservative possible-tail predicate is not onset
+proof: its lookback includes newly accepted input while output may still contain
+older muted PCM. Synthetic eligibility and lifecycle opening therefore use a
+separate bounded scalar proof: a validated delivery observation whose whole
+possible source-dependency interval is genuine qualified input. Single-sample
+proof uses the current delay upper bound; block proof uses the prepared bound
+that covers every output in the block. Possible-tail retention continues to
+render original programme and its processed tail independently of that proof.
+
+An utterance shorter than the graph's upper bound can remain unprovable under
+the current buffering contract. Its genuine programme and tail are not clipped,
+but it does not authorize synthetic continuation or a verified lifecycle close.
+No amplitude classifier, inferred exact DSP delay, or prolonged-speech waveform
+gate is introduced. This conservative authority limitation is explicit pending
+a supported richer delivery contract; it is not a claim of exact DSP provenance.

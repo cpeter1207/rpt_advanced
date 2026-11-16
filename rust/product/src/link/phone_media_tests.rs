@@ -1548,3 +1548,174 @@ fn provider_shortfall_cannot_borrow_an_original_slot_as_synthetic_authority() {
         );
     }
 }
+
+#[test]
+fn delayed_dsp_cannot_open_from_new_input_before_genuine_output_sample_or_block() {
+    for block in [false, true] {
+        for native in [false, true] {
+            for genuine_frames in [16, 32] {
+                let (state, graph) = crate::services::history_tests::processor_fixture(8, 1);
+                let (mut ingress, mut input, shared) = super::prepare_voiced(
+                    reply(),
+                    48000,
+                    NonZeroU32::MIN,
+                    Some(graph),
+                    PhoneSpeechSettings {
+                        preroll_ms: 0,
+                        hold_ms: 20,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                adopt(&mut ingress, 0, reference());
+                ingress.speech = None;
+                for start in [0, 960] {
+                    assert_eq!(ingress.audio(start, &[0.25; 960], Some(birth(10))), Ok(960));
+                }
+                let end = 1920 + genuine_frames as u64;
+                assert_eq!(
+                    ingress.audio(1920, &vec![0.25; genuine_frames], Some(birth(10))),
+                    Ok(genuine_frames)
+                );
+                ingress.voice_decision(Some(end - 1));
+                shared.mark_voice(1920, end);
+                assert_eq!(
+                    if native {
+                        ingress.concealed(end, &[0.5; 960], Some(birth(20)))
+                    } else {
+                        ingress.gap(end, 960)
+                    },
+                    Ok(960)
+                );
+                for start in (end + 960..end + 8640).step_by(960) {
+                    assert_eq!(ingress.audio(start, &[0.25; 960], Some(birth(30))), Ok(960));
+                }
+                let mut first = false;
+                let mut delivered = false;
+                let mut opened = false;
+                for _ in 0..4000 {
+                    let mut pcm = [0.0];
+                    let result = if block {
+                        input.render_timed_block(&mut pcm).map(|_| ())
+                    } else {
+                        input.render_sample().map(|sample| {
+                            pcm[0] = sample;
+                        })
+                    };
+                    if !first && state.retained_sample() != 0.0 {
+                        first = true;
+                        assert_eq!(pcm[0], 0.0, "fixture output is still preceding muted PCM");
+                        assert!(
+                            !shared.output_open.load(Ordering::Acquire),
+                            "new genuine input is not yet output: block={block} native={native}"
+                        );
+                        assert_eq!(
+                            input.phone_speech_state().unwrap().phase,
+                            PhoneSpeechPhase::Unavailable
+                        );
+                    } else if first && result.is_some() && pcm[0] != 0.0 {
+                        delivered = true;
+                    }
+                    opened |= shared.output_open.load(Ordering::Acquire);
+                }
+                assert!(
+                    first && delivered,
+                    "genuine programme/tail must survive: block={block} native={native} frames={genuine_frames}"
+                );
+                assert_eq!(
+                    opened,
+                    genuine_frames > 1,
+                    "long genuine delivery must authorize queued continuity"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn native_and_fallback_inherit_expired_age_even_with_fresh_egress_birth() {
+    use rpt_advanced_core::audio::AudioSpan;
+    for rate in [8000, 16000] {
+        for native in [false, true] {
+            let width = rate as usize / 50;
+            let (mut ingress, mut input, shared) = super::prepare_voiced(
+                reply(),
+                rate,
+                NonZeroU32::MIN,
+                None,
+                PhoneSpeechSettings {
+                    hold_ms: 80,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            adopt(&mut ingress, 0, reference());
+            ingress.speech = None;
+            for block in 0..10 {
+                assert_eq!(
+                    ingress.audio((block * width) as u64, &vec![0.25; width], Some(birth(10))),
+                    Ok(width)
+                );
+            }
+            ingress.voice_decision(Some((10 * width - 1) as u64));
+            let held = (ingress.last_voice, ingress.voice_until);
+            for block in 10..13 {
+                assert_eq!(
+                    if native {
+                        ingress.concealed(
+                            (block * width) as u64,
+                            &vec![0.5; width],
+                            Some(birth(600_000_000)),
+                        )
+                    } else {
+                        ingress.gap((block * width) as u64, width)
+                    },
+                    Ok(width)
+                );
+            }
+            let mut pcm = Vec::new();
+            let mut inherited = None;
+            for _ in 0..18000 {
+                let Some(value) = input.render_timed_sample() else {
+                    continue;
+                };
+                if value.provenance.is_some_and(|p| {
+                    p.plc
+                        && !p.real
+                        && !p.muted
+                        && p.position
+                            .is_some_and(|p| !p.negative && p.frame >= (10 * width + 2) as u64)
+                }) {
+                    inherited = value.age_bound;
+                    pcm.push(value.sample);
+                    if pcm.len() == 480 {
+                        break;
+                    }
+                }
+            }
+            assert_eq!(pcm.len(), 480);
+            let inherited = inherited.unwrap();
+            assert_eq!(
+                inherited.not_after_ns, 10,
+                "new synthetic receipt cannot refresh original age"
+            );
+            assert_eq!((ingress.last_voice, ingress.voice_until), held);
+            assert!(shared.active());
+            let (mut io, state) = crate::link::session::tests::phone_source_peer_at_rate(rate);
+            let (mut writer, reader) = LinkAudioQueue::new(960, 4).unwrap().into_endpoints();
+            let mut outbound = crate::link::outbound::Outbound::new(rate, reader).unwrap();
+            writer.write(
+                AudioSpan {
+                    born_ns: Some(599_000_000),
+                    phone_expires_ns: inherited.not_after_ns + 500_000_000,
+                    ..Default::default()
+                },
+                &pcm,
+            );
+            outbound.step(&mut io, 600).unwrap();
+            assert_eq!(outbound.statistics.snapshot().expired_native_samples, 480);
+            assert!(state.lock().unwrap().audio.is_empty());
+            assert!(state.lock().unwrap().prepared.is_empty());
+        }
+    }
+}

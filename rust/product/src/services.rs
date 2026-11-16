@@ -247,13 +247,24 @@ impl<P: rpt_advanced_core::link::PeerInput> ProcessedPeer<P> {
         &self.input
     }
 
-    /// Qualification follows the same proven output horizon as original age.
+    /// Possible qualified tail follows the conservative output-age horizon,
+    /// not proof that newly accepted genuine PCM has reached output.
     /// Without a processor the caller can use its current accepted source span.
     pub(crate) fn output_qualified(&self) -> Option<bool> {
         self.processor.as_ref().map(|_| {
             self.history
                 .as_ref()
                 .is_some_and(|history| history.output_qualified())
+        })
+    }
+
+    /// Onset requires a wholly genuine possible dependency interval and a
+    /// validated delivery count. A possible tail alone cannot open a source.
+    pub(crate) fn output_genuine(&self) -> Option<bool> {
+        self.processor.as_ref().map(|_| {
+            self.history
+                .as_ref()
+                .is_some_and(|history| history.output_genuine())
         })
     }
 

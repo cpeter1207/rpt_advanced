@@ -113,3 +113,71 @@ fn explicitly_mapped_synthetic_continuity_keeps_original_age() {
     assert_eq!(history.output(input, Some(state(65, 0))), input.age_bound);
     assert!(history.output_qualified());
 }
+
+#[test]
+fn genuine_delivery_requires_full_dependency_interval_not_possible_tail() {
+    for block_path in [false, true] {
+        for delay in [0, 1, 8] {
+            let mut history = history(delay);
+            let mut accepted = 64;
+            let mut render = |history: &mut History, input: TimedPeerSample| {
+                accepted += 1;
+                if block_path {
+                    let mut block = history.begin_block();
+                    history.append_block(&mut block, input);
+                    history.finish_block(block, Some(state(accepted, delay)))
+                } else {
+                    history.output(input, Some(state(accepted, delay)))
+                }
+            };
+            let mut muted = sample();
+            muted.provenance.as_mut().unwrap().muted = true;
+            for _ in 0..=delay {
+                render(&mut history, muted);
+            }
+            for _ in 0..delay {
+                assert!(render(&mut history, sample()).is_some());
+                assert!(
+                    history.output_qualified(),
+                    "possible tail remains available"
+                );
+                assert!(
+                    !history.output_genuine(),
+                    "new input alone cannot prove onset"
+                );
+            }
+            assert!(render(&mut history, sample()).is_some());
+            assert!(history.output_genuine());
+            let mut synthetic = sample();
+            synthetic.provenance.as_mut().unwrap().real = false;
+            synthetic.provenance.as_mut().unwrap().plc = true;
+            assert!(render(&mut history, synthetic).is_some());
+            assert!(
+                history.output_qualified(),
+                "existing bounded tail is preserved"
+            );
+            assert!(
+                !history.output_genuine(),
+                "synthetic cannot mint genuine delivery"
+            );
+            history.invalidate();
+            assert!(!history.output_genuine());
+        }
+    }
+}
+
+#[test]
+fn accepted_without_delivery_cannot_prove_genuine_onset() {
+    let mut history = history(0);
+    let mut buffered = state(65, 0);
+    buffered.delivered_frames = 64;
+    assert!(history.output(sample(), Some(buffered)).is_some());
+    assert!(
+        history.output_qualified(),
+        "possible tail is still conservative"
+    );
+    assert!(
+        !history.output_genuine(),
+        "accepted counter alone is not delivery"
+    );
+}

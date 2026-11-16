@@ -443,6 +443,10 @@ async fn adaptive_delay_reduction_preserves_exact_source_gap_credit() {
         media.observe().unwrap().jitter.skipped_span > 0,
         "exercise actual adaptive delay reduction"
     );
+    assert!(
+        sink.discontinuities > 1,
+        "adaptation is a hard source discontinuity, not timed PLC"
+    );
     let mut end = origin + 1000;
     for (start, count) in sink.ranges {
         assert_eq!(

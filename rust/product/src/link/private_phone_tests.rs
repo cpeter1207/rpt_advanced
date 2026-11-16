@@ -3186,3 +3186,90 @@ fn configured_protocol_limits_continuity_to_sip_and_preserves_command_cuts() {
         }
     }
 }
+
+#[test]
+fn synthetic_continuity_matrix_cannot_survive_retirement_missing_time_reset_or_command() {
+    use rpt_advanced_core::{
+        config::{PhoneAccountProtocol, PhoneSpeechSettings},
+        link::{PeerInput as _, PhoneSpeechPhase},
+    };
+    for rate in [8000, 16000] {
+        for native in [false, true] {
+            for cut in 0..4 {
+                let width = rate as usize / 50;
+                let (mut session, mut control, state, reply) = source_session_with_protocol(
+                    crate::link::session::tests::phone_source_peer_at_rate(rate),
+                    true,
+                    PhoneAccountProtocol::Sip,
+                );
+                session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+                let (pending, mut input) = control
+                    .prepare_pending_voiced_media(
+                        None,
+                        PhoneSpeechSettings {
+                            threshold: 0.0,
+                            onset_frames: 1,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                control.adopt_media(pending).ok().unwrap();
+                session.step(0).unwrap();
+                let birth = state.lock().unwrap().source_reference.unwrap().1;
+                state.lock().unwrap().source_birth = Some(birth);
+                state
+                    .lock()
+                    .unwrap()
+                    .input
+                    .push_back(Input::Audio(vec![0.25; width * 10]));
+                for now in 1..20 {
+                    session.step(now).unwrap();
+                }
+                assert!((0..10).any(|_| input.render_timed_block(&mut [0.0; 480]).is_some()));
+                state.lock().unwrap().input.push_back(if native {
+                    Input::Concealed(vec![0.5; width])
+                } else {
+                    Input::Gap(width)
+                });
+                session.step(20).unwrap();
+                assert!(input.active());
+                assert!(control.digit().is_none());
+                match cut {
+                    0 => control.retire_media(),
+                    1 => {
+                        state.lock().unwrap().source_birth = None;
+                        state
+                            .lock()
+                            .unwrap()
+                            .input
+                            .push_back(Input::Audio(vec![0.25; width]));
+                    }
+                    2 => state.lock().unwrap().source_reset = true,
+                    _ => state.lock().unwrap().input.push_back(Input::Digit(b'7')),
+                }
+                session.step(21).unwrap();
+                assert!(!input.active(), "rate={rate} native={native} cut={cut}");
+                assert_eq!(control.digit(), (cut == 3).then_some(('7', 21)));
+                state.lock().unwrap().source_birth = Some(birth);
+                state.lock().unwrap().input.push_back(if native {
+                    Input::Concealed(vec![0.5; width])
+                } else {
+                    Input::Gap(width)
+                });
+                session.step(22).unwrap();
+                assert_eq!(
+                    input.phone_speech_state().unwrap().phase,
+                    PhoneSpeechPhase::Unavailable
+                );
+                let mut pcm = [1.0; 480];
+                assert!(input.render_timed_block(&mut pcm).is_none());
+                assert_eq!(pcm, [0.0; 480]);
+                assert!(
+                    control.digit().is_none(),
+                    "loss cannot create another command"
+                );
+                assert!(!reply.ended(), "only this media generation is retired");
+            }
+        }
+    }
+}

@@ -620,14 +620,14 @@ pub struct PhoneMediaInput {
     speech_phase: PhoneSpeechPhase,
 }
 impl PhoneMediaInput {
-    fn observe_output(&mut self, known: bool, qualified: bool) {
+    fn observe_output(&mut self, known: bool, qualified: bool, genuine: bool) {
         if !self.shared.voiced {
             return;
         }
         if !self.active() || self.input.signals().dtmf_muted() || !known {
             self.speech_phase = PhoneSpeechPhase::Unavailable;
             self.shared.output_open.store(false, Ordering::Release);
-        } else if qualified {
+        } else if qualified && (genuine || self.shared.output_open.load(Ordering::Acquire)) {
             self.speech_phase = if self.input.source().past_hold {
                 PhoneSpeechPhase::Draining
             } else {
@@ -692,7 +692,7 @@ impl PeerInput for PhoneMediaInput {
             return None;
         }
         let Some(sample) = self.input.render_timed_sample() else {
-            self.observe_output(false, false);
+            self.observe_output(false, false, false);
             return None;
         };
         let qualified = self.input.output_qualified().unwrap_or_else(|| {
@@ -700,7 +700,12 @@ impl PeerInput for PhoneMediaInput {
                 .provenance
                 .is_some_and(|p| !p.muted && (p.real || p.plc || p.gap))
         });
-        self.observe_output(sample.age_bound.is_some(), qualified);
+        let genuine = self.input.output_genuine().unwrap_or_else(|| {
+            sample
+                .provenance
+                .is_some_and(|p| p.real && !p.plc && !p.gap && !p.muted)
+        });
+        self.observe_output(sample.age_bound.is_some(), qualified, genuine);
         self.active().then_some(sample)
     }
     fn render_timed_block(&mut self, output: &mut [f32]) -> Option<RenderedPeerBlock> {
@@ -722,7 +727,8 @@ impl PeerInput for PhoneMediaInput {
                         && result.is_some()
                         && self.input.source().known.wrapping_sub(known_before)
                             == output.len() as u64);
-                self.observe_output(known, active);
+                let genuine = self.input.output_genuine().unwrap_or(qualified != 0);
+                self.observe_output(known, active, genuine);
                 let active = active && !self.input.signals().dtmf_muted();
                 if let Some(mut block) = result.filter(|block| active && block.age_bound.is_some())
                 {
@@ -752,15 +758,19 @@ impl PeerInput for PhoneMediaInput {
             return self.active().then_some(sample);
         }
         let sample = self.render_timed_sample()?;
+        // Preserve genuine programme and conservative tail even when an upper
+        // delay bound cannot yet prove delivery for a synthetic continuity lease.
         (sample.age_bound.is_some()
-            && matches!(
-                self.speech_phase,
-                PhoneSpeechPhase::Open | PhoneSpeechPhase::Draining
-            ))
+            && !self.input.signals().dtmf_muted()
+            && self.input.output_qualified().unwrap_or_else(|| {
+                sample
+                    .provenance
+                    .is_some_and(|p| !p.muted && (p.real || p.plc || p.gap))
+            }))
         .then_some(sample.sample)
     }
     fn silence(&mut self, output: &mut [f32]) {
-        self.observe_output(false, false);
+        self.observe_output(false, false, false);
         if self.active() {
             self.input.silence(output);
         } else {

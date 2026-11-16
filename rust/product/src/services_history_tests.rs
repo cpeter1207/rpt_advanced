@@ -75,6 +75,7 @@ struct Source {
     generation: u64,
     epoch: u64,
     known: bool,
+    muted: bool,
     plc: bool,
     fault_at: Option<(u64, u8)>,
 }
@@ -97,6 +98,7 @@ impl Source {
             generation: 9,
             epoch: 7,
             known: true,
+            muted: false,
             plc: false,
             fault_at: None,
         }
@@ -136,7 +138,11 @@ impl rpt_advanced_core::link::PeerInput for Source {
             return None;
         }
         Some(TimedPeerSample {
-            sample: self.next as f32 * 0.25,
+            sample: if self.muted {
+                0.0
+            } else {
+                self.next as f32 * 0.25
+            },
             age_bound: (self.known && !matches!(fault, Some(0 | 4))).then_some(SourceTimeBound {
                 host_clock_epoch: self.epoch + u64::from(fault == Some(1)),
                 not_after_ns: self.next * 1_000_000,
@@ -148,6 +154,7 @@ impl rpt_advanced_core::link::PeerInput for Source {
                     fraction_billionths: 0,
                     negative: false,
                 }),
+                muted: self.muted,
                 real: fault != Some(4),
                 plc: self.plc || matches!(fault, Some(3 | 4)),
                 ..SampleProvenance::default()
@@ -586,5 +593,41 @@ fn timed_block_source_failure_and_current_mute_never_leak_partial_output() {
                 "failed source invalidates the retained DSP receipt"
             );
         }
+    }
+}
+
+#[test]
+fn short_genuine_programme_below_delay_bound_survives_without_synthetic_authority() {
+    for block in [false, true] {
+        let (state, mut peer) = fixture(8, 1, true);
+        let render = |peer: &mut ProcessedPeer<Source>| {
+            if block {
+                let mut pcm = [0.0];
+                assert!(peer.render_timed_block(&mut pcm).is_some());
+                pcm[0]
+            } else {
+                peer.render_timed_sample().unwrap().sample
+            }
+        };
+        peer.input.muted = true;
+        for _ in 0..16 {
+            assert_eq!(render(&mut peer), 0.0);
+        }
+        // Bypass ring interpolation so exactly one genuine native input reaches
+        // the DSP. This is shorter than the prepared maximum dependency interval.
+        peer.input.muted = false;
+        assert_eq!(render(&mut peer), 0.0);
+        let genuine = state.retained_sample();
+        assert!(genuine > 0.0);
+        assert_eq!(peer.output_qualified(), Some(true));
+        assert_eq!(peer.output_genuine(), Some(false));
+        peer.input.muted = true;
+        assert_eq!(
+            render(&mut peer),
+            genuine,
+            "the actual short tail must render unchanged"
+        );
+        assert_eq!(peer.output_qualified(), Some(true));
+        assert_eq!(peer.output_genuine(), Some(false));
     }
 }

@@ -1,4 +1,4 @@
-//! Original receipt bounds retained alongside the sole serial peer graph.
+//! Original and explicitly inherited receipt bounds beside the sole serial peer graph.
 //! These metadata buckets contain no PCM and never infer time from frame counters.
 use super::{PcmProcessor, abi};
 use rpt_advanced_core::link::{SourceTimeBound, TimedPeerSample};
@@ -62,6 +62,7 @@ pub(super) struct Block {
     unknown: bool,
     count: u64,
     qualified: bool,
+    genuine: bool,
 }
 impl Block {
     fn include(&mut self, source: Option<Bucket>) {
@@ -86,6 +87,8 @@ pub(super) struct History {
     counters: Option<(u64, u64)>,
     frames: u64,
     last_qualified: Option<u64>,
+    genuine_run: u64,
+    output_genuine: bool,
     output_qualified: bool,
     buckets: Box<[Bucket]>,
 }
@@ -108,6 +111,8 @@ impl History {
             counters: Some((state.accepted_frames, state.delivered_frames)),
             frames: 0,
             last_qualified: None,
+            genuine_run: 0,
+            output_genuine: false,
             output_qualified: false,
             buckets: vec![Bucket::default(); count].into_boxed_slice(),
         }))
@@ -116,6 +121,8 @@ impl History {
     fn clear_samples(&mut self) {
         self.frames = 0;
         self.last_qualified = None;
+        self.genuine_run = 0;
+        self.output_genuine = false;
         self.output_qualified = false;
         self.buckets.fill(Bucket::default());
     }
@@ -134,6 +141,7 @@ impl History {
             unknown: self.prepared > self.horizon,
             count: 0,
             qualified: false,
+            genuine: false,
         };
         if self.prepared == 0 {
             return block;
@@ -154,16 +162,22 @@ impl History {
         block
     }
 
-    /// Record original source metadata during the sole PCM fill pass.
+    /// Record original or explicitly inherited metadata during the sole PCM fill pass.
     pub(super) fn append_block(&mut self, block: &mut Block, input: TimedPeerSample) {
         let source = Bucket::source(input);
         let qualified = source.is_some() && input.provenance.is_some_and(|p| !p.muted);
         block.qualified |= qualified;
         block.include(source);
         block.count = block.count.saturating_add(1);
-        if self.record(source, qualified).is_none() {
+        if self
+            .record(source, qualified, Self::genuine(input, qualified))
+            .is_none()
+        {
             block.unknown = true;
         }
+        // The prepared upper bound applies to every output in a block. Only a
+        // wholly genuine possible dependency interval proves delivered onset.
+        block.genuine |= self.genuine_run > self.prepared;
     }
 
     /// Validate one completed native process call and its actual counter observation.
@@ -173,6 +187,7 @@ impl History {
         state: Option<abi::UrpProgrammeBuffering>,
     ) -> Option<SourceTimeBound> {
         self.output_qualified = false;
+        self.output_genuine = false;
         let Some(state) = state else {
             self.invalidate();
             return None;
@@ -206,6 +221,7 @@ impl History {
             .flatten()
             .map(|oldest| oldest.bound);
         self.output_qualified = bound.is_some() && block.qualified;
+        self.output_genuine = bound.is_some() && block.genuine;
         bound
     }
 
@@ -215,13 +231,27 @@ impl History {
         self.output_qualified
     }
 
-    fn record(&mut self, source: Option<Bucket>, qualified: bool) -> Option<u64> {
+    /// Conservative delivery proof, distinct from possible qualified tail.
+    pub(super) fn output_genuine(&self) -> bool {
+        self.output_genuine
+    }
+
+    fn genuine(input: TimedPeerSample, qualified: bool) -> bool {
+        qualified && input.provenance.is_some_and(|p| p.real && !p.plc && !p.gap)
+    }
+
+    fn record(&mut self, source: Option<Bucket>, qualified: bool, genuine: bool) -> Option<u64> {
         let frame = self.frames;
         let Some(next) = frame.checked_add(1) else {
             self.invalidate();
             return None;
         };
         self.frames = next;
+        self.genuine_run = if genuine {
+            self.genuine_run.saturating_add(1)
+        } else {
+            0
+        };
         if qualified {
             self.last_qualified = Some(frame);
         }
@@ -250,6 +280,7 @@ impl History {
         state: Option<abi::UrpProgrammeBuffering>,
     ) -> Option<SourceTimeBound> {
         self.output_qualified = false;
+        self.output_genuine = false;
         let Some(state) = state else {
             self.invalidate();
             return None;
@@ -261,6 +292,9 @@ impl History {
             accepted.checked_add(1) == Some(state.accepted_frames)
                 && state.delivered_frames >= delivered
         });
+        let delivered = self
+            .counters
+            .is_some_and(|(_, delivered)| delivered.checked_add(1) == Some(state.delivered_frames));
         // Actual counters are continuity evidence only. After any lost observation
         // a new baseline and fresh source history are required before qualification.
         self.counters = counters;
@@ -283,10 +317,11 @@ impl History {
         }
         let source = Bucket::source(input);
         let qualified = source.is_some() && input.provenance.is_some_and(|p| !p.muted);
-        let frame = self.record(source, qualified)?;
+        let frame = self.record(source, qualified, Self::genuine(input, qualified))?;
         let delay = state.current_max_delay_frames;
         if delay == 0 {
             self.output_qualified = qualified;
+            self.output_genuine = delivered && self.genuine_run != 0;
             return source.map(|source| source.bound);
         }
         // Never map pre-admission or overwritten history. Whole buckets retain
@@ -308,6 +343,7 @@ impl History {
         self.output_qualified = self
             .last_qualified
             .is_some_and(|last| last >= frame - delay);
+        self.output_genuine = delivered && self.genuine_run > delay;
         Some(oldest.bound)
     }
 
