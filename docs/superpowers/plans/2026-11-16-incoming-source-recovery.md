@@ -76,11 +76,20 @@ SourceReset identity survives refused dispatch across reads.
   positive prefix without matching exact advance evidence, missing receipt plus
   real skip, overflow/reset, insertion, startup and old-size/null-tail sinks.
   Generic hard cuts stay generic; insertion causes no source gap.
-- [ ] Add `adaptation_witness_is_invalidated_before_put_or_ambiguous_get`:
-  a valid fully credited Packet/advance witness followed by a put, reset,
-  Missing, Insertion, overlap, observation failure or saturation stays generic.
-  An already-buffered exact successor without put proves the positive path;
-  unchanged NotDue may retain it. Do not reorder receive/get to save a witness.
+- [ ] Add `steady_cadence_media_adaptation_survives_real_put`: extend the actual
+  no-gap native trace through production Media packet admission, not direct
+  jitter.put fixture injection. At poll880 packet840 ends860, skip160 frames,
+  next due900; put packet900 before get900. Require exact cause/range callback
+  before gap credit and correct retry identity despite normal occupancy/delay
+  gauge changes and skipped-packet cleanup. This is the mandatory Task1 positive
+  gate before any owner recovery implementation.
+- [ ] Add `adaptation_witness_has_one_packet_lifetime`: Accepted puts/NotDue
+  preserve only the specified counter projection; put-side checked late_drops
+  increase is permitted but never establishes cause. Duplicate/full puts,
+  Missing/Insertion, overlap, reset, observation error/decrease/saturation,
+  second advance and mismatched successor invalidate. Exercise a non-Packet get
+  followed by puts, including the native >20 unsuccessful-fetch resync sequence.
+  Do not compare whole Observation: queued_packets/buffered_span/delay vary.
 - [ ] Add `reset_retry_keeps_exact_identity_across_reads`: refusal then identical
   retry completes once; changed range/cause and generic-to-adaptation substitution
   fail closed; later PCM gets zero credit; original owner snapshot is not retaken.
@@ -100,7 +109,9 @@ SourceReset identity survives refused dispatch across reads.
   Rust sink reference over old memory. Use named old digit-tail and new callback
   minimum sizes in SIP and IAX. No hidden use of existing fields.
 - [ ] Verify C prefix/tail layout/short sinks, callback retries/invalid ranges,
-  actual Media skip credit and signed offsets. Update ADR0044 and interface
+  actual Media steady-cadence real-put gate, skip credit and signed offsets.
+  If the gate fails, stop before Task2 and report the minimum necessary contract
+  change rather than substitute a buffer-only fixture. Update ADR0044 and interface
   artifacts; identify exact candidate header/DSO identities without overwriting
   reviewed cohort artifacts. Local coherent commit after targeted checks.
 
@@ -194,8 +205,7 @@ Do not modify strict SIP assertions or positive courtesy oracles to pass.
 - [ ] Return exact base/head, test/ABI/provider identities, focused diff, RED/
   GREEN logs and review status. Distinguish recovery proof, strict SIP result,
   async station behavior and unrun full gates. Explicitly report the
-  prepared/inactive attachment gap and the conservative
-  no-intervening-put witness coverage limit. No live deployment.
+  prepared/inactive attachment gap and any unproved witness cases. No live deployment.
 
 ## Reproducible focused command wrapper
 

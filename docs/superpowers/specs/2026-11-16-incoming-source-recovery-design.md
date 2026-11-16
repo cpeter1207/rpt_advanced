@@ -116,27 +116,54 @@ Proposed smallest published extension, subject to explicit approval:
 In `call_media.rs`, one optional witness records the exact interval skipped by
 one exclusive-owner `Jitter::advance` call. Arm only after a Packet decision
 with zero prefix and zero trim has been completely credited, with its checked
-packet end equal to `source_end`. Snapshot observations immediately before and
-after advance; require a positive checked skipped delta, no reset/overload or
-other counter change, no saturation, and checked interval `[source_end,
-source_end + delta)`. Do not infer the interval from a later cursor.
+packet end equal to `source_end`. Snapshot immediately before/after advance;
+require a strictly positive checked `skipped_span` delta, fitting nonzero u32,
+and checked interval `[source_end, source_end + delta)`. Other cumulative
+counters must not change at this advance. Never derive start from a later cursor.
 
-The first increment deliberately uses a conservative lifetime: invalidate the
-witness BEFORE every subsequent jitter `put`, reset or failed operation, and on
-any Missing, Insertion, overlapping/already-covered or otherwise ambiguous get.
-NotDue may retain it only with unchanged observations. The next Packet get may
-consume it only with unchanged observations, zero trim, known original receipt
-and an exact missing prefix equal to the witness interval. Unknown receipt or
-any mismatch emits the ordinary generic hard cut. No other advance may occur
-while retaining this witness. Invalidation never suppresses, delays or reorders
-normal packet reception or jitter operations. This avoids relying on counters
-to expose put-side native resynchronization, which they do not fully report.
+Compare named counters, NOT the entire Observation. `struct_size` is validated
+metadata. `queued_packets`, `buffered_span` and `delay` are occupancy/delay gauges
+and may change normally across put/get/advance; they provide no cause authority.
+The cumulative counters are `duplicate_drops`, `late_drops`, `full_drops`,
+`missing_span`, `insertion_span`, `skipped_span`, `limit_resets`, `overload_drops`
+and `overload_span`. Any required observation failure, decrease, or any of these
+counters equal to u64::MAX invalidates proof (including an unchanged saturated
+value). All additions/subtractions are checked, not saturating or wrapping.
 
-This proves only already-buffered successor windows with no intervening put.
-It can leave otherwise ordinary adaptation cuts generic and nonrecoverable;
-that coverage limit must be measured and reported, not described as full call
-continuity. Expanding the witness across puts requires a separately reviewed
-proof against the pinned provider, not an optimistic aggregate-counter check.
+After the arming advance, allow only successful Accepted puts and NotDue gets
+before the one successor Packet get. Compare snapshots around each operation.
+All cumulative counters must remain unchanged, except `late_drops` may increase
+by a checked delta during an Accepted put: native cleanup retires queued packets
+at/before the already-established cursor, including the just-skipped interval.
+This cleanup is NOT proof of adaptation; the original advance and exact successor
+interval remain the proof. Duplicate/full/rejected puts invalidate the witness;
+so do errors, explicit resets, Missing/Insertion/ambiguous or overlapping gets,
+a second advance, unknown receipt or interval mismatch. Consume the witness on
+the next Packet only if zero trim, known original receipt and its entire missing
+prefix exactly equal the stored interval. Never suppress/delay/reorder receive
+or jitter operations to preserve a witness. Startup/epoch changes stay generic.
+
+Why puts cannot silently resynchronize within this bounded lifetime: a successful
+Packet clears both wrapper `unsuccessful_gets` and native `lost_count`. Neither
+advance nor puts increments them, and NotDue does not enter native get. The
+first non-Packet get invalidates the witness before any later put. Therefore
+neither put-side >20 reset is reachable. The wrapper disables native auto-adjust,
+so remaining-span bookkeeping cannot introduce a second hidden adjustment.
+This is a source-specific proof, not a general property of aggregate counters.
+See [SpeexDSP 1.2.1 jitter.c](https://raw.githubusercontent.com/xiph/speexdsp/SpeexDSP-1.2.1/libspeexdsp/jitter.c)
+(lines 363-368, 527-532, 581-584, 654-713) and adapter `lib.rs`
+(put231-242, Packet432, non-Packet437-449, advance460-499).
+The existing cohort records Debian libspeexdsp1 1.2.1-3; implementation must
+recheck that identity. A different provider requires revalidation, not inference.
+
+Task1's mandatory acceptance gate extends the actual no-gap steady-cadence trace
+through Media's production packet admission and successor: the poll880 cut after
+packet840 ends860 advances the next due time to900; normal packet900 put occurs
+BEFORE get900 and must retain the exact adaptation cause. Include permitted
+occupancy-gauge changes and skipped-packet cleanup. The existing fixture's direct
+jitter injection alone is insufficient. If this proof or gate fails, stop before
+owner recovery and report the smallest necessary observation-contract change;
+no synthetic/buffer-only replacement fixture or relaxed safety is acceptable.
 
 ### Sized sink and private event dispatch
 
