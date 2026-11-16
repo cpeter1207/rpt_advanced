@@ -48,17 +48,30 @@ Do not rebase over uncommitted evidence. Later, before an authorized publication
 
 ## Validation command envelope
 
-Use the maintained launcher, which enforces resource bounds and fresh pulls:
+The canonical launcher exists at /home/codex/rpt-development/rpt_advanced-workflows/tools/run-in-quality-container.sh (checkout 4aec0ee1aa5cfce8a5be89d314001fca313ef73d). The established resource-reporting launcher also exists and was inspected at /home/codex/rpt-development/workflow-resource-reporting/tools/run-in-quality-container.sh (checkout 9032bb8915da2cebe1f6c179b2b5478f7af9f8bc): its constrained profile forces a fresh pull, 1 CPU/1536 MiB, serial builds/tests and a 20-minute timeout. These are verified local revisions, not a claim about remote main.
+
+Use that known launcher with the **whole development root** mounted, so the coherent provider cohort and shared target cache remain available:
 
 ```sh
 RPTADV_CONTAINER_PROFILE=constrained RPTADV_CONTAINER_PULL=1 \
-  /home/codex/rpt-development/rpt_advanced-workflows/tools/run-in-quality-container.sh \
+  /home/codex/rpt-development/workflow-resource-reporting/tools/run-in-quality-container.sh \
   ghcr.io/cpeter1207/rpt-advanced-quality-debian13:latest \
-  /home/codex/rpt-development/phone-plc-courtesy \
-  sh -lc 'cargo test -p rpt-advanced-standalone phone::call_media::tests -- --test-threads=1'
+  /home/codex/rpt-development \
+  bash /workspace/phone-plc-courtesy/.work/run-focused.sh \
+  cargo test --locked -p rpt-advanced-standalone phone::call_media::tests -- --test-threads=1
 ```
 
-Substitute exactly one affected test command per batch. Confirm required dynamic candidate dependencies are available using the current established cohort workflow before compiling. If image/dependency provisioning or disk space blocks a run, record it, retain work and stop that check; never change permissions, install an unqualified provider, or treat setup failure as a source failure.
+The run-focused.sh helper is implementation-time ignored evidence, **not created or run by planning**. Build it from the verified reference /home/codex/rpt-development/phone-local-speech-retention/.work/radio-2eec2cd-cohort/run-v3.sh, preserving these inputs (container paths below):
+
+- Work in /workspace/phone-plc-courtesy; use /workspace/phone-codec-analysis-union/.work/coherent-phone-qualification for the verified cohort, its providers, runtime baseline and support/sofia.
+- Check providers/qualified-inputs.sha256 and the baseline runtime against cohort/controller-artifacts.sha256 before/after runs. Retain the existing minimum 2147483648-byte free-space guard.
+- Set URP_PRODUCT_INCLUDE=$providers/include, BINDGEN_EXTRA_CLANG_ARGS=-I$providers/include, RPTADV_SOFIA_PREFIX=$cohort/support/sofia, and CARGO_TARGET_DIR=/workspace/phone-codec-analysis-union/.work/target-union. Preserve CARGO_INCREMENTAL=0, CARGO_PROFILE_DEV_DEBUG=0, CARGO_PROFILE_TEST_DEBUG=0, and CC=clang.
+- Reuse verified radio input /workspace/phone-local-speech-retention/.work/radio-2eec2cd-cohort/radio, preserving its checksum and provider SDK checksum. Preserve LIBRARY_PATH=$radio:$providers:$RPTADV_SOFIA_PREFIX/lib:$CARGO_TARGET_DIR/debug.
+- Prepare a **new inactive** runtime at /workspace/phone-plc-courtesy/.work/runtime, with only required unchanged, verified cohort DSOs and symlinks. Never overwrite either baseline runtime. After building this feature's product and standalone, install their artifacts into this private runtime before composed tests.
+- Set LD_LIBRARY_PATH=$radio:$cohort/support/dtmf:$RPTADV_SOFIA_PREFIX/lib:$providers:$runtime:$CARGO_TARGET_DIR/debug, RPT_ADVANCED_LIBDIR=$runtime, and RPTADV_SIP_TEST_PROVIDER=$runtime/librptadv_sip_adapter.so.1, matching the reference's coherent order. Check ldd proves intended radio/product/SDK resolution; do not let tests silently load the baseline product.
+- Run one affected build or test command per bounded batch and preserve resource measurements/digest evidence. Do not blindly rerun the reference's entire all-suite sequence.
+
+Do not invoke bare Cargo against default image headers/libraries: the older radio headers previously produce E0609, and default library discovery can exercise the wrong product. If cohort provisioning, verified dynamic resolution or disk space blocks a run, record the exact setup failure; never weaken tests, change permissions or substitute an unqualified provider.
 
 ## Task 1: Explicit decode provenance and bounded SIP observations
 
@@ -105,10 +118,11 @@ Substitute exactly one affected test command per batch. Confirm required dynamic
 
 **Interfaces:**
 - Add `Ingress::concealed(&mut self, start: u64, samples: &[f32], birth: Option<SourceBirth>) -> Result<usize, Error>` for native PCM.
-- Keep `Ingress::gap(start, count)` for counted source loss, but request `InboundProducer::gap` and retain admission when an existing original-history continuity lease is valid. Actual `SourceInput::Discontinuity` and invalid timing continue to retire.
+- Keep Ingress::gap(start, count) as the counted source-span seam, but permit InboundProducer::gap fallback continuity only for proven mapped same-epoch loss with a valid original-history continuity lease. First distinguish all producer causes below; the callback itself has no reason/birth field. Actual SourceInput::Discontinuity, invalid timing and unqualified causes continue to retire, using the existing discontinuity route rather than silently treating them as packet loss.
 - Extend existing `Shared` bounded source metadata with exact original/synthetic classification and conservative inherited bound. Allocate storage at preparation from existing source-capacity bounds; account for arbitrary one-frame fragment alternation. Use per-source-slot bits/records or an equally exact bounded extension of the existing ledger, not one boolean per 20 ms bucket. Publish metadata before PCM credit and reclaim only after real playout, preserving existing racing-snapshot fail-closed semantics.
 - Add `PhoneSpeechState { key: PhoneCourtesyKey, phase: PhoneSpeechPhase }` and `PhoneSpeechPhase { Open, Draining, Closed, Unavailable }` as Copy core types. Default `PeerInput::phone_speech_state(&self) -> Option<PhoneSpeechState>` returns None; the phone input supplies it, processing wrappers forward it. Closed means verified original hold exhaustion plus drained qualified output, never a generic inactive/error return.
 
+- [ ] Enumerate every counted-gap producer and pin its classification in tests before changing shared gap admission: call_media.rs jitter Kind::Missing; Pending::Audio.prefix from positive packet offset or source_end/adaptation skip; Pending::Gap synthesized when packet receipt lookup fails; and product services.rs callback forwarding to private_phone.rs::SourceInput::Gap, including existing IAX producers. Only known-timed same-epoch loss is recoverable. Failed receipt lookup, reset, epoch mismatch and unqualified skip remain hard discontinuities; insertion still creates no source gap. Reuse existing source-discontinuity callbacks for hard causes. Do not broaden IAX semantics merely because the product callback is shared, and do not infer a missing birth from current time.
 - [ ] Add table-driven red tests at 8/16 kHz: loss before onset, already-open speech, exactly at hold boundary, exhausted immutable age, expired generation, lost timing, reset and command mute. Assert explicit concealed classification, no new original voice decision, unchanged `last_voice/voice_until`, and no synthetic-only RF start.
 - [ ] Add `later_voice_does_not_promote_synthetic_preroll_to_rf_onset`: require genuine qualifying audio to reach output before any synthetic continuation is admitted. Source-side VAD qualification alone is insufficient.
 - [ ] Add `mixed_single_sample_credit_preserves_plc_origin`: alternate one original/one concealed sample inside a bucket, fragment acceptance, force zero credit and mixed fractional conversion boundaries; assert no sample becomes falsely original or entire original regions get mislabeled synthetic.
