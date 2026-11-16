@@ -7,7 +7,8 @@ adaptive cut using a fresh generation, never old media or synthetic authority.
 
 **Architecture:** A cause-specific ordered cut can arm one revision/epoch-bound
 owner request. Fresh original source evidence plus ordinary current collector
-and policy approval enables existing graph preparation/adoption. Old input,
+and policy approval enables exact private graph replacement/preparation/adoption.
+Old input,
 hold and courtesy remain permanently fenced.
 
 **Tech Stack:** Existing Rust controller/standalone, sized C source ABI1,
@@ -38,7 +39,8 @@ optional ABI-tail gates. A fresh worker is to implement, not this author.
 2. A new DTMF onset between control approval and owner adoption must win.
 3. Same-node detach/reattach must reject an old queued recovery ticket.
 4. Fresh original silence may prepare but cannot open RF or create old P.
-5. A cut after final speech cannot inherit old hold; strict composed P may stay RED.
+5. Host replacement preserves only exact approved recovery; explicit retirement
+   cancels it.
 
 ---
 
@@ -48,15 +50,19 @@ optional ABI-tail gates. A fresh worker is to implement, not this author.
 `rust/product/src/services.rs`, `rust/product/src/services_time_tests.rs`,
 `rust/product/src/link/private_phone.rs` (same hard-cut handler only),
 `rust/standalone/src/phone/call_media.rs`,
-`rust/standalone/src/phone/call_media_tests.rs`;
+`rust/standalone/src/phone/call_media_tests.rs`,
+`rust/standalone/src/host_services/iax_phone.rs` and its sink tests;
 affected literal sink initializers in standalone IAX tests and
 `rust/peer-support/tests/support/host_media.rs`; existing C ABI probe and ADR0044.
 Do not change jitter ABI/algorithm.
 
 **Interfaces:** optional appended
 `rptadv_peer_source_adaptation_v1(void*, uint64_t, uint32_t) -> int32_t`;
-`SourceInput::AdaptationCut { start: u64, count: usize }`.
-Generic Discontinuity semantics stay unchanged.
+crate-private `SourceDispatch::AdaptationCut { start: u64, count: usize }`
+and `PeerIo::read_source_causal_at(completion, reference, dispatch)`.
+Public SourceInput and read_source[_at] stay unchanged, sharing validation and
+mapping adaptation to generic Discontinuity for public callers. One private
+SourceReset identity survives refused dispatch across reads.
 
 - [ ] First preserve a before-probe against057cd668: change only the existing
   actual-native/composed-seam characterization expectation to require readiness
@@ -70,14 +76,29 @@ Generic Discontinuity semantics stay unchanged.
   positive prefix without matching exact advance evidence, missing receipt plus
   real skip, overflow/reset, insertion, startup and old-size/null-tail sinks.
   Generic hard cuts stay generic; insertion causes no source gap.
+- [ ] Add `adaptation_witness_is_invalidated_before_put_or_ambiguous_get`:
+  a valid fully credited Packet/advance witness followed by a put, reset,
+  Missing, Insertion, overlap, observation failure or saturation stays generic.
+  An already-buffered exact successor without put proves the positive path;
+  unchanged NotDue may retain it. Do not reorder receive/get to save a witness.
+- [ ] Add `reset_retry_keeps_exact_identity_across_reads`: refusal then identical
+  retry completes once; changed range/cause and generic-to-adaptation substitution
+  fail closed; later PCM gets zero credit; original owner snapshot is not retaken.
+- [ ] Add actual old-layout allocation fixtures for both SIP and production IAX,
+  plus null callback and each one-byte-short field boundary. A full new struct
+  with smaller declared size is not this memory-safety oracle. Public SourceInput
+  exhaustive-match consumer compiles unchanged.
 - [ ] Run focused tests and preserve actual assertion RED separately from build
   errors. Existing `adaptive_delay_reduction_preserves_exact_source_gap_credit`
   and signed-offset tests remain unconditional.
 - [ ] Implement the sized callback, validated service dispatch and bounded
-  exact-native skip evidence; dispatch AdaptationCut through the same hard-cut
+  exact-native skip evidence; dispatch private AdaptationCut through the shared
+  hard-cut
   handler with NO recovery yet. This compiles the interface before Task2's
   behavioral RED; do not implement recovery policy in this task.
-  Check field-size boundaries before reads; no hidden use of existing fields.
+  Check field-size boundaries before raw reads; never construct a full enlarged
+  Rust sink reference over old memory. Use named old digit-tail and new callback
+  minimum sizes in SIP and IAX. No hidden use of existing fields.
 - [ ] Verify C prefix/tail layout/short sinks, callback retries/invalid ranges,
   actual Media skip credit and signed offsets. Update ADR0044 and interface
   artifacts; identify exact candidate header/DSO identities without overwriting
@@ -86,6 +107,7 @@ Generic Discontinuity semantics stay unchanged.
 ### Task2: Add the bounded fresh-source request and real control approval
 
 **Files:** `rust/product/src/link/private_phone.rs`,
+`rust/product/src/link/phone_media.rs`, `rust/product/src/host.rs`,
 `rust/product/src/phone.rs`, `rust/product/src/link/phone_adaptation_tests.rs`,
 `rust/product/src/phone_tests.rs`,
 `rust/product/src/host_phone_attachment_policy_tests.rs`, and
@@ -100,6 +122,10 @@ adjustment; keep the ordinary Engine/refresh/policy path.
 `PrivateCommand::Recover(RecoveryTicket)`. Extend existing allocated
 source-ready shared state with packed request and checked cancellation epoch.
 No public Rust API. Real consumed_revision remains digits-only.
+Crate-private `PhoneCalls::retire_for_graph_replacement(&mut self,
+&PhoneSource, &PeerReply) -> Result<(), Error>` replaces the host's unconditional
+public retire call. Exact approved recovery preserves its ticket; all other
+cases retain cancellation. Prepared/adopted media binds immutable origin epoch.
 
 - [ ] Extend057cd668 characterization with a cause-tagged active-origin branch:
   actual native cut; old input immediately inactive; fresh independently timed
@@ -109,15 +135,31 @@ No public Rust API. Real consumed_revision remains digits-only.
 - [ ] Run against Task1's cause-aware but nonrecovering implementation: expect
   readiness/admission RED, not native-fixture, compiler or timing failure.
   Preserve this exact base/log separately from057cd668's before-probe.
-- [ ] Implement active-origin ticket arming; capture real cut reference/epoch,
+- [ ] Implement active-origin ticket arming; capture real cut reference and
+  immutable active-origin epoch,
   cancel on generic cut/onset/digit; publish only after positive original credit
   and actual detector/raw-tail drain. Synthetic-only/pre-cut receipt cannot arm.
 - [ ] Implement collector/auth/attachment-gated approval through existing queue.
   Owner validates after reading source, without end_command or suppression
-  clearing. Use acknowledged recovery revision only for fresh media preparation.
+  clearing. Queueing is same-ticket idempotent. Use acknowledged recovery
+  revision only for fresh media preparation.
 - [ ] Implement cancellation-epoch invalidation on explicit retire/detach before
   existing media retirement; stale queued approvals and prepared inputs fail
   closed. Repeated eligible cuts replace one ticket, not append work.
+- [ ] Implement exact private graph replacement in host.rs/phone.rs: keep public
+  retire_media canceling, separate its shared generation-retire primitive from
+  cancellation. Reload/policy invalidation cancels before graph preparation.
+  Bind epoch at candidate creation, retain through owner queue and adoption;
+  mismatches retire, never recapture a newer epoch from an old origin.
+- [ ] Add `host_refresh_recovers_exact_approved_generation_after_busy`: use actual
+  Host::refresh_inputs, verified idle control and original evidence; Busy/drop
+  retires unpublished candidate, exact current ticket can retry with a distinct
+  generation. Successful adoption consumes ticket; external retirement, detach
+  or reload before retry makes it fail closed.
+- [ ] Add `cancel_epoch_invalidates_active_origin_before_retirement`: pause control
+  between epoch invalidation and shared-media retirement, offer an adaptation
+  cut from still-active old origin; it cannot capture the new epoch or recover.
+  Also cancel after approval and before queued candidate adoption.
 - [ ] Add compact negative/race tests covering all spec classes: origins/protocols;
   source time/provenance/credit; collectors/commands; repeated cuts/queue full;
   exact call/account/attachment/config and candidate replacement/exhaustion.
@@ -151,7 +193,9 @@ Do not modify strict SIP assertions or positive courtesy oracles to pass.
   original failure was reproduced or solved from aggregate counters.
 - [ ] Return exact base/head, test/ABI/provider identities, focused diff, RED/
   GREEN logs and review status. Distinguish recovery proof, strict SIP result,
-  async station behavior and unrun full gates. No live deployment.
+  async station behavior and unrun full gates. Explicitly report the
+  prepared/inactive attachment gap and the conservative
+  no-intervening-put witness coverage limit. No live deployment.
 
 ## Reproducible focused command wrapper
 
