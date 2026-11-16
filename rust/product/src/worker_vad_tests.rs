@@ -4,10 +4,12 @@ use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
 fn setup() -> (Runtime<Audio>, RadioWorker) {
-    let (runtime, owners) = audio_owners_with_config(
-        4096,
-        "[1000]\nradio_channel=usb\nduplex=full\nsquelch_delay_ms=160\n",
-    );
+    setup_with_delay(160)
+}
+fn setup_with_delay(delay_ms: u32) -> (Runtime<Audio>, RadioWorker) {
+    let configuration =
+        format!("[1000]\nradio_channel=usb\nduplex=full\nsquelch_delay_ms={delay_ms}\n");
+    let (runtime, owners) = audio_owners_with_config(4096, &configuration);
     crate::fixture::RADIO_READY.store(0, Ordering::Release);
     // SAFETY: the fixture descriptor and callbacks live for the test process.
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
@@ -15,7 +17,7 @@ fn setup() -> (Runtime<Audio>, RadioWorker) {
         services.radio("1000", "usb", 4096).unwrap(),
         Instant::now(),
         RadioStatus::default(),
-        160,
+        u64::from(delay_ms),
         50,
     )
     .unwrap_or_else(|_| panic!("prepare VAD callback fixture"));
@@ -85,6 +87,133 @@ fn replace_local_provider(worker: &mut RadioWorker, api: ffi::rpcr3_descriptor) 
     worker.handoff = update.receive.handoff.clone();
     worker.receive.state.get_mut().ring.current = update.receive;
     worker.transmit.ring.get_mut().current = update.transmit;
+}
+
+#[test]
+fn zero_retention_vad_services_ring_while_raw_is_closed() {
+    thread_local! {
+        static RENDERS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    unsafe extern "C" fn counted_render(
+        ring: *mut ffi::rpcr3_ring,
+        output: *mut f32,
+        count: u64,
+        real: *mut u64,
+    ) -> i32 {
+        RENDERS.set(RENDERS.get() + 1);
+        // SAFETY: only the render entry was wrapped; forward its unchanged spans
+        // and retained ring to the process-lifetime original provider.
+        unsafe {
+            ((*ffi::rpcr3_descriptor()).ring_consumer_render.unwrap())(ring, output, count, real)
+        }
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for mode in [0, 1, 2] {
+        let (_runtime, mut worker) = setup();
+        // SAFETY: copy the process-lifetime provider; retain all real operations.
+        let mut api = unsafe { *ffi::rpcr3_descriptor() };
+        api.ring_consumer_render = Some(counted_render);
+        replace_local_provider(&mut worker, api);
+        RENDERS.set(0);
+        for block in 0..4 {
+            let mut capture = metadata(block * 960, 960, false, false, 0, None, mode);
+            capture.vad_preroll_frames = 0;
+            assert_eq!(deliver(&worker, &capture, &mut [0.25; 960]), 0);
+            let mut output = [9.0; 960];
+            assert_eq!(tx(&worker, &mut output), (0, 0));
+            assert_eq!(output, [0.0; 960]);
+        }
+        assert_eq!(RENDERS.get(), if mode == 0 { 0 } else { 4 });
+        drop(worker.stop());
+    }
+}
+
+#[test]
+fn configured_vad_retention_sizes_existing_ring_and_preserves_raw_gate() {
+    thread_local! {
+        static POLICY: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
+    }
+    unsafe extern "C" fn query(
+        _: *mut std::ffi::c_void,
+        _: *mut std::ffi::c_void,
+        request: *mut ffi::rptadv_radio_control_v1,
+        _: ffi::rptadv_text_sink_v1,
+        _: *mut std::ffi::c_void,
+    ) -> i32 {
+        // SAFETY: the typed client lends its complete writable control request.
+        let request = unsafe { &mut *request };
+        assert_eq!(
+            request.command.command,
+            ffi::URP_AST_COMMAND_GET_RECEIVE_POLICY
+        );
+        let (mode, retention_ms) = POLICY.get();
+        request.command.value = i64::from(mode);
+        request.command.flags = retention_ms * 48;
+        0
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for (mode, retention_ms, delay_ms) in [
+        (1, 0, 0),
+        (1, 80, 30),
+        (2, 160, 30),
+        (2, 300, 30),
+        (2, 80, 200),
+    ] {
+        POLICY.set((mode, retention_ms));
+        let configuration =
+            format!("[1000]\nradio_channel=usb\nduplex=full\nsquelch_delay_ms={delay_ms}\n");
+        let (_runtime, owners) = audio_owners_with_config(4096, &configuration);
+        crate::fixture::RADIO_READY.store(0, Ordering::Release);
+        // SAFETY: copy the fixture's process-lifetime function table.
+        let mut table = unsafe { *crate::fixture::host_descriptor() };
+        table.radio_control = Some(query);
+        // SAFETY: the leaked immutable table and fixture callback code outlive the worker.
+        let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+        let mut worker = RadioWorker::prepare(
+            services.radio("1000", "usb", 4096).unwrap(),
+            Instant::now(),
+            RadioStatus::default(),
+            u64::from(delay_ms),
+            50,
+        )
+        .unwrap_or_else(|_| panic!("prepare mode {mode}, retention {retention_ms} ms"));
+        assert_eq!(worker.minimum_delay_ms(), u64::from(retention_ms));
+        assert_eq!(
+            worker.squelch_delay_ms(),
+            u64::from(delay_ms.max(retention_ms))
+        );
+        assert_eq!(
+            worker.observer.observe().unwrap().reserve_samples,
+            u64::from(delay_ms.max(retention_ms)) * 48,
+        );
+        assert!(worker.attach(owners).is_ok());
+        let mut clock = 0;
+        let mut heard_voice = false;
+        for _ in 0..40 {
+            let mut capture = metadata(clock, 960, true, true, 1, Some(clock + 959), mode);
+            capture.vad_preroll_frames = retention_ms * 48;
+            assert_eq!(deliver(&worker, &capture, &mut [0.25; 960]), 0);
+            clock += 960;
+            let mut output = [0.0; 960];
+            assert_eq!(tx(&worker, &mut output).0, 0);
+            heard_voice |= output.iter().any(|sample| *sample > 0.05);
+        }
+        assert!(
+            heard_voice,
+            "configured retention must not permanently mute qualified speech"
+        );
+        let mut closed = metadata(clock, 960, false, false, 1, None, mode);
+        closed.vad_preroll_frames = retention_ms * 48;
+        assert_eq!(deliver(&worker, &closed, &mut [0.25; 960]), 0);
+        let mut output = [9.0; 960];
+        assert_eq!(tx(&worker, &mut output), (0, 0));
+        assert_eq!(output, [0.0; 960]);
+        drop(worker.stop());
+    }
 }
 
 #[test]
@@ -202,44 +331,52 @@ fn rapid_rekey_mutes_old_tail_and_retains_new_onset_before_tx_runs() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (_runtime, worker) = setup();
-    let mut clock = 0;
-    for _ in 0..4 {
-        let metadata = metadata(clock, 960, true, true, 1, Some(clock + 959), 1);
-        assert_eq!(deliver(&worker, &metadata, &mut [0.5; 960]), 0);
-        clock += 960;
-    }
-    let closed = metadata(clock, 480, false, false, 1, None, 1);
-    assert_eq!(deliver(&worker, &closed, &mut [0.0; 480]), 0);
-    clock += 480;
-    let first_new = metadata(clock, 960, true, true, 2, Some(clock + 959), 1);
-    assert_eq!(deliver(&worker, &first_new, &mut [-0.375; 960]), 0);
-    clock += 960;
-    assert_eq!(
-        worker.observer.observe().unwrap().available_samples,
-        5280,
-        "normal RF rekey must not drop initial capture while awaiting TX"
-    );
-    let mut played = Vec::new();
-    for block in 0..24 {
-        if block != 0 {
-            let metadata = metadata(clock, 960, true, true, 2, Some(clock + 959), 1);
-            assert_eq!(deliver(&worker, &metadata, &mut [-0.125; 960]), 0);
+    for (retention_ms, delay_ms) in [(0, 0), (0, 160), (160, 160)] {
+        for mode in [1, 2] {
+            let (_runtime, worker) = setup_with_delay(delay_ms);
+            let mut clock = 0;
+            for _ in 0..4 {
+                let mut metadata = metadata(clock, 960, true, true, 1, Some(clock + 959), mode);
+                metadata.vad_preroll_frames = retention_ms * 48;
+                assert_eq!(deliver(&worker, &metadata, &mut [0.5; 960]), 0);
+                clock += 960;
+            }
+            let mut closed = metadata(clock, 480, false, false, 1, None, mode);
+            closed.vad_preroll_frames = retention_ms * 48;
+            assert_eq!(deliver(&worker, &closed, &mut [0.0; 480]), 0);
+            clock += 480;
+            let mut first_new = metadata(clock, 960, true, true, 2, Some(clock + 959), mode);
+            first_new.vad_preroll_frames = retention_ms * 48;
+            assert_eq!(deliver(&worker, &first_new, &mut [-0.375; 960]), 0);
             clock += 960;
+            assert_eq!(
+                worker.observer.observe().unwrap().available_samples,
+                5280,
+                "normal RF rekey must not drop initial capture while awaiting TX"
+            );
+            let mut played = Vec::new();
+            for block in 0..24 {
+                if block != 0 {
+                    let mut metadata = metadata(clock, 960, true, true, 2, Some(clock + 959), mode);
+                    metadata.vad_preroll_frames = retention_ms * 48;
+                    assert_eq!(deliver(&worker, &metadata, &mut [-0.125; 960]), 0);
+                    clock += 960;
+                }
+                let mut output = [9.0; 960];
+                assert_eq!(tx(&worker, &mut output).0, 0);
+                played.extend_from_slice(&output);
+            }
+            assert!(
+                played.iter().all(|sample| *sample < 0.02),
+                "old positive tail must stay muted after rapid rekey"
+            );
+            assert!(
+                played.iter().any(|sample| *sample < -0.3),
+                "new burst's first negative marker must survive"
+            );
+            drop(worker.stop());
         }
-        let mut output = [9.0; 960];
-        assert_eq!(tx(&worker, &mut output).0, 0);
-        played.extend_from_slice(&output);
     }
-    assert!(
-        played.iter().all(|sample| *sample < 0.02),
-        "old positive tail must stay muted after rapid rekey"
-    );
-    assert!(
-        played.iter().any(|sample| *sample < -0.3),
-        "new burst's first negative marker must survive"
-    );
-    drop(worker.stop());
 }
 #[test]
 fn partial_and_zero_credit_capture_require_reset_and_a_post_fault_voice() {
@@ -295,7 +432,7 @@ fn malformed_source_and_identity_free_error_records_cancel_prior_admission() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    for bad in 0..19 {
+    for bad in 0..22 {
         let (_runtime, worker) = setup();
         let mut clock = 0;
         grant(&worker, &mut clock, 1);
@@ -322,10 +459,13 @@ fn malformed_source_and_identity_free_error_records_cancel_prior_admission() {
             12 => metadata.vad_mode = 3,
             13 => metadata.vad_voice_active = 2,
             14 => metadata.vad_score = -0.1,
-            15 => metadata.vad_preroll_frames = 0,
+            15 => metadata.vad_preroll_frames = 14448,
             16 => metadata.rf_burst_id = 0,
             17 => metadata.vad_voice_sample_index = clock + 960,
-            _ => metadata.vad_score = 1.1,
+            18 => metadata.vad_score = 1.1,
+            19 => metadata.vad_preroll_frames = 47,
+            20 => metadata.vad_preroll_frames = u32::MAX,
+            _ => metadata.vad_mode = 0,
         }
         let status = if bad == 7 {
             // SAFETY: negative status is the sized cancellation record; it requires no PCM or identity.
@@ -671,42 +811,48 @@ fn vad_fault_waits_for_successful_reset_and_cannot_grant_without_a_voice_stamp()
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (_runtime, worker) = setup();
-    let mut clock = 0;
-    for count in [4096, 4096, 4096, 2112, 960] {
-        let capture = metadata(clock, count, true, false, 1, None, 1);
-        assert_eq!(deliver(&worker, &capture, &mut vec![0.25; count]), 0);
-        clock += count as u64;
+    for retention_ms in [0, 160] {
+        let (_runtime, worker) = setup_with_delay(retention_ms);
+        let mut clock = 0;
+        for count in [4096, 4096, 4096, 2112, 960] {
+            let mut capture = metadata(clock, count, true, false, 1, None, 1);
+            capture.vad_preroll_frames = retention_ms * 48;
+            assert_eq!(deliver(&worker, &capture, &mut vec![0.25; count]), 0);
+            clock += count as u64;
+        }
+        assert_eq!(
+            worker.handoff.write_failed_samples.load(Ordering::Acquire),
+            960
+        );
+        let mut pending = metadata(clock, 960, true, true, 1, Some(clock + 959), 1);
+        pending.vad_preroll_frames = retention_ms * 48;
+        assert_eq!(deliver(&worker, &pending, &mut [0.25; 960]), 0);
+        clock += 960;
+        assert_eq!(
+            worker.handoff.pending_reset_dropped.load(Ordering::Acquire),
+            960
+        );
+        let required = worker.handoff.reset_required.load(Ordering::Acquire);
+        RadioWorker::fail_next_for_test(TestFailure::Reset);
+        let mut output = [9.0; 960];
+        assert_eq!(tx(&worker, &mut output), (0, 0));
+        assert_eq!(output, [0.0; 960]);
+        assert!(worker.handoff.reset_ack.load(Ordering::Acquire) < required);
+        assert_eq!(tx(&worker, &mut output), (0, 0));
+        assert_eq!(worker.handoff.reset_ack.load(Ordering::Acquire), required);
+        let mut falling = metadata(clock, 960, false, false, 1, None, 1);
+        falling.vad_preroll_frames = retention_ms * 48;
+        assert_eq!(deliver(&worker, &falling, &mut [0.0; 960]), 0);
+        clock += 960;
+        assert_eq!(worker.observer.observe().unwrap().available_samples, 960);
+        let mut unstamped = metadata(clock, 960, true, true, 2, None, 1);
+        unstamped.vad_preroll_frames = retention_ms * 48;
+        assert_eq!(deliver(&worker, &unstamped, &mut [0.25; 960]), 0);
+        assert_eq!(worker.handoff.admission.load(Ordering::Acquire), 0);
+        assert_eq!(tx(&worker, &mut output), (0, 0));
+        assert_eq!(output, [0.0; 960]);
+        drop(worker.stop());
     }
-    assert_eq!(
-        worker.handoff.write_failed_samples.load(Ordering::Acquire),
-        960
-    );
-    let pending = metadata(clock, 960, true, true, 1, Some(clock + 959), 1);
-    assert_eq!(deliver(&worker, &pending, &mut [0.25; 960]), 0);
-    clock += 960;
-    assert_eq!(
-        worker.handoff.pending_reset_dropped.load(Ordering::Acquire),
-        960
-    );
-    let required = worker.handoff.reset_required.load(Ordering::Acquire);
-    RadioWorker::fail_next_for_test(TestFailure::Reset);
-    let mut output = [9.0; 960];
-    assert_eq!(tx(&worker, &mut output), (0, 0));
-    assert_eq!(output, [0.0; 960]);
-    assert!(worker.handoff.reset_ack.load(Ordering::Acquire) < required);
-    assert_eq!(tx(&worker, &mut output), (0, 0));
-    assert_eq!(worker.handoff.reset_ack.load(Ordering::Acquire), required);
-    let falling = metadata(clock, 960, false, false, 1, None, 1);
-    assert_eq!(deliver(&worker, &falling, &mut [0.0; 960]), 0);
-    clock += 960;
-    assert_eq!(worker.observer.observe().unwrap().available_samples, 960);
-    let unstamped = metadata(clock, 960, true, true, 2, None, 1);
-    assert_eq!(deliver(&worker, &unstamped, &mut [0.25; 960]), 0);
-    assert_eq!(worker.handoff.admission.load(Ordering::Acquire), 0);
-    assert_eq!(tx(&worker, &mut output), (0, 0));
-    assert_eq!(output, [0.0; 960]);
-    drop(worker.stop());
 }
 
 thread_local! {

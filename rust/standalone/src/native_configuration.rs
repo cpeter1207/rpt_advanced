@@ -250,6 +250,56 @@ mod tests {
     }
 
     #[test]
+    fn copied_native_receive_policy_preserves_configured_retention() {
+        // SAFETY: these C records contain only scalar fields and nullable pointers.
+        let (mut radio, mut request): (
+            abi::rptadv_radio_session_config,
+            abi::UrpNativeStationConfig,
+        ) = unsafe { std::mem::zeroed() };
+        radio.struct_size = std::mem::size_of_val(&radio) as u32;
+        radio.abi_version = 5;
+        request.struct_size = std::mem::size_of_val(&request) as u32;
+        request.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
+        request.radio = &radio;
+        for mode in [0, 1, 2] {
+            for retention_ms in [0, 1, 80, 160, 300] {
+                radio.receive.vad_mode = mode;
+                radio.speech.retention_ms = retention_ms;
+                // SAFETY: all borrowed records remain readable for this synchronous copy.
+                let copied = unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap();
+                assert_eq!(
+                    copied.receive_policy(),
+                    (mode, if mode == 0 { 0 } else { retention_ms * 48 }),
+                    "mode {mode}, retention {retention_ms} ms",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn copied_native_receive_policy_rejects_out_of_contract_tail() {
+        // SAFETY: these C records contain only scalar fields and nullable pointers.
+        let (mut radio, mut request): (
+            abi::rptadv_radio_session_config,
+            abi::UrpNativeStationConfig,
+        ) = unsafe { std::mem::zeroed() };
+        radio.struct_size = std::mem::size_of_val(&radio) as u32;
+        radio.abi_version = 5;
+        request.struct_size = std::mem::size_of_val(&request) as u32;
+        request.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
+        request.radio = &radio;
+        for (mode, retention_ms) in [(3, 160), (1, 301), (2, u32::MAX), (0, 301)] {
+            radio.receive.vad_mode = mode;
+            radio.speech.retention_ms = retention_ms;
+            // SAFETY: all borrowed records remain readable for this synchronous copy.
+            assert!(
+                unsafe { NativeRadioConfiguration::copy_from(&request) }.is_err(),
+                "mode {mode}, retention {retention_ms} ms",
+            );
+        }
+    }
+
+    #[test]
     fn copied_native_request_rejects_null_and_size_only_header() {
         // SAFETY: null is rejected before access.
         assert!(unsafe { NativeRadioConfiguration::copy_from(std::ptr::null()) }.is_err());

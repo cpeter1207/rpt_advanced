@@ -1369,13 +1369,26 @@ fn receive_policy_query_requires_exact_response_and_rejects_unknown_success() {
             12 => p.struct_size = 4,
             13 => p.command.command = 1,
             14 => p.command.target = 1,
+            15 => {
+                p.command.value = 1;
+                p.command.flags = 3840;
+            }
+            16 => p.command.flags = 14400,
+            17 => p.command.flags = 14448,
+            18 => p.command.flags = 47,
+            19 => p.command.flags = u32::MAX,
+            20 => {
+                p.command.value = 1;
+                p.command.flags = 0;
+            }
+            21 => p.command.flags = 48,
             _ => {}
         }
         0
     }
     let services = host_services(|table| table.radio_control = Some(query));
     let mut radio = services.radio("1000", "usb", 8).unwrap();
-    for case in 0..15 {
+    for case in 0..22 {
         CASE.set(case);
         assert_eq!(
             radio.receive_policy(),
@@ -1383,6 +1396,18 @@ fn receive_policy_query_requires_exact_response_and_rejects_unknown_success() {
                 0..=2 => Ok(ReceivePolicy {
                     mode: u32::from(case),
                     preroll_frames: if case == 0 { 0 } else { 7680 }
+                }),
+                5 | 20 => Ok(ReceivePolicy {
+                    mode: if case == 5 { 2 } else { 1 },
+                    preroll_frames: 0,
+                }),
+                15 | 16 | 21 => Ok(ReceivePolicy {
+                    mode: if case == 15 { 1 } else { 2 },
+                    preroll_frames: match case {
+                        15 => 3840,
+                        16 => 14400,
+                        _ => 48,
+                    },
                 }),
                 9 => Err(-9),
                 _ => Err(-1),
