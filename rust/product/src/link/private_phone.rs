@@ -742,9 +742,11 @@ impl PrivatePhoneSession {
                 {
                     media.adopt(&self.reply, self.source_end, admission);
                 }
-            } else if self.pending_release != Some(expected) {
-                media.retire();
             }
+            // Matching Media may reach this serial queue before CollectionEnded.
+            // Retain it inactive; only the settled matching release plus real
+            // drained/ready source above grants adoption. A newer revision still
+            // retires it immediately, so waiting cannot resurrect old custody.
         }
         self.select_programme(
             self.current.is_none() && self.media.as_ref().is_some_and(|media| media.active()),

@@ -2575,3 +2575,16 @@ This implements the inactive development courtesy checkpoint only. It is not
 native ARM64, full coverage/package/hosted qualification, an operator config
 change, deployment authorization, or physical/RF acceptance. Those gates and
 the separately approved manual milestone remain required.
+
+
+### Prepared input before collector release (2026-11-16 local prerequisite)
+
+Fast graph publication may deliver a prepared Media command before the matching
+CollectionEnded token reaches the existing serial private owner. Equal current
+revision is not permission to play, but absence of the later release is not a
+revocation either. The owner retains that one candidate inactive until the same
+revision is settled and the actual source is drained and ready. A newer digit,
+source reset, call/media retirement or cancellation still invalidates the old
+candidate; stale releases never revive it or substitute for a fresh preparation.
+There is no extra candidate, PCM buffer, command queue or early admission.
+Both command orders and cancellation while waiting are deterministic test cases.

@@ -3340,3 +3340,98 @@ fn native_recovered_ilbc_tone_cannot_initiate_private_dtmf_or_speech() {
     assert!(state.lock().unwrap().bound_radio.is_none());
     assert!(!reply.ended(), "non-authority is not call termination");
 }
+
+#[test]
+fn prepared_phone_media_precedes_collection_release_without_early_admission_or_retirement() {
+    use rpt_advanced_core::link::PeerInput as _;
+    for delayed_release in [false, true] {
+        let (mut session, mut control, state, reply) = source_session_with_auth(true);
+        session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+        state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+        session.step(1).unwrap();
+        assert_eq!(control.digit(), Some(('5', 1)));
+        if !delayed_release {
+            assert!(control.collection_ended(&reply));
+        }
+        let mut input = control.prepare_media(None).unwrap();
+        if delayed_release {
+            for now in 2..5 {
+                session.step(now).unwrap();
+                assert!(
+                    !input.active(),
+                    "Media cannot grant authority before matching collector release"
+                );
+                assert!(
+                    control.media_occupied(),
+                    "same-revision candidate must survive Media arriving before CommandEnd"
+                );
+                assert!(collection_suppressed(&session));
+                let mut pcm = [1.0; 160];
+                assert!(input.render_timed_block(&mut pcm).is_none());
+                assert_eq!(pcm, [0.0; 160]);
+            }
+            assert!(control.collection_ended(&reply));
+        }
+        session.step(5).unwrap();
+        assert!(
+            input.active(),
+            "both queue orders admit only after matching settled release and real drain"
+        );
+        assert!(!collection_suppressed(&session));
+        assert!(!reply.ended());
+    }
+}
+
+#[test]
+fn prepared_phone_media_awaiting_release_cannot_survive_cuts_or_stale_release() {
+    for cut in ["digit", "reset", "hangup", "retire", "cancel-queued"] {
+        let (mut session, mut control, state, reply) = source_session_with_auth(true);
+        session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+        state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+        session.step(1).unwrap();
+        assert_eq!(control.digit(), Some(('5', 1)));
+        let old = control.prepare_media(None).unwrap();
+        let mut replacement = None;
+        if cut == "cancel-queued" {
+            control.retire_media();
+            replacement = Some(control.prepare_media(None).unwrap());
+        }
+        session.step(2).unwrap();
+        assert!(!old.active());
+        assert!(
+            control.media_occupied(),
+            "candidate custody is retained inactive before release ({cut})"
+        );
+        match cut {
+            "digit" => state.lock().unwrap().input.push_back(Input::Digit(b'6')),
+            "reset" => state.lock().unwrap().source_reset = true,
+            "hangup" => reply.retire(),
+            "retire" => control.retire_media(),
+            _ => {}
+        }
+        let result = session.step(3);
+        if cut == "hangup" {
+            assert_eq!(result, Err(Error::Hangup));
+            assert!(!control.collection_ended(&reply));
+        } else {
+            result.unwrap();
+            // Control still holds digit5's revision. A stale release after a
+            // newer digit/reset cannot revive its retired input.
+            assert!(control.collection_ended(&reply));
+            session.step(4).unwrap();
+        }
+        assert!(
+            !old.active(),
+            "no cut/release may resurrect old custody ({cut})"
+        );
+        assert_eq!(
+            replacement.as_ref().is_some_and(|input| input.active()),
+            cut == "cancel-queued"
+        );
+        assert_eq!(control.media_occupied(), cut == "cancel-queued");
+        assert_eq!(reply.ended(), cut == "hangup");
+        if matches!(cut, "digit" | "reset") {
+            assert!(collection_suppressed(&session));
+        }
+    }
+}
