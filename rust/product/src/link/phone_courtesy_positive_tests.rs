@@ -114,6 +114,7 @@ fn configured_native_phone_morse_p_follows_original_hold_and_real_dsp_tail() {
     let call = reply();
     let source = call.phone_source().unwrap().clone();
     let (dsp, graph) = crate::services::history_tests::processor_fixture(1, 1);
+    let render_tap = crate::link::ring::tests::TimedTapGuard::next();
     let (mut ingress, mut input, shared) = super::super::prepare_voiced(
         call.clone(),
         RATE,
@@ -207,6 +208,9 @@ level_db=-6
     let mut tail_nonzero = false;
     let mut after_close = Vec::with_capacity(144_000);
     let mut remote_voice = false;
+    let expected_hold = std::cell::Cell::new(None::<(u64, u64)>);
+    let mut last_held = None;
+    let mut previous_render_calls = 0;
     let mut tick = || {
         let ((rf, metadata), allocations) = guard.measure(|| {
             let mut generation = transmit.acquire().unwrap();
@@ -232,6 +236,69 @@ level_db=-6
         });
         assert_eq!(allocations, 0);
         let phase = evidence.phase();
+        let raw = render_tap.0.snapshot();
+        let support = raw
+            .coordinate
+            .filter(|position| !position.negative)
+            .map(|position| {
+                assert_eq!(position.generation, shared.generation);
+                assert!(position.fraction_billionths < 1_000_000_000);
+                (
+                    position,
+                    position.frame + u64::from(position.fraction_billionths != 0),
+                )
+            });
+        if let Some((hold_start, hold_end)) = expected_hold.get() {
+            if let Some((position, upper)) = support.filter(|(_, upper)| *upper >= hold_start) {
+                assert_eq!(
+                    raw.calls,
+                    previous_render_calls + 1,
+                    "exactly one actual native source render per DSP frame"
+                );
+                if upper < hold_end {
+                    assert_eq!(
+                        dsp.retained_sample().to_bits(),
+                        raw.pcm.to_bits(),
+                        "original held source must not gate before independently recomputed endpoint"
+                    );
+                    last_held = Some((position, native, raw.pcm));
+                } else {
+                    assert_eq!(
+                        dsp.retained_sample(),
+                        0.0,
+                        "no new qualified input after original endpoint"
+                    );
+                }
+            }
+            if matches!(phase, PhoneSpeechPhase::Draining | PhoneSpeechPhase::Closed) {
+                let (_,upper)=support.expect("actual native source coordinate, not phase or past_hold, proves consumed endpoint");
+                assert!(
+                    upper >= hold_end,
+                    "actual rendered source support must reach original endpoint before draining/close: {upper} < {hold_end}"
+                );
+                let (last_position, last_native, last_pcm) =
+                    last_held.expect("original held source must actually render before tail");
+                assert!(
+                    last_position.frame + u64::from(last_position.fraction_billionths != 0)
+                        < hold_end
+                );
+                if phase == PhoneSpeechPhase::Draining {
+                    assert_eq!(native, last_native + 1);
+                    assert_eq!(
+                        rf.to_bits(),
+                        last_pcm.to_bits(),
+                        "actual retained output is the final original-held source sample"
+                    );
+                } else if closed.is_none() {
+                    assert_eq!(
+                        native,
+                        last_native + 2,
+                        "completed close follows actual last held source and one retained output frame"
+                    );
+                }
+            }
+        }
+        previous_render_calls = raw.calls;
         if phase == PhoneSpeechPhase::Draining {
             assert!(evidence.past_hold.load(Ordering::Relaxed));
             assert_eq!(
@@ -333,6 +400,10 @@ level_db=-6
         original_hold.1,
         original_hold.0.unwrap() + 1 + u64::from(HOLD_MS) * 48
     );
+    expected_hold.set(Some((
+        original_hold.0.unwrap() + 1,
+        original_hold.0.unwrap() + 1 + u64::from(HOLD_MS) * 48,
+    )));
     assert!(
         original_hold.1 > cursor as u64,
         "leave actual original hold for synthetic continuity"
@@ -435,6 +506,24 @@ level_db=-6
     for (start, end) in gates {
         let mut cycles = after_close[DELAY + start..DELAY + end].chunks_exact(60);
         for cycle in &mut cycles {
+            // Independent 800 Hz sin/cos projection, allowing arbitrary phase.
+            // A 1600 Hz tone has ~zero projection even though both signs occur.
+            let mut energy = 0.0;
+            let mut sine = 0.0;
+            let mut cosine = 0.0;
+            for (index, sample) in cycle.iter().enumerate() {
+                let phase = std::f64::consts::TAU * 800.0 * index as f64 / f64::from(RATE);
+                let sample = f64::from(*sample);
+                energy += sample * sample;
+                sine += sample * phase.sin();
+                cosine += sample * phase.cos();
+            }
+            let projected = 2.0 * (sine * sine + cosine * cosine) / cycle.len() as f64;
+            assert!(
+                energy > 0.01 && projected / energy > 0.999,
+                "800 Hz reference energy fraction must exceed99.9%, got {}",
+                projected / energy
+            );
             assert!(
                 cycle.iter().any(|s| *s > 0.05) && cycle.iter().any(|s| *s < -0.05),
                 "complete 800 Hz cycles in every dot/dash, not a constant stand-in"
@@ -502,6 +591,10 @@ impl StationMediaSession for NativeMorseStation {
             .as_ref()
             .expect("runtime must supply the configured Morse source");
         assert_eq!(program.morse.as_slice(), std::slice::from_ref(morse));
+        assert_eq!(morse.text, "P");
+        assert_eq!(morse.speed_wpm, 25);
+        assert_eq!(morse.frequency_hz, 800.0);
+        assert_eq!(morse.level_db, -6);
         Ok(Box::new(NativeMorseStream(
             MorseRenderer::new(
                 &morse.text,

@@ -1385,3 +1385,189 @@ fn phone_reserve_uses_actual_ring_headroom_and_capacity_bounds() {
         }
     }
 }
+
+// One explicitly armed test ring on this serial test thread. All production
+// calls and returned PCM/timing/status remain the released provider's own.
+type TimedCallback =
+    unsafe extern "C" fn(*mut ffi::rpcr3_ring, *mut f32, *mut ffi::rpcr3_timed_sample_v1) -> i32;
+struct TimedTapState {
+    armed: bool,
+    ring: *mut ffi::rpcr3_ring,
+    original: Option<TimedCallback>,
+    evidence: Arc<TimedRenderTap>,
+}
+thread_local! {
+    static TIMED_TAP: std::cell::RefCell<Option<TimedTapState>> = const { std::cell::RefCell::new(None) };
+}
+#[derive(Default)]
+pub(crate) struct TimedRenderTap {
+    calls: AtomicU64,
+    code: std::sync::atomic::AtomicI32,
+    flags: std::sync::atomic::AtomicU32,
+    generation: AtomicU64,
+    frame: AtomicU64,
+    fraction: std::sync::atomic::AtomicU32,
+    pcm: std::sync::atomic::AtomicU32,
+}
+pub(crate) struct TimedRenderSnapshot {
+    pub calls: u64,
+    pub coordinate: Option<SourceCoordinate>,
+    pub pcm: f32,
+}
+impl TimedRenderTap {
+    pub(crate) fn snapshot(&self) -> TimedRenderSnapshot {
+        assert_eq!(
+            self.code.load(Ordering::Relaxed),
+            0,
+            "tap preserves provider return status"
+        );
+        let flags = self.flags.load(Ordering::Relaxed);
+        TimedRenderSnapshot {
+            calls: self.calls.load(Ordering::Relaxed),
+            coordinate: (flags & ffi::RPCR3_TIMED_POSITION_VALID != 0).then(|| SourceCoordinate {
+                generation: self.generation.load(Ordering::Relaxed),
+                frame: self.frame.load(Ordering::Relaxed),
+                fraction_billionths: self.fraction.load(Ordering::Relaxed),
+                negative: flags & ffi::RPCR3_TIMED_NEGATIVE != 0,
+            }),
+            pcm: f32::from_bits(self.pcm.load(Ordering::Relaxed)),
+        }
+    }
+}
+/// Arm only the next actual ring. Render on this same test thread and keep the
+/// guard alive until every tapped consumer drops; cleanup is offline and !Send.
+pub(crate) struct TimedTapGuard(
+    pub(crate) Arc<TimedRenderTap>,
+    std::marker::PhantomData<std::rc::Rc<()>>,
+);
+impl TimedTapGuard {
+    pub(crate) fn next() -> Self {
+        let evidence = Arc::new(TimedRenderTap::default());
+        TIMED_TAP.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none());
+            *slot = Some(TimedTapState {
+                armed: true,
+                ring: std::ptr::null_mut(),
+                original: None,
+                evidence: Arc::clone(&evidence),
+            });
+        });
+        Self(evidence, std::marker::PhantomData)
+    }
+}
+impl Drop for TimedTapGuard {
+    fn drop(&mut self) {
+        TIMED_TAP.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+unsafe extern "C" fn tapped_timed_sample(
+    ring: *mut ffi::rpcr3_ring,
+    pcm: *mut f32,
+    timing: *mut ffi::rpcr3_timed_sample_v1,
+) -> i32 {
+    TIMED_TAP.with(|slot| {
+        let slot = slot.borrow();
+        let tap = slot.as_ref().unwrap();
+        assert_eq!(tap.ring, ring);
+        // SAFETY: forward the original caller's valid output pointers unchanged;
+        // the original operation remains the sole actual consumer of this ring.
+        let code = unsafe { tap.original.unwrap()(ring, pcm, timing) };
+        let evidence = &tap.evidence;
+        evidence.code.store(code, Ordering::Relaxed);
+        // SAFETY: the Rust ring caller supplied these complete initialized records.
+        let timing = unsafe { &*timing };
+        evidence.flags.store(timing.flags, Ordering::Relaxed);
+        evidence
+            .generation
+            .store(timing.generation, Ordering::Relaxed);
+        evidence.frame.store(timing.source_frame, Ordering::Relaxed);
+        evidence
+            .fraction
+            .store(timing.source_fraction_billionths, Ordering::Relaxed);
+        evidence
+            .pcm
+            .store(unsafe { *pcm }.to_bits(), Ordering::Relaxed);
+        evidence.calls.fetch_add(1, Ordering::Relaxed);
+        code
+    })
+}
+pub(super) fn open_with_timed_tap(
+    rate: u32,
+    policy: InboundPolicy,
+) -> Option<Result<(InboundProducer, InboundConsumer), RingError>> {
+    TIMED_TAP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let tap = slot.as_mut().filter(|tap| tap.armed)?;
+        tap.armed = false;
+        // SAFETY: checked_descriptor copies only the real readable native prefix.
+        let mut api = match unsafe { checked_descriptor(ffi::rpcr3_descriptor()) } {
+            Ok(api) => api,
+            Err(error) => return Some(Err(error)),
+        };
+        tap.original = api.ring_consumer_render_sample_timed;
+        assert!(tap.original.is_some());
+        api.ring_consumer_render_sample_timed = Some(tapped_timed_sample);
+        // SAFETY: from_descriptor copies the table. Every operation except this
+        // transparent timed-call tap remains exactly the native function pointer.
+        let result = unsafe { InboundRing::from_descriptor(rate, policy, &api) };
+        if let Ok((_, consumer)) = &result {
+            tap.ring = consumer.0.handle.as_ptr();
+        }
+        Some(result)
+    })
+}
+
+#[test]
+fn timed_render_tap_is_transparent_and_has_no_later_ring_effect() {
+    let policy = InboundPolicy::Phone { reserve_ms: 160 };
+    let (mut original_writer, mut original) = InboundRing::open(48000, policy).unwrap();
+    {
+        let tap = TimedTapGuard::next();
+        let (mut writer, mut reader) = InboundRing::open(48000, policy).unwrap();
+        let mut calls = 0;
+        for block in 0..20 {
+            let pcm = [0.25; 960];
+            let start = block * 960;
+            assert_eq!(writer.write_tagged(&pcm, 77, start, &[]), Ok(960));
+            assert_eq!(original_writer.write_tagged(&pcm, 77, start, &[]), Ok(960));
+            for _ in 0..960 {
+                let actual = reader.render_timed_sample().unwrap();
+                let expected = original.render_timed_sample().unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "native PCM, status and every provenance flag remain unchanged"
+                );
+                calls += 1;
+                let observed = tap.0.snapshot();
+                assert_eq!(observed.calls, calls);
+                assert_eq!(observed.coordinate, actual.provenance.unwrap().position);
+                assert_eq!(observed.pcm.to_bits(), actual.sample.to_bits());
+            }
+        }
+    }
+    assert!(TIMED_TAP.with(|slot| slot.borrow().is_none()));
+    let _later = InboundRing::open(48000, policy).unwrap();
+    assert!(TIMED_TAP.with(|slot| slot.borrow().is_none()));
+}
+#[test]
+fn timed_render_tap_cleans_up_failed_creation_and_unwind() {
+    {
+        let _tap = TimedTapGuard::next();
+        assert!(InboundRing::open(0, InboundPolicy::Peer).is_err());
+        assert!(!TIMED_TAP.with(|slot| slot.borrow().as_ref().unwrap().armed));
+    }
+    assert!(TIMED_TAP.with(|slot| slot.borrow().is_none()));
+    assert!(
+        std::panic::catch_unwind(|| {
+            let _tap = TimedTapGuard::next();
+            panic!("intentional test unwind before ring construction");
+        })
+        .is_err()
+    );
+    assert!(TIMED_TAP.with(|slot| slot.borrow().is_none()));
+    let _later = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+    assert!(TIMED_TAP.with(|slot| slot.borrow().is_none()));
+}

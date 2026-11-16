@@ -152,6 +152,11 @@ impl InboundRing {
         input_rate: u32,
         policy: InboundPolicy,
     ) -> Result<(InboundProducer, InboundConsumer), RingError> {
+        // Test-only transparent tap on the actual native consumer, never a second ring.
+        #[cfg(test)]
+        if let Some(result) = tests::open_with_timed_tap(input_rate, policy) {
+            return result;
+        }
         // SAFETY: the linked provider retains its immutable descriptor for process lifetime.
         unsafe { Self::from_descriptor(input_rate, policy, ffi::rpcr3_descriptor()) }
     }
