@@ -84,24 +84,23 @@ impl Host {
             .ok_or(RuntimeError::MissingNode)?
             .command_map()
             .map_err(|_| RuntimeError::Preparation)?;
+        let account = rpt_advanced_core::config::PhoneAccountSettings::resolve(
+            self.runtime.document(),
+            source.account(),
+        )
+        .value
+        .ok_or(RuntimeError::Rejected)?;
         let grammar = PhoneDtmfGrammar::new(
             &map,
             PhoneDtmfOptions {
-                inter_digit_timeout_ms: rpt_advanced_core::config::PhoneAccountSettings::resolve(
-                    self.runtime.document(),
-                    source.account(),
-                )
-                .value
-                .ok_or(RuntimeError::Rejected)?
-                .inter_digit_timeout_ms
-                .into(),
+                inter_digit_timeout_ms: account.inter_digit_timeout_ms.into(),
                 default_command_target: Some(local.to_owned()),
                 ..PhoneDtmfOptions::default()
             },
         )
         .map_err(|_| RuntimeError::Preparation)?;
         self.phone_calls
-            .start(source, reply, grammar, &mut self.peer_io)
+            .start(source, reply, grammar, account.protocol, &mut self.peer_io)
             .map_err(|_| RuntimeError::Preparation)
     }
     pub(super) fn pump_private_phones(&mut self, clock: RuntimeClock) {

@@ -100,8 +100,14 @@ static int32_t inspect(void *handle, const uint8_t *packet, size_t bytes,
 
 /** Script explicit decoder recovery without replacing any production hook. */
 static int32_t conceal(void *handle, uint32_t frames, float *pcm, size_t capacity, size_t *count) {
+    ++conceal_calls;
+    if (fault("conceal_error"))
+        return RPTADV_CODEC_FAILED;
+    if (fault("conceal_count")) {
+        *count = frames - 1;
+        return RPTADV_CODEC_COMPLETE;
+    }
     if (fault("malformed_recover") || fault("malformed_missing")) {
-        ++conceal_calls;
         if (fault("malformed_missing")) {
             *count = 0;
             return RPTADV_CODEC_UNSUPPORTED;

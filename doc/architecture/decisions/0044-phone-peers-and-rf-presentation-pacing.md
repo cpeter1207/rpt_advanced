@@ -1662,8 +1662,9 @@ preserve ordinary traffic after refusal; monitor/parrot policy cannot bypass it.
 A fresh admission keeps its immutable time cut while draining known same-epoch
 pre-cut jitter prefixes that have not entered its ring. It never changes their
 birth or feeds them to classification. Once any PCM is admitted, stale input
-still retires the generation; unknown birth/epoch and gaps retain the same
-retirement behavior. This avoids repeatedly replacing a graph just to chase
+still retires the generation; unknown birth/epoch and unresolved gaps retain
+that retirement behavior. Proven same-epoch SIP loss now uses the bounded
+continuity policy below, not blanket retirement. This avoids repeatedly replacing a graph just to chase
 the real provider's retained jitter tail.
 
 The composed loopback fixture uses literal SIP/RTP, actual private login and
@@ -1756,7 +1757,8 @@ retain an outer process watchdog; this changes no production or protocol timer.
 
 ## Preserve ordinary input across phone rearm — 2026-11-14
 
-A legitimate phone source gap still retires that phone media generation. Its
+An unresolved phone source discontinuity retires that phone media generation;
+known timed SIP loss is governed by the bounded continuity amendment below. A
 subsequent phone-only graph refresh preserves unchanged ordinary source owners
 instead of replacing their inbound rings and restarting the 260 ms receive target.
 Preparation holds only read-only reservations for those existing rings. At the
@@ -2378,12 +2380,12 @@ actual full-call, external-peer, hardware and aggregate qualification.
 The serial SIP media owner distinguishes successfully decoded packet PCM from
 explicit decoder recovery and unsupported native concealment. It retains the
 concealed flag with the original source coordinates through sink backpressure;
-unsupported concealment takes the existing hard-gap path in this incremental
-checkpoint. A per-call payload-free control-side snapshot exposes jitter playout
+unsupported concealment uses the counted ring-fallback seam when its original
+history is qualified; unknown timing remains a hard discontinuity. A per-call payload-free control-side snapshot exposes jitter playout
 observations and measured recovery counts, not a network loss percentage. The
 provider C ABI is unchanged. Native iLBC success can hide internal recovery;
-this boundary does not claim to detect that unreported distinction. Bounded PLC
-continuity and synthetic-onset protections remain a separate, undeployed step.
+this boundary does not claim to detect that unreported distinction. The bounded
+continuity amendment below remains undeployed and is not hardware acceptance.
 
 ### Prepared telephone courtesy ownership
 
@@ -2409,3 +2411,60 @@ This checkpoint deliberately has no production speech-close emitter: generic
 private inactivity, attachment loss and retirement are not genuine held/drained
 speech closure. That proof remains the source-owner follow-up; no PCM queue,
 worker, generator, provider ABI or node configuration changes here.
+
+### Bounded explicit SIP concealment and rendered speech lifecycle — 2026-11-16
+
+The counted gap callback is not itself proof of packet loss. The SIP owner now
+distinguishes jitter missing decisions and positive known packet offsets from
+unmapped receipts and unproven adaptation skips. Unknown receipt timing and
+unqualified skips first traverse the retained source-discontinuity callback.
+Insertion changes only playout time; overlap and duplicate credit never publish
+the same source interval twice. Incoming configured account protocol is copied
+into the existing serial private owner; outgoing admission already requires a
+SIP reservation. IAX keeps its previous gap/concealment retirement, without new
+reset/revision behavior or protocol inference from capability flags.
+
+One leased missing unit uses the codec's existing native concealment callback
+once, retaining PCM and original receipt bounds through zero/partial credit.
+Unsupported units use ring fallback once instead. The already prepared PCM
+scratch bounds large spans; encoded successor packets stay encoded until their
+missing prefix has released that scratch. There is no new PCM queue, worker,
+codec negotiation, provider ABI or independent concealment duration.
+
+The existing source receipt ledger has a preparation-allocated two-bit overlay
+per source slot: unknown, original, synthetic and eligible synthetic. Metadata
+precedes PCM credit and follows the existing fail-closed revision snapshots and
+playout reclamation. Mixed one-sample and fractional conversion boundaries are
+exact. Each existing bucket keeps separate conservative original and synthetic
+birth bounds, so inherited PLC age cannot contaminate a fresh original receipt.
+Provider shortfall against an original slot cannot borrow that receipt as
+authority for synthetic continuation. A later original VAD decision can mark only original preroll, never
+retroactively promote synthetic onset. Synthetic continuation requires genuine
+qualified output to have reached the consumer and remains within the original
+source hold. It inherits the preceding original-history bound, never current
+time, and does not refresh last-voice, the hold endpoint or source age. The
+existing mixer/egress age limits still apply independently.
+
+Only genuine accepted source PCM enters speech analysis. A concealed interval
+forces an analysis-only reset before the next genuine prefix, never a reset of
+programme retention. The old configured-preprocessing provider cannot perform
+that reset and therefore fails closed; its exact limitation and the separately
+reviewed dependency work are recorded in the analysis-history-reset design.
+This checkpoint must not be described as complete preprocessed loss recovery
+until the reset-capable provider cohort is independently qualified.
+
+The Copy source lifecycle is Open, Draining, Closed or Unavailable. Closed
+requires the original hold's exact (including fractional) boundary and verified
+absence of qualified post-DSP tail. Initial inactivity, unknown timing, failed
+processing, command mute and retired call/media are not closure. Empty renders
+do not advance evidence. Processed receipt history carries explicitly bounded
+synthetic continuation without converting it to original audio.
+
+Source state deliberately omits a second courtesy key. It belongs to the unique
+input already owned by AudioPeer's nonzero prepared PhoneCourtesyKey; that slot
+and LinkAudio's exact call/media fences supply the identity when the controller
+consumes the evidence. Replacement inputs cannot adopt predecessor keys. There
+is still no production call to phone_speech_closed and no courtesy emission.
+Explicit recovery provenance cannot classify libilbc2.0.2's internally recovered
+complete units under the current provider result contract; no private-state
+inspection or heuristic classification is claimed.

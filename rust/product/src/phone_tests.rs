@@ -234,8 +234,12 @@ fn private_session_with_peer(
     let source = calls.admit(io, 0).unwrap();
     let reply = calls.reply(&source).unwrap();
     let io = calls.calls[0].io.take().unwrap();
-    let (session, control) =
-        crate::link::private_phone::PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    let (session, control) = crate::link::private_phone::PrivatePhoneSession::prepare(
+        io,
+        reply.clone(),
+        rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+    )
+    .unwrap();
     (calls, session, control, state, source, reply)
 }
 
@@ -556,7 +560,12 @@ fn prepared_phone_media_api_requires_current_mailbox_and_serial_owner_identity()
     ));
     assert_eq!(calls.retire_media(&source, &reply), Err(Error::Admission));
     let io = calls.calls[0].io.take().unwrap();
-    let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    let (mut session, control) = PrivatePhoneSession::prepare(
+        io,
+        reply.clone(),
+        rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+    )
+    .unwrap();
     calls.calls[0].owner = Some(control);
     session.set_source_clock(
         crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
@@ -632,8 +641,12 @@ pub(crate) fn controlled_source_session_mode(rate: u32, inband: bool) -> Control
         .authenticate(&source, &reply, &records(), "100", "1234", 0)
         .unwrap();
     let io = calls.calls[0].io.take().unwrap();
-    let (session, control) =
-        crate::link::private_phone::PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    let (session, control) = crate::link::private_phone::PrivatePhoneSession::prepare(
+        io,
+        reply.clone(),
+        rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+    )
+    .unwrap();
     calls.calls[0].owner = Some(control);
     calls.calls[0].grammar = Some(
         rpt_advanced_core::phone_dtmf::PhoneDtmfGrammar::new(
@@ -956,7 +969,12 @@ fn outgoing_media_uses_existing_source_owner_and_releases_callee_digits_without_
     let source = calls.adopt_outgoing(&claim, io).unwrap();
     let reply = calls.reply(&source).unwrap();
     let io = calls.calls[0].io.take().unwrap();
-    let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    let (mut session, control) = PrivatePhoneSession::prepare(
+        io,
+        reply.clone(),
+        rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+    )
+    .unwrap();
     calls.calls[0].owner = Some(control);
     session.set_source_clock(
         crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
@@ -1014,7 +1032,12 @@ fn outgoing_initial_source_cut_rearms_without_any_callee_digit() {
     let source = calls.adopt_outgoing(&claim, io).unwrap();
     let reply = calls.reply(&source).unwrap();
     let io = calls.calls[0].io.take().unwrap();
-    let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    let (mut session, control) = PrivatePhoneSession::prepare(
+        io,
+        reply.clone(),
+        rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+    )
+    .unwrap();
     calls.calls[0].owner = Some(control);
     session.set_source_clock(
         crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
@@ -1137,7 +1160,12 @@ fn outgoing_telephone_digits_keep_exact_owner_and_bounded_busy_custody() {
     let source = calls.adopt_outgoing(&claim, io).unwrap();
     let reply = calls.reply(&source).unwrap();
     let io = calls.calls[0].io.take().unwrap();
-    let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    let (mut session, control) = PrivatePhoneSession::prepare(
+        io,
+        reply.clone(),
+        rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+    )
+    .unwrap();
     calls.calls[0].owner = Some(control);
     session.set_source_clock(
         crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
@@ -1238,7 +1266,12 @@ fn outgoing_inband_digit_uses_existing_private_queue_not_event_callback() {
         let source = calls.adopt_outgoing(&claim, io).unwrap();
         let reply = calls.reply(&source).unwrap();
         let io = calls.calls[0].io.take().unwrap();
-        let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+        let (mut session, control) = PrivatePhoneSession::prepare(
+            io,
+            reply.clone(),
+            rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+        )
+        .unwrap();
         calls.calls[0].owner = Some(control);
         session.set_source_clock(
             crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),
@@ -1273,7 +1306,12 @@ fn radio_telephone_digit_requires_answered_attachment_and_exact_claim() {
         let source = calls.adopt_outgoing(&claim, io).unwrap();
         let reply = calls.reply(&source).unwrap();
         let io = calls.calls[0].io.take().unwrap();
-        let (mut session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+        let (mut session, control) = PrivatePhoneSession::prepare(
+            io,
+            reply.clone(),
+            rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+        )
+        .unwrap();
         calls.calls[0].owner = Some(control);
         session.set_source_clock(
             crate::services::SourceTimeClock::new(std::time::Instant::now()).unwrap(),

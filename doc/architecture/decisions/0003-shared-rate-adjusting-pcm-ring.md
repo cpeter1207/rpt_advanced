@@ -182,3 +182,14 @@ producer's quiescence; reset discards old tags and decoder/converter history.
 Implementation status: shared-ring and detector extensions are under focused
 feature-branch validation. Controller ownership and EchoLink integration remain
 pending; no deployed component or existing IAX DTMF behavior changes yet.
+
+## Phone explicit-loss caller policy — 2026-11-16
+
+Known timed SIP loss prefers the existing codec-native concealment operation.
+Retained native PCM is written once through the tagged ring path; unsupported
+units instead use the existing counted ring gap operation, never both for the
+same source unit. The product overlays exact synthetic origin because native
+concealed PCM necessarily enters the ring as supplied PCM. Ring fallback keeps
+its existing PLC/gap flags. No ring ABI, PLC algorithm, converter, buffer or
+latency policy changes. ADR0044 specifies original-held qualification and
+inherited immutable age; unqualified source discontinuity still retires.

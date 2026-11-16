@@ -9,6 +9,7 @@ use rptadv_codec_client::CodecCatalog;
 use rptadv_jitter_client::{Admission, Jitter, Kind, Observation};
 use std::{mem::size_of, net::SocketAddr, sync::Arc};
 
+#[derive(Clone, Copy)]
 enum Pending {
     Audio {
         start: u64,
@@ -16,12 +17,22 @@ enum Pending {
         born: u64,
         prefix: u32,
         provenance: DecodeProvenance,
+        // Retain encoded packet until its missing prefix has finished using PCM scratch.
+        decode: Option<(usize, usize)>,
     },
     Gap {
         start: u64,
         count: u32,
     },
     Digit(u8),
+}
+
+/// One bounded missing unit, prepared once and retained through exact sink credit.
+struct Loss {
+    count: usize,
+    offset: usize,
+    born: u64,
+    provenance: DecodeProvenance,
 }
 
 /// One pre-answer socket/offer, never an incoming receipt or a usable media handle.
@@ -97,6 +108,9 @@ pub(crate) struct Media {
     packet: Box<[u8]>,
     pending: Option<Pending>,
     offset: usize,
+    loss: Option<Loss>,
+    // Original receipt history only; synthetic samples never refresh this lease.
+    last_birth: Option<u64>,
     // End of source media actually credited by product, independent of jitter adaptation.
     source_end: Option<u64>,
     decision_pending: bool,
@@ -164,6 +178,8 @@ impl Media {
             packet,
             pending: None,
             offset: 0,
+            loss: None,
+            last_birth: None,
             source_end: None,
             decision_pending: false,
             host_epoch: None,
@@ -348,27 +364,26 @@ impl Media {
                 } else {
                     decision.start_offset.max(0) as u32
                 };
-                let provenance = self
-                    .codec
-                    .decode(&self.packet[..decision.length], &mut self.pcm[..span])?;
-                if provenance == DecodeProvenance::Concealed {
-                    self.decode_recovery_frames =
-                        self.decode_recovery_frames.saturating_add(span as u64);
-                }
-                self.pcm.copy_within(skip..span, 0);
-                if let Some((_, born)) = self
+                let born = self
                     .births
                     .iter()
                     .flatten()
                     .find(|(timestamp, _)| *timestamp == decision.timestamp)
-                    .filter(|_| provenance != DecodeProvenance::Missing)
-                {
+                    .map(|(_, born)| *born);
+                // An adaptation skip is not a proven lost packet. Neither it nor
+                // unknown receipt timing may acquire the timed-loss lease.
+                if born.is_none() || prefix > decision.start_offset.max(0) as u32 {
+                    self.discontinuity = true;
+                    self.last_birth = None;
+                }
+                if let Some(born) = born {
                     self.pending = Some(Pending::Audio {
                         start,
                         count,
-                        born: *born,
+                        born,
                         prefix,
-                        provenance,
+                        provenance: DecodeProvenance::Original,
+                        decode: Some((decision.length, skip)),
                     });
                 } else {
                     self.pending = Some(Pending::Gap {
@@ -387,6 +402,11 @@ impl Media {
                     .checked_add(u64::from(decision.span))
                     .ok_or(MediaError::JitterShape)?;
                 let start = self.source_end.unwrap_or(decision.timestamp);
+                if start < decision.timestamp {
+                    // The missing decision does not prove an earlier adaptation skip.
+                    self.discontinuity = true;
+                    self.last_birth = None;
+                }
                 if start >= end {
                     return self.jitter.advance(now, 0).map_err(|_| MediaError::Jitter);
                 }
@@ -403,6 +423,73 @@ impl Media {
         // No new RTP put/get occurs while its prefix or decoded suffix is retained.
         self.decision_pending = true;
         Ok(())
+    }
+    /// Consume one retained loss unit. No original history means a hard counted
+    /// span, never native synthesis with a fabricated current-time receipt.
+    fn read_loss(
+        &mut self,
+        sink: &abi::rptadv_peer_source_sink_v1,
+        start: u64,
+        remaining: usize,
+    ) -> Result<usize, MediaError> {
+        let Some(born) = self.last_birth else {
+            let accepted =
+                unsafe { sink.gap.unwrap()(sink.context, start, remaining as u32) } as usize;
+            return (accepted <= remaining)
+                .then_some(accepted)
+                .ok_or(MediaError::SourceContract);
+        };
+        if self.loss.is_none() {
+            let count = remaining.min(self.pcm.len());
+            // The released provider decides native-unit support, including partial
+            // negotiated packets. Unsupported returns Missing without advancing PLC.
+            let provenance = self.codec.conceal(count as u32, &mut self.pcm[..count])?;
+            match provenance {
+                DecodeProvenance::Concealed => {
+                    self.native_plc_frames = self.native_plc_frames.saturating_add(count as u64)
+                }
+                DecodeProvenance::Missing => {
+                    self.fallback_frames = self.fallback_frames.saturating_add(count as u64)
+                }
+                DecodeProvenance::Original => return Err(MediaError::Codec),
+            }
+            self.loss = Some(Loss {
+                count,
+                offset: 0,
+                born,
+                provenance,
+            });
+        }
+        let loss = self.loss.as_mut().expect("prepared missing unit");
+        let count = loss.count - loss.offset;
+        let accepted = if loss.provenance == DecodeProvenance::Concealed {
+            let birth = abi::rptadv_source_birth_v1 {
+                struct_size: size_of::<abi::rptadv_source_birth_v1>() as u32,
+                abi_version: 1,
+                host_clock_epoch: sink.host_clock_epoch,
+                born_ns: loss.born,
+            };
+            unsafe {
+                sink.audio_timed.unwrap()(
+                    sink.context,
+                    start,
+                    self.pcm[loss.offset..loss.count].as_ptr(),
+                    count,
+                    1,
+                    &birth,
+                )
+            }
+        } else {
+            unsafe { sink.gap.unwrap()(sink.context, start, count as u32) as usize }
+        };
+        if accepted > count {
+            return Err(MediaError::SourceContract);
+        }
+        loss.offset += accepted;
+        if loss.offset == loss.count {
+            self.loss = None;
+        }
+        Ok(accepted)
     }
     /// Preserve one refused PCM/digit/gap while the reactor independently services SIP.
     pub(crate) unsafe fn read(
@@ -442,6 +529,10 @@ impl Media {
             return Err(MediaError::SourceContract);
         }
         self.host_epoch = Some(sink.host_clock_epoch);
+        if self.pending.is_none() {
+            self.offset = 0;
+            self.poll(sink.reference_now_ns)?;
+        }
         if self.discontinuity {
             match unsafe { sink.source_discontinuity.unwrap()(sink.context) } {
                 0 => self.discontinuity = false,
@@ -452,28 +543,45 @@ impl Media {
                 _ => return Err(MediaError::SourceContract),
             }
         }
-        if self.pending.is_none() {
-            self.offset = 0;
-            self.poll(sink.reference_now_ns)?;
-        }
-        if let Some(Pending::Audio { start, prefix, .. }) = &mut self.pending {
-            if *prefix != 0 {
-                let accepted = unsafe {
-                    sink.gap.unwrap()(sink.context, *start - u64::from(*prefix), *prefix)
+        if let Some(Pending::Audio { start, prefix, .. }) = &self.pending {
+            let (start, prefix) = (*start, *prefix);
+            if prefix != 0 {
+                let accepted = self.read_loss(sink, start - u64::from(prefix), prefix as usize)?;
+                let Some(Pending::Audio { prefix, .. }) = self.pending.as_mut() else {
+                    unreachable!()
                 };
-                if accepted > *prefix {
-                    return Err(MediaError::SourceContract);
-                }
-                *prefix -= accepted;
-                self.source_end = Some(*start - u64::from(*prefix));
+                *prefix -= accepted as u32;
+                self.source_end = Some(start - u64::from(*prefix));
                 output.progress = if *prefix == 0 { 1 } else { 2 };
                 return Ok(());
             }
         }
-        let Some(pending) = &self.pending else {
+        if let Some(Pending::Audio {
+            count,
+            decode,
+            provenance,
+            ..
+        }) = self.pending.as_mut()
+        {
+            if let Some((length, skip)) = decode.take() {
+                let span = *count + skip;
+                *provenance = self
+                    .codec
+                    .decode(&self.packet[..length], &mut self.pcm[..span])?;
+                if *provenance == DecodeProvenance::Concealed {
+                    self.decode_recovery_frames =
+                        self.decode_recovery_frames.saturating_add(span as u64);
+                }
+                if *provenance == DecodeProvenance::Missing {
+                    self.fallback_frames = self.fallback_frames.saturating_add(*count as u64);
+                }
+                self.pcm.copy_within(skip..span, 0);
+            }
+        }
+        let Some(pending) = self.pending else {
             return Ok(());
         };
-        let accepted = match *pending {
+        let accepted = match pending {
             Pending::Digit(symbol) => {
                 match unsafe { sink.digit.unwrap()(sink.context, u32::from(symbol)) } {
                     0 => true,
@@ -498,32 +606,40 @@ impl Media {
                     born_ns: born,
                 };
                 let remaining = count - self.offset;
-                let accepted = unsafe {
-                    sink.audio_timed.unwrap()(
-                        sink.context,
-                        start + self.offset as u64,
-                        self.pcm[self.offset..count].as_ptr(),
-                        remaining,
-                        u32::from(provenance == DecodeProvenance::Concealed),
-                        &birth,
-                    )
+                let accepted = if provenance == DecodeProvenance::Missing {
+                    unsafe {
+                        sink.gap.unwrap()(
+                            sink.context,
+                            start + self.offset as u64,
+                            remaining as u32,
+                        ) as usize
+                    }
+                } else {
+                    unsafe {
+                        sink.audio_timed.unwrap()(
+                            sink.context,
+                            start + self.offset as u64,
+                            self.pcm[self.offset..count].as_ptr(),
+                            remaining,
+                            u32::from(provenance == DecodeProvenance::Concealed),
+                            &birth,
+                        )
+                    }
                 };
                 if accepted > remaining {
                     return Err(MediaError::SourceContract);
+                }
+                if accepted != 0 && provenance == DecodeProvenance::Original {
+                    self.last_birth = Some(born);
                 }
                 self.offset += accepted;
                 self.source_end = Some(start + self.offset as u64);
                 self.offset == count
             }
             Pending::Gap { start, count } => {
-                let remaining = count - self.offset as u32;
-                let accepted = unsafe {
-                    sink.gap.unwrap()(sink.context, start + self.offset as u64, remaining)
-                };
-                if accepted > remaining {
-                    return Err(MediaError::SourceContract);
-                }
-                self.offset += accepted as usize;
+                let remaining = count as usize - self.offset;
+                let accepted = self.read_loss(sink, start + self.offset as u64, remaining)?;
+                self.offset += accepted;
                 self.source_end = Some(start + self.offset as u64);
                 self.offset == count as usize
             }

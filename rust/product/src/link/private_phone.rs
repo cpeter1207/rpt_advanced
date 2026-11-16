@@ -282,6 +282,7 @@ pub(crate) struct PrivatePhoneSession {
     source_clock: Option<SourceTimeClock>,
     source_completion: SourceCompletion,
     digit_mode: PhoneDigitMode,
+    timed_loss: bool,
     // A 20 ms offer needs at most three 8 ms partitions at either released rate.
     source: Option<SourceIngress<4>>,
     replies: Consumer<PrivateCommand>,
@@ -307,6 +308,7 @@ impl PrivatePhoneSession {
     pub(crate) fn prepare(
         io: PeerIo,
         reply: PeerReply,
+        protocol: rpt_advanced_core::config::PhoneAccountProtocol,
     ) -> Result<(Self, PrivatePhoneControl), Error> {
         let source = reply.phone_source().ok_or(Error::Admission)?;
         if io.identity().call_id() != Some(source.call_id())
@@ -363,6 +365,7 @@ impl PrivatePhoneSession {
                 source_clock: None,
                 source_completion: SourceCompletion::Pending,
                 digit_mode,
+                timed_loss: protocol == rpt_advanced_core::config::PhoneAccountProtocol::Sip,
                 source,
                 replies: incoming,
                 digits,
@@ -425,6 +428,7 @@ impl PrivatePhoneSession {
         let source_end = &mut self.source_end;
         let source = self.source.as_mut().ok_or(Error::Operation)?;
         let mode = self.digit_mode;
+        let timed_loss = self.timed_loss;
         let scratch = &mut self.pcm;
         let mut failure = None;
         let mut retire_egress = false;
@@ -497,7 +501,13 @@ impl PrivatePhoneSession {
                                 media.retire();
                             }
                             let accepted = match media.as_mut() {
-                                Some(media) if concealed => media.gap(start, count)?,
+                                Some(media) if concealed && !timed_loss => {
+                                    media.retire();
+                                    count
+                                }
+                                Some(media) if concealed => {
+                                    media.concealed(start, &scratch[..count], birth)?
+                                }
                                 Some(media) => media.audio(start, &scratch[..count], birth)?,
                                 None => count,
                             };
@@ -517,9 +527,18 @@ impl PrivatePhoneSession {
                             })
                             .and_then(|()| {
                                 *source_end = (*source_end).max(start + count as u64);
-                                media
-                                    .as_mut()
-                                    .map_or(Ok(count), |media| media.gap(start, count))
+                                media.as_mut().map_or(Ok(count), |media| {
+                                    if source.muted() && !media.prepared() {
+                                        media.retire();
+                                    }
+                                    if timed_loss {
+                                        media.gap(start, count)
+                                    } else {
+                                        // IAX still supplies unresolved loss, not a SIP loss lease.
+                                        media.retire();
+                                        Ok(count)
+                                    }
+                                })
                             })
                     }
                     SourceInput::Discontinuity => {

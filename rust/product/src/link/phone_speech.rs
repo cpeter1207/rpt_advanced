@@ -19,6 +19,7 @@ type Process = unsafe extern "C" fn(
     u64,
     *mut abi::rptadv_speech_analysis_result,
 ) -> abi::rptadv_radio_result;
+type Reset = unsafe extern "C" fn(*mut Handle) -> abi::rptadv_radio_result;
 type Destroy = unsafe extern "C" fn(*mut Handle);
 
 #[derive(Clone, Copy)]
@@ -26,6 +27,7 @@ struct Api {
     create: Create,
     process: Process,
     destroy: Destroy,
+    reset: Reset,
 }
 impl Api {
     unsafe fn from_descriptor(d: *const abi::rptadv_radio_descriptor) -> Result<Self, Error> {
@@ -64,18 +66,18 @@ impl Api {
                 ptr::addr_of!((*d).speech_analysis_destroy).read_unaligned(),
             )
         };
-        let _ = reset.ok_or(Error::UnsupportedFormat)?;
         Ok(Self {
             create: create.ok_or(Error::UnsupportedFormat)?,
             process: process.ok_or(Error::UnsupportedFormat)?,
             destroy: destroy.ok_or(Error::UnsupportedFormat)?,
+            reset: reset.ok_or(Error::UnsupportedFormat)?,
         })
     }
 }
 
 /// One serialized shared-provider classifier, prepared outside source callbacks.
-/// Discontinuity retires the generation; a selected preprocessing graph cannot be
-/// reset in place. Programme retention remains entirely in the existing ring.
+/// Known loss resets detector history only; unsupported selected preprocessing
+/// fails closed. Programme retention remains entirely in the existing ring.
 pub(super) struct SpeechAnalysis {
     handle: NonNull<Handle>,
     api: Api,
@@ -116,6 +118,13 @@ impl SpeechAnalysis {
             handle: NonNull::new(handle).ok_or(Error::Allocation)?,
             api,
         })
+    }
+    /// Reset analysis only after a known source loss; programme admission is separate.
+    /// Unsupported configured providers fail closed rather than join detector frames.
+    pub(super) fn reset(&mut self) -> Result<(), Error> {
+        // SAFETY: this serial source owner retains the uniquely owned live handle.
+        let code = unsafe { (self.api.reset)(self.handle.as_ptr()) };
+        (code == 0).then_some(()).ok_or(Error::Translation)
     }
     /// Analyze only a newly accepted source prefix, preserving its original coordinate.
     pub(super) fn process(&mut self, start: u64, samples: &[f32]) -> Result<Option<u64>, Error> {
@@ -306,6 +315,38 @@ mod descriptor_tests {
             }
             // SAFETY: this local complete record remains live throughout prefix validation.
             assert!(unsafe { Api::from_descriptor(&d) }.is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod loss_reset_contract_tests {
+    use super::*;
+    #[test]
+    fn released_reset_contract_across_analysis_only_loss() {
+        for preprocessing_enabled in [false, true] {
+            let settings = PhoneSpeechSettings {
+                preprocessing_enabled,
+                ..Default::default()
+            };
+            let mut analysis = SpeechAnalysis::new(8000, 160, settings).unwrap();
+            analysis.process(1000, &[0.0; 80]).unwrap();
+            // This is the released public callback, not a guessed private reset.
+            let reset = unsafe {
+                (*abi::rptadv_radio_descriptor())
+                    .speech_analysis_reset
+                    .unwrap()
+            };
+            let (result, allocations) =
+                crate::fixture::allocations(|| unsafe { reset(analysis.handle.as_ptr()) });
+            assert_eq!(allocations, 0);
+            if preprocessing_enabled {
+                assert_ne!(result, 0, "current selected graph cannot reset in place");
+                assert_eq!(analysis.process(1240, &[0.0; 160]), Err(Error::Translation));
+            } else {
+                assert_eq!(result, 0);
+                assert_eq!(analysis.process(1240, &[0.0; 160]), Ok(None));
+            }
         }
     }
 }

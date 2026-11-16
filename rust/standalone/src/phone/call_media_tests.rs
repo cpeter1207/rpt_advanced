@@ -374,7 +374,7 @@ async fn socket_backlog_keeps_receipt_age_before_dequeue_and_refused_credit() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unavailable_socket_receipt_mapping_uses_existing_source_gap() {
+async fn unavailable_socket_receipt_mapping_is_a_hard_discontinuity() {
     let providers = ProviderSet::load().unwrap();
     let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -394,6 +394,7 @@ async fn unavailable_socket_receipt_mapping_uses_existing_source_gap() {
     read(&mut media, &mut sink, 40_000_000);
     assert!(sink.audio.is_empty());
     assert_eq!(sink.gaps, [((1u64 << 32) + 1000, 160)]);
+    assert_eq!(sink.discontinuities, 2, "unknown receipt is not timed loss");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -808,6 +809,7 @@ async fn recovered_pcm_keeps_concealed_flag_and_samples_across_refusals() {
         count: 4,
         born: 10,
         prefix: 0,
+        decode: None,
         provenance: DecodeProvenance::Concealed,
     });
     let mut sink = Sink::default();
@@ -856,7 +858,7 @@ fn scripted_recovery_reaches_sink_with_one_decision_across_credit() {
                         observation.native_plc_frames,
                         observation.fallback_frames
                     ),
-                    (0, 0, 0)
+                    (0, 0, 160)
                 );
                 return;
             }
@@ -1046,4 +1048,213 @@ async fn observation_distinguishes_missing_from_insertion() {
     let snapshot = media.observe().unwrap();
     assert_eq!(snapshot.jitter.missing_span, u64::from(decision.span));
     assert_eq!(snapshot.jitter.insertion_span, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_loss_runs_once_and_fallback_is_not_stacked() {
+    use super::super::media::AudioProfile;
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let catalog = super::super::codec::load_catalog().unwrap();
+    for profile in AudioProfile::ALL {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let description = MediaDescription {
+            remote: sender.local_addr().unwrap(),
+            codec: profile,
+            receive_payload: profile.payload(),
+            send_payload: profile.payload(),
+            telephone_events: [None, None],
+        };
+        let endpoint = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), description.clone(), 1, 0)
+            .await
+            .unwrap();
+        let mut media =
+            Media::from_endpoint(endpoint, description, Vec::new(), jitter, &catalog).unwrap();
+        let frames = profile.parameters().packet_frames as usize;
+        let mut encoded = vec![0; profile.parameters().packet_bytes];
+        let mut encoder = AudioCodec::load(profile).unwrap();
+        encoder.encode(&vec![0.25; frames], &mut encoded).unwrap();
+        let start = 1u64 << 32;
+        let born = 1_000_000_000;
+        media.clock = Some((0, start));
+        media
+            .jitter
+            .put(start, frames as u32, born, &encoded)
+            .unwrap();
+        media.births[0] = Some((start, born));
+        let mut sink = Sink {
+            credit: frames,
+            allow_zero: true,
+            ..Default::default()
+        };
+        read(&mut media, &mut sink, born + 40_000_000);
+        assert_eq!(media.source_end, Some(start + frames as u64), "{profile:?}");
+        sink.credit = 0;
+        read(&mut media, &mut sink, born + 100_000_000);
+        let observation = media.observe().unwrap();
+        let mut reference = AudioCodec::load(profile).unwrap();
+        let mut reference_pcm = vec![0.0; frames];
+        reference.decode(&encoded, &mut reference_pcm).unwrap();
+        let native = reference
+            .conceal(frames as u32, &mut reference_pcm)
+            .unwrap()
+            == DecodeProvenance::Concealed;
+        assert_eq!(
+            observation.native_plc_frames,
+            if native { frames as u64 } else { 0 },
+            "{profile:?}"
+        );
+        assert_eq!(
+            observation.fallback_frames,
+            if native { 0 } else { frames as u64 },
+            "{profile:?}"
+        );
+        assert_eq!(
+            observation.native_plc_frames + observation.fallback_frames,
+            frames as u64,
+            "{profile:?}"
+        );
+        for _ in 0..3 {
+            read(&mut media, &mut sink, born + 100_000_000);
+        }
+        let again = media.observe().unwrap();
+        assert_eq!(
+            (again.native_plc_frames, again.fallback_frames),
+            (observation.native_plc_frames, observation.fallback_frames)
+        );
+        sink.credit = 1;
+        while media.pending.is_some() {
+            read(&mut media, &mut sink, born + 100_000_000);
+        }
+        assert_eq!(media.source_end, Some(start + 2 * frames as u64));
+        if observation.native_plc_frames > 0 {
+            assert!(sink.flags[1..].iter().all(|flag| *flag == 1), "{profile:?}");
+            assert!(sink.gaps.is_empty(), "native PLC must not stack fallback");
+            assert_eq!(
+                &sink.pcm[frames..],
+                &reference_pcm,
+                "native retained PCM changed on retry"
+            );
+        } else {
+            assert_eq!(
+                sink.gaps.iter().map(|(_, n)| u64::from(*n)).sum::<u64>(),
+                frames as u64
+            );
+        }
+        let next = start + 2 * frames as u64;
+        let later = born + 100_000_000;
+        media
+            .jitter
+            .put(next, frames as u32, later, &encoded)
+            .unwrap();
+        media.births[1] = Some((next, later));
+        sink.credit = frames;
+        let before = sink.pcm.len();
+        read(&mut media, &mut sink, later + 40_000_000);
+        while media.pending.is_some() {
+            read(&mut media, &mut sink, later + 40_000_000);
+        }
+        assert_eq!(media.source_end, Some(next + frames as u64));
+        assert_eq!(
+            sink.flags.last(),
+            Some(&0),
+            "real audio resumes after native/fallback"
+        );
+        assert_eq!(sink.pcm.len() - before, frames);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ilbc_prefix_uses_bounded_scratch_before_decoding_retained_packet() {
+    use super::super::media::AudioProfile;
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let catalog = super::super::codec::load_catalog().unwrap();
+    for prefix in [80u32, 240, 480] {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let description = MediaDescription {
+            remote: sender.local_addr().unwrap(),
+            codec: AudioProfile::Ilbc30,
+            receive_payload: AudioProfile::Ilbc30.payload(),
+            send_payload: AudioProfile::Ilbc30.payload(),
+            telephone_events: [None, None],
+        };
+        let endpoint = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), description.clone(), 1, 0)
+            .await
+            .unwrap();
+        let mut media =
+            Media::from_endpoint(endpoint, description, Vec::new(), jitter, &catalog).unwrap();
+        let mut encoder = AudioCodec::load(AudioProfile::Ilbc30).unwrap();
+        let mut encoded = [0; 50];
+        encoder.encode(&[0.25; 240], &mut encoded).unwrap();
+        media.packet[..50].copy_from_slice(&encoded);
+        media.pending = Some(Pending::Audio {
+            start: 1000,
+            count: 240,
+            born: 1_000_000_000,
+            prefix: 0,
+            provenance: DecodeProvenance::Original,
+            decode: Some((50, 0)),
+        });
+        let mut sink = Sink {
+            credit: 240,
+            allow_zero: true,
+            ..Default::default()
+        };
+        read(&mut media, &mut sink, 1_100_000_000);
+        assert_eq!(media.source_end, Some(1240));
+        media.offset = 0;
+        media.pending = Some(Pending::Audio {
+            start: 1240 + u64::from(prefix),
+            count: 240,
+            born: 1_010_000_000,
+            prefix,
+            provenance: DecodeProvenance::Original,
+            decode: Some((50, 0)),
+        });
+        sink.credit = 0;
+        read(&mut media, &mut sink, 1_100_000_000);
+        let first = media.observe().unwrap();
+        for _ in 0..3 {
+            read(&mut media, &mut sink, 1_100_000_000);
+        }
+        let after = media.observe().unwrap();
+        assert_eq!(
+            (after.native_plc_frames, after.fallback_frames),
+            (first.native_plc_frames, first.fallback_frames)
+        );
+        assert!(
+            matches!(
+                media.pending,
+                Some(Pending::Audio {
+                    decode: Some(_),
+                    ..
+                })
+            ),
+            "packet must still be encoded while PLC owns scratch"
+        );
+        sink.credit = 17;
+        while media.pending.is_some() {
+            read(&mut media, &mut sink, 1_100_000_000);
+        }
+        let after = media.observe().unwrap();
+        assert_eq!(
+            after.native_plc_frames,
+            if prefix == 80 { 0 } else { u64::from(prefix) }
+        );
+        assert_eq!(after.fallback_frames, if prefix == 80 { 80 } else { 0 });
+        assert_eq!(media.source_end, Some(1480 + u64::from(prefix)));
+        let mut reference = AudioCodec::load(AudioProfile::Ilbc30).unwrap();
+        let mut expected = [0.0; 240];
+        reference.decode(&encoded, &mut expected).unwrap();
+        for _ in 0..prefix / 240 {
+            reference.conceal(240, &mut expected).unwrap();
+        }
+        reference.decode(&encoded, &mut expected).unwrap();
+        assert_eq!(
+            &sink.pcm[sink.pcm.len() - 240..],
+            &expected,
+            "prefix PLC must not overwrite or predecode retained packet"
+        );
+    }
 }

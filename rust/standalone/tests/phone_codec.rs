@@ -113,6 +113,11 @@ fn exercise_fault(fault: &str) {
                 assert_eq!(decoded, Ok(DecodeProvenance::Original));
                 assert!(pcm.iter().all(|sample| sample.abs() < 0.001));
             }
+            if fault.starts_with("conceal_") {
+                let before = unsafe { conceal_calls() };
+                assert_eq!(codec.conceal(160, &mut pcm), Err(MediaError::Codec));
+                assert_eq!(unsafe { conceal_calls() }, before + 1);
+            }
             drop(codec);
         }
         assert_eq!(
@@ -182,6 +187,8 @@ fn codec_rejects_provider_faults_and_reclaims_partial_construction() {
         "malformed_missing",
         "decode_error",
         "decoded_frames",
+        "conceal_error",
+        "conceal_count",
         "inspect_malformed",
         "inspect_error",
         "inspect_zero",

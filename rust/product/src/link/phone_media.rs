@@ -8,13 +8,13 @@ use crate::{
 use rpt_advanced_core::audio::{LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue};
 use rpt_advanced_core::config::PhoneSpeechSettings;
 use rpt_advanced_core::link::{
-    PeerInput, PeerReply, PeerSignals, PhoneSource, ReceivePolicy, RenderedPeerBlock,
-    SourceCoordinate, SourceTimeBound, TimedPeerSample,
+    PeerInput, PeerReply, PeerSignals, PhoneSource, PhoneSpeechPhase, PhoneSpeechState,
+    ReceivePolicy, RenderedPeerBlock, SourceCoordinate, SourceTimeBound, TimedPeerSample,
 };
 use std::num::NonZeroU32;
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 
 const BUCKETS: usize = 64;
@@ -29,6 +29,7 @@ struct Bucket {
     index: AtomicU64,
     epoch: AtomicU64,
     birth: AtomicU64,
+    synthetic_birth: AtomicU64,
     voice_start: AtomicU64,
     voice_end: AtomicU64,
 }
@@ -43,6 +44,11 @@ pub(super) struct Shared {
     voiced: bool,
     oldest: AtomicU64,
     buckets: [Bucket; BUCKETS],
+    // Two bits for each existing ledger source slot: unknown/original/synthetic/
+    // leased synthetic. Unlike bucket voice ranges these cannot promote preroll.
+    origins: Box<[AtomicU64]>,
+    output_open: AtomicBool,
+    voice_until: AtomicU64,
 }
 impl Shared {
     pub(super) fn occupied(&self) -> bool {
@@ -61,6 +67,9 @@ impl Shared {
     // At most two 20 ms buckets per offered ring prefix. Refuse live-slot
     // collisions before PCM acceptance. Fragment count never consumes capacity.
     fn record(&self, start: u64, end: u64, birth: SourceBirth) -> bool {
+        self.record_origin(start, end, birth, 1)
+    }
+    fn record_origin(&self, start: u64, end: u64, birth: SourceBirth, origin: u64) -> bool {
         let first = start / self.width;
         let last = (end - 1) / self.width;
         let oldest = self.oldest.load(Ordering::Acquire);
@@ -77,8 +86,15 @@ impl Shared {
             let slot = self.slot(index);
             let retained = slot.revision.load(Ordering::SeqCst) != 0
                 && slot.index.load(Ordering::SeqCst) == index;
+            // Synthetic inheritance must not poison a fresh original receipt
+            // sharing this bucket. Each origin keeps its conservative bound.
+            let receipt = if origin == 1 {
+                &slot.birth
+            } else {
+                &slot.synthetic_birth
+            };
             let earliest = if retained {
-                slot.birth.load(Ordering::SeqCst).min(birth.born_ns)
+                receipt.load(Ordering::SeqCst).min(birth.born_ns)
             } else {
                 birth.born_ns
             };
@@ -86,15 +102,59 @@ impl Shared {
             // returns unknown rather than mixing a reused bucket's identity/time.
             slot.revision.fetch_add(1, Ordering::SeqCst);
             if !retained {
+                slot.birth.store(u64::MAX, Ordering::SeqCst);
+                slot.synthetic_birth.store(u64::MAX, Ordering::SeqCst);
+                for frame in index * self.width..(index + 1) * self.width {
+                    self.set_origin(frame, 0);
+                }
                 slot.voice_start.store(0, Ordering::SeqCst);
                 slot.voice_end.store(0, Ordering::SeqCst);
             }
             slot.index.store(index, Ordering::SeqCst);
             slot.epoch.store(birth.host_clock_epoch, Ordering::SeqCst);
-            slot.birth.store(earliest, Ordering::SeqCst);
+            receipt.store(earliest, Ordering::SeqCst);
+            for frame in start.max(index * self.width)..end.min((index + 1) * self.width) {
+                self.set_origin(frame, origin);
+            }
             slot.revision.fetch_add(1, Ordering::SeqCst);
         }
         true
+    }
+    fn set_origin(&self, frame: u64, origin: u64) {
+        let offset = frame % (self.width * BUCKETS as u64);
+        let shift = (offset % 32) * 2;
+        let word = &self.origins[(offset / 32) as usize];
+        let _ = word.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+            Some((old & !(3 << shift)) | (origin << shift))
+        });
+    }
+    fn origin(&self, frame: u64) -> Option<u64> {
+        let slot = self.slot(frame / self.width);
+        let before = slot.revision.load(Ordering::SeqCst);
+        if before == 0 || before & 1 != 0 || slot.index.load(Ordering::SeqCst) != frame / self.width
+        {
+            return None;
+        }
+        let offset = frame % (self.width * BUCKETS as u64);
+        let origin = (self.origins[(offset / 32) as usize].load(Ordering::SeqCst)
+            >> ((offset % 32) * 2))
+            & 3;
+        (origin != 0 && slot.revision.load(Ordering::SeqCst) == before).then_some(origin)
+    }
+    fn synthetic_at(&self, position: SourceCoordinate) -> Option<bool> {
+        if position.generation != self.generation
+            || position.negative
+            || position.fraction_billionths >= 1_000_000_000
+        {
+            return None;
+        }
+        let first = self.origin(position.frame)?;
+        let next = if position.fraction_billionths == 0 {
+            first
+        } else {
+            self.origin(position.frame.checked_add(1)?)?
+        };
+        Some(first >= 2 || next >= 2)
     }
     // Add source-coordinate admission to existing receipt buckets, never PCM.
     // Only the serial ingress writes; an interrupted snapshot remains unqualified.
@@ -128,22 +188,47 @@ impl Shared {
     fn voiced_frame(&self, frame: u64) -> bool {
         let slot = self.slot(frame / self.width);
         let before = slot.revision.load(Ordering::SeqCst);
-        before != 0
+        self.origin(frame) == Some(1)
+            && before != 0
             && before & 1 == 0
             && slot.index.load(Ordering::SeqCst) == frame / self.width
             && slot.voice_start.load(Ordering::SeqCst) <= frame
             && frame < slot.voice_end.load(Ordering::SeqCst)
             && slot.revision.load(Ordering::SeqCst) == before
     }
+    fn admitted_frame(&self, frame: u64) -> bool {
+        self.voiced_frame(frame)
+            || (self.origin(frame) == Some(3) && self.output_open.load(Ordering::Acquire))
+    }
+    // Overlay native origin without changing provider programme ownership.
+    fn stamp(&self, sample: &mut TimedPeerSample) {
+        sample.age_bound = None;
+        if let Some(provenance) = sample.provenance.as_mut() {
+            if !provenance.zero_extension {
+                if let Some(position) = provenance.position {
+                    if let Some(synthetic) = self.synthetic_at(position) {
+                        if synthetic {
+                            provenance.real = false;
+                            provenance.plc = true;
+                        } else if !provenance.real || provenance.plc || provenance.gap {
+                            // Ring shortfall is not authority for timed loss.
+                            return;
+                        }
+                        sample.age_bound = self.locate(position);
+                    }
+                }
+            }
+        }
+    }
     fn voice_at(&self, position: SourceCoordinate) -> bool {
         position.generation == self.generation
             && !position.negative
-            && self.voiced_frame(position.frame)
+            && self.admitted_frame(position.frame)
             && (position.fraction_billionths == 0
                 || position
                     .frame
                     .checked_add(1)
-                    .is_some_and(|next| self.voiced_frame(next)))
+                    .is_some_and(|next| self.admitted_frame(next)))
     }
     fn bound(&self, frame: u64) -> Option<SourceTimeBound> {
         let index = frame / self.width;
@@ -153,9 +238,14 @@ impl Shared {
             return None;
         }
         let found = slot.index.load(Ordering::SeqCst);
+        let receipt = if self.origin(frame)? == 1 {
+            &slot.birth
+        } else {
+            &slot.synthetic_birth
+        };
         let bound = SourceTimeBound {
             host_clock_epoch: slot.epoch.load(Ordering::SeqCst),
-            not_after_ns: slot.birth.load(Ordering::SeqCst),
+            not_after_ns: receipt.load(Ordering::SeqCst),
         };
         (found == index && slot.revision.load(Ordering::SeqCst) == before).then_some(bound)
     }
@@ -194,6 +284,7 @@ pub(super) struct Ingress {
     voice_until: u64,
     preroll_frames: u64,
     hold_frames: u64,
+    analysis_gap: bool,
 }
 impl Ingress {
     fn voice_decision(&mut self, last: Option<u64>) {
@@ -207,6 +298,9 @@ impl Ingress {
         self.shared
             .mark_voice(end.saturating_sub(self.preroll_frames), end);
         self.voice_until = end.saturating_add(self.hold_frames);
+        self.shared
+            .voice_until
+            .store(self.voice_until, Ordering::Release);
     }
     pub(super) fn active(&self) -> bool {
         self.shared.active()
@@ -254,11 +348,29 @@ impl Ingress {
     pub(super) fn retire(&self) {
         self.shared.retire();
     }
+    /// Native codec concealment retains its exact source origin; never analyze it.
+    pub(super) fn concealed(
+        &mut self,
+        start: u64,
+        samples: &[f32],
+        birth: Option<SourceBirth>,
+    ) -> Result<usize, Error> {
+        self.accept(start, samples, birth, true)
+    }
     pub(super) fn audio(
         &mut self,
         start: u64,
         samples: &[f32],
         birth: Option<SourceBirth>,
+    ) -> Result<usize, Error> {
+        self.accept(start, samples, birth, false)
+    }
+    fn accept(
+        &mut self,
+        start: u64,
+        samples: &[f32],
+        birth: Option<SourceBirth>,
+        synthetic: bool,
     ) -> Result<usize, Error> {
         if !self.shared.active() {
             return Ok(samples.len());
@@ -293,7 +405,12 @@ impl Ingress {
         let end = start
             .checked_add(offered as u64)
             .ok_or(Error::InvalidFrame)?;
-        if !self.shared.record(start, end, birth) {
+        let recorded = if synthetic {
+            self.record_loss(start, end, Some(birth))
+        } else {
+            self.shared.record(start, end, birth)
+        };
+        if !recorded {
             return Ok(0);
         }
         let accepted = self
@@ -301,7 +418,19 @@ impl Ingress {
             .write_tagged(&samples[..offered], self.shared.generation, start, &[])
             .map_err(|_| Error::Write)?;
         self.cursor = Some(start + accepted as u64);
-        if accepted != 0 {
+        if accepted != 0 && synthetic {
+            self.analysis_gap = true;
+        }
+        if accepted != 0 && !synthetic {
+            if self.analysis_gap {
+                if let Some(speech) = self.speech.as_mut() {
+                    if let Err(error) = speech.reset() {
+                        self.retire();
+                        return Err(error);
+                    }
+                }
+                self.analysis_gap = false;
+            }
             if let Some(speech) = self.speech.as_mut() {
                 let decision = speech.process(start, &samples[..accepted])?;
                 self.voice_decision(decision);
@@ -311,12 +440,63 @@ impl Ingress {
         }
         Ok(accepted)
     }
+    fn record_loss(&self, start: u64, end: u64, birth: Option<SourceBirth>) -> bool {
+        let inherited = start
+            .checked_sub(1)
+            .and_then(|frame| self.shared.bound(frame));
+        let Some(bound) = inherited
+            .map(|bound| SourceBirth {
+                host_clock_epoch: bound.host_clock_epoch,
+                born_ns: birth.map_or(bound.not_after_ns, |birth| {
+                    birth.born_ns.min(bound.not_after_ns)
+                }),
+            })
+            .or(birth)
+        else {
+            return false;
+        };
+        // The original hold must exist now; a later VAD decision cannot promote
+        // this span. Actual output-open eligibility is checked at render time,
+        // after preceding genuine PCM has traversed the same programme DSP.
+        let leased = self.last_voice.is_some()
+            && inherited.is_some()
+            && bound.host_clock_epoch == self.admission.host_clock_epoch;
+        let held_end = if leased {
+            end.min(self.voice_until).max(start)
+        } else {
+            start
+        };
+        (held_end == start || self.shared.record_origin(start, held_end, bound, 3))
+            && (held_end == end || self.shared.record_origin(held_end, end, bound, 2))
+    }
+    /// Only the explicitly qualified SIP caller may use this counted-loss seam.
+    /// Unknown/IAX spans retain retirement at their existing private source owner.
     pub(super) fn gap(&mut self, start: u64, count: usize) -> Result<usize, Error> {
-        // A missing/codec-concealed interval has no qualifying original voice.
-        // Retire this admission rather than let PLC acquire a fresh age bound.
-        self.retire();
-        self.cursor = start.checked_add(count as u64);
-        Ok(count)
+        if !self.active() {
+            return Ok(count);
+        }
+        if !self.shared.voiced
+            || self.cursor != Some(start)
+            || start == 0
+            || self.shared.bound(start - 1).is_none()
+        {
+            self.retire();
+            return Ok(count);
+        }
+        let offered = count.min(self.shared.width as usize);
+        let end = start
+            .checked_add(offered as u64)
+            .ok_or(Error::InvalidFrame)?;
+        if offered == 0 {
+            return Ok(0);
+        }
+        if !self.record_loss(start, end, None) {
+            return Ok(0);
+        }
+        let accepted = self.writer.gap(offered as u64).map_err(|_| Error::Write)? as usize;
+        self.cursor = Some(start + accepted as u64);
+        self.analysis_gap |= accepted != 0;
+        Ok(accepted)
     }
 }
 impl Drop for Ingress {
@@ -329,6 +509,8 @@ struct TimedInput {
     reader: InboundConsumer,
     shared: Arc<Shared>,
     qualified: u64,
+    known: u64,
+    past_hold: bool,
 }
 impl PeerInput for TimedInput {
     fn phone_reply(&self) -> Option<&PeerReply> {
@@ -353,19 +535,22 @@ impl PeerInput for TimedInput {
     }
     fn render_timed_sample(&mut self) -> Option<TimedPeerSample> {
         let mut sample = self.reader.render_timed_sample().ok()?;
-        if let Some(provenance) = sample.provenance.as_ref() {
-            if provenance.real && !provenance.plc && !provenance.gap && !provenance.zero_extension {
-                sample.age_bound = provenance
-                    .position
-                    .and_then(|position| self.shared.locate(position));
+        self.shared.stamp(&mut sample);
+        if sample.age_bound.is_some() {
+            self.known = self.known.wrapping_add(1);
+            if let Some(position) = sample.provenance.and_then(|p| p.position) {
+                let until = self.shared.voice_until.load(Ordering::Acquire);
+                self.past_hold = until != 0
+                    && position
+                        .frame
+                        .saturating_add(u64::from(position.fraction_billionths != 0))
+                        >= until;
             }
         }
         if self.shared.voiced {
             let qualified = sample.age_bound.is_some()
                 && sample.provenance.as_ref().is_some_and(|p| {
-                    p.real
-                        && !p.plc
-                        && !p.gap
+                    (p.real || p.plc || p.gap)
                         && !p.zero_extension
                         && !p.muted
                         && p.position
@@ -432,8 +617,28 @@ pub struct PhoneMediaInput {
     input: ProcessedPeer<TimedInput>,
     shared: Arc<Shared>,
     outbound: Option<LinkAudioProducer>,
+    speech_phase: PhoneSpeechPhase,
 }
 impl PhoneMediaInput {
+    fn observe_output(&mut self, known: bool, qualified: bool) {
+        if !self.shared.voiced {
+            return;
+        }
+        if !self.active() || self.input.signals().dtmf_muted() || !known {
+            self.speech_phase = PhoneSpeechPhase::Unavailable;
+            self.shared.output_open.store(false, Ordering::Release);
+        } else if qualified {
+            self.speech_phase = if self.input.source().past_hold {
+                PhoneSpeechPhase::Draining
+            } else {
+                PhoneSpeechPhase::Open
+            };
+            self.shared.output_open.store(true, Ordering::Release);
+        } else if self.input.source().past_hold && self.shared.output_open.load(Ordering::Acquire) {
+            self.speech_phase = PhoneSpeechPhase::Closed;
+            self.shared.output_open.store(false, Ordering::Release);
+        }
+    }
     /// Transfer the existing mix-minus queue producer to exactly one typed graph slot.
     pub fn take_output(&mut self) -> Option<LinkAudioProducer> {
         self.outbound.take()
@@ -451,6 +656,15 @@ impl PhoneMediaInput {
     }
 }
 impl PeerInput for PhoneMediaInput {
+    fn phone_speech_state(&self) -> Option<PhoneSpeechState> {
+        self.shared.voiced.then_some(PhoneSpeechState {
+            phase: if self.active() && !self.signals().dtmf_muted() {
+                self.speech_phase
+            } else {
+                PhoneSpeechPhase::Unavailable
+            },
+        })
+    }
     fn phone_reply(&self) -> Option<&PeerReply> {
         Some(&self.shared.reply)
     }
@@ -477,12 +691,25 @@ impl PeerInput for PhoneMediaInput {
         if !self.active() {
             return None;
         }
-        let sample = self.input.render_timed_sample()?;
+        let Some(sample) = self.input.render_timed_sample() else {
+            self.observe_output(false, false);
+            return None;
+        };
+        let qualified = self.input.output_qualified().unwrap_or_else(|| {
+            sample
+                .provenance
+                .is_some_and(|p| !p.muted && (p.real || p.plc || p.gap))
+        });
+        self.observe_output(sample.age_bound.is_some(), qualified);
         self.active().then_some(sample)
     }
     fn render_timed_block(&mut self, output: &mut [f32]) -> Option<RenderedPeerBlock> {
+        if output.is_empty() {
+            return None;
+        }
         if self.active() {
             let before = self.input.source().qualified;
+            let known_before = self.input.source().known;
             let result = self.input.render_timed_block(output);
             if self.active() {
                 if !self.shared.voiced {
@@ -490,6 +717,13 @@ impl PeerInput for PhoneMediaInput {
                 }
                 let qualified = self.input.source().qualified.wrapping_sub(before) as usize;
                 let active = self.input.output_qualified().unwrap_or(qualified != 0);
+                let known = result.is_some_and(|block| block.age_bound.is_some())
+                    || (self.input.output_qualified().is_none()
+                        && result.is_some()
+                        && self.input.source().known.wrapping_sub(known_before)
+                            == output.len() as u64);
+                self.observe_output(known, active);
+                let active = active && !self.input.signals().dtmf_muted();
                 if let Some(mut block) = result.filter(|block| active && block.age_bound.is_some())
                 {
                     // Stateful output may contain the previous block's final voice,
@@ -513,10 +747,20 @@ impl PeerInput for PhoneMediaInput {
         if !self.active() {
             return None;
         }
-        let sample = self.input.render_sample()?;
-        self.active().then_some(sample)
+        if !self.shared.voiced {
+            let sample = self.input.render_sample()?;
+            return self.active().then_some(sample);
+        }
+        let sample = self.render_timed_sample()?;
+        (sample.age_bound.is_some()
+            && matches!(
+                self.speech_phase,
+                PhoneSpeechPhase::Open | PhoneSpeechPhase::Draining
+            ))
+        .then_some(sample.sample)
     }
     fn silence(&mut self, output: &mut [f32]) {
+        self.observe_output(false, false);
         if self.active() {
             self.input.silence(output);
         } else {
@@ -605,17 +849,26 @@ fn prepare_with_speech(
         voiced: speech.is_some(),
         oldest: AtomicU64::new(0),
         buckets: std::array::from_fn(|_| Bucket::default()),
+        origins: (0..(u64::from(rate) / 50 * BUCKETS as u64).div_ceil(32))
+            .map(|_| AtomicU64::new(0))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        output_open: AtomicBool::new(false),
+        voice_until: AtomicU64::new(0),
     });
     let (output, outbound) = LinkAudioQueue::new(48_000 / 5, 64)
         .map_err(|_| Error::Allocation)?
         .into_endpoints();
     let input = PhoneMediaInput {
         outbound: Some(output),
+        speech_phase: PhoneSpeechPhase::Unavailable,
         input: ProcessedPeer::new(
             TimedInput {
                 reader,
                 shared: Arc::clone(&shared),
                 qualified: 0,
+                known: 0,
+                past_hold: false,
             },
             processor,
         ),
@@ -626,6 +879,7 @@ fn prepare_with_speech(
             outbound: Some(outbound),
             speech,
             last_voice: None,
+            analysis_gap: false,
             voice_until: 0,
             preroll_frames: u64::from(rate) * u64::from(settings.preroll_ms) / 1000,
             hold_frames: u64::from(rate) * u64::from(settings.hold_ms) / 1000,

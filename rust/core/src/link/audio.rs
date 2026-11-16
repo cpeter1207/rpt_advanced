@@ -212,8 +212,33 @@ pub struct RfContributor<'a> {
     pub call: &'a PeerReply,
 }
 
+/// Evidence from the exact input owned by an AudioPeer's prepared courtesy key.
+/// The caller pairs this value with that slot's key and retained call/media fences;
+/// the source must not allocate a competing identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhoneSpeechState {
+    /// Latest verified rendered lifecycle, not generic input activity.
+    pub phase: PhoneSpeechPhase,
+}
+/// Original-held phone speech after the existing programme DSP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneSpeechPhase {
+    /// Qualified genuine speech has reached programme output.
+    Open,
+    /// Original hold ended, but qualified processed output remains.
+    Draining,
+    /// Original hold ended and the qualified processed tail has drained.
+    Closed,
+    /// No verified closure: initial, retired, muted, failed or unknown timing.
+    Unavailable,
+}
+
 /// Unique adapter-owned consumer of one released inbound ring.
 pub trait PeerInput: Send {
+    /// Rendered phone source evidence; ordinary inputs supply no phone lifecycle.
+    fn phone_speech_state(&self) -> Option<PhoneSpeechState> {
+        None
+    }
     /// Exact private-call token, never a numeric node identity or mailbox grant.
     /// Public inputs return None; wrappers forward the original token unchanged.
     fn phone_reply(&self) -> Option<&super::PeerReply> {

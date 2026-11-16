@@ -137,7 +137,7 @@ impl rpt_advanced_core::link::PeerInput for Source {
         }
         Some(TimedPeerSample {
             sample: self.next as f32 * 0.25,
-            age_bound: (self.known && fault != Some(0)).then_some(SourceTimeBound {
+            age_bound: (self.known && !matches!(fault, Some(0 | 4))).then_some(SourceTimeBound {
                 host_clock_epoch: self.epoch + u64::from(fault == Some(1)),
                 not_after_ns: self.next * 1_000_000,
             }),

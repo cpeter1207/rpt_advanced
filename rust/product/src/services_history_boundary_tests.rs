@@ -102,3 +102,14 @@ fn overwritten_or_mixed_lifecycle_buckets_cannot_qualify_delayed_output() {
         );
     }
 }
+
+#[test]
+fn explicitly_mapped_synthetic_continuity_keeps_original_age() {
+    let mut history = history(0);
+    let mut input = sample();
+    let provenance = input.provenance.as_mut().unwrap();
+    provenance.real = false;
+    provenance.plc = true;
+    assert_eq!(history.output(input, Some(state(65, 0))), input.age_bound);
+    assert!(history.output_qualified());
+}

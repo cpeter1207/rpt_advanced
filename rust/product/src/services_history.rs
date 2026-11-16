@@ -35,9 +35,10 @@ impl Bucket {
         let position = provenance.position?;
         (!position.negative
             && position.fraction_billionths < 1_000_000_000
-            && provenance.real
-            && !provenance.plc
-            && !provenance.gap
+            // Phone TimedInput supplies a bound for explicitly mapped retained
+            // synthetic continuity only. Unmapped ring shortfall has no bound.
+            && ((provenance.real && !provenance.plc && !provenance.gap)
+                || (!provenance.real && (provenance.plc || provenance.gap)))
             && !provenance.zero_extension)
             .then_some(Self {
                 index: 0,

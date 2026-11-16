@@ -269,6 +269,9 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     fn phone_reply(&self) -> Option<&rpt_advanced_core::link::PeerReply> {
         self.input.phone_reply()
     }
+    fn phone_speech_state(&self) -> Option<rpt_advanced_core::link::PhoneSpeechState> {
+        self.input.phone_speech_state()
+    }
     fn source_rate(&self) -> u32 {
         self.input.source_rate()
     }

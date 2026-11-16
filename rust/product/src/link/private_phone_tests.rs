@@ -97,7 +97,12 @@ fn provider_local_metadata_cannot_put_nul_in_native_error_logging() {
     )
     .unwrap();
     let signals = PeerSignals::for_phone(source);
-    let (mut session, _control) = PrivatePhoneSession::prepare(io, signals.reply_target()).unwrap();
+    let (mut session, _control) = PrivatePhoneSession::prepare(
+        io,
+        signals.reply_target(),
+        rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+    )
+    .unwrap();
     state.lock().unwrap().fail_ready = true;
     crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
     assert_eq!(session.step(0), Err(Error::Hangup));
@@ -411,7 +416,12 @@ fn private_prepare_checks_all_provider_identity_fields_and_retirement() {
             reply.retire();
         }
         assert!(
-            PrivatePhoneSession::prepare(io, reply).is_err(),
+            PrivatePhoneSession::prepare(
+                io,
+                reply,
+                rpt_advanced_core::config::PhoneAccountProtocol::Iax
+            )
+            .is_err(),
             "{mismatch}"
         );
     }
@@ -493,6 +503,26 @@ fn source_session_with_peer(
     Arc<std::sync::Mutex<crate::link::session::tests::State>>,
     PeerReply,
 ) {
+    source_session_with_protocol(
+        (io, state),
+        authenticated,
+        rpt_advanced_core::config::PhoneAccountProtocol::Iax,
+    )
+}
+
+fn source_session_with_protocol(
+    (io, state): (
+        PeerIo,
+        Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+    ),
+    authenticated: bool,
+    protocol: rpt_advanced_core::config::PhoneAccountProtocol,
+) -> (
+    PrivatePhoneSession,
+    PrivatePhoneControl,
+    Arc<std::sync::Mutex<crate::link::session::tests::State>>,
+    PeerReply,
+) {
     let (account, call) = io.generations();
     let source = PhoneSource::new(
         io.phone_account().unwrap().clone(),
@@ -507,7 +537,7 @@ fn source_session_with_peer(
         assert!(signals.authenticate_phone());
     }
     let reply = signals.reply_target();
-    let (session, control) = PrivatePhoneSession::prepare(io, reply.clone()).unwrap();
+    let (session, control) = PrivatePhoneSession::prepare(io, reply.clone(), protocol).unwrap();
     (session, control, state, reply)
 }
 
@@ -915,7 +945,11 @@ fn private_source_analysis_rejects_unsupported_detector_rate_without_legacy_regr
     .unwrap();
     let signals = PeerSignals::for_phone(source);
     assert!(matches!(
-        PrivatePhoneSession::prepare(io, signals.reply_target()),
+        PrivatePhoneSession::prepare(
+            io,
+            signals.reply_target(),
+            rpt_advanced_core::config::PhoneAccountProtocol::Iax
+        ),
         Err(Error::UnsupportedFormat)
     ));
     // Legacy command-only readers still retain their established preparation.
@@ -3076,4 +3110,79 @@ fn selected_analysis_preserves_thirty_ms_source_credit_birth_and_retirement() {
     assert_eq!(input.render(&mut stale), None);
     assert!(stale.iter().all(|sample| *sample == 0.0));
     assert!(!reply.ended());
+}
+
+#[test]
+fn configured_protocol_limits_continuity_to_sip_and_preserves_command_cuts() {
+    use rpt_advanced_core::{
+        config::{PhoneAccountProtocol, PhoneSpeechSettings},
+        link::{PeerInput as _, PhoneSpeechPhase},
+    };
+    for protocol in [PhoneAccountProtocol::Iax, PhoneAccountProtocol::Sip] {
+        for native in [false, true] {
+            let (mut session, mut control, state, reply) = source_session_with_protocol(
+                crate::link::session::tests::phone_source_peer_at_rate(8000),
+                true,
+                protocol,
+            );
+            session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+            let (pending, mut input) = control
+                .prepare_pending_voiced_media(
+                    None,
+                    PhoneSpeechSettings {
+                        threshold: 0.0,
+                        onset_frames: 1,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            control.adopt_media(pending).ok().unwrap();
+            session.step(0).unwrap();
+            let birth = state.lock().unwrap().source_reference.unwrap().1;
+            state.lock().unwrap().source_birth = Some(birth);
+            state
+                .lock()
+                .unwrap()
+                .input
+                .push_back(Input::Audio(vec![0.25; 1600]));
+            for now in 1..20 {
+                session.step(now).unwrap();
+            }
+            assert!((0..10).any(|_| input.render_timed_block(&mut [0.0; 480]).is_some()));
+            let revision = session.revision.0.get();
+            state.lock().unwrap().input.push_back(if native {
+                Input::Concealed(vec![0.5; 160])
+            } else {
+                Input::Gap(160)
+            });
+            session.step(20).unwrap();
+            assert_eq!(input.active(), protocol == PhoneAccountProtocol::Sip);
+            assert_eq!(session.revision.0.get(), revision);
+            assert!(
+                control.digit().is_none(),
+                "synthetic media cannot initiate DTMF"
+            );
+            if protocol == PhoneAccountProtocol::Sip {
+                state
+                    .lock()
+                    .unwrap()
+                    .input
+                    .push_back(Input::Audio(vec![0.25; 160]));
+                session.step(21).unwrap();
+                assert!(
+                    input.active(),
+                    "genuine audio resumes after analysis-only reset"
+                );
+                state.lock().unwrap().input.push_back(Input::Digit(b'7'));
+                session.step(22).unwrap();
+                assert_eq!(control.digit(), Some(('7', 22)));
+                assert!(!input.active());
+            }
+            assert_eq!(
+                input.phone_speech_state().unwrap().phase,
+                PhoneSpeechPhase::Unavailable
+            );
+            assert!(!reply.ended());
+        }
+    }
 }

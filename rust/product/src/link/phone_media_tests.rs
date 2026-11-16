@@ -1165,3 +1165,386 @@ fn configured_phone_media_rejects_unbounded_history_and_reserve_before_publicati
         );
     }
 }
+
+#[test]
+fn timed_loss_continues_open_original_hold_without_refreshing_it() {
+    for rate in [8000, 16000] {
+        let (mut ingress, mut input, shared) = super::prepare_voiced(
+            reply(),
+            rate,
+            NonZeroU32::MIN,
+            None,
+            PhoneSpeechSettings::default(),
+        )
+        .unwrap();
+        adopt(&mut ingress, 0, reference());
+        ingress.speech = None;
+        let width = u64::from(rate) / 50;
+        for block in 0..10 {
+            assert_eq!(
+                ingress.audio(block * width, &vec![0.25; width as usize], Some(birth(10))),
+                Ok(width as usize)
+            );
+        }
+        ingress.voice_decision(Some(10 * width - 1));
+        let mut output = [0.0; 480];
+        assert!((0..10).any(|_| input.render_timed_block(&mut output).is_some()));
+        let hold = (ingress.last_voice, ingress.voice_until);
+        assert_eq!(ingress.gap(10 * width, width as usize), Ok(width as usize));
+        assert!(
+            shared.active(),
+            "known timed loss is not a programme discontinuity at {rate}"
+        );
+        assert_eq!((ingress.last_voice, ingress.voice_until), hold);
+    }
+}
+
+#[test]
+fn mixed_single_sample_credit_preserves_plc_origin() {
+    for rate in [8000, 16000] {
+        let (mut ingress, mut input, shared) = super::prepare_voiced(
+            reply(),
+            rate,
+            NonZeroU32::MIN,
+            None,
+            PhoneSpeechSettings::default(),
+        )
+        .unwrap();
+        adopt(&mut ingress, 0, reference());
+        ingress.speech = None;
+        let width = u64::from(rate) / 50;
+        for frame in 0..width {
+            let accepted = if frame % 2 == 0 {
+                ingress.audio(frame, &[0.25], Some(birth(10)))
+            } else {
+                ingress.concealed(frame, &[0.5], Some(birth(20)))
+            };
+            assert_eq!(accepted, Ok(1));
+        }
+        ingress.voice_decision(Some(width - 1));
+        for frame in 0..width {
+            assert_eq!(
+                shared.synthetic_at(position(&shared, frame, 0)),
+                Some(frame % 2 == 1)
+            );
+            assert_eq!(shared.voiced_frame(frame), frame % 2 == 0);
+        }
+        assert_eq!(shared.synthetic_at(position(&shared, 0, 1)), Some(true));
+        assert_eq!(shared.synthetic_at(position(&shared, 1, 1)), Some(true));
+
+        let capacity = u64::from(rate) * 300 / 1000;
+        for frame in width..capacity {
+            assert_eq!(
+                if frame % 2 == 0 {
+                    ingress.audio(frame, &[0.25], Some(birth(10)))
+                } else {
+                    ingress.concealed(frame, &[0.5], Some(birth(20)))
+                },
+                Ok(1)
+            );
+        }
+        assert_eq!(ingress.concealed(capacity, &[0.5], Some(birth(20))), Ok(0));
+        assert_eq!(ingress.cursor, Some(capacity));
+        for _ in 0..960 {
+            input.render_timed_sample();
+        }
+        assert_eq!(ingress.concealed(capacity, &[0.5], Some(birth(20))), Ok(1));
+        assert_eq!(ingress.audio(capacity + 1, &[0.25], Some(birth(30))), Ok(1));
+        assert_eq!(
+            shared.synthetic_at(position(&shared, capacity, 0)),
+            Some(true)
+        );
+        assert_eq!(
+            shared.synthetic_at(position(&shared, capacity + 1, 0)),
+            Some(false)
+        );
+        assert_eq!(
+            shared.synthetic_at(position(&shared, capacity, 1)),
+            Some(true)
+        );
+    }
+}
+
+#[test]
+fn later_voice_does_not_promote_synthetic_preroll_to_rf_onset() {
+    let (mut ingress, mut input, shared) = super::prepare_voiced(
+        reply(),
+        8000,
+        NonZeroU32::MIN,
+        None,
+        PhoneSpeechSettings::default(),
+    )
+    .unwrap();
+    adopt(&mut ingress, 0, reference());
+    ingress.speech = None;
+    for frame in 0..1600 {
+        assert_eq!(
+            if frame < 800 {
+                ingress.concealed(frame, &[0.5], Some(birth(10)))
+            } else {
+                ingress.audio(frame, &[0.25], Some(birth(20)))
+            },
+            Ok(1)
+        );
+    }
+    ingress.voice_decision(Some(1599));
+    let mut original_reached_output = false;
+    for _ in 0..9600 {
+        let Some(sample) = input.render_timed_sample() else {
+            continue;
+        };
+        let Some(provenance) = sample.provenance else {
+            continue;
+        };
+        if provenance.real && !provenance.muted {
+            original_reached_output = true;
+        }
+        if provenance
+            .position
+            .is_some_and(|p| !p.negative && p.frame < 799)
+        {
+            assert!(provenance.plc && !provenance.real);
+            assert!(
+                provenance.muted,
+                "later genuine VAD cannot promote synthetic onset"
+            );
+            assert_eq!(sample.sample, 0.0);
+        }
+    }
+    assert!(original_reached_output);
+    assert!(shared.active());
+}
+
+#[test]
+fn phone_speech_closes_only_after_original_hold_and_processed_tail_drain() {
+    use rpt_advanced_core::link::PhoneSpeechPhase;
+    for processed in [false, true] {
+        let (_state, graph) = crate::services::history_tests::processor_fixture(1, 1);
+        let graph = processed.then_some(graph);
+        let (mut ingress, mut input, shared) = super::prepare_voiced(
+            reply(),
+            48000,
+            NonZeroU32::MIN,
+            graph,
+            PhoneSpeechSettings {
+                hold_ms: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        adopt(&mut ingress, 0, reference());
+        ingress.speech = None;
+        assert_eq!(
+            input.phone_speech_state().unwrap().phase,
+            PhoneSpeechPhase::Unavailable
+        );
+        for block in 0..10 {
+            assert_eq!(
+                ingress.audio(block * 960, &[0.25; 960], Some(birth(10))),
+                Ok(960)
+            );
+        }
+        ingress.voice_decision(Some(1919));
+        let mut open = false;
+        let mut draining = false;
+        let mut closed = false;
+        for _ in 0..4000 {
+            let mut output = [0.0];
+            let result = input.render_timed_block(&mut output);
+            match input.phone_speech_state().unwrap().phase {
+                PhoneSpeechPhase::Open => open = true,
+                PhoneSpeechPhase::Draining => {
+                    draining = true;
+                    assert!(result.is_some());
+                    assert!(input.render_timed_block(&mut []).is_none());
+                    assert_eq!(
+                        input.phone_speech_state().unwrap().phase,
+                        PhoneSpeechPhase::Draining
+                    );
+                }
+                PhoneSpeechPhase::Closed => {
+                    closed = true;
+                    assert!(result.is_none());
+                    break;
+                }
+                PhoneSpeechPhase::Unavailable => {}
+            }
+        }
+        assert!(
+            open && closed,
+            "processed={processed} open={open} closed={closed} phase={:?} past_hold={}",
+            input.speech_phase,
+            input.input.source().past_hold
+        );
+        assert_eq!(
+            draining, processed,
+            "one-sample DSP retains one exact tail sample"
+        );
+        shared.retire();
+        assert_eq!(
+            input.phone_speech_state().unwrap().phase,
+            PhoneSpeechPhase::Unavailable
+        );
+    }
+}
+
+#[test]
+fn native_and_fallback_loss_render_only_inside_the_original_hold() {
+    for rate in [8000, 16000] {
+        for (native, queued) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (mut ingress, mut input, shared) = super::prepare_voiced(
+                reply(),
+                rate,
+                NonZeroU32::MIN,
+                None,
+                PhoneSpeechSettings {
+                    hold_ms: 20,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            adopt(&mut ingress, 0, reference());
+            ingress.speech = None;
+            let width = u64::from(rate) / 50;
+            for block in 0..10 {
+                assert_eq!(
+                    ingress.audio(block * width, &vec![0.25; width as usize], Some(birth(10))),
+                    Ok(width as usize)
+                );
+            }
+            ingress.voice_decision(Some(10 * width - 1));
+            if !queued {
+                assert!((0..10).any(|_| input.render_timed_block(&mut [0.0; 480]).is_some()));
+            }
+            let hold = (ingress.last_voice, ingress.voice_until);
+            let concealed_pcm = vec![0.5; width as usize];
+            for block in 10..12 {
+                let (accepted, allocations) = crate::fixture::allocations(|| {
+                    if native {
+                        ingress.concealed(block * width, &concealed_pcm, Some(birth(20)))
+                    } else {
+                        ingress.gap(block * width, width as usize)
+                    }
+                });
+                assert_eq!(allocations, 0);
+                assert_eq!(accepted, Ok(width as usize));
+            }
+            assert_eq!((ingress.last_voice, ingress.voice_until), hold);
+            let mut rendered = 0;
+            for _ in 0..18000 {
+                let (value, allocations) =
+                    crate::fixture::allocations(|| input.render_timed_sample());
+                assert_eq!(allocations, 0);
+                let Some(value) = value else {
+                    continue;
+                };
+                let Some(provenance) = value.provenance else {
+                    continue;
+                };
+                let Some(position) = provenance.position else {
+                    continue;
+                };
+                if position.negative || position.frame < 10 * width || position.frame >= 12 * width
+                {
+                    continue;
+                }
+                assert!(!provenance.real && provenance.plc);
+                assert_eq!(
+                    value.age_bound.unwrap().not_after_ns,
+                    10,
+                    "loss cannot renew receipt age"
+                );
+                if position.frame < 11 * width - 1 && !provenance.zero_extension {
+                    assert!(
+                        !provenance.muted,
+                        "held {rate} native={native} pos={position:?}"
+                    );
+                    rendered += 1;
+                } else if position.frame >= 11 * width {
+                    assert!(provenance.muted, "loss cannot renew source hold");
+                }
+            }
+            assert!(
+                rendered > 0,
+                "mapped fallback/native must reach output {rate} native={native}"
+            );
+            assert!(shared.active());
+        }
+    }
+}
+
+#[test]
+fn synthetic_age_does_not_poison_fresh_original_receipts_in_the_same_bucket() {
+    for rate in [8000, 16000] {
+        let (mut ingress, _input, shared) = super::prepare_voiced(
+            reply(),
+            rate,
+            NonZeroU32::MIN,
+            None,
+            PhoneSpeechSettings::default(),
+        )
+        .unwrap();
+        adopt(&mut ingress, 0, reference());
+        ingress.speech = None;
+        let width = u64::from(rate) / 50;
+        assert_eq!(
+            ingress.audio(0, &vec![0.25; width as usize], Some(birth(10))),
+            Ok(width as usize)
+        );
+        assert_eq!(
+            ingress.concealed(width, &vec![0.5; width as usize / 2], Some(birth(20))),
+            Ok(width as usize / 2)
+        );
+        assert_eq!(
+            ingress.audio(
+                width + width / 2,
+                &vec![0.25; width as usize / 2],
+                Some(birth(30))
+            ),
+            Ok(width as usize / 2)
+        );
+        assert_eq!(shared.bound(width).unwrap().not_after_ns, 10);
+        assert_eq!(shared.bound(width + width / 2).unwrap().not_after_ns, 30);
+        assert_eq!(
+            shared
+                .locate(position(&shared, width + width / 2 - 1, 1))
+                .unwrap()
+                .not_after_ns,
+            10
+        );
+        assert_eq!(
+            ingress.gap(2 * width, width as usize / 2),
+            Ok(width as usize / 2)
+        );
+        assert_eq!(shared.bound(2 * width).unwrap().not_after_ns, 30);
+    }
+}
+
+#[test]
+fn provider_shortfall_cannot_borrow_an_original_slot_as_synthetic_authority() {
+    use rpt_advanced_core::link::SampleProvenance;
+    let (_ingress, _input, shared) = prepare(reply(), 8000, None).unwrap();
+    assert!(shared.record(0, 2, birth(10)));
+    for (real, plc, gap) in [
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+    ] {
+        let mut sample = TimedPeerSample {
+            sample: 0.5,
+            age_bound: None,
+            provenance: Some(SampleProvenance {
+                real,
+                plc,
+                gap,
+                position: Some(position(&shared, 0, 0)),
+                ..Default::default()
+            }),
+        };
+        shared.stamp(&mut sample);
+        assert_eq!(
+            sample.age_bound, None,
+            "only exact synthetic ledger slots may inherit PLC age"
+        );
+    }
+}

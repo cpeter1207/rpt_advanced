@@ -20,6 +20,13 @@ pub enum AudioInput {
 }
 
 impl PeerInput for AudioInput {
+    fn phone_speech_state(&self) -> Option<rpt_advanced_core::link::PhoneSpeechState> {
+        match self {
+            Self::Peer(input) => input.phone_speech_state(),
+            Self::Retained(_) => None,
+            Self::Phone(input) => input.phone_speech_state(),
+        }
+    }
     fn phone_reply(&self) -> Option<&PeerReply> {
         match self {
             Self::Peer(input) => input.phone_reply(),

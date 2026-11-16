@@ -327,9 +327,10 @@ impl PhoneCalls {
         source: &PhoneSource,
         reply: &PeerReply,
         grammar: PhoneDtmfGrammar,
+        protocol: rpt_advanced_core::config::PhoneAccountProtocol,
         worker: &mut PeerIoWorker,
     ) -> Result<(), Error> {
-        self.start_call(source, reply, Some(grammar), worker)
+        self.start_call(source, reply, Some(grammar), protocol, worker)
     }
     /// Start the same private serial owner without creating an incoming collector.
     pub(crate) fn start_outgoing(
@@ -341,18 +342,25 @@ impl PhoneCalls {
         if !reply.phone_outgoing() {
             return Err(Error::Admission);
         }
-        self.start_call(source, reply, None, worker)
+        self.start_call(
+            source,
+            reply,
+            None,
+            rpt_advanced_core::config::PhoneAccountProtocol::Sip,
+            worker,
+        )
     }
     fn start_call(
         &mut self,
         source: &PhoneSource,
         reply: &PeerReply,
         grammar: Option<PhoneDtmfGrammar>,
+        protocol: rpt_advanced_core::config::PhoneAccountProtocol,
         worker: &mut PeerIoWorker,
     ) -> Result<(), Error> {
         let call = self.current(source, reply)?;
         let io = call.io.take().ok_or(Error::Admission)?;
-        let (session, control) = PrivatePhoneSession::prepare(io, reply.clone())?;
+        let (session, control) = PrivatePhoneSession::prepare(io, reply.clone(), protocol)?;
         worker.attach_private(session).map_err(|_| Error::Thread)?;
         call.owner = Some(control);
         if let Some(grammar) = &grammar {
