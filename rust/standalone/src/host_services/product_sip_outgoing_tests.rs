@@ -281,6 +281,15 @@ fn strict_silence_rejects_even_credited_later_cuts() {
             .is_err()
         );
     }
+    // Fresh transition credit cannot excuse packet loss or rewound source time.
+    for (current, marker) in [((12, 1160, 7), false), ((11, 999, 7), true)] {
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_rtp_step(previous, current, marker, 160, true, 21, 20)
+            })
+            .is_err()
+        );
+    }
 }
 
 fn observe_rtp(wire: &[u8]) {

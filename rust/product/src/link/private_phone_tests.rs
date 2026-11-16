@@ -2898,3 +2898,182 @@ fn transmit_only_inband_keeps_native_receive_events_and_existing_control_owner()
     assert!(state.lock().unwrap().digits.is_empty());
     assert!(!reply.phone_authenticated());
 }
+
+#[test]
+fn selected_analysis_preserves_thirty_ms_source_credit_birth_and_retirement() {
+    use rpt_advanced_core::link::PeerInput as _;
+
+    let rate = 8000_u32;
+    let quantum = rate as usize / 50;
+    let block = rate as usize * 30 / 1000;
+    // Derive the fill boundary from InboundPolicy::Phone's 300 ms capacity,
+    // independently of its explicitly selected 160 ms programme reserve.
+    let capacity = rate as usize * 300 / 1000;
+    let blocks = capacity.div_ceil(block) + 1;
+    let (mut session, mut control, state, reply) = source_session_with_peer(
+        crate::link::session::tests::phone_source_peer_transmit_inband(rate),
+        true,
+    );
+    assert_eq!(session.digit_mode, PhoneDigitMode::NativeEvents);
+    assert_eq!(control.digit_mode, PhoneDigitMode::InBand);
+    session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+    let settings = rpt_advanced_core::config::PhoneSpeechSettings {
+        preprocessing_enabled: true,
+        // Deterministic admission oracle, not a proposed telephone tuning preset.
+        threshold: 0.0,
+        onset_frames: 1,
+        reserve_ms: 160,
+        ..Default::default()
+    };
+    let (pending, mut input) = control
+        .prepare_pending_voiced_media(None, settings)
+        .unwrap();
+    control.adopt_media(pending).ok().unwrap();
+    session.step(0).unwrap();
+    assert!(input.active());
+    assert_eq!(input.source_rate(), rate);
+    let epoch = state.lock().unwrap().source_reference.unwrap().0;
+    let offered = vec![0.25_f32; block];
+    let offered_bits: Vec<_> = offered.iter().map(|sample| sample.to_bits()).collect();
+    let mut births = Vec::new();
+    let mut now = 0;
+    for _ in 0..blocks {
+        {
+            let mut source = state.lock().unwrap();
+            let (observed_epoch, born) = source.source_reference.unwrap();
+            assert_eq!(observed_epoch, epoch);
+            births.push(born);
+            source.source_birth = Some(born);
+            source.input.push_back(Input::Audio(offered.clone()));
+        }
+        // A 30 ms decoded offer needs at most two 20 ms-limited source reads.
+        // The extra bounded attempts also expose refusal at the actual ring limit.
+        for _ in 0..4 {
+            now += 1;
+            session.step(now).unwrap();
+            let source = state.lock().unwrap();
+            if source.input.is_empty() || source.source_credits.last().is_some_and(|(_, n)| *n == 0)
+            {
+                break;
+            }
+        }
+    }
+    let expected: Vec<_> = (0..blocks)
+        .flat_map(|index| {
+            let start = (index * block) as u64;
+            [(start, quantum), (start + quantum as u64, block - quantum)]
+        })
+        .collect();
+    {
+        let source = state.lock().unwrap();
+        let accepted: Vec<_> = source
+            .source_credits
+            .iter()
+            .copied()
+            .filter(|(_, n)| *n != 0)
+            .collect();
+        assert_eq!(accepted, expected[..expected.len() - 2]);
+        assert_eq!(accepted.iter().map(|(_, n)| n).sum::<usize>(), capacity);
+        assert_eq!(source.source_credits.last(), Some(&(capacity as u64, 0)));
+        assert!(
+            matches!(source.input.front(), Some(Input::Audio(pcm))
+                if pcm.iter().map(|sample| sample.to_bits()).collect::<Vec<_>>() == offered_bits),
+            "refused decoded block must retain every original sample bit"
+        );
+    }
+    assert_eq!(input.available(), capacity as u64);
+    now += 1;
+    session.step(now).unwrap();
+    assert_eq!(
+        state.lock().unwrap().source_credits.last(),
+        Some(&(capacity as u64, 0)),
+        "a blocked retry cannot advance source credit"
+    );
+    for _ in 0..4800 {
+        input.render_timed_sample().unwrap();
+    }
+    for _ in 0..4 {
+        now += 1;
+        session.step(now).unwrap();
+        if state.lock().unwrap().input.is_empty() {
+            break;
+        }
+    }
+    {
+        let source = state.lock().unwrap();
+        assert!(
+            source.input.is_empty(),
+            "bounded retry must finish the retained block"
+        );
+        assert_eq!(
+            source
+                .source_credits
+                .iter()
+                .copied()
+                .filter(|(_, n)| *n != 0)
+                .collect::<Vec<_>>(),
+            expected,
+            "each original source frame receives credit exactly once"
+        );
+    }
+    let mut retry_samples = 0;
+    for _ in 0..14000 {
+        let sample = input.render_timed_sample().unwrap();
+        if let Some(position) = sample
+            .provenance
+            .filter(|p| p.real && !p.plc && !p.gap && !p.zero_extension && !p.muted)
+            .and_then(|p| p.position)
+            .filter(|p| !p.negative)
+        {
+            let frame = position.frame as usize;
+            if (quantum * 2..blocks * block - 32).contains(&frame) {
+                assert!(
+                    (sample.sample - 0.25).abs() < 0.01,
+                    "analysis filtering must not replace original programme PCM"
+                );
+                let bound = sample.age_bound.unwrap();
+                assert_eq!(bound.host_clock_epoch, epoch);
+                // Existing receipt buckets may conservatively combine older
+                // births, but neither admission nor retry may make a block younger.
+                assert!(bound.not_after_ns <= births[frame / block]);
+                if frame >= capacity + 32 {
+                    retry_samples += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        retry_samples > 0,
+        "inspect the accepted retry, not only earlier audio"
+    );
+    state.lock().unwrap().source_reset = true;
+    now += 1;
+    session.step(now).unwrap();
+    assert!(!input.active() && !control.media_occupied() && !reply.ended());
+    assert!(
+        session
+            .media
+            .as_ref()
+            .is_some_and(|media| !media.occupied())
+    );
+    let mut stale = [1.0; 960];
+    assert_eq!(input.render(&mut stale), None);
+    assert!(stale.iter().all(|sample| *sample == 0.0));
+    assert!(input.render_timed_sample().is_none());
+
+    state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+    now += 1;
+    session.step(now).unwrap();
+    assert_eq!(control.digit(), Some(('5', now)));
+    assert!(control.collection_ended(&reply));
+    let (pending, replacement) = control
+        .prepare_pending_voiced_media(None, settings)
+        .unwrap();
+    control.adopt_media(pending).ok().unwrap();
+    now += 1;
+    session.step(now).unwrap();
+    assert!(replacement.active() && !input.active());
+    assert_eq!(input.render(&mut stale), None);
+    assert!(stale.iter().all(|sample| *sample == 0.0));
+    assert!(!reply.ended());
+}
