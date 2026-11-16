@@ -154,14 +154,20 @@ impl Remote {
     }
 }
 fn media(caller: &mut Caller, codec: &mut AudioCodec, samples: &[f32]) {
+    let mut next = Instant::now();
     for chunk in samples.chunks(160) {
         let mut pcm = [0.0; 160];
         pcm[..chunk.len()].copy_from_slice(chunk);
         caller.audio(codec, &pcm);
         caller.service();
-        thread::sleep(Duration::from_millis(20));
+        // RTP advances one 20-ms packet, including encode/service work.
+        // Relative sleeps accumulate drift and can legitimately trigger native
+        // jitter adaptation cuts.
+        next += caller.packet_interval();
+        thread::sleep(next.saturating_duration_since(Instant::now()));
     }
 }
+
 pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool) {
     let mut caller = Caller::establish(sip, None);
     caller.keepalive = true;
@@ -237,7 +243,12 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool
         "silence after the private result does not open radio VOX"
     );
     media(&mut caller, &mut codec, &speech);
-    media(&mut caller, &mut codec, &[0.0; 16000]);
+    media(&mut caller, &mut codec, &[0.0; 4000]);
+    eprintln!(
+        "vox-courtesy: existing={existing} voice_remote={} rf={}",
+        observation.voiced.load(Ordering::Acquire),
+        PUBLIC_OUTPUT.load(Ordering::Acquire)
+    );
     assert!(
         observation.voiced.load(Ordering::Acquire) > 160,
         "real remote must hear qualified speech"
@@ -245,6 +256,40 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool
     assert!(
         PUBLIC_OUTPUT.load(Ordering::Acquire) > 0,
         "existing local mix receives qualified voice without private command results"
+    );
+    let remote_after_tail = observation.voiced.load(Ordering::Acquire);
+    let first = RADIO_TURNS.load(Ordering::Acquire);
+    media(&mut caller, &mut codec, &[0.0; 16000]);
+    let last = RADIO_TURNS.load(Ordering::Acquire);
+    assert!(last - first < RF_MORSE.len());
+    let mut bursts = Vec::new();
+    let mut on = 0;
+    for frame in first..last {
+        if RF_MORSE[frame % RF_MORSE.len()].load(Ordering::Acquire) {
+            on += 1;
+        } else if on != 0 {
+            bursts.push(on);
+            on = 0;
+        }
+    }
+    eprintln!("vox-courtesy: existing={existing} local_P_bursts={bursts:?} final_on={on}");
+    assert_eq!(on, 0, "local P must finish after the held close");
+    assert_eq!(bursts.len(), 4, "one local Morse P (.--.), got {bursts:?}");
+    assert!(
+        bursts[0] <= 4 && bursts[3] <= 4 && bursts[1] >= 6 && bursts[2] >= 6,
+        "P dot/dash durations: {bursts:?}"
+    );
+    assert_eq!(
+        observation.voiced.load(Ordering::Acquire),
+        remote_after_tail,
+        "P is never ordinary peer media"
+    );
+    let quiet = PUBLIC_PCM_OUTPUT.load(Ordering::Acquire);
+    media(&mut caller, &mut codec, &[0.0; 4000]);
+    assert_eq!(
+        PUBLIC_PCM_OUTPUT.load(Ordering::Acquire),
+        quiet,
+        "silence cannot repeat P or reopen speech"
     );
     assert!(
         !LAST_PTT.load(Ordering::Acquire),

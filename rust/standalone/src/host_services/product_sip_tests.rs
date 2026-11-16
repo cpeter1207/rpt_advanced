@@ -319,6 +319,7 @@ impl Caller {
     }
     fn digits(&mut self, digits: &[u8]) {
         for digit in digits {
+            let next = Instant::now() + Duration::from_millis(40);
             let event = b"0123456789*#ABCD"
                 .iter()
                 .position(|value| value == digit)
@@ -340,6 +341,9 @@ impl Caller {
                 self.sequence = self.sequence.wrapping_add(1);
                 thread::sleep(Duration::from_millis(10));
             }
+            // The RTP cursor advances 40 ms, not just the three 10-ms sends.
+            // Include packet work in that budget instead of accumulating lead.
+            thread::sleep(next.saturating_duration_since(Instant::now()));
         }
     }
 }
@@ -469,6 +473,12 @@ fn product_call_profile(
             .env(CHILD, "1")
             .output()
             .unwrap();
+        for line in String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter(|line| line.starts_with("vox-courtesy:"))
+        {
+            eprintln!("{line}");
+        }
         assert!(
             output.status.success(),
             "real SIP product child failed:\n{}\n{}",
@@ -511,6 +521,13 @@ fn product_call_profile(
         .unwrap();
         configuration.replace("[desk]", &format!("[1000]\nlink_lookup_method=file\nlink_static_directory_file={}\nphone_allow_accounts=office", path.display()))
             .replace("local_node=desk", "local_node=1000\nattach_local_nodes=1000")
+    } else {
+        configuration
+    };
+    let configuration = if voice {
+        format!(
+            "{configuration}\n[courtesy 1000 phone]\ninput=phone\nmorse_text=P\nmorse_speed_wpm=25\nmorse_frequency_hz=800\n"
+        )
     } else {
         configuration
     };
@@ -690,5 +707,37 @@ fn caller_packet_clock_matches_selected_codec_frame_duration() {
                 "{profile:?}"
             );
         }
+    }
+}
+
+#[test]
+fn literal_event_sender_accounts_for_the_full_advanced_source_clock() {
+    let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut caller = literal_sender(peer.local_addr().unwrap());
+    let started = Instant::now();
+    caller.digits(b"12");
+    let advanced = Duration::from_millis(u64::from(caller.timestamp) / 8);
+    assert_eq!(advanced, Duration::from_millis(80));
+    assert!(
+        started.elapsed() >= advanced,
+        "literal sender advanced 80 ms of RTP but waited only {:?}; repeated commands create artificial source clock lead",
+        started.elapsed()
+    );
+}
+
+fn literal_sender(address: SocketAddr) -> Caller {
+    Caller {
+        sip: UdpSocket::bind("127.0.0.1:0").unwrap(),
+        rtp: UdpSocket::bind("127.0.0.1:0").unwrap(),
+        target: address,
+        media: address,
+        to: String::new(),
+        sequence: 0,
+        timestamp: 0,
+        keepalive: false,
+        profile: AudioProfile::Mulaw,
+        events: true,
+        event_clock: 8000,
+        event_payload: 101,
     }
 }

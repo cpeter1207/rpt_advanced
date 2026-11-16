@@ -39,6 +39,8 @@ unsafe extern "C" fn capture_radio_metadata(
 static PUBLIC_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 static PUBLIC_PCM_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 static LAST_PTT: AtomicBool = AtomicBool::new(false);
+// Test-only 20-ms RF observations; a complete P occupies under 32 slots.
+static RF_MORSE: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 // Test-only local RF input; the existing callback scratch remains the sole PCM block.
 static LOCAL_INPUT: AtomicBool = AtomicBool::new(false);
 // ASCII DTMF or a keyed silent gap, rendered in the same existing callback scratch.
@@ -166,6 +168,19 @@ unsafe extern "C" fn activate(
                 .iter()
                 .filter(|sample| sample.abs() > 0.0001)
                 .count();
+            let energy: f32 = samples.iter().map(|sample| sample * sample).sum();
+            let correlation = |lag: usize| {
+                samples
+                    .iter()
+                    .zip(samples.iter().skip(lag))
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>()
+            };
+            // The configured fixture tone is 800 Hz at the existing 48-kHz DAC.
+            RF_MORSE[RADIO_TURNS.load(Ordering::Relaxed) % RF_MORSE.len()].store(
+                energy > 0.01 && correlation(60) > energy * 0.7 && correlation(30) < -energy * 0.7,
+                Ordering::Release,
+            );
             PUBLIC_PCM_OUTPUT.fetch_add(nonzero, Ordering::Relaxed);
             PUBLIC_OUTPUT.fetch_add(nonzero + usize::from(keyed != 0), Ordering::Relaxed);
             LAST_PTT.store(keyed != 0, Ordering::Release);
