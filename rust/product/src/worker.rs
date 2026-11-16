@@ -238,6 +238,8 @@ pub struct RadioStatus {
 /// Normal VAD RF edges advance the token while retaining tagged PCM. Actual faults
 /// separately request a reset, including faults observed after raw RF has closed.
 struct LocalHandoff {
+    // Mode is independent of reserve: selected VAD still drains at zero retention.
+    vad_enabled: AtomicBool,
     token: AtomicU64,
     admission: AtomicU64,
     reset_required: AtomicU64,
@@ -589,11 +591,13 @@ unsafe extern "C" fn receive_callback(
         || end.is_none()
         || metadata.raw_receiver_keyed > 1
         || metadata.receiver_keyed > metadata.raw_receiver_keyed
-        || metadata.vad_mode > 2
         || metadata.vad_voice_active > 1
         || !metadata.vad_score.is_finite()
         || !(0.0..=1.0).contains(&metadata.vad_score)
-        || metadata.vad_preroll_frames != if metadata.vad_mode == 0 { 0 } else { 7680 }
+        || !crate::services::ReceivePolicy::valid(
+            i64::from(metadata.vad_mode),
+            metadata.vad_preroll_frames,
+        )
         || (metadata.raw_receiver_keyed != 0 && metadata.vad_mode != 0 && metadata.rf_burst_id == 0)
         || (metadata.vad_voice_sample_index != u64::MAX
             && metadata.vad_voice_sample_index >= end.unwrap_or(0))
@@ -662,6 +666,12 @@ fn receive(
         .window
         .configure(generation.settings().status_snapshot_interval_ms);
     state.ring.adopt(generation.id());
+    state
+        .ring
+        .current
+        .handoff
+        .vad_enabled
+        .store(vad, Ordering::Release);
     context.status.current_handoff.store(
         Arc::as_ptr(&state.ring.current.handoff).cast_mut(),
         Ordering::Release,
@@ -921,7 +931,7 @@ unsafe fn transmit(
     let epoch = token & !1;
     let mut reset_ok = true;
     let acknowledged = handoff.reset_ack.load(Ordering::Acquire);
-    let vad = context.status.vad_delay_ms.load(Ordering::Acquire) != 0;
+    let vad = handoff.vad_enabled.load(Ordering::Acquire);
     if epoch != acknowledged {
         if (vad && handoff.reset_required.load(Ordering::Acquire) <= acknowledged)
             || reset_local(consumer).is_ok()
@@ -1181,6 +1191,10 @@ impl RadioWorker {
         status.vad_delay_ms.store(minimum_delay, Ordering::Release);
         let squelch_delay_ms = squelch_delay_ms.max(minimum_delay);
         status.handoff = Arc::default();
+        status
+            .handoff
+            .vad_enabled
+            .store(policy.mode != 0, Ordering::Release);
         let ring = LocalRingUpdate::with_handoff(squelch_delay_ms, status.handoff.clone());
         #[cfg(test)]
         let ring = if take_test_failure(TestFailure::Prepare) {

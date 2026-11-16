@@ -93,6 +93,24 @@ rendering. Processing faults or discontinuities cancel admission and require
 fresh qualification; they do not open receive. This local failure rule is
 separate from ADR 0004's future Hamlib-source noise/open fallback.
 
+### Configurable analysis continuation (unreleased)
+
+The reusable preprocessing cohort adds independent per-consumer analysis settings.
+Local programme retention is `vad_retention_ms`, 0 through 300 whole milliseconds,
+with the existing 160 ms default. The effective local reserve remains
+`max(squelch_delay_ms, vad_retention_ms)` while VAD is enabled; Off contributes
+zero. These values reuse the existing delay owner and its existing maximum.
+A zero reserve does not disable VAD, remove a separately configured squelch delay,
+or bypass source/burst identity, fresh-voice admission, or fault-reset fences.
+The existing per-ring handoff carries enablement separately from delay so normal
+raw RF edges retain tagged PCM and closed receive keeps draining even at zero.
+
+Both controller hosts consume the shared SDK's resolved values. Native copy,
+control response and callback metadata reject out-of-contract provider values;
+the SDK remains the only configuration parser. Old omitted-key local defaults
+and independent telephone settings are unchanged. This continuation is not a
+claim of local hardware acceptance or authorization to enable preprocessing.
+
 ### Ownership and matched artifacts
 
 ADRs 0003, 0025, 0026, and 0027 retain single-writer rings, generation adoption,

@@ -1231,6 +1231,13 @@ pub(crate) struct ReceivePolicy {
     pub(crate) mode: u32,
     pub(crate) preroll_frames: u32,
 }
+impl ReceivePolicy {
+    /// Validate the shared radio's whole-millisecond 0..=300 ms reserve at 48 kHz.
+    pub(crate) fn valid(mode: i64, frames: u32) -> bool {
+        (mode == 0 && frames == 0)
+            || (matches!(mode, 1 | 2) && frames <= 14_400 && frames % 48 == 0)
+    }
+}
 
 /// Unique radio handle operated by one product worker.
 pub struct Radio {
@@ -1280,10 +1287,7 @@ impl Radio {
             || request.command.abi_version != 1
             || request.command.command != abi::URP_AST_COMMAND_GET_RECEIVE_POLICY
             || request.command.target != 0
-            || !matches!(
-                (request.command.value, request.command.flags),
-                (0, 0) | (1 | 2, 7680)
-            )
+            || !ReceivePolicy::valid(request.command.value, request.command.flags)
         {
             return Err(-1);
         }

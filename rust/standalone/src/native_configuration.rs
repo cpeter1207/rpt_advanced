@@ -54,6 +54,9 @@ impl NativeRadioConfiguration {
         if radio.abi_version != 5 {
             return Err("incompatible native radio session template".to_owned());
         }
+        if radio.receive.vad_mode > 2 || radio.speech.retention_ms > 300 {
+            return Err("invalid native receive policy".to_owned());
+        }
         // SAFETY: the caller guarantees each advertised span for this call.
         let (
             device_identifier,
@@ -97,7 +100,14 @@ impl NativeRadioConfiguration {
     /// Return resolved speech mode and the sole receive owner's minimum native reserve.
     pub(crate) fn receive_policy(&self) -> (u32, u32) {
         let mode = self.radio.receive.vad_mode;
-        (mode, if mode == 0 { 0 } else { 7_680 })
+        (
+            mode,
+            if mode == 0 {
+                0
+            } else {
+                self.radio.speech.retention_ms * 48
+            },
+        )
     }
 
     /// Create a borrowed request view valid while this owner remains borrowed.
