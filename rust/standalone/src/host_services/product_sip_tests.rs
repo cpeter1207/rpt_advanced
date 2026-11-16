@@ -268,6 +268,12 @@ impl Caller {
                         self.profile.parameters().pcm_rate_hz
                     );
                 }
+                // The next helper starts its own cadence. Finish only the
+                // already-sent packet's interval so prompt boundaries cannot
+                // advance the source clock faster than wall time.
+                if self.keepalive {
+                    thread::sleep(next_audio.saturating_duration_since(Instant::now()));
+                }
                 return result;
             }
             assert!(
@@ -740,4 +746,31 @@ fn literal_sender(address: SocketAddr) -> Caller {
         event_clock: 8000,
         event_payload: 101,
     }
+}
+
+/// Prompt completion must not donate the remainder of its last packet to the
+/// next helper's new cadence and accumulate artificial RTP source-clock lead.
+#[test]
+fn literal_prompt_completion_accounts_for_the_last_source_packet() {
+    let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut caller = literal_sender(peer.local_addr().unwrap());
+    caller.keepalive = true;
+    caller.sip.set_nonblocking(true).unwrap();
+    caller.rtp.set_nonblocking(true).unwrap();
+    let mut codec = AudioCodec::load(AudioProfile::Mulaw).unwrap();
+    let mut response = [0xff; 172];
+    response[0] = 0x80;
+    response[1] = 0;
+    peer.send_to(&response, caller.rtp.local_addr().unwrap())
+        .unwrap();
+    let started = Instant::now();
+    let received = caller.prompt(&mut codec, "clock regression");
+    let elapsed = started.elapsed();
+    let advanced = Duration::from_micros(u64::from(caller.timestamp) * 125);
+    assert!(!received.is_empty());
+    assert!(advanced >= Duration::from_millis(400));
+    assert!(
+        elapsed >= advanced,
+        "prompt advanced {advanced:?} of RTP but returned after {elapsed:?}"
+    );
 }
