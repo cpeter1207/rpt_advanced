@@ -844,6 +844,8 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
         controller::{ControllerSettings, CourtesySettings, NodeController, PreparedMedia},
         link::{AudioPeer, LinkAudio, Mode, PeerIdentity, SourcePosition},
     };
+    // Deliberate constant routing/scheduling stand-in, NOT Morse P. The separate
+    // courtesy_positive fixture checks configured native Morse and nonzero hold.
     struct Courtesy(usize);
     impl PcmStreamReader for Courtesy {
         fn start(&mut self) {
@@ -1370,6 +1372,8 @@ fn later_voice_does_not_promote_synthetic_preroll_to_rf_onset() {
 
 #[test]
 fn phone_speech_closes_only_after_original_hold_and_processed_tail_drain() {
+    // Controlled phase seam (zero hold and injected decision), not native VAD.
+    // courtesy_positive covers real analysis with a nonzero original hold.
     use rpt_advanced_core::link::PhoneSpeechPhase;
     for processed in [false, true] {
         let (_state, graph) = crate::services::history_tests::processor_fixture(1, 1);
@@ -2137,3 +2141,6 @@ fn phone_speech_invalidation_starvation_and_temporary_processor_pending_are_not_
         }
     }
 }
+
+#[path = "phone_courtesy_positive_tests.rs"]
+mod courtesy_positive;
