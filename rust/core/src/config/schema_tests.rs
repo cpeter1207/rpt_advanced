@@ -251,6 +251,14 @@ fn courtesy_assignments_are_complete_and_unique_per_node() {
             "duplicate courtesy input assignment",
         ),
         (
+            "[node]\n[courtesy node a]\ninput=phone\n[courtesy node b]\ninput=phone\n",
+            "duplicate courtesy input assignment",
+        ),
+        (
+            "[node]\n[courtesy node phone]\ninput=phone\nremote_node=100\n",
+            "courtesy remote node requires link input",
+        ),
+        (
             "[node]\n[courtesy node a]\ninput=link\n[courtesy node b]\ninput=link\n",
             "duplicate courtesy input assignment",
         ),
@@ -265,7 +273,7 @@ fn courtesy_assignments_are_complete_and_unique_per_node() {
 
     Schema::validate(
         &ConfigDocument::parse(
-            "[node]\n[courtesy node receiver]\ninput=receiver\n[courtesy node generic]\ninput=link\n[courtesy node peer]\ninput=link\nremote_node=100\n",
+            "[node]\n[courtesy node phone]\ninput=phone\n[courtesy node receiver]\ninput=receiver\n[courtesy node generic]\ninput=link\n[courtesy node peer]\ninput=link\nremote_node=100\n",
         )
         .unwrap(),
     )

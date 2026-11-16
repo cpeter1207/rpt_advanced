@@ -607,6 +607,10 @@ defines the full reload, hardware-handoff, and failure policy.
   Standalone selects a non-Asterisk control backend.
 - Telemetry is serialized. Speech is preferred and falls back to Morse when
   speech cannot be prepared.
+  Optional private-phone courtesy has its own typed ingress/media key and borrows
+  control-retained exact call/input fences from the current mixer; retirement and
+  rekey cancel pending and active phone playback without completing it. Generic
+  private inactivity does not emit a speech closure. See ADR 0044.
 - A received-traffic timeout mutes receive and regenerated traffic only at
   local RF. Its local-only priority notice completes before PTT drops; recovery
   waits for every local and linked input to become inactive and completes the

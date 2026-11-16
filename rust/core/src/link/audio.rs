@@ -271,6 +271,7 @@ pub trait PeerInput: Send {
 pub struct AudioPeer<P: PeerInput> {
     identity: PeerIdentity,
     phone: Option<PeerReply>,
+    courtesy_key: Option<super::PhoneCourtesyKey>,
     mode: Mode,
     input: P,
     outbound: Option<LinkAudioProducer>,
@@ -341,9 +342,15 @@ impl<P: PeerInput> AudioPeer<P> {
             return Err(AdmissionError::Invalid);
         }
         let receive = ReceiveState::with_policy(input.source_rate(), input.receive_policy())?;
+        let courtesy_key = phone
+            .as_ref()
+            .and_then(PeerReply::phone_source)
+            .map(|source| super::PhoneCourtesyKey::prepare(source.ingress()))
+            .transpose()?;
         Ok(Self {
             identity,
             phone,
+            courtesy_key,
             mode,
             input,
             outbound: Some(outbound),
@@ -388,6 +395,7 @@ pub struct LinkAudio<P: PeerInput> {
     text: Option<Box<dyn LocalTextInput>>,
     text_samples: Vec<f32>,
     peers: Vec<AudioPeer<P>>,
+    phone_courtesy: Vec<super::PhoneCourtesyFence>,
     local: Vec<f32>,
     mix: Vec<f32>,
     parrot_mix: Vec<f32>,
@@ -653,6 +661,16 @@ impl<P: PeerInput> LinkAudio<P> {
                 (generation, peer.phone.clone())
             })
             .collect();
+        let phone_courtesy = peers
+            .iter()
+            .filter_map(|peer| {
+                Some(super::PhoneCourtesyFence {
+                    key: peer.courtesy_key?,
+                    call: peer.phone.as_ref()?.clone(),
+                    media: peer.input.signals().reply_target(),
+                })
+            })
+            .collect();
         let mut outbound = Vec::new();
         for peer in &mut peers {
             // Control-only construction consumes each freshly prepared peer exactly once.
@@ -702,6 +720,7 @@ impl<P: PeerInput> LinkAudio<P> {
                 text_samples: vec![0.0; maximum],
                 routing: vec![Destination::default(); peers.len()],
                 peers,
+                phone_courtesy,
                 local: vec![0.0; maximum],
                 mix: vec![0.0; maximum],
                 parrot_mix: vec![0.0; maximum],
@@ -966,6 +985,9 @@ impl<P: PeerInput> LinkAudio<P> {
             self.rf_programme.private |= peer.rf_contributor && peer.phone.is_some();
             if active {
                 if !peer.reported_active {
+                    if let Some(key) = peer.courtesy_key {
+                        controller.phone_speech_rekeyed(key);
+                    }
                     if let Some(direct) = public {
                         controller.link_keyed(direct);
                         self.status.last_keyed.store(index + 1, Ordering::Release);
@@ -1059,6 +1081,7 @@ impl<P: PeerInput> LinkAudio<P> {
             &self.mix[..count],
             audio,
             ParrotOutput {
+                phone_courtesy: &self.phone_courtesy,
                 samples: &mut self.parrot_output[..count],
                 active: &mut parrot_active,
                 replies: Some(&mut self.reply_output[..count]),

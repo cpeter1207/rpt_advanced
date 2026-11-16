@@ -85,6 +85,8 @@ pub struct ControllerSettings {
 
 /// Callback-owned parrot fanout and per-sample addressed command replies.
 pub(crate) struct ParrotOutput<'a> {
+    /// Exact current mixer input fences; absence fails closed for private courtesy.
+    pub phone_courtesy: &'a [crate::link::PhoneCourtesyFence],
     pub samples: &'a mut [f32],
     pub active: &'a mut bool,
     pub replies: Option<&'a mut [PeerReplySample]>,
@@ -130,6 +132,7 @@ pub struct NodeController {
     first_due: Vec<u64>,
     telemetry: TelemetryPlanner,
     courtesy: CourtesyPlanner,
+    active_phone_courtesy: Option<crate::link::PhoneCourtesyKey>,
     announcements: Vec<AnnouncementState>,
     tails: TailPlanner,
     timeout: TimeoutPolicy,
@@ -273,6 +276,7 @@ impl NodeController {
                 first_due,
                 telemetry,
                 courtesy: CourtesyPlanner::new(courtesy),
+                active_phone_courtesy: None,
                 announcements: announcements
                     .into_iter()
                     .map(|announcement| AnnouncementState {
@@ -371,6 +375,48 @@ impl NodeController {
         }
     }
 
+    /// Schedule only a proved, drained private speech close; this grants no call authority.
+    /// Generic private inactivity must never call this method.
+    pub fn phone_speech_closed(&mut self, key: crate::link::PhoneCourtesyKey, kerchunk: bool) {
+        if !key.valid() {
+            return;
+        }
+        self.receive_unkeyed(kerchunk);
+        if !kerchunk {
+            self.courtesy.schedule_phone(
+                key,
+                self.now
+                    .saturating_add(samples(self.settings.courtesy_delay_ms)),
+            );
+        }
+    }
+
+    /// Rekey and exact-generation invalidation share the cancellation boundary.
+    pub fn phone_speech_rekeyed(&mut self, key: crate::link::PhoneCourtesyKey) {
+        self.courtesy.cancel_phone(key);
+        if self.active_phone_courtesy == Some(key) {
+            self.active_phone_courtesy = None;
+            if let Some(Source::Courtesy(index)) = self.telemetry.active {
+                self.courtesy.media[index].0.cancel();
+                self.telemetry.active = None;
+            }
+        }
+    }
+
+    fn validate_phone_courtesy(&mut self, fences: &[crate::link::PhoneCourtesyFence]) {
+        for key in [self.courtesy.pending_phone(), self.active_phone_courtesy]
+            .into_iter()
+            .flatten()
+        {
+            if !fences
+                .iter()
+                .any(|fence| fence.key == key && fence.current())
+            {
+                self.phone_speech_rekeyed(key);
+            }
+        }
+    }
+
     /// A kerchunk cannot retain traffic hang; normal releases clear prior suppression.
     fn receive_unkeyed(&mut self, kerchunk: bool) {
         self.timeout.unkey(self.now);
@@ -396,6 +442,7 @@ impl NodeController {
 
     /// Apply a sample-free receive edge without advancing playback or elapsed time.
     pub fn process_event(&mut self, receiving: bool, linked: bool) -> bool {
+        self.validate_phone_courtesy(&[]);
         self.process_event_with_activity(receiving, linked, receiving || linked)
     }
 
@@ -476,6 +523,10 @@ impl NodeController {
         if let Some(output) = &mut parrot_output {
             *output.active = false;
         }
+        let phone_courtesy = parrot_output
+            .as_ref()
+            .map_or(&[][..], |output| output.phone_courtesy);
+        self.validate_phone_courtesy(phone_courtesy);
         if audio.is_empty() {
             return self.process_event_with_activity(receiving, linked, source_activity);
         }
@@ -492,6 +543,7 @@ impl NodeController {
             output.samples.fill(0.0);
         }
         for (offset, sample) in audio.iter_mut().enumerate() {
+            self.validate_phone_courtesy(phone_courtesy);
             let parrot_sample = parrot_output.as_mut().map(|output| ProgramSample {
                 parrot: &mut output.samples[offset],
                 parrot_active: &mut *output.active,
@@ -641,6 +693,9 @@ impl NodeController {
 
     /// Finish exactly one attempt; cancellation never advances successful cooldowns.
     fn complete_playback(&mut self, source: Option<Source>, outcome: PlaybackOutcome) {
+        if matches!(source, Some(Source::Courtesy(_))) {
+            self.active_phone_courtesy = None;
+        }
         match source {
             Some(Source::Identifier(index)) if outcome == PlaybackOutcome::Succeeded => {
                 self.satisfy_identifier(index);
@@ -855,6 +910,7 @@ impl NodeController {
         let parrot_ready = !source_activity && self.telemetry.parrot_pending();
         if (may_transmit || peer_ready) && self.telemetry.active.is_none() {
             if courtesy_ready {
+                self.active_phone_courtesy = self.courtesy.pending_phone();
                 self.telemetry.active = self.courtesy.pop().and_then(|index| {
                     self.courtesy.media.get_mut(index).map(|media| {
                         media.0.restart(false);

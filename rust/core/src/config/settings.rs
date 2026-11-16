@@ -510,7 +510,7 @@ impl ResolvedCourtesySettings {
             .unwrap_or_default();
         let remote_node =
             crate::link::PeerIdentity::canonical_operator(&remote_node).unwrap_or(remote_node);
-        if !matches!(input.as_str(), "receiver" | "link") {
+        if !matches!(input.as_str(), "receiver" | "link" | "phone") {
             return Err(ConfigError::structure(
                 &section,
                 "courtesy input is required",

@@ -94,6 +94,7 @@ fn timeout_notices_are_local_only_even_with_regeneration_and_peer_fanout() {
         &[0.125; 4],
         &mut audio,
         ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut active,
             replies: Some(&mut replies),

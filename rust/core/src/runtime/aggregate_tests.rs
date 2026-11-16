@@ -630,6 +630,7 @@ fn site_report_captures_after_unkey_and_answers_only_the_requesting_peer() {
             &[],
             &mut audio,
             crate::controller::ParrotOutput {
+                phone_courtesy: &[],
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(&mut replies),
@@ -745,6 +746,7 @@ fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
         &[],
         &mut audio,
         crate::controller::ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut active,
             replies: Some(&mut replies),
@@ -969,6 +971,7 @@ fn composition_runtime_command_waits_for_source_unkey_and_uses_configured_audien
         &[],
         &mut audio,
         crate::controller::ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut parrot_active,
             replies: Some(&mut replies),
@@ -5218,6 +5221,7 @@ fn phone_bypass_confirmation_and_results_keep_the_original_peer_generation() {
                 &[],
                 &mut audio,
                 crate::controller::ParrotOutput {
+                    phone_courtesy: &[],
                     samples: &mut parrot,
                     active: &mut active,
                     replies: Some(&mut replies),

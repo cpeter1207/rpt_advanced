@@ -1,5 +1,6 @@
 //! Last-unkey courtesy selection with source-specific rekey cancellation.
 use super::PreparedMedia;
+use crate::link::PhoneCourtesyKey;
 
 /// Control-prepared local, generic-link, and exact-peer courtesy media.
 #[derive(Default)]
@@ -8,13 +9,21 @@ pub struct CourtesySettings {
     pub receiver: Option<PreparedMedia>,
     /// Generic linked-source courtesy.
     pub link: Option<PreparedMedia>,
+    /// Local-only private telephone speech courtesy. Absent means off.
+    pub phone: Option<PreparedMedia>,
     /// Advisory identity wins, then direct identity, then the generic link media.
     pub peers: Vec<(String, PreparedMedia)>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CourtesySource {
+    Public([u8; 64]),
+    Phone(PhoneCourtesyKey),
+}
+
 #[derive(Clone, Copy)]
 struct Pending {
-    source: [u8; 64],
+    source: CourtesySource,
     media: usize,
     due: u64,
 }
@@ -24,6 +33,7 @@ pub(super) struct CourtesyPlanner {
     peers: Vec<(String, usize)>,
     receiver: Option<usize>,
     link: Option<usize>,
+    phone: Option<usize>,
     pending: Option<Pending>,
 }
 
@@ -35,6 +45,10 @@ impl CourtesyPlanner {
             media.len() - 1
         });
         let link = settings.link.filter(|m| m.1).map(|m| {
+            media.push(m);
+            media.len() - 1
+        });
+        let phone = settings.phone.filter(|m| m.1).map(|m| {
             media.push(m);
             media.len() - 1
         });
@@ -52,6 +66,7 @@ impl CourtesyPlanner {
             peers,
             receiver,
             link,
+            phone,
             pending: None,
         }
     }
@@ -68,7 +83,10 @@ impl CourtesyPlanner {
         let Some(key) = Self::identity(source) else {
             return;
         };
-        if self.pending.is_some_and(|item| item.source == key) {
+        if self
+            .pending
+            .is_some_and(|item| item.source == CourtesySource::Public(key))
+        {
             self.pending = None;
         }
     }
@@ -91,10 +109,35 @@ impl CourtesyPlanner {
                 .or(self.link)
         };
         self.pending = chosen.map(|media| Pending {
-            source: key,
+            source: CourtesySource::Public(key),
             media,
             due,
         });
+    }
+    /// Latest genuine private closure uses its own prepared media, not link fallback.
+    pub fn schedule_phone(&mut self, key: PhoneCourtesyKey, due: u64) {
+        if key.valid() {
+            self.pending = self.phone.map(|media| Pending {
+                source: CourtesySource::Phone(key),
+                media,
+                due,
+            });
+        }
+    }
+    /// Cancel only the matching private input lifetime.
+    pub fn cancel_phone(&mut self, key: PhoneCourtesyKey) {
+        if self
+            .pending
+            .is_some_and(|item| item.source == CourtesySource::Phone(key))
+        {
+            self.pending = None;
+        }
+    }
+    pub fn pending_phone(&self) -> Option<PhoneCourtesyKey> {
+        match self.pending?.source {
+            CourtesySource::Phone(key) => Some(key),
+            CourtesySource::Public(_) => None,
+        }
     }
     pub fn pending(&self) -> bool {
         self.pending.is_some()

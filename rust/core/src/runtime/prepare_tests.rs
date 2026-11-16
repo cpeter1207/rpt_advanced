@@ -379,7 +379,8 @@ fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
          [announcement 1000 recorded]\nsound_file=news.wav\n\
          [courtesy 1000 empty]\ninput=link\n\
          [courtesy 1000 receiver]\ninput=receiver\nmorse_text=R\n\
-         [courtesy 1000 peer]\ninput=link\nremote_node=2000\nmorse_text=P\n",
+         [courtesy 1000 peer]\ninput=link\nremote_node=2000\nmorse_text=L\n\
+         [courtesy 1000 phone]\ninput=phone\nmorse_text=P\n",
     )
     .unwrap();
     let node = NodeId::new("1000").unwrap();
@@ -398,13 +399,14 @@ fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
     .unwrap();
 
     let sources = media.sources.lock().unwrap();
-    assert_eq!(sources.len(), 3);
+    assert_eq!(sources.len(), 4);
     assert_eq!(
         sources[0].file.as_deref(),
         Some(std::path::Path::new("news.wav"))
     );
     assert_eq!(sources[1].morse.as_ref().unwrap().text, "R");
-    assert_eq!(sources[2].morse.as_ref().unwrap().text, "P");
+    assert_eq!(sources[2].morse.as_ref().unwrap().text, "L");
+    assert_eq!(sources[3].morse.as_ref().unwrap().text, "P");
 }
 
 #[test]

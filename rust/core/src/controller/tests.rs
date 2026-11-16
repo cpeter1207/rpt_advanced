@@ -109,6 +109,7 @@ fn incoming_text_interrupts_voice_telemetry_with_its_morse_fallback() {
             &[],
             &mut output,
             ParrotOutput {
+                phone_courtesy: &[],
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(&mut replies),
@@ -156,6 +157,7 @@ fn text_local_mix_callback_does_not_allocate_or_release_storage() {
         &[],
         &mut output,
         ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -759,6 +761,7 @@ fn receive_defers_status_and_switches_identifiers_and_announcements_to_morse() {
                         &[],
                         &mut radio,
                         ParrotOutput {
+                            phone_courtesy: &[],
                             samples: &mut parrot,
                             active: &mut parrot_active,
                             replies: Some(&mut replies),
@@ -914,6 +917,7 @@ fn regenerate(
         &[],
         samples,
         ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -1041,6 +1045,7 @@ fn regeneration_consumption_does_not_allocate_or_free_on_audio() {
         &[],
         &mut audio,
         ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -1083,6 +1088,7 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
             &[],
             &mut radio,
             ParrotOutput {
+                phone_courtesy: &[],
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(&mut replies),
@@ -1138,6 +1144,7 @@ fn pending_peer_reply_stays_silent_and_ended_reply_is_reclaimed() {
             &[],
             &mut radio,
             ParrotOutput {
+                phone_courtesy: &[],
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(replies),
@@ -1326,6 +1333,7 @@ fn parrot_output_size_mismatch_skips_sample_processing() {
         &[],
         &mut audio,
         ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -1821,6 +1829,7 @@ fn receive_activity_discards_a_queued_parrot_before_playback() {
         &[],
         &mut audio,
         ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut parrot_active,
             replies: None,
@@ -1858,6 +1867,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
         &[],
         &mut audio,
         ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut parrot_active,
             replies: None,
@@ -1875,6 +1885,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
         &[],
         &mut audio,
         ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut parrot_active,
             replies: None,
@@ -1912,6 +1923,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
         &[],
         &mut rf,
         ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -1929,6 +1941,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
         &[],
         &mut rf,
         ParrotOutput {
+            phone_courtesy: &[],
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -2261,6 +2274,7 @@ fn courtesy_latest_unkey_validates_identity_and_cancels_only_its_source() {
         receiver: Some(media(0.1, 48)),
         link: Some(media(0.2, 48)),
         peers: vec![("selected".into(), media(0.3, 48))],
+        ..CourtesySettings::default()
     });
     assert_eq!(planner.pop(), None);
     assert!(!planner.ready(u64::MAX));
@@ -2771,6 +2785,7 @@ fn overlapping_sources_play_only_the_last_unkey_courtesy() {
         let courtesy = CourtesySettings {
             receiver: (!local_last || last_has_tone).then(|| media(0.1, 4)),
             link: None,
+            phone: None,
             peers: if local_last || last_has_tone {
                 vec![("north".into(), media(0.3, 4))]
             } else {
@@ -2817,6 +2832,7 @@ fn courtesy_selection_cancellation_latest_unkey_and_kerchunk() {
     let courtesy = CourtesySettings {
         receiver: Some(media(0.1, 1)),
         link: Some(media(0.2, 1)),
+        phone: None,
         peers: vec![
             ("north".into(), media(0.3, 1)),
             ("downstream".into(), media(0.4, 1)),
@@ -3759,4 +3775,253 @@ fn empty_courtesy_override_falls_back_to_generic_media() {
     let mut output = [0.0];
     node.process_audio(false, false, &[], &mut output);
     assert_eq!(output, [0.4]);
+}
+
+#[test]
+fn phone_courtesy_cancels_only_exact_typed_generation() {
+    let first = crate::link::PhoneCourtesyKey {
+        ingress: 1,
+        media_generation: 1,
+    };
+    let next = crate::link::PhoneCourtesyKey {
+        ingress: 1,
+        media_generation: 2,
+    };
+    let mut planner = courtesy::CourtesyPlanner::new(CourtesySettings {
+        phone: Some(media(0.4, 48)),
+        link: Some(media(0.2, 48)),
+        ..CourtesySettings::default()
+    });
+    planner.schedule_phone(first, 5);
+    planner.cancel_phone(next);
+    assert!(!planner.ready(4));
+    assert!(planner.ready(5));
+    planner.cancel_phone(first);
+    assert!(!planner.pending());
+    planner.schedule("peer", "", 0);
+    planner.cancel_phone(first);
+    assert!(planner.ready(0));
+}
+
+/// Original call and ring tokens are prepared off audio and borrowed at playout.
+fn phone_courtesy_fence(ingress: u64) -> crate::link::PhoneCourtesyFence {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneCallId, PhoneCourtesyKey, PhoneSource};
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        PhoneCallId::new([1; 16]).unwrap(),
+        1,
+        ingress,
+    )
+    .unwrap();
+    let call = PeerSignals::for_phone(source);
+    assert!(call.authenticate_phone());
+    crate::link::PhoneCourtesyFence {
+        key: PhoneCourtesyKey::prepare(ingress).unwrap(),
+        call: call.reply_target(),
+        media: PeerSignals::new().reply_target(),
+    }
+}
+
+fn phone_courtesy_tick(
+    node: &mut NodeController,
+    fences: &[crate::link::PhoneCourtesyFence],
+) -> f32 {
+    let mut audio = [0.0];
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut audio,
+        ParrotOutput {
+            phone_courtesy: fences,
+            samples: &mut [0.0],
+            active: &mut false,
+            replies: None,
+            regeneration: None,
+            local_media: crate::link::LocalMedia::default(),
+        },
+    );
+    audio[0]
+}
+
+#[test]
+fn phone_courtesy_rekey_and_each_retained_fence_cancel_pending_and_active_without_credit() {
+    for active in [false, true] {
+        for invalidation in 0..4 {
+            let fence = phone_courtesy_fence(7);
+            let key = fence.key;
+            let (mut node, _) = NodeController::new(
+                ControllerSettings {
+                    courtesy_delay_ms: 0,
+                    ..ControllerSettings::default()
+                },
+                vec![],
+                vec![],
+                CourtesySettings {
+                    phone: Some(media(0.4, 48)),
+                    ..CourtesySettings::default()
+                },
+            )
+            .unwrap();
+            node.phone_speech_closed(key, false);
+            if active {
+                assert_eq!(
+                    phone_courtesy_tick(&mut node, std::slice::from_ref(&fence)),
+                    0.4
+                );
+            }
+            match invalidation {
+                0 => node.phone_speech_rekeyed(key),
+                1 => fence.call.retire(),
+                2 => fence.media.retire(),
+                _ => {}
+            }
+            let fences = if invalidation == 3 {
+                &[][..]
+            } else {
+                std::slice::from_ref(&fence)
+            };
+            AUDIO_ALLOCATIONS.with(|counter| counter.set(Some(0)));
+            let sample = phone_courtesy_tick(&mut node, fences);
+            let allocations = AUDIO_ALLOCATIONS.with(|counter| counter.replace(None).unwrap());
+            assert_eq!(allocations, 0, "cancellation must not allocate or reclaim");
+            assert_eq!(sample, 0.0, "active={active}, invalidation={invalidation}");
+            assert!(node.telemetry.active.is_none());
+            assert!(!node.courtesy.pending());
+            if active {
+                assert_eq!(
+                    node.courtesy.media[0].0.outcome(),
+                    PlaybackOutcome::Cancelled
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn phone_courtesy_delay_kerchunk_stale_generation_and_public_rekey_policy() {
+    for delay in [ControllerSettings::default().courtesy_delay_ms, 3] {
+        for kerchunk in [false, true] {
+            let fence = phone_courtesy_fence(7);
+            let (mut node, _) = NodeController::new(
+                ControllerSettings {
+                    courtesy_delay_ms: delay,
+                    ..ControllerSettings::default()
+                },
+                vec![],
+                vec![],
+                CourtesySettings {
+                    phone: Some(media(0.4, 48)),
+                    link: Some(media(0.2, 48)),
+                    ..CourtesySettings::default()
+                },
+            )
+            .unwrap();
+            node.phone_speech_closed(fence.key, kerchunk);
+            let unrelated = phone_courtesy_fence(7);
+            node.phone_speech_rekeyed(unrelated.key);
+            for _ in 0..samples(delay) {
+                assert_eq!(
+                    phone_courtesy_tick(&mut node, std::slice::from_ref(&fence)),
+                    0.0
+                );
+            }
+            assert_eq!(
+                phone_courtesy_tick(&mut node, std::slice::from_ref(&fence)),
+                if kerchunk { 0.0 } else { 0.4 }
+            );
+        }
+    }
+    let fence = phone_courtesy_fence(7);
+    let next = phone_courtesy_fence(7);
+    assert_ne!(fence.key, next.key);
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            courtesy_delay_ms: 0,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings {
+            phone: Some(media(0.4, 48)),
+            link: Some(media(0.2, 48)),
+            ..CourtesySettings::default()
+        },
+    )
+    .unwrap();
+    node.phone_speech_closed(fence.key, false);
+    assert_eq!(
+        phone_courtesy_tick(&mut node, &[next]),
+        0.0,
+        "new mixer cannot adopt old closure"
+    );
+    node.link_unkeyed("peer", "", false);
+    node.phone_speech_rekeyed(fence.key);
+    assert_eq!(phone_courtesy_tick(&mut node, &[]), 0.2);
+    node.link_keyed("peer");
+    assert_eq!(
+        phone_courtesy_tick(&mut node, &[]),
+        0.2,
+        "public active courtesy still continues"
+    );
+}
+
+#[test]
+fn phone_courtesy_is_off_without_assignment_or_valid_key() {
+    let mut planner = courtesy::CourtesyPlanner::new(CourtesySettings::default());
+    planner.schedule_phone(
+        crate::link::PhoneCourtesyKey {
+            ingress: 1,
+            media_generation: 1,
+        },
+        0,
+    );
+    assert!(!planner.pending());
+    let mut planner = courtesy::CourtesyPlanner::new(CourtesySettings {
+        phone: Some(media(0.4, 48)),
+        ..CourtesySettings::default()
+    });
+    for key in [
+        crate::link::PhoneCourtesyKey {
+            ingress: 0,
+            media_generation: 1,
+        },
+        crate::link::PhoneCourtesyKey {
+            ingress: 1,
+            media_generation: 0,
+        },
+    ] {
+        planner.schedule_phone(key, 0);
+        assert!(!planner.pending());
+    }
+}
+
+#[test]
+fn phone_courtesy_exact_active_cancel_preserves_unrelated_pending_and_public_active() {
+    let first = phone_courtesy_fence(7);
+    let second = phone_courtesy_fence(8);
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings {
+            phone: Some(media(0.4, 48)),
+            link: Some(media(0.2, 48)),
+            ..CourtesySettings::default()
+        },
+    )
+    .unwrap();
+    let fences = [first, second];
+    node.phone_speech_closed(fences[0].key, false);
+    assert_eq!(phone_courtesy_tick(&mut node, &fences), 0.4);
+    node.phone_speech_rekeyed(fences[1].key);
+    assert_eq!(phone_courtesy_tick(&mut node, &fences), 0.4);
+    node.link_unkeyed("public", "", false);
+    node.phone_speech_rekeyed(fences[0].key);
+    assert_eq!(phone_courtesy_tick(&mut node, &fences), 0.2);
+    node.phone_speech_closed(fences[1].key, false);
+    node.phone_speech_rekeyed(fences[1].key);
+    assert_eq!(phone_courtesy_tick(&mut node, &fences), 0.2);
 }

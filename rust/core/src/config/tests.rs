@@ -845,7 +845,7 @@ fn invalid_macro_overrides_resolve_to_valid_inherited_values() {
 #[test]
 fn invalid_courtesy_remote_resolves_to_unassigned_input() {
     let node = NodeId::new("524950").unwrap();
-    for input in ["receiver", "link"] {
+    for input in ["receiver", "link", "phone"] {
         let document = ConfigDocument::parse(&format!(
             "[524950]\n[courtesy 524950 tail]\ninput={input}\nremote_node=invalid\n"
         ))
@@ -1605,4 +1605,32 @@ fn composition_schema_reports_inherited_defaults_and_rejects_message_intervals()
         .unwrap();
     assert_eq!(ignored.value, "on");
     assert_eq!(ignored.message, "unknown option ignored");
+}
+
+#[test]
+fn phone_courtesy_assignment_resolves_morse_p() {
+    let document =
+        ConfigDocument::parse("[node]\n[courtesy node phone]\ninput=phone\nmorse_text=P\n")
+            .unwrap();
+    let resolved =
+        ResolvedCourtesySettings::resolve(&document, &NodeId::new("node").unwrap(), "phone")
+            .expect("phone courtesy should resolve");
+    assert_eq!(resolved.value.input, "phone");
+    assert_eq!(resolved.value.morse_text, "P");
+}
+
+#[test]
+fn phone_courtesy_malformed_media_fields_keep_inherited_warning_fallback() {
+    let document = ConfigDocument::parse(
+        "[node]\n[courtesy]\nlevel_db=-12\nmorse_speed_wpm=25\nmorse_frequency_hz=900\n\
+         [courtesy node phone]\ninput=phone\nmorse_text=P\nlevel_db=bad\nmorse_speed_wpm=0\nmorse_frequency_hz=bad\n",
+    ).unwrap();
+    let resolved =
+        ResolvedCourtesySettings::resolve(&document, &NodeId::new("node").unwrap(), "phone")
+            .unwrap();
+    assert_eq!(resolved.warnings.len(), 3);
+    assert_eq!(resolved.value.level_db, -12);
+    assert_eq!(resolved.value.morse_level_db, -12);
+    assert_eq!(resolved.value.morse_speed_wpm, 25);
+    assert_eq!(resolved.value.morse_frequency_hz, 900);
 }

@@ -131,3 +131,54 @@ impl PhoneSource {
         self.ingress
     }
 }
+
+/// Exact private ingress and control-prepared media lifetime, never a public node ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhoneCourtesyKey {
+    /// Product-assigned nonzero actual ingress.
+    pub ingress: u64,
+    /// Nonzero unique prepared input generation; never reused after retirement.
+    pub media_generation: u64,
+}
+impl PhoneCourtesyKey {
+    /// Allocate on control. Exhaustion fails closed instead of reusing an identity.
+    pub(crate) fn prepare(ingress: u64) -> Result<Self, super::AdmissionError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        if ingress == 0 {
+            return Err(super::AdmissionError::Invalid);
+        }
+        let media_generation = NEXT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map_err(|_| super::AdmissionError::Invalid)?;
+        Ok(Self {
+            ingress,
+            media_generation,
+        })
+    }
+
+    pub(crate) fn valid(self) -> bool {
+        self.ingress != 0 && self.media_generation != 0
+    }
+}
+
+/// Control-retained original call and input tokens, borrowed without refcount work on audio.
+/// Neither this fence nor its scalar key grants authentication or call authority.
+pub(crate) struct PhoneCourtesyFence {
+    pub key: PhoneCourtesyKey,
+    pub call: super::PeerReply,
+    pub media: super::PeerReply,
+}
+impl PhoneCourtesyFence {
+    pub fn current(&self) -> bool {
+        self.key.valid()
+            && self.call.phone_media_authorized()
+            && self
+                .call
+                .phone_source()
+                .is_some_and(|source| source.ingress() == self.key.ingress)
+            && !self.media.ended()
+    }
+}

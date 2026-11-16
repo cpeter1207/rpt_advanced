@@ -620,7 +620,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         "phone_outgoing_account" => {
             value.is_empty() || crate::link::PhoneAccountId::new(value).is_ok()
         }
-        "input" => matches!(value, "receiver" | "link"),
+        "input" => matches!(value, "receiver" | "link" | "phone"),
         "remote_node" | "target_node" => node_value_valid(value),
         "action" => ScheduledAction::from_str(value).is_ok(),
         "at" => EventTrigger::from_str(value).is_ok(),
@@ -887,11 +887,7 @@ fn validate_courtesies(document: &ConfigDocument) -> Result<(), ConfigError> {
                 "courtesy remote node requires link input",
             ));
         }
-        let identity = if input == "receiver" {
-            ("receiver".to_owned(), String::new())
-        } else {
-            ("link".to_owned(), remote)
-        };
+        let identity = (input.to_owned(), remote);
         let node_assignments = assignments.entry(parsed.node.unwrap()).or_default();
         if node_assignments.contains(&identity) {
             return Err(ConfigError::structure(

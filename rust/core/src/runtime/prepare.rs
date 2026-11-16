@@ -366,6 +366,8 @@ pub(super) fn controller(
         if let Some(prepared) = courtesy_media(&mut station, &settings, &status)? {
             if settings.input == "receiver" {
                 courtesy.receiver = Some(prepared);
+            } else if settings.input == "phone" {
+                courtesy.phone = Some(prepared);
             } else if settings.remote_node.is_empty() {
                 courtesy.link = Some(prepared);
             } else {

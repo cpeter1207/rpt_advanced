@@ -2384,3 +2384,28 @@ observations and measured recovery counts, not a network loss percentage. The
 provider C ABI is unchanged. Native iLBC success can hide internal recovery;
 this boundary does not claim to detect that unreported distinction. Bounded PLC
 continuity and synthetic-onset protections remain a separate, undeployed step.
+
+### Prepared telephone courtesy ownership
+
+An optional named courtesy assignment with `input=phone` uses the existing
+prepared media selection independently of receiver and public-link assignments.
+Absence is off; structural uniqueness and inherited warning/fallback rules remain
+unchanged. This is local-transmitter telemetry, never private-call or peer egress.
+
+Control assigns each prepared private input a nonzero, never-reused scalar media
+generation, paired with the existing actual ingress. Its mixer retains the exact
+original call and input-media tokens. The audio controller holds only Copy keys
+for pending and active phone selections and borrows the current mixer's retained
+fences before each playout sample. A missing key, retired call, or retired input
+uses the same exact-key cancellation as rekey: cancel pending and active phone
+playback without successful completion credit. Mixer replacement cannot adopt
+old private selections, even for the same live call. Token cloning and reclamation
+remain on control; audio neither allocates nor drops an owning token.
+
+Public-link rekey still cancels only pending courtesy, and unrelated sources
+retain their existing behavior. The typed `phone_speech_closed` boundary reuses
+normal courtesy delay and kerchunk policy but does not confer call authority.
+This checkpoint deliberately has no production speech-close emitter: generic
+private inactivity, attachment loss and retirement are not genuine held/drained
+speech closure. That proof remains the source-owner follow-up; no PCM queue,
+worker, generator, provider ABI or node configuration changes here.

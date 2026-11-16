@@ -787,3 +787,90 @@ fn outgoing_isolation_suppresses_only_ordinary_media_in_both_directions() {
         }
     }
 }
+
+#[test]
+fn phone_courtesy_prepared_membership_replacement_and_no_generic_close() {
+    use crate::controller::{MorseSettings, PreparedMedia};
+    let source = source(7, 9, 13);
+    let call = reply(source.clone(), true);
+    let prepare = || {
+        let (writer, output) = LinkAudioQueue::new(16, 4).unwrap().into_endpoints();
+        let mut input = input(call.clone());
+        input.quiet = true;
+        input.signals.set_radio_keyed(false);
+        let peer =
+            AudioPeer::for_phone(&source, &call, Mode::TRANSCEIVE, input, writer, 4).unwrap();
+        let key = peer.courtesy_key.unwrap();
+        let (links, dispatcher) = LinkAudio::new(vec![peer], 4).unwrap();
+        assert_eq!(links.phone_courtesy[0].key, key);
+        assert_eq!(links.phone_courtesy[0].call, call);
+        assert_eq!(
+            links.phone_courtesy[0].media,
+            links.peers[0].input.signals().reply_target()
+        );
+        (key, links, dispatcher, output)
+    };
+    let (key, mut links, mut dispatcher, mut output) = prepare();
+    let (mut controller, control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings {
+            phone: Some(
+                PreparedMedia::new(Some(vec![0.4; 48]), "P", MorseSettings::default()).unwrap(),
+            ),
+            ..CourtesySettings::default()
+        },
+    )
+    .unwrap();
+    // A generic inactive edge is not proof of a held, drained speech closure.
+    links.peers[0].reported_active = true;
+    let mut rf = [0.0; 4];
+    links
+        .process(&mut controller, false, &mut rf, SourcePosition::default())
+        .unwrap();
+    assert_eq!(rf, [0.0; 4]);
+    assert!(links.status().last_keyed().is_none());
+    dispatcher.dispatch(1);
+    let mut sent = [0.0; 4];
+    output.read(&mut sent);
+    assert_eq!(sent, [0.0; 4]);
+
+    // The explicitly proved boundary remains local-only under existing site inhibition.
+    controller.phone_speech_closed(key, false);
+    control.set_site_inhibit(true);
+    links
+        .process(&mut controller, false, &mut rf, SourcePosition::default())
+        .unwrap();
+    assert_eq!(rf, [0.0; 4]);
+    control.set_site_inhibit(false);
+    links
+        .process(&mut controller, false, &mut rf, SourcePosition::default())
+        .unwrap();
+    assert_eq!(rf, [0.4; 4]);
+    dispatcher.dispatch(2);
+    output.read(&mut sent);
+    assert_eq!(sent, [0.0; 4], "phone courtesy cannot enter private egress");
+
+    // Same admitted call, different input preparation: never adopt the old active tone.
+    let (next_key, mut next, _, _) = prepare();
+    assert_ne!(key, next_key);
+    next.process(&mut controller, false, &mut rf, SourcePosition::default())
+        .unwrap();
+    assert_eq!(rf, [0.0; 4]);
+    controller.phone_speech_closed(next_key, false);
+    next.process(&mut controller, false, &mut rf, SourcePosition::default())
+        .unwrap();
+    assert_eq!(
+        rf, [0.4; 4],
+        "prepared reusable media restarts after cancellation"
+    );
+    next.peers[0].input.signals().end();
+    next.process(&mut controller, false, &mut rf, SourcePosition::default())
+        .unwrap();
+    assert_eq!(
+        rf, [0.0; 4],
+        "input retirement cancels even while the call remains live"
+    );
+    assert!(call.phone_media_authorized());
+}
