@@ -1,3 +1,7 @@
+# Standalone phone analysis requires radio preprocessing and explicit reset capabilities.
+# Historical alpha11 is NOT a reset-capable release floor. Publication is blocked
+# until reset-capable radio/RNNoise packages pass the native package gates and the
+# Build-Depends/Depends lower bounds below are aligned to that qualified release.
 Source: rpt-advanced
 Section: hamradio
 Priority: optional

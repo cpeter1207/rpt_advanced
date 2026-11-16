@@ -1719,3 +1719,150 @@ fn native_and_fallback_inherit_expired_age_even_with_fresh_egress_birth() {
         }
     }
 }
+
+#[test]
+fn configured_phone_media_reset_preserves_programme_hold_birth_and_requalifies_real_speech() {
+    let speech: Vec<f32> = include_bytes!("../tests/fixtures/phone-speech/yes-48000-s16le.pcm")
+        .chunks_exact(2)
+        .step_by(6)
+        .map(|p| f32::from(i16::from_le_bytes([p[0], p[1]])) / 32768.0)
+        .collect();
+    for native in [false, true] {
+        let (mut ingress, mut input, shared) = super::prepare_voiced(
+            reply(),
+            8000,
+            NonZeroU32::MIN,
+            None,
+            PhoneSpeechSettings {
+                preprocessing_enabled: true,
+                threshold: 0.75,
+                onset_frames: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        adopt(&mut ingress, 1000, reference());
+        let mut cursor = 1000;
+        for loss in 0..3 {
+            let origin = cursor;
+            for block in speech.chunks(127) {
+                assert_eq!(
+                    ingress.audio(cursor, block, Some(birth(10))),
+                    Ok(block.len())
+                );
+                cursor += block.len() as u64;
+                for _ in 0..block.len() * 6 {
+                    let _ = input.render_timed_sample();
+                }
+            }
+            assert!(
+                ingress
+                    .last_voice
+                    .is_some_and(|last| (origin..cursor).contains(&last)),
+                "successor speech requalifies on its genuine coordinates: loss {loss}"
+            );
+            let hold = (ingress.last_voice, ingress.voice_until);
+            let admission = ingress.admission;
+            let retained = input.available();
+            let prior = shared.bound(cursor - 1).unwrap();
+            let (result, allocations) = crate::fixture::allocations(|| {
+                if native {
+                    ingress.concealed(cursor, &[0.9; 80], Some(birth(99)))
+                } else {
+                    ingress.gap(cursor, 80)
+                }
+            });
+            assert_eq!(result, Ok(80));
+            assert_eq!(allocations, 0);
+            assert!(ingress.analysis_gap);
+            assert_eq!((ingress.last_voice, ingress.voice_until), hold);
+            assert_eq!(
+                shared.bound(cursor).unwrap(),
+                prior,
+                "loss cannot refresh source age"
+            );
+            cursor += 80;
+            // A one-sample genuine successor triggers reset but cannot complete a
+            // new model frame or manufacture a new hold. Programme is not flushed.
+            let (result, allocations) =
+                crate::fixture::allocations(|| ingress.audio(cursor, &[0.25], Some(birth(20))));
+            assert_eq!(result, Ok(1));
+            assert_eq!(allocations, 0);
+            assert!(!ingress.analysis_gap);
+            assert!(shared.active());
+            assert_eq!((ingress.last_voice, ingress.voice_until), hold);
+            assert_eq!(
+                ingress.admission.host_clock_epoch,
+                admission.host_clock_epoch
+            );
+            assert_eq!(ingress.admission.now_ns, admission.now_ns);
+            assert_eq!(input.available(), retained + 81);
+            assert_eq!(shared.bound(cursor - 1).unwrap(), prior);
+            cursor += 1;
+            for _ in 0..81 * 6 {
+                let _ = input.render_timed_sample();
+            }
+        }
+    }
+}
+
+#[test]
+fn configured_phone_media_defers_loss_reset_until_a_genuine_retry_is_accepted() {
+    for rate in [8000, 16000] {
+        let width = rate as usize / 50;
+        let (mut ingress, mut input, shared) = super::prepare_voiced(
+            reply(),
+            rate,
+            NonZeroU32::MIN,
+            None,
+            PhoneSpeechSettings {
+                preprocessing_enabled: true,
+                threshold: 0.0,
+                onset_frames: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        adopt(&mut ingress, 0, reference());
+        let original = vec![0.25; width];
+        for block in 0..14 {
+            assert_eq!(
+                ingress.audio((block * width) as u64, &original, Some(birth(10))),
+                Ok(width)
+            );
+        }
+        assert!(ingress.last_voice.is_some());
+        assert_eq!(ingress.gap((14 * width) as u64, width), Ok(width));
+        let cursor = (15 * width) as u64;
+        let hold = (ingress.last_voice, ingress.voice_until);
+        for _ in 0..2 {
+            assert_eq!(ingress.audio(cursor, &original, Some(birth(20))), Ok(0));
+            assert!(
+                ingress.analysis_gap,
+                "zero credit must not reset or consume a prefix"
+            );
+            assert_eq!(ingress.cursor, Some(cursor));
+            assert_eq!((ingress.last_voice, ingress.voice_until), hold);
+            assert_eq!(input.available(), cursor);
+        }
+        for _ in 0..4800 {
+            let _ = input.render_timed_sample();
+        }
+        let retained = input.available();
+        assert!(retained > 0);
+        let (result, allocations) =
+            crate::fixture::allocations(|| ingress.audio(cursor, &original[..1], Some(birth(20))));
+        assert_eq!(result, Ok(1));
+        assert_eq!(allocations, 0);
+        assert!(!ingress.analysis_gap);
+        assert_eq!(
+            input.available(),
+            retained + 1,
+            "successful reset retains older programme"
+        );
+        assert_eq!((ingress.last_voice, ingress.voice_until), hold);
+        assert_eq!(shared.bound(cursor - 1).unwrap().not_after_ns, 10);
+        assert_eq!(shared.bound(cursor).unwrap().not_after_ns, 20);
+        assert!(shared.active());
+    }
+}

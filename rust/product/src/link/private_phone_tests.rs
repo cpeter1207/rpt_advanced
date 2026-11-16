@@ -3130,6 +3130,7 @@ fn configured_protocol_limits_continuity_to_sip_and_preserves_command_cuts() {
                 .prepare_pending_voiced_media(
                     None,
                     PhoneSpeechSettings {
+                        preprocessing_enabled: true,
                         threshold: 0.0,
                         onset_frames: 1,
                         ..Default::default()

@@ -145,3 +145,12 @@ or final hardware/RF-path qualification. Those checks remain necessary for
 the intended station and conditions. Future Hamlib audio-source integration,
 streaming/IQ selection, and the verified shared-clock adapter remain in their
 existing wishlist entries; local VAD does not complete them.
+
+### Explicit phone analysis reset qualification (2026-11-16)
+
+Standalone phone loss recovery uses the existing radio analysis reset callback
+only with the checked explicit-reset capability. This clears analysis history
+without synthetic model observations or changing programme PCM. It is distinct
+from local RF carrier rearm, session replacement and implicit source-jump
+policy, which remain unchanged. The SDK remains the whole-session consumer;
+this phone-only requirement adds no SDK phone wrapper or host ABI slot.

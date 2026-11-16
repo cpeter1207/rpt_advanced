@@ -2485,3 +2485,19 @@ but it does not authorize synthetic continuation or a verified lifecycle close.
 No amplitude classifier, inferred exact DSP delay, or prolonged-speech waveform
 gate is introduced. This conservative authority limitation is explicit pending
 a supported richer delivery contract; it is not a claim of exact DSP provenance.
+
+### Reset-capable standalone analysis activation (2026-11-16)
+
+The separately reviewed radio/RNNoise candidate supplies explicit in-place
+analysis reset without synthetic inference. The controller now requires that
+capability during media preparation; older configured providers cannot be
+admitted and fail only on first loss. The existing accepted-genuine-prefix seam
+resets analysis after known loss and then analyzes only that accepted prefix.
+Zero credit, insertion and retry do not analyze synthetic PCM or reset the
+programme ring. Successful reset leaves admission, epoch, retained PCM, original
+hold endpoint and receipt age intact; later genuine decisions use their true
+source coordinates. Existing failure propagation remains fail-closed.
+
+This is local candidate composition, not a reset-capable release/package floor,
+hardware acceptance or permission to activate a node. Courtesy emission and
+the independent codec recovery-provenance integration remain separate work.

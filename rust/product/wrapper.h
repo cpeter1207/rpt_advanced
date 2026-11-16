@@ -9,3 +9,10 @@
 #include <rptadv_samplerate_adapter/rptadv_samplerate_adapter.h>
 #include <rptadvradio/rptadvradio.h>
 #include <usbradioplus_product.h>
+
+/* Bindgen cannot evaluate the provider's UINT64_C function-like macros.
+ * This internal enum binds their exact mask and rejects older headers. */
+enum {
+    RPTADV_PHONE_SPEECH_REQUIRED_CAPABILITIES =
+        RPTADV_RADIO_SPEECH_PREPROCESSING_CAPABILITY | RPTADV_RADIO_SPEECH_ANALYSIS_RESET_CAPABILITY
+};

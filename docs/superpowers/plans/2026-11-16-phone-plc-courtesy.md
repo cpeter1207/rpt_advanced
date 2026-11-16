@@ -157,3 +157,13 @@ Do not invoke bare Cargo against default image headers/libraries: the older radi
 All requested features map to Tasks 1–4. No classifier or new codec negotiation was added. Exact concealed origin and source-age continuity precede the courtesy integration; a generic inactive edge is explicitly insufficient. New private interfaces are defined where consumed. Existing C provider/host ABIs remain unchanged.
 
 The isolated planning tree is ready for the parent to review and execute serially. The parent should choose implementation detail refinements only if they preserve the spec's exact safety contracts. A missing safe provider contract or a failed provenance proof is a substantive blocker to report, not a reason to relax synthetic authority or add an arbitrary timeout. No wall-clock completion estimate is promised: four reviewable code increments plus two separately authorized hardware checkpoints are the milestones.
+
+## Reset dependency correction (2026-11-16)
+
+The earlier no-provider-change assumption does not hold for configured analysis:
+its old reset callback fails closed. The separate analysis-history-reset plan
+qualifies an append-only RNNoise reset contract and radio capability bit 4.
+Controller setup now requires this capability in addition to preprocessing;
+no SDK phone API, host table slot, programme queue or radio-session reset change
+is needed. Exact local candidate identity is not a published package floor.
+The independent codec provenance contract is tracked separately.

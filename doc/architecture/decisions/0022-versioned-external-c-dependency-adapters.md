@@ -305,3 +305,19 @@ normal configured host:port lookup, without a custom DNS stack. A blocking looku
 retains its descriptor lease and generation allocator until its actual completion.
 The public combined-distribution license review remains a separate hold; this
 local implementation does not authorize publication.
+
+## Standalone phone analysis reset capability (2026-11-16 local checkpoint)
+
+The controller's existing standalone speech-analysis loader requires both radio
+preprocessing bit 1 and explicit history-reset bit 4, the complete capability
+word, matching ABI/name and all callbacks before creating media. Header binding
+requires the named capability constants. No SDK wrapper, host-service slot,
+provider ABI prefix or SONAME changes. A provider that only supports the old
+configured chain is rejected at setup, not first discovered on packet loss.
+
+The local candidate is radio 8c5b5b41bc054a98dc7d36a7f199089bdc82b3b3 with
+RNNoise adapter b25f187d958c9866430bdf968c2b2bb579e5d667. Candidate source/DSO
+hash qualification is not a published package floor. Historical radio alpha11
+or alpha12 and RNNoise alpha2 metadata do not guarantee this contract. Package
+publication remains blocked until real reset-capable versions are qualified
+and every build/runtime lower bound is aligned; no SDK API bump is invented.

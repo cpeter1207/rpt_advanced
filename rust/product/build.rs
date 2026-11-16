@@ -46,6 +46,7 @@ fn main() {
         .allowlist_var("URP_PROGRAMME_.*")
         .allowlist_var("URP_AST_.*")
         .allowlist_var("RPTADV_MEDIA_.*")
+        .allowlist_var("RPTADV_PHONE_SPEECH_REQUIRED_CAPABILITIES")
         .allowlist_var("RPTADV_PEER_EVENT_.*")
         .allowlist_var("RPTADV_PEER_PHONE_INBAND_DIGITS")
         .allowlist_var("RPTADV_PEER_TIMED_G711_EGRESS")

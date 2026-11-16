@@ -51,10 +51,11 @@ impl Api {
             return Err(Error::UnsupportedFormat);
         }
         // Older providers may ignore unknown config bytes. Never silently use a
-        // plain classifier when this exact prepared-chain contract is selected.
+        // plain classifier or admit a chain that first fails to reset on packet loss.
         // SAFETY: the checked size includes this complete capability scalar.
         let features = unsafe { ptr::addr_of!((*d).speech_analysis_capabilities).read_unaligned() };
-        if features & 1 == 0 {
+        let required = u64::from(abi::RPTADV_PHONE_SPEECH_REQUIRED_CAPABILITIES);
+        if features & required != required {
             return Err(Error::UnsupportedFormat);
         }
         // SAFETY: size validation covers the complete speech-analysis tail.
@@ -76,8 +77,9 @@ impl Api {
 }
 
 /// One serialized shared-provider classifier, prepared outside source callbacks.
-/// Known loss resets detector history only; unsupported selected preprocessing
-/// fails closed. Programme retention remains entirely in the existing ring.
+/// Known loss resets detector history only; setup rejects providers without the
+/// complete preprocessing and explicit in-place reset contracts. Programme retention
+/// remains entirely in the existing ring.
 pub(super) struct SpeechAnalysis {
     handle: NonNull<Handle>,
     api: Api,
@@ -90,7 +92,7 @@ impl SpeechAnalysis {
         maximum: usize,
         settings: PhoneSpeechSettings,
     ) -> Result<Self, Error> {
-        // SAFETY: the directly linked released descriptor has immutable process lifetime.
+        // SAFETY: the directly linked qualified descriptor has immutable process lifetime.
         let api = unsafe { Api::from_descriptor(abi::rptadv_radio_descriptor()) }?;
         let maximum = u32::try_from(maximum).map_err(|_| Error::UnsupportedFormat)?;
         let config = abi::rptadv_speech_analysis_config {
@@ -294,11 +296,14 @@ mod descriptor_tests {
 
     #[test]
     fn released_phone_speech_descriptor_requires_the_complete_matching_tail() {
-        // SAFETY: the linked current release supplies this complete immutable record.
+        // SAFETY: the linked qualified provider supplies this complete immutable record.
         let original = unsafe { abi::rptadv_radio_descriptor().read() };
         // SAFETY: null is rejected before any prefix access.
         assert!(unsafe { Api::from_descriptor(ptr::null()) }.is_err());
-        for case in 0..8 {
+        let size_only = size_of::<u32>() as u32;
+        // SAFETY: the advertised prefix is exactly the allocated size word.
+        assert!(unsafe { Api::from_descriptor(ptr::from_ref(&size_only).cast()) }.is_err());
+        for case in 0..11 {
             let mut d = original;
             match case {
                 0 => {
@@ -311,10 +316,21 @@ mod descriptor_tests {
                 4 => d.speech_analysis_process = None,
                 5 => d.speech_analysis_reset = None,
                 6 => d.speech_analysis_destroy = None,
-                _ => d.speech_analysis_capabilities = 0,
+                7 => d.speech_analysis_capabilities = 1,
+                8 => d.speech_analysis_capabilities = 4,
+                9 => d.capability_name = c"wrong.radio-core".as_ptr(),
+                _ => {
+                    d.struct_size =
+                        (offset_of!(abi::rptadv_radio_descriptor, speech_analysis_capabilities)
+                            + size_of::<u64>()
+                            - 1) as u32
+                }
             }
             // SAFETY: this local complete record remains live throughout prefix validation.
-            assert!(unsafe { Api::from_descriptor(&d) }.is_err());
+            assert!(
+                unsafe { Api::from_descriptor(&d) }.is_err(),
+                "descriptor case {case}"
+            );
         }
     }
 }
@@ -322,30 +338,108 @@ mod descriptor_tests {
 #[cfg(test)]
 mod loss_reset_contract_tests {
     use super::*;
+
+    /// Use the dependency's native allocator guard alongside the Rust counter.
+    /// The maintained constrained runner requires its real malloc/free control.
+    struct NativeGuard {
+        begin: Option<unsafe extern "C" fn()>,
+        end: Option<unsafe extern "C" fn()>,
+    }
+    impl NativeGuard {
+        fn new() -> Self {
+            let symbol = |name: &CStr| {
+                // SAFETY: the optional test preload has immutable process lifetime.
+                unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) }
+            };
+            let begin = symbol(c"swr_test_realtime_begin");
+            let end = symbol(c"swr_test_realtime_end");
+            let control = symbol(c"swr_test_realtime_control");
+            if begin.is_null() || end.is_null() || control.is_null() {
+                assert!(std::env::var_os("RPTADV_REQUIRE_ALLOC_GUARD").is_none());
+                return Self {
+                    begin: None,
+                    end: None,
+                };
+            }
+            // SAFETY: the owned native guard exports exactly these signatures.
+            unsafe {
+                let control: unsafe extern "C" fn() -> i32 = std::mem::transmute(control);
+                assert_eq!(control(), 1, "native allocation/free positive control");
+                Self {
+                    begin: Some(std::mem::transmute::<
+                        *mut libc::c_void,
+                        unsafe extern "C" fn(),
+                    >(begin)),
+                    end: Some(std::mem::transmute::<
+                        *mut libc::c_void,
+                        unsafe extern "C" fn(),
+                    >(end)),
+                }
+            }
+        }
+        fn measure<T>(&self, operation: impl FnOnce() -> T) -> (T, usize) {
+            // Initialize the Rust measurement TLS before the native guard is armed.
+            crate::fixture::allocations(|| ());
+            // SAFETY: begin/end are paired on this serial test thread.
+            unsafe {
+                if let Some(begin) = self.begin {
+                    begin();
+                }
+            }
+            let result = crate::fixture::allocations(operation);
+            // SAFETY: this ends the current thread's matching guarded interval.
+            unsafe {
+                if let Some(end) = self.end {
+                    end();
+                }
+            }
+            result
+        }
+    }
     #[test]
-    fn released_reset_contract_across_analysis_only_loss() {
-        for preprocessing_enabled in [false, true] {
-            let settings = PhoneSpeechSettings {
-                preprocessing_enabled,
-                ..Default::default()
-            };
-            let mut analysis = SpeechAnalysis::new(8000, 160, settings).unwrap();
-            analysis.process(1000, &[0.0; 80]).unwrap();
-            // This is the released public callback, not a guessed private reset.
-            let reset = unsafe {
-                (*abi::rptadv_radio_descriptor())
-                    .speech_analysis_reset
-                    .unwrap()
-            };
-            let (result, allocations) =
-                crate::fixture::allocations(|| unsafe { reset(analysis.handle.as_ptr()) });
-            assert_eq!(allocations, 0);
-            if preprocessing_enabled {
-                assert_ne!(result, 0, "current selected graph cannot reset in place");
-                assert_eq!(analysis.process(1240, &[0.0; 160]), Err(Error::Translation));
-            } else {
-                assert_eq!(result, 0);
-                assert_eq!(analysis.process(1240, &[0.0; 160]), Ok(None));
+    fn phone_speech_reset_contract_across_analysis_only_loss() {
+        let guard = NativeGuard::new();
+        let speech: Vec<f32> = include_bytes!("../tests/fixtures/phone-speech/yes-48000-s16le.pcm")
+            .chunks_exact(2)
+            .map(|p| f32::from(i16::from_le_bytes([p[0], p[1]])) / 32768.0)
+            .collect();
+        for rate in [8000, 16000, 48000] {
+            for preprocessing_enabled in [false, true] {
+                let settings = PhoneSpeechSettings {
+                    preprocessing_enabled,
+                    threshold: 0.75,
+                    onset_frames: 2,
+                    ..Default::default()
+                };
+                let mut analysis = SpeechAnalysis::new(rate, 160, settings).unwrap();
+                let source: Vec<_> = speech
+                    .iter()
+                    .step_by(48000 / rate as usize)
+                    .copied()
+                    .collect();
+                analysis.process(1000, &[0.0; 80]).unwrap();
+                for origin in [1240, 100000] {
+                    let (reset, allocations) = guard.measure(|| analysis.reset());
+                    assert_eq!(reset, Ok(()));
+                    assert_eq!(allocations, 0);
+                    let (first, allocations) =
+                        guard.measure(|| analysis.process(origin, &[0.0; 160]));
+                    assert_eq!(first, Ok(None), "reset cannot synthesize a speech decision");
+                    assert_eq!(allocations, 0);
+                    let mut start = origin + 160;
+                    let mut voice = None;
+                    for block in source.chunks(160) {
+                        let (result, allocations) =
+                            guard.measure(|| analysis.process(start, block));
+                        voice = result.unwrap().or(voice);
+                        assert_eq!(allocations, 0);
+                        start += block.len() as u64;
+                    }
+                    assert!(
+                        voice.is_some_and(|last| (origin + 160..start).contains(&last)),
+                        "real successor speech must requalify at its true coordinates: {rate}/{preprocessing_enabled}"
+                    );
+                }
             }
         }
     }
