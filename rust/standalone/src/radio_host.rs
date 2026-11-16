@@ -1825,6 +1825,7 @@ mod receive_policy_tests {
         radio.struct_size = std::mem::size_of_val(&radio) as u32;
         radio.abi_version = 5;
         radio.receive.vad_mode = mode;
+        radio.speech.retention_ms = 160;
         // SAFETY: zero initializes scalar fields and nullable pointers, never Rust references.
         let mut config: abi::UrpNativeStationConfig = unsafe { std::mem::zeroed() };
         config.struct_size = std::mem::size_of_val(&config) as u32;
