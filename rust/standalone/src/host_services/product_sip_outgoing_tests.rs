@@ -7,6 +7,7 @@ enum IvrMode {
     Disabled,
     Events,
     InBand,
+    MixedClock,
 }
 
 use crate::phone::{
@@ -63,6 +64,8 @@ fn next_call(runtime: &ProductRuntime) -> u64 {
 }
 static ANSWER_ACKS: AtomicUsize = AtomicUsize::new(0);
 static SELECTED_PAYLOAD: AtomicUsize = AtomicUsize::new(0);
+static RTP_PACKET_TICKS: AtomicUsize = AtomicUsize::new(160);
+static SOURCE_DIGITS: AtomicUsize = AtomicUsize::new(0);
 static CONTINUOUS_RTP: AtomicBool = AtomicBool::new(false);
 static LAST_RTP: Mutex<Option<(u16, u32, u32)>> = Mutex::new(None);
 
@@ -71,6 +74,10 @@ static LAST_RTP: Mutex<Option<(u16, u32, u32)>> = Mutex::new(None);
 static SOURCE_CUTS: AtomicUsize = AtomicUsize::new(0);
 static LAST_MARKED_CUT: AtomicUsize = AtomicUsize::new(0);
 static ALLOW_SOURCE_CUT: AtomicBool = AtomicBool::new(false);
+// Diagnostic metadata for synthetic silence only; no PCM or control symbols.
+static QUIET_PHASE: AtomicUsize = AtomicUsize::new(0);
+static QUIET_PACKET: AtomicUsize = AtomicUsize::new(0);
+static QUIET_SKIPPED_INPUT: AtomicUsize = AtomicUsize::new(0);
 struct SourceCutObserver {
     original: abi::rptadv_peer_source_sink_v1,
 }
@@ -132,6 +139,7 @@ unsafe extern "C" fn observe_source_digit(context: *mut c_void, symbol: u32) -> 
     let accepted = unsafe { original.digit.unwrap()(original.context, symbol) };
     if accepted == 0 {
         SOURCE_CUTS.fetch_add(1, Ordering::Release);
+        SOURCE_DIGITS.fetch_add(1, Ordering::Release);
     }
     accepted
 }
@@ -200,6 +208,81 @@ unsafe extern "C" fn observe_peer_read_source(
     }
 }
 
+// Check every packet, including transition packets. Fresh source credit never
+// permits a cut once the measured strict interval has begun.
+fn assert_rtp_step(
+    previous: (u16, u32, u32),
+    current: (u16, u32, u32),
+    marker: bool,
+    expected: u32,
+    allow_cut: bool,
+    cuts: usize,
+    last_cut: usize,
+) -> usize {
+    let (sequence, timestamp, ssrc) = previous;
+    assert_eq!(
+        (current.0, current.2),
+        (sequence.wrapping_add(1), ssrc),
+        "one accepted RTP sequence and SSRC across source retirement"
+    );
+    let delta = current.1.wrapping_sub(timestamp);
+    if marker || delta != expected {
+        assert!(
+            allow_cut,
+            "healthy negotiated silence must remain continuous: phase={}, packet={}, previous={previous:?}, current={current:?}, marker={marker}, delta={delta}, expected={expected}, cuts={cuts}, last_cut={last_cut}, skipped_input={}",
+            QUIET_PHASE.load(Ordering::Acquire),
+            QUIET_PACKET.load(Ordering::Acquire),
+            QUIET_SKIPPED_INPUT.load(Ordering::Acquire)
+        );
+        assert!(marker, "source cut must retain the existing reset marker");
+        assert!(
+            cuts > last_cut,
+            "a marker alone is not evidence of an accepted source cut"
+        );
+        assert!(
+            (delta as i32) > 0,
+            "retirement cannot replay or rewind source time"
+        );
+        return cuts;
+    }
+    last_cut
+}
+
+#[test]
+fn strict_silence_rejects_even_credited_later_cuts() {
+    let previous = (10, 1000, 7);
+    assert_eq!(
+        assert_rtp_step(previous, (11, 1160, 7), false, 160, false, 20, 20),
+        20
+    );
+    assert_eq!(
+        assert_rtp_step(previous, (11, 1472, 7), true, 160, true, 21, 20),
+        21
+    );
+    for (allow, marker, delta, cuts) in [
+        (false, true, 472, 21),
+        (false, false, 472, 20),
+        (true, true, 472, 20),
+        (true, false, 472, 21),
+        (true, true, 0, 21),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_rtp_step(
+                    previous,
+                    (11, 1000 + delta, 7),
+                    marker,
+                    160,
+                    allow,
+                    cuts,
+                    20,
+                )
+            })
+            .is_err()
+        );
+    }
+}
+
 fn observe_rtp(wire: &[u8]) {
     let current = (
         u16::from_be_bytes(wire[2..4].try_into().unwrap()),
@@ -208,33 +291,17 @@ fn observe_rtp(wire: &[u8]) {
     );
     let mut last = LAST_RTP.lock().unwrap();
     if CONTINUOUS_RTP.load(Ordering::Acquire) {
-        if let Some((sequence, timestamp, ssrc)) = *last {
-            assert_eq!(
-                (current.0, current.2),
-                (sequence.wrapping_add(1), ssrc),
-                "one accepted RTP sequence and SSRC across source retirement"
+        if let Some(previous) = *last {
+            let cut = assert_rtp_step(
+                previous,
+                current,
+                wire[1] & 0x80 != 0,
+                RTP_PACKET_TICKS.load(Ordering::Acquire) as u32,
+                ALLOW_SOURCE_CUT.load(Ordering::Acquire),
+                SOURCE_CUTS.load(Ordering::Acquire),
+                LAST_MARKED_CUT.load(Ordering::Acquire),
             );
-            let delta = current.1.wrapping_sub(timestamp);
-            if wire[1] & 0x80 != 0 || delta != 160 {
-                assert!(
-                    ALLOW_SOURCE_CUT.load(Ordering::Acquire),
-                    "healthy negotiated20ms silence must remain continuous"
-                );
-                assert_ne!(
-                    wire[1] & 0x80,
-                    0,
-                    "source cut must retain the existing reset marker"
-                );
-                let cuts = SOURCE_CUTS.load(Ordering::Acquire);
-                assert!(
-                    cuts > LAST_MARKED_CUT.swap(cuts, Ordering::AcqRel),
-                    "a marker alone is not evidence of an accepted source cut"
-                );
-                assert!(
-                    (delta as i32) > 0,
-                    "retirement cannot replay or rewind source time"
-                );
-            }
+            LAST_MARKED_CUT.store(cut, Ordering::Release);
         }
     }
     if last.is_none() {
@@ -243,26 +310,48 @@ fn observe_rtp(wire: &[u8]) {
     *last = Some(current);
 }
 
-fn quiet_media(caller: &mut Caller, codec: &mut AudioCodec, packets: u64, incoming: bool) {
+fn quiet_media(
+    caller: &mut Caller,
+    codec: &mut AudioCodec,
+    packets: u64,
+    rearm_digits: Option<usize>,
+) {
+    let incoming = rearm_digits.is_some();
+    let mut transition = incoming;
+    let phase = if incoming { 2 } else { 1 };
+    QUIET_PHASE.store(phase, Ordering::Release);
+    QUIET_PACKET.store(0, Ordering::Release);
+    QUIET_SKIPPED_INPUT.store(0, Ordering::Release);
     let rf_before = PUBLIC_OUTPUT.load(Ordering::Acquire);
-    let started = Instant::now();
+    let mut started = Instant::now();
+    let transition_deadline = started + Duration::from_secs(3);
     let mut next_input = started;
     let mut wire = [0; 2048];
     // Thirty seconds is a bounded steady-state transport test, not an assumed NAT lifetime.
-    for packet in 1..=packets {
-        let until = Instant::now() + Duration::from_secs(3);
+    let mut packet = 0;
+    while packet < packets {
+        QUIET_PACKET.store(
+            if transition { 0 } else { packet as usize + 1 },
+            Ordering::Release,
+        );
+        let until = if transition {
+            transition_deadline
+        } else {
+            Instant::now() + Duration::from_secs(3)
+        };
         let (length, source) = loop {
             if incoming && Instant::now() >= next_input {
                 caller.audio_payload(
                     codec,
                     &vec![0.0; caller.profile.parameters().packet_frames as usize],
-                    SELECTED_PAYLOAD.load(Ordering::Acquire) as u8,
+                    caller.profile.payload(),
                 );
-                next_input += Duration::from_millis(20);
+                next_input += caller.packet_interval();
                 // Preserve source gaps after missed slots, never burst old PCM.
                 while next_input <= Instant::now() {
-                    caller.timestamp = caller.timestamp.wrapping_add(160);
-                    next_input += Duration::from_millis(20);
+                    QUIET_SKIPPED_INPUT.fetch_add(1, Ordering::Release);
+                    caller.timestamp = caller.timestamp.wrapping_add(caller.packet_ticks());
+                    next_input += caller.packet_interval();
                 }
             }
             service(caller);
@@ -275,25 +364,50 @@ fn quiet_media(caller: &mut Caller, codec: &mut AudioCodec, packets: u64, incomi
             );
             thread::sleep(Duration::from_millis(1));
         };
-        assert_eq!((length, source), (172, caller.media));
+        assert_eq!(
+            (length, source),
+            (12 + caller.profile.parameters().packet_bytes, caller.media)
+        );
         assert_eq!(
             wire[1] & 0x7f,
             SELECTED_PAYLOAD.load(Ordering::Acquire) as u8
         );
         observe_rtp(&wire[..length]);
         let mut pcm = vec![0.0; caller.profile.parameters().packet_frames as usize];
-        codec
-            .decode(wire[12..172].try_into().unwrap(), &mut pcm)
-            .unwrap();
+        codec.decode(&wire[12..length], &mut pcm).unwrap();
         assert!(pcm.iter().all(|sample| sample.abs() < 0.001));
+        if transition {
+            assert!(
+                Instant::now() < transition_deadline,
+                "native control rearm did not reach the wire"
+            );
+            let accepted = SOURCE_DIGITS.load(Ordering::Acquire);
+            let expected = rearm_digits.unwrap();
+            assert!(
+                accepted <= expected,
+                "native control was accepted more than once"
+            );
+            if accepted == expected
+                && LAST_MARKED_CUT.load(Ordering::Acquire) == SOURCE_CUTS.load(Ordering::Acquire)
+            {
+                // A paced packet has crossed the already credited rearm boundary.
+                // Keep its RTP history; every following packet is strictly continuous.
+                transition = false;
+                ALLOW_SOURCE_CUT.store(false, Ordering::Release);
+                started = Instant::now();
+            }
+            continue;
+        }
+        packet += 1;
         if packet % 50 == 0 {
             // Include ordinary OS scheduling tolerance without accepting a catch-up flood.
-            let expected = Duration::from_millis(packet * 20);
+            let expected = caller.packet_interval() * u32::try_from(packet).unwrap();
             let elapsed = started.elapsed();
             assert!(elapsed + Duration::from_millis(100) >= expected);
             assert!(elapsed <= expected + Duration::from_millis(500));
         }
     }
+    QUIET_PHASE.store(0, Ordering::Release);
     assert_eq!(LOCAL_RX_KEYED_TURNS.load(Ordering::Acquire), 0);
     assert_eq!(
         PUBLIC_OUTPUT.load(Ordering::Acquire),
@@ -329,16 +443,14 @@ fn drain(caller: &Caller, codec: &mut AudioCodec, returned: &mut Vec<f32>) {
             source, caller.media,
             "same offered RTP socket owns answered media"
         );
-        assert_eq!(length, 172);
+        assert_eq!(length, 12 + caller.profile.parameters().packet_bytes);
         assert_eq!(
             (wire[0], wire[1] & 0x7f),
             (0x80, SELECTED_PAYLOAD.load(Ordering::Acquire) as u8)
         );
         observe_rtp(&wire[..length]);
         let mut pcm = vec![0.0; caller.profile.parameters().packet_frames as usize];
-        codec
-            .decode(wire[12..172].try_into().unwrap(), &mut pcm)
-            .unwrap();
+        codec.decode(&wire[12..length], &mut pcm).unwrap();
         returned.extend_from_slice(&pcm);
     }
 }
@@ -356,18 +468,18 @@ fn media(
         }
         let mut pcm = vec![0.0; caller.profile.parameters().packet_frames as usize];
         pcm[..chunk.len()].copy_from_slice(chunk);
-        caller.audio_payload(codec, &pcm, SELECTED_PAYLOAD.load(Ordering::Acquire) as u8);
+        caller.audio_payload(codec, &pcm, caller.profile.payload());
         if let Some(remote) = linked.as_mut() {
             remote.pump();
         }
         service(caller);
         drain(caller, codec, returned);
-        next += Duration::from_millis(20);
+        next += caller.packet_interval();
         // This bounded fixture never catches up by emitting a burst of old media.
         // A missed source slot is explicit in its timestamp, not a renewed birth.
         while next <= Instant::now() {
-            caller.timestamp = caller.timestamp.wrapping_add(160);
-            next += Duration::from_millis(20);
+            caller.timestamp = caller.timestamp.wrapping_add(caller.packet_ticks());
+            next += caller.packet_interval();
         }
     }
     // Preserve the final packet interval across consecutive media calls too.
@@ -428,7 +540,7 @@ fn latch(caller: &Caller) -> Option<SocketAddr> {
     while Instant::now() < until {
         service(caller);
         if let Ok((length, source)) = caller.rtp.recv_from(&mut wire) {
-            assert_eq!(length, 172);
+            assert_eq!(length, 12 + caller.profile.parameters().packet_bytes);
             assert_eq!(
                 (wire[0], wire[1] & 0x7f),
                 (0x80, SELECTED_PAYLOAD.load(Ordering::Acquire) as u8)
@@ -597,6 +709,37 @@ fn product_outgoing_with_policy(
             "host_services::product_phone_tests::sip::outgoing::actual_unlocked_phone_bypass_allows_eligible_peer_playout"
         } else if bypass_all == Some(false) {
             "host_services::product_phone_tests::sip::outgoing::actual_unlocked_phone_bypass_preserves_local_only_playout"
+        } else if selected == AudioProfile::Ilbc30 {
+            if ivr == IvrMode::Events {
+                "host_services::product_phone_tests::sip::outgoing::actual_ilbc_radio_digits_preserve_private_native_events"
+            } else if ivr == IvrMode::InBand {
+                "host_services::product_phone_tests::sip::outgoing::actual_ilbc_radio_digits_preserve_private_inband"
+            } else {
+                "host_services::product_phone_tests::sip::outgoing::actual_ilbc_quiet_call_preserves_thirty_ms_rtp"
+            }
+        } else if selected == AudioProfile::L16Wideband {
+            match ivr {
+                IvrMode::MixedClock => {
+                    "host_services::product_phone_tests::sip::outgoing::actual_l16_mixed_event_answer_keeps_native_receive_and_private_inband_transmit"
+                }
+                IvrMode::Events => {
+                    "host_services::product_phone_tests::sip::outgoing::actual_l16_matched_events_preserve_native_digits_and_clock"
+                }
+                IvrMode::InBand => {
+                    "host_services::product_phone_tests::sip::outgoing::actual_l16_absent_events_preserve_private_inband"
+                }
+                IvrMode::Disabled => {
+                    "host_services::product_phone_tests::sip::outgoing::actual_l16_quiet_call_preserves_zero_receiver_key_and_continuous_rtp"
+                }
+            }
+        } else if selected == AudioProfile::Gsm {
+            "host_services::product_phone_tests::sip::outgoing::actual_gsm_two_way_phone_preserves_quiet_rtp"
+        } else if selected == AudioProfile::G726 {
+            "host_services::product_phone_tests::sip::outgoing::actual_g726_two_way_phone_preserves_quiet_rtp"
+        } else if selected == AudioProfile::G726Aal2 {
+            "host_services::product_phone_tests::sip::outgoing::actual_aal2_g726_two_way_phone_preserves_quiet_rtp"
+        } else if selected == AudioProfile::L16Narrowband {
+            "host_services::product_phone_tests::sip::outgoing::actual_l16_narrowband_two_way_phone_preserves_quiet_rtp"
         } else if selected == AudioProfile::G722 {
             "host_services::product_phone_tests::sip::outgoing::actual_product_g722_two_way_phone_preserves_wideband_pcm"
         } else if isolated {
@@ -635,7 +778,17 @@ fn product_outgoing_with_policy(
         );
         return;
     }
-    SELECTED_PAYLOAD.store(usize::from(selected.payload()), Ordering::Release);
+    let remote_audio_payload = if selected == AudioProfile::L16Wideband {
+        113
+    } else {
+        selected.payload()
+    };
+    SELECTED_PAYLOAD.store(usize::from(remote_audio_payload), Ordering::Release);
+    RTP_PACKET_TICKS.store(
+        (selected.parameters().packet_frames * selected.parameters().rtp_clock_hz
+            / selected.parameters().pcm_rate_hz) as usize,
+        Ordering::Release,
+    );
     let directory =
         std::env::temp_dir().join(format!("rpt-outgoing-product-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
@@ -851,15 +1004,25 @@ fn product_outgoing_with_policy(
         );
     }
     assert!(worker.incoming().is_none());
+    let event_clock = if ivr == IvrMode::MixedClock {
+        8000
+    } else {
+        selected.parameters().rtp_clock_hz
+    };
+    let local_event_payload = if event_clock == 16000 { 102 } else { 101 };
+    let remote_event_payload = if selected == AudioProfile::L16Wideband {
+        if event_clock == 16000 { 121 } else { 120 }
+    } else {
+        local_event_payload
+    };
     let answer = MediaDescription {
         codec: selected,
-        receive_payload: selected.payload(),
-        send_payload: selected.payload(),
-        telephone_event: if ivr == IvrMode::InBand {
-            None
-        } else {
-            offer.telephone_event
-        },
+        receive_payload: remote_audio_payload,
+        send_payload: remote_audio_payload,
+        telephone_events: [8000, 16000].map(|rate| {
+            (ivr != IvrMode::InBand && rate == event_clock)
+                .then_some(TelephoneEvent::symmetric(remote_event_payload, rate))
+        }),
         ..offer.clone()
     }
     .answer(rtp.local_addr().unwrap(), 99)
@@ -885,6 +1048,8 @@ fn product_outgoing_with_policy(
         keepalive: false,
         profile: selected,
         events: ivr != IvrMode::InBand,
+        event_clock,
+        event_payload: local_event_payload,
     };
     let mut codec = AudioCodec::load(selected).unwrap();
     let mut returned = Vec::new();
@@ -910,7 +1075,10 @@ fn product_outgoing_with_policy(
         assert_eq!(LOCAL_RX_KEYED_TURNS.load(Ordering::Acquire), 0);
         caller.media = learned.unwrap();
         CONTINUOUS_RTP.store(true, Ordering::Release);
-        quiet_media(&mut caller, &mut codec, 1500, false);
+        let packets = Duration::from_secs(30)
+            .as_nanos()
+            .div_ceil(caller.packet_interval().as_nanos()) as u64;
+        quiet_media(&mut caller, &mut codec, packets, None);
         // An initial admission cut cannot excuse a later unrelated reset.
         LAST_MARKED_CUT.store(SOURCE_CUTS.load(Ordering::Acquire), Ordering::Release);
         ALLOW_SOURCE_CUT.store(true, Ordering::Release);
@@ -1020,6 +1188,7 @@ fn product_outgoing_with_policy(
     );
     LAST_MARKED_CUT.store(SOURCE_CUTS.load(Ordering::Acquire), Ordering::Release);
     let radio_before = PUBLIC_OUTPUT.load(Ordering::Acquire);
+    let digits_before = SOURCE_DIGITS.load(Ordering::Acquire);
     caller.digits(b"*4#*70");
     media(
         &mut caller,
@@ -1033,6 +1202,13 @@ fn product_outgoing_with_policy(
         radio_before,
         "callee DTMF grants no node control"
     );
+    if selected == AudioProfile::L16Wideband {
+        assert_eq!(
+            SOURCE_DIGITS.load(Ordering::Acquire) - digits_before,
+            if ivr == IvrMode::InBand { 0 } else { 6 },
+            "negotiated native RX credits each completed key once without outgoing-role authority"
+        );
+    }
     assert!(
         returned.iter().all(|sample| sample.abs() <= 0.01),
         "no private control result for outgoing role"
@@ -1042,8 +1218,7 @@ fn product_outgoing_with_policy(
     if latching {
         // Continue the established incoming source with real silence instead of
         // introducing missing RTP during this healthy post-rearm cadence phase.
-        ALLOW_SOURCE_CUT.store(false, Ordering::Release);
-        quiet_media(&mut caller, &mut codec, 100, true);
+        quiet_media(&mut caller, &mut codec, 100, Some(digits_before + 6));
         LAST_MARKED_CUT.store(SOURCE_CUTS.load(Ordering::Acquire), Ordering::Release);
         ALLOW_SOURCE_CUT.store(true, Ordering::Release);
     }
@@ -1135,8 +1310,12 @@ fn product_outgoing_with_policy(
         MediaDescription::parse(invite.split_once("\r\n\r\n").unwrap().1.as_bytes()).unwrap();
     let answer = MediaDescription {
         codec: selected,
-        receive_payload: selected.payload(),
-        send_payload: selected.payload(),
+        receive_payload: remote_audio_payload,
+        send_payload: remote_audio_payload,
+        telephone_events: [8000, 16000].map(|rate| {
+            (ivr != IvrMode::InBand && rate == event_clock)
+                .then_some(TelephoneEvent::symmetric(remote_event_payload, rate))
+        }),
         ..next_offer.clone()
     }
     .answer(caller.rtp.local_addr().unwrap(), 100)
@@ -1249,7 +1428,7 @@ fn telephone_ivr(
     let mut next = start;
     let mut last = None;
     let mut events: Vec<(u32, u8, u16, u8)> = Vec::new();
-    let mut decoder = ivr_decoder::Decoder::new();
+    let mut decoder = ivr_decoder::Decoder::new(caller.profile.parameters().pcm_rate_hz);
     let mut decoded = Vec::with_capacity(16);
     let mut maximum_audio = 0.0f32;
     let mut nonzero_by_slot = [0usize; 12];
@@ -1275,7 +1454,7 @@ fn telephone_ivr(
         caller.audio_payload(
             codec,
             &vec![0.0; caller.profile.parameters().packet_frames as usize],
-            SELECTED_PAYLOAD.load(Ordering::Acquire) as u8,
+            caller.profile.payload(),
         );
         if let Some(remote) = linked.as_mut() {
             // The existing ordinary transport stays live, but any DTMF event
@@ -1300,7 +1479,13 @@ fn telephone_ivr(
                 assert_eq!(ssrc, original_ssrc);
             }
             last = Some((sequence, ssrc));
-            if wire[1] & 0x7f == 101 {
+            if wire[1] & 0x7f != SELECTED_PAYLOAD.load(Ordering::Acquire) as u8 {
+                let event_payload = if caller.profile == AudioProfile::L16Wideband {
+                    121
+                } else {
+                    101
+                };
+                assert_eq!(wire[1] & 0x7f, event_payload);
                 assert_eq!(length, 16);
                 let ended = wire[13] & 0x80 != 0;
                 let duration = u16::from_be_bytes(wire[14..16].try_into().unwrap());
@@ -1315,23 +1500,27 @@ fn telephone_ivr(
                 }
                 let event = events.last_mut().unwrap();
                 assert_eq!(event.1, wire[12]);
-                assert!(duration >= event.2 && duration <= 1600);
+                assert!(
+                    duration >= event.2
+                        && u32::from(duration) <= caller.profile.parameters().rtp_clock_hz / 5
+                );
                 event.2 = duration;
                 if ended {
-                    assert_eq!(duration, 1600);
+                    assert_eq!(
+                        u32::from(duration),
+                        caller.profile.parameters().rtp_clock_hz / 5
+                    );
                     event.3 += 1;
                 }
                 assert!(event.3 <= 3);
             } else {
-                assert_eq!(length, 172);
+                assert_eq!(length, 12 + caller.profile.parameters().packet_bytes);
                 assert_eq!(
                     wire[1] & 0x7f,
                     SELECTED_PAYLOAD.load(Ordering::Acquire) as u8
                 );
                 let mut pcm = vec![0.0; caller.profile.parameters().packet_frames as usize];
-                codec
-                    .decode(wire[12..172].try_into().unwrap(), &mut pcm)
-                    .unwrap();
+                codec.decode(&wire[12..length], &mut pcm).unwrap();
                 if pcm.iter().any(|sample| sample.abs() > 0.01) {
                     nonzero_by_slot[(elapsed / 280).min(11)] += 1;
                 }
@@ -1341,10 +1530,10 @@ fn telephone_ivr(
                 decoder.process(&mut pcm, &mut decoded);
             }
         }
-        next += Duration::from_millis(20);
+        next += caller.packet_interval();
         while next <= Instant::now() {
-            caller.timestamp = caller.timestamp.wrapping_add(160);
-            next += Duration::from_millis(20);
+            caller.timestamp = caller.timestamp.wrapping_add(caller.packet_ticks());
+            next += caller.packet_interval();
         }
     }
     LOCAL_DTMF.store(0, Ordering::Release);
@@ -1520,4 +1709,95 @@ fn assert_call_bypass(
 #[test]
 fn actual_product_g722_two_way_phone_preserves_wideband_pcm() {
     product_outgoing(false, true, true, AudioProfile::G722, false);
+}
+
+#[test]
+fn actual_l16_mixed_event_answer_keeps_native_receive_and_private_inband_transmit() {
+    product_outgoing_with_policy(
+        true,
+        false,
+        false,
+        AudioProfile::L16Wideband,
+        IvrMode::MixedClock,
+        true,
+        None,
+    );
+}
+#[test]
+fn actual_l16_matched_events_preserve_native_digits_and_clock() {
+    product_outgoing_with_policy(
+        true,
+        false,
+        false,
+        AudioProfile::L16Wideband,
+        IvrMode::Events,
+        true,
+        None,
+    );
+}
+#[test]
+fn actual_l16_absent_events_preserve_private_inband() {
+    product_outgoing_with_policy(
+        true,
+        false,
+        false,
+        AudioProfile::L16Wideband,
+        IvrMode::InBand,
+        true,
+        None,
+    );
+}
+
+#[test]
+fn actual_l16_quiet_call_preserves_zero_receiver_key_and_continuous_rtp() {
+    // Quiet/latch requires no earlier RF activity; isolation fixtures deliberately
+    // key RF before origination to prove the ordinary peer works before the cut.
+    product_outgoing(false, true, true, AudioProfile::L16Wideband, false);
+}
+
+#[test]
+fn actual_gsm_two_way_phone_preserves_quiet_rtp() {
+    product_outgoing(false, true, true, AudioProfile::Gsm, false);
+}
+
+#[test]
+fn actual_g726_two_way_phone_preserves_quiet_rtp() {
+    product_outgoing(false, true, true, AudioProfile::G726, false);
+}
+
+#[test]
+fn actual_aal2_g726_two_way_phone_preserves_quiet_rtp() {
+    product_outgoing(false, true, true, AudioProfile::G726Aal2, false);
+}
+
+#[test]
+fn actual_l16_narrowband_two_way_phone_preserves_quiet_rtp() {
+    product_outgoing(false, true, true, AudioProfile::L16Narrowband, false);
+}
+
+#[test]
+fn actual_ilbc_quiet_call_preserves_thirty_ms_rtp() {
+    product_outgoing(false, true, true, AudioProfile::Ilbc30, false);
+}
+#[test]
+fn actual_ilbc_radio_digits_preserve_private_native_events() {
+    product_outgoing_with_ivr(
+        true,
+        false,
+        false,
+        AudioProfile::Ilbc30,
+        IvrMode::Events,
+        true,
+    );
+}
+#[test]
+fn actual_ilbc_radio_digits_preserve_private_inband() {
+    product_outgoing_with_ivr(
+        true,
+        false,
+        false,
+        AudioProfile::Ilbc30,
+        IvrMode::InBand,
+        true,
+    );
 }

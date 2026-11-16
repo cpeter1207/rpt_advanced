@@ -2267,8 +2267,108 @@ serial-owner slot until non-callback replacement or cleanup. A fresh selected
 graph still requires the existing exact source revision, authorization and
 collector-release protocol; no reset grants readmission.
 
-Focused offline speech/media behavior has been exercised against a hash-pinned
-private Radio API candidate. This does not qualify a distributable artifact or
-native callback safety: Rust allocation counters do not observe C-library
-allocation, and the shared chain's native allocator guard remains blocked.
-Full quality gates, native platform coverage and live qualification are separate.
+The selected private cohort now uses a 255-tap native FIR before RNNoise,
+not the earlier FFmpeg bandpass recipe. Radio runtime 48c692d with the 3ae3e5c
+header and SDK runtime 6a55584/source 2d2589a passed separate provider checks.
+The frozen phone-only source 336a4d3 passed its complete affected controller
+suites, all 21 isolated actual-call cases, C composition and strict checks.
+The earlier FFmpeg native-allocation failure remains historical evidence for
+that different recipe, not a passing result or the selected FIR implementation.
+
+This source-only codec/analysis union has not inherited those execution results:
+its merged source and exact runtime must be qualified together. Distributable
+artifacts, full quality gates, native platform coverage and live qualification
+remain separate.
+
+### Directional telephone digit selection (Batch A)
+
+`RPTADV_PEER_PHONE_INBAND_DIGITS` keeps its existing receive-and-transmit
+semantics. The additional `RPTADV_PEER_PHONE_INBAND_EGRESS` bit512 requests only
+transmit synthesis through the existing finite private digit owner. Native
+received events remain actionable, and their source credit, exact-call authority
+and deduplication are unchanged. The complete PHONE/ASYNC/PREPARED/SOURCE_MEDIA/
+PRIVATE_CALL group is required. Redundant declaration of both in-band bits is
+harmless and retains the original in-band receive policy. Other peer kinds,
+incomplete callback groups and unknown bits remain rejected.
+
+This is an additive semantic capability, with no ABI layout or SONAME change.
+Old hosts preserve their behavior with the bit absent; old products reject the
+unknown capability rather than silently discarding negotiated receive events.
+Only the private transmit control copy uses the new accessor. The session's
+receive policy still uses bit64, and there is no second detector or queue.
+
+### Fixed-frame SIP packet and event mappings
+
+The SIP transport validates encoded packet bytes separately from PCM frames and
+RTP ticks. GSM, G726, AAL2-G726 and both L16 rates reuse the released neutral
+codec client. RTP L16 converts the existing little-endian PCM16 provider's wire
+words to network byte order at the protocol boundary. No converter is duplicated.
+The serial egress retains one setup-sized wire buffer and one pending datagram;
+WouldBlock retains the original bytes, sequence, timestamp, marker and deadline.
+The source birth, finite true-source span and retirement rules above are unchanged.
+
+For the supported 8/16 kHz RTP clocks, SDP keeps at most one event mapping per
+clock, including independent local receive and remote transmit payload numbers.
+An incoming answer selects a matching event clock or genuinely omits events.
+An outgoing valid mixed-clock answer retains native event reception but publishes
+bit512 for synthesized in-band transmission when no matching clock was selected.
+The endpoint independently refuses mismatched-clock native event transmission.
+G722 matches 8 kHz events despite decoding to 16 kHz PCM. Valid answer payload
+renumbering does not authorize reinterpretation of an offered payload format.
+
+Native receive-event history remains bounded by the existing exact remote SSRC;
+its identity includes the negotiated event clock, raw onset and symbol. Repeated
+reports and finals within that mapping yield one completed digit. Cross-clock
+onsets are not scaled or equated, since their offsets need not share an origin.
+This is not universal deduplication of a sender encoding one physical key twice
+under different clock mappings. Mixed-clock event transmission and RTCP clock-
+switch signaling are not implemented. In-band fallback is permitted by RFC4733,
+but an event-only IVR need not recognize it. Outgoing callee digits retain their
+existing lack of controller-command authority.
+
+
+### Bounded native SIP receive units
+
+Receive packet shape is independent of the selected fixed transmit packet.
+The selected decoder is prepared for complete native coding units through a
+30 ms local ceiling. GSM remains one 20 ms coding unit under that ceiling.
+Encoder configuration and paced transmit size are unchanged. This receive
+checkpoint does not yet add iLBC or change the SDP packet-time policy.
+
+The RTP owner requires a call-local framing inspection before copying payload
+or adopting SSRC. Native Malformed is discardable peer input; other provider
+failures and impossible successful span/mode/length reports remain terminal
+codec failures. Inspection does not advance decoder or concealment history.
+The existing jitter owner retains actual encoded length and inspected PCM span;
+playout decodes only those prefixes through the existing recovery operation.
+L16 swaps only the actual payload prefix in its prepared scratch.
+
+The same retained PCM/gap credit, signed overlap handling, original receipt
+birth and retirement rules apply to 10/20/30 ms receive spans. There is no new
+queue, callback owner, provider ABI, converter or decoder per packet. Only the
+selected codec contexts remain live; startup bidirectional probes are temporary.
+The worst supported L16/16k receive payload is 960 bytes and 480 PCM frames.
+This is an implementation ceiling, not a claim to accept every RTP packetization.
+
+
+### iLBC30 negotiation checkpoint
+
+The same catalog now includes the released iLBC profile11 with explicit mode30:
+240 PCM frames, 50 encoded bytes and 240 RTP ticks at 8 kHz per 30 ms transmit
+packet. The default dynamic payload is100. Both selected contexts are prepared
+before advertisement. RFC3952 resolves our mode30 preference against either
+peer mode20 or mode30 to mode30 in both directions; absent mode uses30. Reserved,
+unsupported and duplicate mode declarations are not inferred from payload length.
+
+The local SDP receive maximum is30 ms for the entire advertised catalog, matching
+the complete-unit decoder bounds. A mixed-duration offer omits common ptime; a
+selected answer emits the profile's preferred packet duration. Positive decimal
+ptime is a preference, while peer maxptime limits which fixed TX profile may be
+selected. An incompatible iLBC maximum can still leave an offered20 ms codec
+usable. The peer's receive maximum never changes our advertised receive ceiling.
+Decimal parsing validates all digits without floating point, with a harmless
+receiver extension accepting trailing fractional zeroes such as20.0.
+
+This adds no codec implementation, provider version, ABI or media queue. Focused
+native-provider, SDP, UDP, finite-tail and source-credit checks are distinct from
+actual full-call, external-peer, hardware and aggregate qualification.

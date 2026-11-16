@@ -2881,3 +2881,20 @@ fn source_discontinuity_retires_media_but_keeps_dsp_with_its_serial_owner() {
         "replacing the owner cannot revive its previous generation"
     );
 }
+
+#[test]
+fn transmit_only_inband_keeps_native_receive_events_and_existing_control_owner() {
+    let (mut session, mut control, state, reply) = source_session_with_peer(
+        crate::link::session::tests::phone_source_peer_transmit_inband(8000),
+        false,
+    );
+    assert_eq!(session.digit_mode, PhoneDigitMode::NativeEvents);
+    assert_eq!(control.digit_mode, PhoneDigitMode::InBand);
+    state.lock().unwrap().input.push_back(Input::Digit(b'7'));
+    session.step(1).unwrap();
+    assert_eq!(control.digit(), Some(('7', 1)));
+    assert_eq!(control.digit(), None);
+    assert!(state.lock().unwrap().input.is_empty());
+    assert!(state.lock().unwrap().digits.is_empty());
+    assert!(!reply.phone_authenticated());
+}

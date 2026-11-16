@@ -1,11 +1,22 @@
 //! Same actual product/private source, with an independent literal SIP/RTP caller.
 use super::*;
+use crate::phone::media::TelephoneEvent;
 use crate::phone::media::{AudioCodec, AudioProfile};
 use std::collections::BTreeMap;
 #[path = "product_sip_outgoing_tests.rs"]
 mod outgoing;
 #[path = "product_sip_vox_tests.rs"]
 mod vox;
+
+// iLBC uses the normal configured 20-WPM speed so a Morse unit spans two
+// codec frames. Earlier codec fixtures retain their exact 40-WPM setup.
+fn prompt_speed(profile: AudioProfile) -> u32 {
+    if profile == AudioProfile::Ilbc30 {
+        20
+    } else {
+        40
+    }
+}
 
 struct Caller {
     sip: UdpSocket,
@@ -18,6 +29,8 @@ struct Caller {
     keepalive: bool,
     profile: AudioProfile,
     events: bool,
+    event_clock: u32,
+    event_payload: u8,
 }
 
 fn fields(packet: &[u8]) -> (String, BTreeMap<String, String>) {
@@ -41,6 +54,14 @@ fn fields(packet: &[u8]) -> (String, BTreeMap<String, String>) {
     (first, headers)
 }
 impl Caller {
+    fn packet_interval(&self) -> Duration {
+        let p = self.profile.parameters();
+        Duration::from_nanos(u64::from(p.packet_frames) * 1_000_000_000 / u64::from(p.pcm_rate_hz))
+    }
+    fn packet_ticks(&self) -> u32 {
+        let p = self.profile.parameters();
+        p.packet_frames * p.rtp_clock_hz / p.pcm_rate_hz
+    }
     fn answer_register(&self, fields: &BTreeMap<String, String>, target: SocketAddr) {
         let mut response = "SIP/2.0 200 OK\r\n".to_owned();
         for name in ["via", "from", "to", "call-id", "cseq"] {
@@ -95,6 +116,12 @@ impl Caller {
             keepalive: !events,
             profile,
             events,
+            event_clock: profile.parameters().rtp_clock_hz,
+            event_payload: if profile.parameters().rtp_clock_hz == 16000 {
+                102
+            } else {
+                101
+            },
         };
         let mut packet = [0; 8192];
         if registered.is_none() {
@@ -111,7 +138,10 @@ impl Caller {
             codec: profile,
             receive_payload: profile.payload(),
             send_payload: profile.payload(),
-            telephone_event: events.then_some(101),
+            telephone_events: [8000, 16000].map(|rate| {
+                (events && rate == owner.event_clock)
+                    .then_some(TelephoneEvent::symmetric(owner.event_payload, rate))
+            }),
         }
         .answer(owner.rtp.local_addr().unwrap(), 1)
         .unwrap();
@@ -149,7 +179,11 @@ impl Caller {
                 let selected =
                     crate::phone::media::MediaDescription::parse(body.as_bytes()).unwrap();
                 assert_eq!(selected.codec, profile);
-                assert_eq!(selected.telephone_event, events.then_some(101));
+                assert_eq!(
+                    selected.telephone_events,
+                    [8000, 16000].map(|rate| (events && rate == owner.event_clock)
+                        .then_some(TelephoneEvent::symmetric(owner.event_payload, rate)))
+                );
                 owner.media = SocketAddr::new(address.trim().parse().unwrap(), port);
                 owner.request("ACK", "");
                 owner.sip.set_nonblocking(true).unwrap();
@@ -176,9 +210,9 @@ impl Caller {
         self.audio_payload(codec, pcm, self.profile.payload());
     }
     fn audio_payload(&mut self, codec: &mut AudioCodec, pcm: &[f32], payload: u8) {
-        let mut encoded = [0; 160];
+        let mut encoded = vec![0; self.profile.parameters().packet_bytes];
         codec.encode(pcm, &mut encoded).unwrap();
-        let mut wire = [0; 172];
+        let mut wire = vec![0; 12 + encoded.len()];
         wire[0] = 0x80;
         wire[1] = payload;
         wire[2..4].copy_from_slice(&self.sequence.to_be_bytes());
@@ -187,7 +221,7 @@ impl Caller {
         wire[12..].copy_from_slice(&encoded);
         self.rtp.send_to(&wire, self.media).unwrap();
         self.sequence = self.sequence.wrapping_add(1);
-        self.timestamp = self.timestamp.wrapping_add(160);
+        self.timestamp = self.timestamp.wrapping_add(self.packet_ticks());
     }
     fn prompt(&mut self, codec: &mut AudioCodec, stage: &str) -> Vec<f32> {
         let source_start = self.timestamp;
@@ -202,25 +236,26 @@ impl Caller {
                     codec,
                     &vec![0.0; self.profile.parameters().packet_frames as usize],
                 );
-                next_audio += Duration::from_millis(20);
+                next_audio += self.packet_interval();
             }
             self.service();
             let mut wire = [0; 2048];
             if let Ok((length, source)) = self.rtp.recv_from(&mut wire) {
                 assert_eq!(source, self.media);
-                assert_eq!(length, 172);
+                assert_eq!(length, 12 + self.profile.parameters().packet_bytes);
                 assert_eq!(wire[0], 0x80);
                 assert_eq!(wire[1] & 0x7f, self.profile.payload());
                 let mut pcm = vec![0.0; self.profile.parameters().packet_frames as usize];
-                codec
-                    .decode(wire[12..172].try_into().unwrap(), &mut pcm)
-                    .unwrap();
+                codec.decode(&wire[12..length], &mut pcm).unwrap();
                 if pcm.iter().any(|sample| sample.abs() > 0.01) {
                     last_tone = Instant::now();
                 }
                 result.extend_from_slice(&pcm);
             }
-            if !result.is_empty() && last_tone.elapsed() > Duration::from_millis(400) {
+            if !result.is_empty()
+                && last_tone.elapsed()
+                    > Duration::from_millis(16_000 / u64::from(prompt_speed(self.profile)))
+            {
                 if !self.events {
                     let ticks = self.timestamp.wrapping_sub(source_start);
                     assert!(
@@ -228,7 +263,7 @@ impl Caller {
                         "inband prompt waits retain a progressing RTP source clock"
                     );
                     eprintln!(
-                        "inband {stage} source timeline: {} ms, {ticks} RTP8k ticks, {} PCM Hz",
+                        "inband {stage} source timeline: {} ms, {ticks} negotiated RTP ticks, {} PCM Hz",
                         started.elapsed().as_millis(),
                         self.profile.parameters().pcm_rate_hz
                     );
@@ -259,14 +294,18 @@ impl Caller {
             let low = [697.0, 770.0, 852.0, 941.0][index / 4];
             let high = [1209.0, 1336.0, 1477.0, 1633.0][index % 4];
             // Existing test tone synthesis, at the negotiated source rate.
-            for packet in 0..10 {
+            // Keep the same100ms tone and at least100ms gap. The final native
+            // packet may contain additional silence; no coding unit is truncated.
+            let tone_frames = parameters.pcm_rate_hz as usize / 10;
+            let digit_packets = (parameters.pcm_rate_hz as usize / 5).div_ceil(frames);
+            for packet in 0..digit_packets {
                 if let Some(wait) = next.checked_duration_since(Instant::now()) {
                     thread::sleep(wait);
                 }
                 for (sample, value) in pcm.iter_mut().enumerate() {
                     let phase = (packet * frames + sample) as f32 * std::f32::consts::TAU
                         / parameters.pcm_rate_hz as f32;
-                    *value = if packet < 5 {
+                    *value = if packet * frames + sample < tone_frames {
                         0.2 * ((phase * low).sin() + (phase * high).sin())
                     } else {
                         0.0
@@ -274,7 +313,7 @@ impl Caller {
                 }
                 self.audio(codec, &pcm);
                 self.service();
-                next += Duration::from_millis(20);
+                next += self.packet_interval();
             }
         }
     }
@@ -284,16 +323,19 @@ impl Caller {
                 .iter()
                 .position(|value| value == digit)
                 .unwrap() as u8;
-            self.timestamp = self.timestamp.wrapping_add(320);
+            self.timestamp = self
+                .timestamp
+                .wrapping_add(self.profile.parameters().rtp_clock_hz / 25);
             // A complete event plus its redundant end must yield one private digit.
             for flags in [10, 0x8a, 0x8a] {
                 let mut wire = [0u8; 16];
                 wire[0] = 0x80;
-                wire[1] = 101;
+                wire[1] = self.event_payload;
                 wire[2..4].copy_from_slice(&self.sequence.to_be_bytes());
                 wire[4..8].copy_from_slice(&self.timestamp.to_be_bytes());
                 wire[8..12].copy_from_slice(&19u32.to_be_bytes());
-                wire[12..].copy_from_slice(&[event, flags, 0, 160]);
+                let duration = (self.event_clock / 50) as u16;
+                wire[12..].copy_from_slice(&[event, flags, (duration >> 8) as u8, duration as u8]);
                 self.rtp.send_to(&wire, self.media).unwrap();
                 self.sequence = self.sequence.wrapping_add(1);
                 thread::sleep(Duration::from_millis(10));
@@ -317,13 +359,13 @@ fn call_flow_profile(
     let mut caller = Caller::establish_profile(sip, registered, profile, events);
     let mut codec = AudioCodec::load(profile).unwrap();
     let assert_prompt = |pcm: &[f32], expected: &str| {
-        // Envelope-only observation reuses the unchanged 8 kHz Morse assertion.
+        // Preserve the raw envelope oracle at the configured speed and 8 kHz.
         let observed: Vec<_> = pcm
             .iter()
             .step_by((profile.parameters().pcm_rate_hz / 8000) as usize)
             .copied()
             .collect();
-        super::assert_prompt(&observed, expected);
+        super::assert_prompt_at_speed(&observed, expected, prompt_speed(profile));
     };
     let login = caller.prompt(&mut codec, "login");
     if !login_only {
@@ -401,7 +443,15 @@ fn product_call_profile(
 ) {
     const CHILD: &str = "RPTADV_TEST_REAL_SIP_PHONE_PRODUCT";
     if std::env::var_os(CHILD).is_none() {
-        let test = if profile == AudioProfile::G722 && events {
+        let test = if profile == AudioProfile::Ilbc30 && events {
+            "host_services::product_phone_tests::sip::real_product_ilbc_private_call_authenticates_with_events"
+        } else if profile == AudioProfile::Ilbc30 {
+            "host_services::product_phone_tests::sip::real_product_ilbc_private_call_authenticates_inband"
+        } else if profile == AudioProfile::L16Wideband && events {
+            "host_services::product_phone_tests::sip::real_product_l16_private_call_authenticates_with_matching_events"
+        } else if profile == AudioProfile::L16Wideband {
+            "host_services::product_phone_tests::sip::real_product_l16_private_call_authenticates_inband"
+        } else if profile == AudioProfile::G722 && events {
             "host_services::product_phone_tests::sip::real_product_g722_private_call_authenticates_with_events"
         } else if profile == AudioProfile::G722 {
             "host_services::product_phone_tests::sip::real_product_g722_private_call_authenticates_inband"
@@ -443,7 +493,8 @@ fn product_call_profile(
     let sip = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut remote = voice.then(vox::Remote::new);
     let configuration = format!(
-        "[general]\nnode_enabled=yes\n[desk]\nradio_channel=fixture\nduplex=full\n[morse]\nspeed_wpm=40\nfrequency_hz=800\nlevel_db=-6\n[phone_account office]\nlocal_node=desk\nenabled=yes\nprotocol=sip\nserver={}\nusername=fixture-user\nsecrets_file=phone.secret\nregister=yes\n{}",
+        "[general]\nnode_enabled=yes\n[desk]\nradio_channel=fixture\nduplex=full\n[morse]\nspeed_wpm={}\nfrequency_hz=800\nlevel_db=-6\n[phone_account office]\nlocal_node=desk\nenabled=yes\nprotocol=sip\nserver={}\nusername=fixture-user\nsecrets_file=phone.secret\nregister=yes\n{}",
+        prompt_speed(profile),
         sip.local_addr().unwrap(),
         if no_mailbox {
             ""
@@ -587,4 +638,57 @@ fn product_call_profile(
     drop(remote);
     fs::remove_dir_all(directory).unwrap();
     result.unwrap();
+}
+
+#[test]
+fn real_product_l16_private_call_authenticates_with_matching_events() {
+    product_call_profile(false, false, false, AudioProfile::L16Wideband, true);
+}
+#[test]
+fn real_product_l16_private_call_authenticates_inband() {
+    product_call_profile(false, false, false, AudioProfile::L16Wideband, false);
+}
+
+#[test]
+fn real_product_ilbc_private_call_authenticates_with_events() {
+    product_call_profile(false, false, false, AudioProfile::Ilbc30, true);
+}
+#[test]
+fn real_product_ilbc_private_call_authenticates_inband() {
+    product_call_profile(false, false, false, AudioProfile::Ilbc30, false);
+}
+#[test]
+fn caller_packet_clock_matches_selected_codec_frame_duration() {
+    for profile in AudioProfile::ALL {
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let mut caller = Caller {
+            sip: UdpSocket::bind("127.0.0.1:0").unwrap(),
+            rtp: UdpSocket::bind("127.0.0.1:0").unwrap(),
+            target: peer.local_addr().unwrap(),
+            media: peer.local_addr().unwrap(),
+            to: String::new(),
+            sequence: 0,
+            timestamp: 0,
+            keepalive: false,
+            profile,
+            events: true,
+            event_clock: profile.parameters().rtp_clock_hz,
+            event_payload: 101,
+        };
+        let p = profile.parameters();
+        let mut codec = AudioCodec::load(profile).unwrap();
+        let mut wire = [0; 2048];
+        for expected in [0, p.packet_frames * p.rtp_clock_hz / p.pcm_rate_hz] {
+            caller.audio(&mut codec, &vec![0.0; p.packet_frames as usize]);
+            let (length, source) = peer.recv_from(&mut wire).unwrap();
+            assert_eq!(source, caller.rtp.local_addr().unwrap());
+            assert_eq!(length, 12 + p.packet_bytes);
+            assert_eq!(
+                u32::from_be_bytes(wire[4..8].try_into().unwrap()),
+                expected,
+                "{profile:?}"
+            );
+        }
+    }
 }

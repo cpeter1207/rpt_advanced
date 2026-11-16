@@ -34,6 +34,7 @@ fn main() {
         .allowlist_type("rptadv_.*")
         .allowlist_var("RPTADV_PHONE_ACCOUNT_.*")
         .allowlist_var("RPTADV_PEER_FINITE_PACKET_EGRESS")
+        .allowlist_var("RPTADV_PEER_PHONE_INBAND_EGRESS")
         .allowlist_type("Urp.*")
         .allowlist_function("usbradioplus_product_descriptor_v1")
         .allowlist_function("rpcr3_descriptor")

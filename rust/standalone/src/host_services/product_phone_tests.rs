@@ -337,8 +337,9 @@ fn prompt(peer: &mut IaxPeer, stage: &str) -> Vec<f32> {
     }
 }
 
-/// Narrow Morse envelope check: 40 WPM, 800 Hz, 8 kHz G.711 loopback.
-fn decode_prompt(pcm: &[f32]) -> String {
+/// Narrow raw Morse envelope check at the configured speed, 800 Hz and 8 kHz.
+fn decode_prompt(pcm: &[f32], speed_wpm: u32) -> String {
+    let unit = 9600 / speed_wpm as usize;
     let mut runs: Vec<(bool, usize)> = Vec::new();
     for chunk in pcm.chunks(10) {
         let tone = chunk.iter().any(|sample| sample.abs() > 0.01);
@@ -357,10 +358,10 @@ fn decode_prompt(pcm: &[f32]) -> String {
         .iter()
         .map(|(tone, count)| {
             if *tone {
-                if *count < 480 { '.' } else { '-' }
-            } else if *count > 1200 {
+                if *count < 2 * unit { '.' } else { '-' }
+            } else if *count > 5 * unit {
                 '/'
-            } else if *count > 480 {
+            } else if *count > 2 * unit {
                 ' '
             } else {
                 '_'
@@ -370,7 +371,36 @@ fn decode_prompt(pcm: &[f32]) -> String {
         .collect()
 }
 fn assert_prompt(pcm: &[f32], expected: &str) {
-    assert_eq!(decode_prompt(pcm), expected, "decoded private Morse reply");
+    assert_prompt_at_speed(pcm, expected, 40);
+}
+fn assert_prompt_at_speed(pcm: &[f32], expected: &str, speed_wpm: u32) {
+    assert_eq!(
+        decode_prompt(pcm, speed_wpm),
+        expected,
+        "decoded private Morse reply"
+    );
+}
+
+#[test]
+fn configured_prompt_speed_preserves_symbol_boundaries() {
+    for speed in [20, 40] {
+        let unit = 9600 / speed as usize;
+        for offset in [0, 40, 79] {
+            let mut pcm = vec![0.0; offset];
+            for (tone, units) in [(true, 1), (false, 3), (true, 3), (false, 7), (true, 1)] {
+                pcm.extend(std::iter::repeat_n(
+                    if tone { 0.25 } else { 0.0 },
+                    unit * units,
+                ));
+            }
+            assert_eq!(decode_prompt(&pcm, speed), ". -/.");
+            pcm.extend(std::iter::repeat_n(0.0, unit * 10));
+            assert_eq!(decode_prompt(&pcm, speed), ". -/.");
+            if speed == 40 {
+                assert_prompt(&pcm, ". -/.");
+            }
+        }
+    }
 }
 
 fn caller(client: IaxClient, local: SocketAddr, target: SocketAddr) {

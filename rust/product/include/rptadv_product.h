@@ -92,6 +92,13 @@ struct UrpAstSiteSnapshot;
  * and retain that legacy behavior; older products reject this unknown bit.
  * This is an additive semantic contract, without a record/layout change. */
 #define RPTADV_PEER_FINITE_PACKET_EGRESS 256U
+/** PHONE transmit-only in-band digits. Requires ASYNC, PREPARED, SOURCE_MEDIA
+ * and PRIVATE_CALL together. Native received events remain actionable unless
+ * PHONE_INBAND_DIGITS also selects in-band receive detection. Transmit uses the
+ * existing finite private digit synthesizer, never an additional event queue.
+ * Old hosts omit this bit without behavior changes; old products reject it as
+ * unknown. This extends semantics only, without a record or SONAME change. */
+#define RPTADV_PEER_PHONE_INBAND_EGRESS 512U
 
 /** Borrowed immutable bytes. Null is valid only with zero length. */
 struct rptadv_peer_bytes_v1 {

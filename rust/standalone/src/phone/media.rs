@@ -3,6 +3,8 @@ use std::{net::SocketAddr, os::fd::AsRawFd, time::Instant};
 
 #[cfg(test)]
 mod tests;
+/// Local receive ceiling, independent of the peer's receive packet-time preference.
+pub(crate) const MAX_RECEIVE_MS: u32 = 30;
 /// Implemented SIP wire profiles; unavailable codecs are never advertised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioProfile {
@@ -12,6 +14,18 @@ pub enum AudioProfile {
     Alaw,
     /// RTP payload 9, 16 kHz PCM with the standard 8 kHz RTP clock.
     G722,
+    /// GSM full-rate, one standard 33-byte frame per packet.
+    Gsm,
+    /// Standard RTP G726-32 low-nibble-first packing.
+    G726,
+    /// AAL2 G726-32 high-nibble-first packing.
+    G726Aal2,
+    /// Network-order signed linear PCM at 8 kHz.
+    L16Narrowband,
+    /// Network-order signed linear PCM at 16 kHz.
+    L16Wideband,
+    /// iLBC mode30, one 240-frame/50-byte coding unit per transmit packet.
+    Ilbc30,
 }
 /// Negotiated unencrypted media; no implicit SRTP downgrade.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,8 +38,28 @@ pub struct MediaDescription {
     pub receive_payload: u8,
     /// Payload sent to the peer, independent of the receive mapping.
     pub send_payload: u8,
-    /// Negotiated RFC 4733 payload at 8000 Hz, if present.
-    pub telephone_event: Option<u8>,
+    /// At most one negotiated RFC 4733 mapping per supported clock (8/16 kHz).
+    pub telephone_events: [Option<TelephoneEvent>; 2],
+}
+/// One directional RFC 4733 mapping; receive identity never implies TX eligibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TelephoneEvent {
+    /// Payload accepted from the peer, as advertised by this endpoint.
+    pub receive_payload: u8,
+    /// Payload sent to the peer, as advertised by the peer.
+    pub send_payload: u8,
+    /// Event duration and onset clock, independent of decoded PCM.
+    pub clock_rate_hz: u32,
+}
+impl TelephoneEvent {
+    /// Symmetric mapping used by a local offer or an accepted incoming offer.
+    pub const fn symmetric(payload: u8, clock_rate_hz: u32) -> Self {
+        Self {
+            receive_payload: payload,
+            send_payload: payload,
+            clock_rate_hz,
+        }
+    }
 }
 /// Redacted media failures, never SDP or packet bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,33 +98,61 @@ pub struct AudioParameters {
     pub rtp_clock_hz: u32,
     /// PCM samples represented by one transmit packet.
     pub packet_frames: u32,
-    /// Maximum encoded bytes in the selected packet profile.
+    /// Encoded bytes represented by one fixed transmit packet.
     pub packet_bytes: usize,
 }
 impl AudioProfile {
-    /// Verified SIP profiles, retaining PCMU as the outbound preference.
-    pub const ALL: [Self; 3] = [Self::Mulaw, Self::Alaw, Self::G722];
+    /// Implemented fixed-packet profiles, retaining PCMU as the preference.
+    pub const ALL: [Self; 9] = [
+        Self::Mulaw,
+        Self::Alaw,
+        Self::G722,
+        Self::Gsm,
+        Self::G726,
+        Self::G726Aal2,
+        Self::L16Narrowband,
+        Self::L16Wideband,
+        Self::Ilbc30,
+    ];
     /// Current bounded packet policy, validated against the released provider.
     pub fn parameters(self) -> AudioParameters {
+        use rptadv_codec_client::ProfileId;
+        let (provider_profile, pcm_rate_hz, rtp_clock_hz, packet_bytes) = match self {
+            Self::Mulaw => (ProfileId::G711Mu, 8000, 8000, 160),
+            Self::Alaw => (ProfileId::G711A, 8000, 8000, 160),
+            Self::G722 => (ProfileId::G722, 16000, 8000, 160),
+            Self::Gsm => (ProfileId::GsmFr, 8000, 8000, 33),
+            Self::G726 => (ProfileId::G726, 8000, 8000, 80),
+            Self::G726Aal2 => (ProfileId::G726Aal2, 8000, 8000, 80),
+            Self::L16Narrowband => (ProfileId::Pcm8, 8000, 8000, 320),
+            Self::L16Wideband => (ProfileId::Pcm16, 16000, 16000, 640),
+            Self::Ilbc30 => (ProfileId::Ilbc, 8000, 8000, 50),
+        };
         AudioParameters {
-            provider_profile: match self {
-                Self::Mulaw => rptadv_codec_client::ProfileId::G711Mu,
-                Self::Alaw => rptadv_codec_client::ProfileId::G711A,
-                Self::G722 => rptadv_codec_client::ProfileId::G722,
+            provider_profile,
+            mode_id: if self == Self::Ilbc30 { 30 } else { 0 },
+            pcm_rate_hz,
+            rtp_clock_hz,
+            packet_frames: if self == Self::Ilbc30 {
+                240
+            } else {
+                pcm_rate_hz / 50
             },
-            mode_id: 0,
-            pcm_rate_hz: if self == Self::G722 { 16000 } else { 8000 },
-            rtp_clock_hz: 8000,
-            packet_frames: if self == Self::G722 { 320 } else { 160 },
-            packet_bytes: 160,
+            packet_bytes,
         }
     }
-    /// Static RTP/AVP assignment for this implemented wire profile.
+    /// Static assignment or this endpoint's default dynamic offer mapping.
     pub fn payload(self) -> u8 {
         match self {
             Self::Mulaw => 0,
             Self::Alaw => 8,
             Self::G722 => 9,
+            Self::Gsm => 3,
+            Self::G726 => 96,
+            Self::G726Aal2 => 97,
+            Self::L16Narrowband => 98,
+            Self::L16Wideband => 99,
+            Self::Ilbc30 => 100,
         }
     }
     fn name(self) -> &'static str {
@@ -98,16 +160,28 @@ impl AudioProfile {
             Self::Mulaw => "PCMU",
             Self::Alaw => "PCMA",
             Self::G722 => "G722",
+            Self::Gsm => "GSM",
+            Self::G726 => "G726-32",
+            Self::G726Aal2 => "AAL2-G726-32",
+            Self::L16Narrowband | Self::L16Wideband => "L16",
+            Self::Ilbc30 => "iLBC",
         }
     }
+    fn matches_format(self, format: &str) -> bool {
+        let expected = format!("{}/{}", self.name(), self.parameters().rtp_clock_hz);
+        // RFC8866 encoding names are case-insensitive; clock/channel syntax stays exact.
+        format.eq_ignore_ascii_case(&expected)
+            || format.eq_ignore_ascii_case(&format!("{expected}/1"))
+    }
 }
+
 impl MediaDescription {
     /// Select one supported audio stream without accepting security downgrade.
     pub fn parse(source: &[u8]) -> Result<Self, MediaError> {
         Self::parse_description(source, false)
     }
-    /// Answers may only retain offered payloads; invalid advertised events are
-    /// not equivalent to genuinely omitting RFC4733 and choosing inband DTMF.
+    /// Answers retain offered formats with directional payload numbering. An
+    /// offered payload cannot be reinterpreted as another format or clock.
     pub(crate) fn parse_answer(source: &[u8]) -> Result<Self, MediaError> {
         Self::parse_description(source, true)
     }
@@ -131,14 +205,6 @@ impl MediaDescription {
         {
             return Err(invalid);
         }
-        if answer
-            && name
-                .formats
-                .iter()
-                .any(|pt| !matches!(pt.as_str(), "0" | "8" | "9" | "101"))
-        {
-            return Err(invalid);
-        }
         let attributes = || session.attributes.iter().chain(&media.attributes);
         if attributes().any(|a| {
             matches!(
@@ -150,14 +216,22 @@ impl MediaDescription {
                     | "ice-pwd"
                     | "candidate"
                     | "rtcp-mux"
-            ) || (a.key == "ptime" && a.value.as_deref() != Some("20"))
-                || (a.key == "maxptime"
-                    && a.value
-                        .as_deref()
-                        .and_then(|v| v.parse::<u32>().ok())
-                        .is_none_or(|maximum| maximum < 20))
+            )
         }) {
             return Err(invalid);
+        }
+        // ptime is a preference, not a wire-shape requirement. Peer maxptime
+        // bounds our fixed TX packet; our independent RX ceiling is advertised.
+        let mut maximum = MAX_RECEIVE_MS;
+        for attribute in attributes().filter(|a| matches!(a.key.as_str(), "ptime" | "maxptime")) {
+            let whole = attribute
+                .value
+                .as_deref()
+                .and_then(packet_time_floor)
+                .ok_or(invalid)?;
+            if attribute.key == "maxptime" {
+                maximum = maximum.min(whole);
+            }
         }
         let direction = media
             .attributes
@@ -193,78 +267,218 @@ impl MediaDescription {
         {
             return Err(invalid);
         }
-        let codec = name
-            .formats
-            .iter()
-            .find_map(|value| match value.as_str() {
-                "0" => Some(AudioProfile::Mulaw),
-                "8" => Some(AudioProfile::Alaw),
-                "9" => Some(AudioProfile::G722),
-                _ => None,
-            })
-            .ok_or(invalid)?;
-        let expected = format!("{}/{}", codec.name(), codec.parameters().rtp_clock_hz);
-        let payload = codec.payload().to_string();
-        for attribute in attributes().filter(|a| a.key == "rtpmap") {
-            let (pt, format) = attribute
-                .value
-                .as_deref()
-                .and_then(|v| v.split_once(' '))
-                .ok_or(invalid)?;
-            if pt == payload && format != expected && format != format!("{expected}/1") {
-                return Err(invalid);
-            }
-            if answer && name.formats.iter().any(|value| value == pt) {
-                let offered = match pt {
-                    "0" => "PCMU/8000",
-                    "8" => "PCMA/8000",
-                    "9" => "G722/8000",
-                    "101" => "telephone-event/8000",
-                    _ => return Err(invalid),
-                };
-                if format != offered && format != format!("{offered}/1") {
+        let mut selected = None;
+        let mut telephone_events = [None; 2];
+        for value in &name.formats {
+            // Unknown incoming formats do not invalidate usable audio; every
+            // answer format must correspond to a format we actually offered.
+            let Some(payload) = value.parse::<u8>().ok().filter(|pt| *pt <= 127) else {
+                if answer {
+                    return Err(invalid);
+                }
+                continue;
+            };
+            let mut mapping = None;
+            for attribute in attributes().filter(|a| a.key == "rtpmap") {
+                let (pt, format) = attribute
+                    .value
+                    .as_deref()
+                    .and_then(|v| v.split_once(' '))
+                    .ok_or(invalid)?;
+                if pt == value && mapping.replace(format).is_some() {
                     return Err(invalid);
                 }
             }
+            let codec = AudioProfile::ALL.into_iter().find(|codec| {
+                if payload < 96 {
+                    codec.payload() == payload && mapping.is_none_or(|v| codec.matches_format(v))
+                } else {
+                    mapping.is_some_and(|v| codec.matches_format(v))
+                }
+            });
+            if payload < 96
+                && AudioProfile::ALL.iter().any(|c| c.payload() == payload)
+                && codec.is_none()
+            {
+                return Err(invalid);
+            }
+            let event_clock = match mapping {
+                Some(value)
+                    if value.eq_ignore_ascii_case("telephone-event/8000")
+                        || value.eq_ignore_ascii_case("telephone-event/8000/1") =>
+                {
+                    Some(8000)
+                }
+                Some(value)
+                    if value.eq_ignore_ascii_case("telephone-event/16000")
+                        || value.eq_ignore_ascii_case("telephone-event/16000/1") =>
+                {
+                    Some(16000)
+                }
+                _ => None,
+            }
+            .filter(|_| (96..=127).contains(&payload))
+            .filter(|_| {
+                attributes()
+                    .filter(|a| a.key == "fmtp")
+                    .filter_map(|a| a.value.as_deref()?.split_once(' '))
+                    .filter(|(pt, _)| *pt == value)
+                    .all(|(_, events)| complete_dtmf_range(events))
+            });
+            if answer {
+                if codec.is_none() && event_clock.is_none() {
+                    return Err(invalid);
+                }
+                if let Some(offered) = AudioProfile::ALL
+                    .into_iter()
+                    .find(|c| c.payload() == payload)
+                {
+                    if codec != Some(offered) {
+                        return Err(invalid);
+                    }
+                }
+                if matches!(payload, 101 | 102)
+                    && event_clock != Some(if payload == 101 { 8000 } else { 16000 })
+                {
+                    return Err(invalid);
+                }
+            }
+            if codec == Some(AudioProfile::Ilbc30) {
+                let mut mode = None;
+                for attribute in attributes().filter(|a| a.key == "fmtp") {
+                    let (pt, parameters) = attribute
+                        .value
+                        .as_deref()
+                        .and_then(|v| v.split_once(' '))
+                        .ok_or(invalid)?;
+                    if pt != value {
+                        continue;
+                    }
+                    for parameter in parameters.split(';') {
+                        let (key, value) = parameter
+                            .trim()
+                            .split_once('=')
+                            .unwrap_or((parameter.trim(), ""));
+                        let value = value.trim();
+                        if key.trim().eq_ignore_ascii_case("mode")
+                            && (!matches!(value, "20" | "30") || mode.replace(value).is_some())
+                        {
+                            return Err(invalid);
+                        }
+                    }
+                }
+                // RFC3952's lower-bandwidth common mode is30 even for a mode20
+                // peer preference. Absent mode also retains the30ms default.
+            }
+            if selected.is_none() {
+                selected = codec
+                    .filter(|codec| {
+                        let profile = codec.parameters();
+                        profile.packet_frames * 1000 / profile.pcm_rate_hz <= maximum
+                    })
+                    .map(|codec| (codec, payload));
+            }
+            if let Some(clock_rate_hz) = event_clock {
+                let index = usize::from(clock_rate_hz == 16000);
+                if telephone_events[index].is_some() {
+                    // One offered mapping per rate: an answer cannot add aliases.
+                    if answer {
+                        return Err(invalid);
+                    }
+                } else {
+                    telephone_events[index] = Some(TelephoneEvent {
+                        receive_payload: if answer { 101 + index as u8 } else { payload },
+                        send_payload: payload,
+                        clock_rate_hz,
+                    });
+                }
+            }
         }
-        let telephone_event = attributes().filter(|a| a.key == "rtpmap").find_map(|a| {
-            let (pt, format) = a.value.as_deref()?.split_once(' ')?;
-            let number = pt.parse::<u8>().ok()?;
-            let events_supported = attributes()
-                .filter(|a| a.key == "fmtp")
-                .filter_map(|a| a.value.as_deref()?.split_once(' '))
-                .filter(|(payload, _)| *payload == pt)
-                .all(|(_, events)| complete_dtmf_range(events));
-            ((96..=127).contains(&number)
-                && name.formats.iter().any(|f| f == pt)
-                && matches!(format, "telephone-event/8000" | "telephone-event/8000/1")
-                && events_supported)
-                .then_some(number)
-        });
-        if answer && name.formats.iter().any(|pt| pt == "101") && telephone_event != Some(101) {
-            return Err(invalid);
+        let (codec, payload) = selected.ok_or(invalid)?;
+        if !answer {
+            // An answerer genuinely omits unmatched events. An offerer must
+            // retain valid mixed answers for RX while falling back only for TX.
+            for event in &mut telephone_events {
+                if event.is_some_and(|e| e.clock_rate_hz != codec.parameters().rtp_clock_hz) {
+                    *event = None;
+                }
+            }
         }
         Ok(Self {
             remote: SocketAddr::new(ip, port),
             codec,
-            receive_payload: codec.payload(),
-            send_payload: codec.payload(),
-            telephone_event,
+            receive_payload: if answer { codec.payload() } else { payload },
+            send_payload: payload,
+            telephone_events,
         })
+    }
+    /// Native event TX is allowed only at the selected audio RTP clock. Mixed
+    /// answers keep native RX and use the existing synthesized in-band TX path.
+    pub fn transmit_event(&self) -> Option<TelephoneEvent> {
+        self.telephone_events
+            .iter()
+            .flatten()
+            .copied()
+            .find(|event| event.clock_rate_hz == self.codec.parameters().rtp_clock_hz)
+    }
+    /// Receive and transmit decisions are independent; the product preserves RX
+    /// native events even when its outgoing control must synthesize audio tones.
+    pub(crate) fn digit_capabilities(&self) -> u32 {
+        if self.telephone_events.iter().all(Option::is_none) {
+            64
+        } else if self.transmit_event().is_none() {
+            512
+        } else {
+            0
+        }
+    }
+    fn valid_payloads(&self) -> bool {
+        let audio = |pt| pt == self.codec.payload() || (96..=127).contains(&pt);
+        if !audio(self.receive_payload) || !audio(self.send_payload) {
+            return false;
+        }
+        for (index, event) in self.telephone_events.iter().enumerate() {
+            if let Some(event) = event {
+                if event.clock_rate_hz != [8000, 16000][index]
+                    || !(96..=127).contains(&event.receive_payload)
+                    || !(96..=127).contains(&event.send_payload)
+                    || event.receive_payload == self.receive_payload
+                    || event.send_payload == self.send_payload
+                {
+                    return false;
+                }
+            }
+        }
+        !matches!(self.telephone_events, [Some(a), Some(b)]
+            if a.receive_payload == b.receive_payload || a.send_payload == b.send_payload)
     }
     /// Answer the selected stream at a local media address.
     pub fn answer(&self, local: SocketAddr, session: u64) -> Result<Vec<u8>, MediaError> {
-        Self::describe(local, session, &[self.codec], self.telephone_event)
+        Self::describe(
+            local,
+            session,
+            &[(self.codec, self.receive_payload)],
+            self.telephone_events,
+        )
     }
-    /// Offer the composition-verified profiles and the fixed telephone-event map.
+    /// Offer implemented profiles with one event mapping per supported RTP clock.
     pub(crate) fn offer(local: SocketAddr, session: u64) -> Result<Vec<u8>, MediaError> {
-        Self::describe(local, session, &AudioProfile::ALL, Some(101))
+        let codecs = AudioProfile::ALL.map(|codec| (codec, codec.payload()));
+        Self::describe(
+            local,
+            session,
+            &codecs,
+            [
+                Some(TelephoneEvent::symmetric(101, 8000)),
+                Some(TelephoneEvent::symmetric(102, 16000)),
+            ],
+        )
     }
     fn describe(
         local: SocketAddr,
         session: u64,
-        codecs: &[AudioProfile],
-        event: Option<u8>,
+        codecs: &[(AudioProfile, u8)],
+        events: [Option<TelephoneEvent>; 2],
     ) -> Result<Vec<u8>, MediaError> {
         if local.ip().is_unspecified() || local.ip().is_multicast() || local.port() == 0 {
             return Err(MediaError::UnsupportedDescription);
@@ -272,31 +486,75 @@ impl MediaDescription {
         let family = if local.is_ipv4() { "IP4" } else { "IP6" };
         let mut formats = codecs
             .iter()
-            .map(|codec| codec.payload().to_string())
+            .map(|(_, payload)| payload.to_string())
             .collect::<Vec<_>>()
             .join(" ");
         let mut attributes = codecs
             .iter()
-            .map(|codec| {
+            .map(|(codec, payload)| {
                 format!(
                     "a=rtpmap:{} {}/{}\r\n",
-                    codec.payload(),
+                    payload,
                     codec.name(),
                     codec.parameters().rtp_clock_hz
                 )
             })
             .collect::<String>();
-        if let Some(pt) = event {
+        for (codec, payload) in codecs {
+            if *codec == AudioProfile::Ilbc30 {
+                use std::fmt::Write;
+                write!(attributes, "a=fmtp:{payload} mode=30\r\n").expect("String formatting");
+            }
+        }
+        // A mixed-duration offer cannot associate one ptime with each format.
+        // The selected answer advertises its actual fixed TX cadence.
+        if let [(codec, _)] = codecs {
+            use std::fmt::Write;
+            let profile = codec.parameters();
+            let duration = profile.packet_frames * 1000 / profile.pcm_rate_hz;
+            write!(attributes, "a=ptime:{duration}\r\n").expect("String formatting");
+        }
+        for event in events.into_iter().flatten() {
+            let pt = event.receive_payload;
+            let rate = event.clock_rate_hz;
             use std::fmt::Write;
             write!(formats, " {pt}").expect("String formatting");
             write!(
                 attributes,
-                "a=rtpmap:{pt} telephone-event/8000\r\na=fmtp:{pt} 0-15\r\n"
+                "a=rtpmap:{pt} telephone-event/{rate}\r\na=fmtp:{pt} 0-15\r\n"
             )
             .expect("String formatting");
         }
-        Ok(format!("v=0\r\no=- {session} {session} IN {family} {}\r\ns=rpt-advanced\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {formats}\r\n{attributes}a=ptime:20\r\na=sendrecv\r\n", local.ip(), local.ip(), local.port()).into_bytes())
+        Ok(format!("v=0\r\no=- {session} {session} IN {family} {}\r\ns=rpt-advanced\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {formats}\r\n{attributes}a=maxptime:{MAX_RECEIVE_MS}\r\na=sendrecv\r\n", local.ip(), local.ip(), local.port()).into_bytes())
     }
+}
+
+// Validate the full positive decimal spelling while retaining only the whole
+// milliseconds needed to compare our integer20/30ms TX periods. Saturation never
+// skips suffix validation. Accept trailing fractional zeroes as a receiver extension.
+fn packet_time_floor(value: &str) -> Option<u32> {
+    let (whole, fraction) = value
+        .split_once('.')
+        .map_or((value, None), |(a, b)| (a, Some(b)));
+    if whole.is_empty() || fraction.is_some_and(str::is_empty) {
+        return None;
+    }
+    let mut positive = false;
+    let mut result = 0;
+    for byte in whole.bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        positive |= byte != b'0';
+        result = (result * 10 + u32::from(byte - b'0')).min(MAX_RECEIVE_MS);
+    }
+    for byte in fraction.unwrap_or("").bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        positive |= byte != b'0';
+    }
+    positive.then_some(result)
 }
 
 // A negotiated RFC 4733 format must cover every telephone keypad symbol.
@@ -322,7 +580,7 @@ fn complete_dtmf_range(value: &str) -> bool {
 pub enum RtpEvent {
     /// Duplicate telephone event, with no newly actionable transition.
     None,
-    /// One complete encoded packet in the selected 20 ms profile.
+    /// One inspected complete-unit encoded packet within the local receive ceiling.
     Audio {
         /// Original wrapping packet sequence number.
         sequence: u16,
@@ -330,6 +588,10 @@ pub enum RtpEvent {
         timestamp: u32,
         /// Original synchronization source.
         ssrc: u32,
+        /// Actual encoded payload bytes copied into the receive workspace.
+        length: usize,
+        /// Native inspected PCM frames, independent of RTP clock ticks.
+        span: u32,
     },
     /// Telephone event onset or first end, independently of audio admission.
     Digit {
@@ -342,8 +604,8 @@ pub enum RtpEvent {
 /// Encoded source media; timing is fixed before its first submission.
 #[derive(Clone, Copy)]
 pub struct TimedAudio<'a> {
-    /// Exactly one 20 ms packet from the negotiated released encoder.
-    pub payload: &'a [u8; 160],
+    /// Exactly one fixed packet from the negotiated released encoder.
+    pub payload: &'a [u8],
     /// First packet following a source discontinuity.
     pub marker: bool,
     /// Original wrapping RTP-clock position, including discarded gaps.
@@ -401,7 +663,7 @@ pub struct RtpEndpoint {
     started: std::time::Instant,
     receipt_floor: Instant,
     source: Option<u32>,
-    events: [Option<(u32, u8, bool)>; 16],
+    events: [Option<(u32, u32, u8, bool)>; 16],
     next_event: usize,
 }
 impl RtpEndpoint {
@@ -415,11 +677,7 @@ impl RtpEndpoint {
         if media.remote.port() == 0
             || media.remote.ip().is_unspecified()
             || media.remote.ip().is_multicast()
-            || media.receive_payload != media.codec.payload()
-            || media.send_payload != media.codec.payload()
-            || media
-                .telephone_event
-                .is_some_and(|payload| !(96..=127).contains(&payload))
+            || !media.valid_payloads()
         {
             return Err(MediaError::UnsupportedDescription);
         }
@@ -442,6 +700,7 @@ impl RtpEndpoint {
                     ssrc,
                     ..Default::default()
                 },
+                wire: vec![0; 12 + media.codec.parameters().packet_bytes].into_boxed_slice(),
                 pending: None,
                 epoch: 1,
                 digit: None,
@@ -460,9 +719,7 @@ impl RtpEndpoint {
         mut self,
         media: MediaDescription,
     ) -> Result<Self, MediaError> {
-        if media.remote.is_ipv4() != self.media.remote.is_ipv4()
-            || media.telephone_event.is_some_and(|pt| pt != 101)
-        {
+        if media.remote.is_ipv4() != self.media.remote.is_ipv4() || !media.valid_payloads() {
             return Err(MediaError::UnsupportedDescription);
         }
         self.socket
@@ -475,6 +732,8 @@ impl RtpEndpoint {
                 Ok(_) => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     self.egress.header.payload_type = media.send_payload;
+                    self.egress.wire =
+                        vec![0; 12 + media.codec.parameters().packet_bytes].into_boxed_slice();
                     self.media = media;
                     self.source = None;
                     self.events = [None; 16];
@@ -518,10 +777,15 @@ impl RtpEndpoint {
     /// Admit one completed symbol without another queue. Zero accepts, one
     /// retains caller custody, and minus one refuses invalid/unnegotiated input.
     pub(crate) fn send_digit(&mut self, digit: u8) -> i32 {
-        let Some(payload) = self.media.telephone_event else {
+        let Some(event) = self.media.transmit_event() else {
             return -1;
         };
-        self.egress.begin_digit(digit, payload, self.elapsed_ms())
+        self.egress.begin_digit(
+            digit,
+            event.send_payload,
+            event.clock_rate_hz,
+            self.elapsed_ms(),
+        )
     }
     /// Service at most one due event report on the existing serial media turn.
     pub(crate) fn poll_digit(&mut self) -> Result<(), MediaError> {
@@ -541,13 +805,17 @@ impl RtpEndpoint {
             .map_err(|_| MediaError::Network)
     }
     /// Receive a source-filtered packet without reordering it before jitter.
-    pub async fn receive(&mut self, output: &mut [u8; 160]) -> Result<RtpEvent, MediaError> {
+    pub async fn receive(
+        &mut self,
+        output: &mut [u8],
+        inspect: impl Fn(&[u8]) -> Result<u32, MediaError>,
+    ) -> Result<RtpEvent, MediaError> {
         loop {
             self.socket
                 .readable()
                 .await
                 .map_err(|_| MediaError::Network)?;
-            if let Some((event, _)) = self.try_receive(output)? {
+            if let Some((event, _)) = self.try_receive(output, &inspect)? {
                 return Ok(event);
             }
         }
@@ -557,7 +825,8 @@ impl RtpEndpoint {
     /// it cannot advance merely because Tokio has not dispatched readiness yet.
     pub(crate) fn try_receive(
         &mut self,
-        output: &mut [u8; 160],
+        output: &mut [u8],
+        inspect: &impl Fn(&[u8]) -> Result<u32, MediaError>,
     ) -> Result<Option<(RtpEvent, Instant)>, MediaError> {
         let mut wire = [0; 2048];
         let mut attempted = false;
@@ -582,7 +851,7 @@ impl RtpEndpoint {
         }
         match result {
             Ok(length) => self
-                .receive_wire(&wire[..length], output)
+                .receive_wire(&wire[..length], output, inspect)
                 .map(|event| Some((event, self.receipt_floor))),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(MediaError::Socket(error.raw_os_error().unwrap_or(0))),
@@ -591,7 +860,8 @@ impl RtpEndpoint {
     fn receive_wire(
         &mut self,
         wire: &[u8],
-        output: &mut [u8; 160],
+        output: &mut [u8],
+        inspect: &impl Fn(&[u8]) -> Result<u32, MediaError>,
     ) -> Result<RtpEvent, MediaError> {
         use webrtc_util::marshal::Unmarshal;
         if wire.len() == 2048 {
@@ -611,22 +881,38 @@ impl RtpEndpoint {
             payload = &payload[..payload.len() - padding];
         }
         let event = if header.payload_type == self.media.receive_payload {
-            let packet: &[u8; 160] = payload.try_into().map_err(|_| MediaError::InvalidPacket)?;
-            output.copy_from_slice(packet);
+            if output.len() < payload.len() {
+                return Err(MediaError::InvalidPacket);
+            }
+            let span = inspect(payload)?;
+            output[..payload.len()].copy_from_slice(payload);
             RtpEvent::Audio {
                 sequence: header.sequence_number,
                 timestamp: header.timestamp,
                 ssrc: header.ssrc,
+                length: payload.len(),
+                span,
             }
-        } else if self.media.telephone_event == Some(header.payload_type) {
-            self.digit(header.timestamp, payload)?
+        } else if let Some(event) = self
+            .media
+            .telephone_events
+            .iter()
+            .flatten()
+            .find(|event| event.receive_payload == header.payload_type)
+        {
+            self.digit(event.clock_rate_hz, header.timestamp, payload)?
         } else {
             return Err(MediaError::InvalidPacket);
         };
         self.source = Some(header.ssrc);
         Ok(event)
     }
-    fn digit(&mut self, timestamp: u32, payload: &[u8]) -> Result<RtpEvent, MediaError> {
+    fn digit(
+        &mut self,
+        clock_rate_hz: u32,
+        timestamp: u32,
+        payload: &[u8],
+    ) -> Result<RtpEvent, MediaError> {
         let [event, flags, high, low] = payload else {
             return Err(MediaError::InvalidPacket);
         };
@@ -635,18 +921,20 @@ impl RtpEndpoint {
         }
         let ended = flags & 0x80 != 0;
         let digit = b"0123456789*#ABCD"[usize::from(*event)];
-        if let Some((_, _, previous_end)) = self
-            .events
-            .iter_mut()
-            .flatten()
-            .find(|(time, symbol, _)| *time == timestamp && symbol == event)
+        if let Some((_, _, _, previous_end)) =
+            self.events
+                .iter_mut()
+                .flatten()
+                .find(|(clock, time, symbol, _)| {
+                    *clock == clock_rate_hz && *time == timestamp && symbol == event
+                })
         {
             if *previous_end || !ended {
                 return Ok(RtpEvent::None);
             }
             *previous_end = true;
         } else {
-            self.events[self.next_event] = Some((timestamp, *event, ended));
+            self.events[self.next_event] = Some((clock_rate_hz, timestamp, *event, ended));
             self.next_event = (self.next_event + 1) % self.events.len();
         }
         Ok(RtpEvent::Digit { digit, ended })
@@ -658,7 +946,6 @@ pub use super::codec::AudioCodec;
 /// One immutable datagram retained only after socket backpressure. Audio and
 /// telephone events share this one slot, SSRC and sequence-number owner.
 struct PendingDatagram {
-    wire: [u8; 172],
     length: usize,
     audio: bool,
     timestamp: u32,
@@ -666,12 +953,12 @@ struct PendingDatagram {
     deadline_ms: u32,
 }
 impl PendingDatagram {
-    fn matches(&self, packet: &Packet<'_>) -> bool {
+    fn matches(&self, wire: &[u8], packet: &Packet<'_>) -> bool {
         self.timestamp == packet.timestamp
             && self.marker == packet.marker
             && self.deadline_ms == packet.deadline_ms
-            && self.wire[1] & 0x7f == packet.payload_type
-            && self.wire[12..self.length] == *packet.payload
+            && wire[1] & 0x7f == packet.payload_type
+            && wire[12..self.length] == *packet.payload
     }
 }
 
@@ -690,6 +977,7 @@ struct Packet<'a> {
 struct TelephoneDigit {
     symbol: u8,
     payload_type: u8,
+    clock_rate_hz: u32,
     started_ms: u32,
     next_ms: u32,
     final_reports: u8,
@@ -698,6 +986,8 @@ struct TelephoneDigit {
 /// Serial packet framing, separate from socket readiness.
 struct RtpEgress {
     header: rtp::header::Header,
+    // One setup-sized reusable wire buffer, shared by audio and event retries.
+    wire: Box<[u8]>,
     pending: Option<PendingDatagram>,
     epoch: u64,
     digit: Option<TelephoneDigit>,
@@ -730,6 +1020,9 @@ impl RtpEgress {
         if self.epoch == 0 || audio.epoch != self.epoch {
             return Ok(SendStatus::Expired);
         }
+        if audio.payload.len() + 12 != self.wire.len() {
+            return Err(MediaError::InvalidPacket);
+        }
         self.packet(
             Packet {
                 payload: audio.payload,
@@ -743,13 +1036,14 @@ impl RtpEgress {
             send,
         )
     }
-    fn begin_digit(&mut self, digit: u8, payload_type: u8, now_ms: u32) -> i32 {
+    fn begin_digit(&mut self, digit: u8, payload_type: u8, clock_rate_hz: u32, now_ms: u32) -> i32 {
         let Some(symbol) = b"0123456789*#ABCD".iter().position(|value| *value == digit) else {
             return -1;
         };
         if self.epoch == 0
             || now_ms.checked_add(650).is_none()
             || !(96..=127).contains(&payload_type)
+            || !matches!(clock_rate_hz, 8000 | 16000)
         {
             return -1;
         }
@@ -759,6 +1053,7 @@ impl RtpEgress {
         self.digit = Some(TelephoneDigit {
             symbol: symbol as u8,
             payload_type,
+            clock_rate_hz,
             started_ms: now_ms,
             next_ms: now_ms,
             final_reports: 0,
@@ -789,8 +1084,9 @@ impl RtpEgress {
         if now_ms < digit.next_ms {
             return Ok(());
         }
-        let duration = (digit.next_ms - digit.started_ms + 20).min(200) as u16 * 8;
-        let ended = duration == 1600;
+        let duration_ms = (digit.next_ms - digit.started_ms + 20).min(200);
+        let duration = (duration_ms * (digit.clock_rate_hz / 1000)) as u16;
+        let ended = duration_ms == 200;
         let payload = [
             digit.symbol,
             12 | if ended { 0x80 } else { 0 },
@@ -801,7 +1097,7 @@ impl RtpEgress {
             Packet {
                 payload: &payload,
                 payload_type: digit.payload_type,
-                timestamp: digit.started_ms.wrapping_mul(8),
+                timestamp: digit.started_ms.wrapping_mul(digit.clock_rate_hz / 1000),
                 marker: digit.next_ms == digit.started_ms,
                 deadline_ms: (digit.next_ms + 200).min(digit.started_ms + 450),
                 audio: false,
@@ -835,7 +1131,7 @@ impl RtpEgress {
             if pending.audio != packet.audio {
                 return Ok(SendStatus::WouldBlock);
             }
-            if !pending.matches(&packet) {
+            if !pending.matches(&self.wire, &packet) {
                 return Err(MediaError::InvalidPacket);
             }
         }
@@ -843,7 +1139,7 @@ impl RtpEgress {
             self.pending = None;
             return Ok(SendStatus::Expired);
         }
-        if packet.deadline_ms - now_ms > 200 || packet.payload.len() > 160 {
+        if packet.deadline_ms - now_ms > 200 || packet.payload.len() > self.wire.len() - 12 {
             return Err(MediaError::InvalidPacket);
         }
         if self.pending.is_none() {
@@ -851,14 +1147,12 @@ impl RtpEgress {
             self.header.timestamp = packet.timestamp;
             let audio_payload =
                 std::mem::replace(&mut self.header.payload_type, packet.payload_type);
-            let mut wire = [0; 172];
-            let marshalled = self.header.marshal_to(&mut wire[..12]);
+            let marshalled = self.header.marshal_to(&mut self.wire[..12]);
             self.header.payload_type = audio_payload;
             marshalled.map_err(|_| MediaError::InvalidPacket)?;
             let length = 12 + packet.payload.len();
-            wire[12..length].copy_from_slice(packet.payload);
+            self.wire[12..length].copy_from_slice(packet.payload);
             self.pending = Some(PendingDatagram {
-                wire,
                 length,
                 audio: packet.audio,
                 timestamp: packet.timestamp,
@@ -867,7 +1161,7 @@ impl RtpEgress {
             });
         }
         let pending = self.pending.as_ref().expect("prepared datagram");
-        match send(&pending.wire[..pending.length]) {
+        match send(&self.wire[..pending.length]) {
             Ok(_) => {
                 self.pending = None;
                 self.header.sequence_number = self.header.sequence_number.wrapping_add(1);

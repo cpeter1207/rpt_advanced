@@ -36,7 +36,7 @@ async fn failed_native_close_before_ack_still_retires_the_product_step() {
         remote: "opaque".into(),
         source: "127.0.0.1:9999".parse().unwrap(),
         media: Mutex::new(media),
-        inband: true,
+        digit_capabilities: 64,
         pcm_rate: 8000,
         direction: Direction::Incoming,
         state: AtomicU32::new(2),
@@ -76,4 +76,47 @@ async fn failed_native_close_before_ack_still_retires_the_product_step() {
     drop(entry);
     drop(shared);
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn malformed_encoded_length_preserves_call_but_pcm_contract_failure_retires_it() {
+    use crate::phone::media::{AudioProfile, MediaDescription};
+    let providers = crate::providers::ProviderSet::load().unwrap();
+    // Every real media lease is dropped before the released provider descriptors.
+    let jitter = unsafe { &*std::ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let catalog = crate::phone::codec::load_catalog().unwrap();
+    for codec in AudioProfile::ALL {
+        let source = "127.0.0.1:9999".parse().unwrap();
+        let offer = MediaDescription {
+            remote: source,
+            codec,
+            receive_payload: codec.payload(),
+            send_payload: codec.payload(),
+            telephone_events: [None, None],
+        }
+        .answer(source, 1)
+        .unwrap();
+        let media = Media::new(&offer, 1, jitter, &catalog).await.unwrap();
+        let (sender, _receiver) = mpsc::channel(1);
+        let shared = Arc::new(Shared {
+            key: Key {
+                account: "length-control".into(),
+                generation: 1,
+                call: 1,
+            },
+            account: "length-control".into(),
+            local: "desk".into(),
+            remote: "opaque".into(),
+            source,
+            media: Mutex::new(media),
+            digit_capabilities: 64,
+            pcm_rate: codec.parameters().pcm_rate_hz,
+            direction: Direction::Incoming,
+            state: AtomicU32::new(3),
+            close: Arc::new(AtomicBool::new(false)),
+            stopped: AtomicBool::new(false),
+            client: Client::new(sender),
+        });
+        crate::host_services::tests::assert_sip_timed_input_contract(Handle { shared });
+    }
 }

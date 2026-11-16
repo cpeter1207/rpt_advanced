@@ -1,8 +1,13 @@
 //! Independent wire-format contract for the native phone media boundary.
+use rpt_advanced_standalone::phone::media::TelephoneEvent;
 use rpt_advanced_standalone::phone::media::{
     AudioProfile, MediaDescription, MediaError, SendStatus, TimedAudio,
 };
 use std::net::SocketAddr;
+
+fn inspect_g711(packet: &[u8]) -> Result<u32, MediaError> {
+    rpt_advanced_standalone::phone::media::AudioCodec::load(AudioProfile::Mulaw)?.inspect(packet)
+}
 
 fn offer(payload: &str, attributes: &str) -> String {
     format!(
@@ -22,7 +27,10 @@ fn selects_g711_and_only_explicit_8000hz_telephone_events() {
         media.remote,
         "127.0.0.1:42000".parse::<SocketAddr>().unwrap()
     );
-    assert_eq!(media.telephone_event, Some(101));
+    assert_eq!(
+        media.telephone_events,
+        [Some(TelephoneEvent::symmetric(101, 8000)), None]
+    );
     let answer = media.answer("127.0.0.1:43000".parse().unwrap(), 7).unwrap();
     let answer = std::str::from_utf8(&answer).unwrap();
     assert!(answer.contains("m=audio 43000 RTP/AVP 8 101\r\n"));
@@ -36,7 +44,7 @@ fn rejects_unsupported_or_ambiguous_media_instead_of_downgrading() {
     let cases = [
         valid.replace("RTP/AVP", "RTP/SAVP"),
         valid.replace("42000", "0"),
-        valid.replace("a=ptime:20", "a=ptime:30"),
+        valid.replace("a=ptime:20", "a=ptime:0"),
         valid.replace("a=ptime:20", "a=rtpmap:0 PCMU/16000"),
         valid.replace("a=ptime:20", "a=sendonly"),
         valid.replace(
@@ -67,7 +75,7 @@ fn session_attributes_and_media_connection_are_honored() {
         media.remote,
         "127.0.0.2:42000".parse::<SocketAddr>().unwrap()
     );
-    assert_eq!(media.telephone_event, None);
+    assert_eq!(media.telephone_events, [None; 2]);
     assert!(
         MediaDescription::parse(
             offer("0", "")
@@ -87,7 +95,7 @@ async fn rtp_socket_preserves_packet_order_and_original_source_clock() {
         codec: AudioProfile::Mulaw,
         receive_payload: AudioProfile::Mulaw.payload(),
         send_payload: AudioProfile::Mulaw.payload(),
-        telephone_event: Some(101),
+        telephone_events: [Some(TelephoneEvent::symmetric(101, 8000)), None],
     };
     let mut transport = RtpEndpoint::bind(
         "127.0.0.1:0".parse().unwrap(),
@@ -139,11 +147,13 @@ async fn rtp_socket_preserves_packet_order_and_original_source_clock() {
         peer.send_to(&wire[..172], local).await.unwrap();
         let mut payload = [0; 160];
         assert_eq!(
-            transport.receive(&mut payload).await.unwrap(),
+            transport.receive(&mut payload, inspect_g711).await.unwrap(),
             RtpEvent::Audio {
                 sequence,
                 timestamp: 160,
-                ssrc: 7
+                ssrc: 7,
+                length: 160,
+                span: 160
             }
         );
         assert_eq!(payload, [0xff; 160]);
@@ -159,7 +169,7 @@ async fn telephone_events_are_bounded_and_end_repetitions_are_deduplicated() {
         codec: AudioProfile::Alaw,
         receive_payload: AudioProfile::Alaw.payload(),
         send_payload: AudioProfile::Alaw.payload(),
-        telephone_event: Some(101),
+        telephone_events: [Some(TelephoneEvent::symmetric(101, 8000)), None],
     };
     let mut transport = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), description, 1, 1)
         .await
@@ -204,7 +214,13 @@ async fn telephone_events_are_bounded_and_end_repetitions_are_deduplicated() {
             160,
         ];
         peer.send_to(&packet, local).await.unwrap();
-        assert_eq!(transport.receive(&mut [0; 160]).await.unwrap(), expected);
+        assert_eq!(
+            transport
+                .receive(&mut [0; 160], inspect_g711)
+                .await
+                .unwrap(),
+            expected
+        );
     }
     // Unknown event and wrong codec payload fail closed, not as speech.
     for payload in [
@@ -213,7 +229,7 @@ async fn telephone_events_are_bounded_and_end_repetitions_are_deduplicated() {
     ] {
         peer.send_to(&payload, local).await.unwrap();
         assert_eq!(
-            transport.receive(&mut [0; 160]).await,
+            transport.receive(&mut [0; 160], inspect_g711).await,
             Err(MediaError::InvalidPacket)
         );
     }
@@ -244,8 +260,8 @@ fn packet_time_and_telephone_event_ranges_are_negotiated_not_assumed() {
     assert_eq!(
         MediaDescription::parse(partial.as_bytes())
             .unwrap()
-            .telephone_event,
-        None
+            .telephone_events,
+        [None; 2]
     );
 }
 
@@ -263,7 +279,7 @@ async fn constructing_media_cannot_bypass_payload_and_endpoint_validation() {
             codec: AudioProfile::Mulaw,
             receive_payload: AudioProfile::Mulaw.payload(),
             send_payload: AudioProfile::Mulaw.payload(),
-            telephone_event: event,
+            telephone_events: [event.map(|pt| TelephoneEvent::symmetric(pt, 8000)), None],
         };
         assert!(matches!(
             RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), media, 1, 1).await,
@@ -327,7 +343,7 @@ fn g711_mapping_and_ipv6_answers_preserve_the_selected_profile() {
             let answered = MediaDescription::parse(&answer).unwrap();
             assert_eq!(answered.codec, codec);
             assert_eq!(answered.remote, "[::1]:43000".parse().unwrap());
-            assert_eq!(answered.telephone_event, None);
+            assert_eq!(answered.telephone_events, [None; 2]);
             for local in [
                 "0.0.0.0:43000",
                 "239.1.1.1:43000",
@@ -360,7 +376,7 @@ fn telephone_event_mappings_require_offered_dynamic_payloads_and_valid_ranges() 
         );
         let media = MediaDescription::parse(source.as_bytes()).unwrap();
         assert_eq!(media.codec, AudioProfile::Mulaw);
-        assert_eq!(media.telephone_event, None, "{source}");
+        assert_eq!(media.telephone_events, [None; 2], "{source}");
     }
     let media = MediaDescription::parse(
         offer(
@@ -370,7 +386,10 @@ fn telephone_event_mappings_require_offered_dynamic_payloads_and_valid_ranges() 
         .as_bytes(),
     )
     .unwrap();
-    assert_eq!(media.telephone_event, Some(101));
+    assert_eq!(
+        media.telephone_events,
+        [Some(TelephoneEvent::symmetric(101, 8000)), None]
+    );
 }
 
 async fn media_pair() -> (tokio::net::UdpSocket, RtpEndpoint) {
@@ -382,7 +401,7 @@ async fn media_pair() -> (tokio::net::UdpSocket, RtpEndpoint) {
             codec: AudioProfile::Mulaw,
             receive_payload: AudioProfile::Mulaw.payload(),
             send_payload: AudioProfile::Mulaw.payload(),
-            telephone_event: Some(101),
+            telephone_events: [Some(TelephoneEvent::symmetric(101, 8000)), None],
         },
         1,
         1,
@@ -409,9 +428,12 @@ async fn receive_packet(
     peer.send_to(wire, transport.local_addr().unwrap())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), transport.receive(output))
-        .await
-        .unwrap()
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        transport.receive(output, inspect_g711),
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -422,7 +444,7 @@ async fn rtp_rejects_bad_framing_without_accepting_a_source_or_overwriting_audio
         vec![0; 2048],
         vec![0; 2049],
         wrong_version,
-        packet(0, 160, 7, &[0xff; 159]),
+        packet(0, 160, 7, &[]),
         packet(0, 160, 7, &[0xff; 161]),
     ];
     for payload in [vec![], vec![0], vec![2]] {
@@ -449,7 +471,9 @@ async fn rtp_rejects_bad_framing_without_accepting_a_source_or_overwriting_audio
             Ok(RtpEvent::Audio {
                 sequence: 1,
                 timestamp: 320,
-                ssrc: 8
+                ssrc: 8,
+                length: 160,
+                span: 160
             })
         );
         assert_eq!(output, [0xff; 160]);
@@ -470,7 +494,9 @@ async fn rtp_strips_valid_padding_and_keeps_the_first_valid_source() {
             Ok(RtpEvent::Audio {
                 sequence: 1,
                 timestamp: 160,
-                ssrc: 7
+                ssrc: 7,
+                length: 160,
+                span: 160
             })
         );
         assert_eq!(output, [0xd5; 160]);
@@ -497,7 +523,9 @@ async fn rtp_strips_valid_padding_and_keeps_the_first_valid_source() {
         Ok(RtpEvent::Audio {
             sequence: 1,
             timestamp: 480,
-            ssrc: 7
+            ssrc: 7,
+            length: 160,
+            span: 160
         })
     );
     assert_eq!(output, [0xff; 160]);

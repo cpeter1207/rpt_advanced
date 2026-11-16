@@ -1,5 +1,6 @@
 //! Real RTP, released codec/jitter, and exact source-sink credit tests.
 use super::*;
+use crate::phone::media::TelephoneEvent;
 use crate::providers::ProviderSet;
 use std::{ffi::c_void, net::UdpSocket, ptr, time::Duration};
 
@@ -460,8 +461,11 @@ async fn outgoing_offer_keeps_one_port_selects_answer_and_discards_preanswer_pac
     let description = MediaDescription::parse(offer.description()).unwrap();
     let offered = description.remote;
     let text = std::str::from_utf8(offer.description()).unwrap();
-    assert!(text.contains("RTP/AVP 0 8 9 101"));
-    assert_eq!(description.telephone_event, Some(101));
+    assert!(text.contains("RTP/AVP 0 8 9 3 96 97 98 99 100 101 102"));
+    assert_eq!(
+        description.telephone_events,
+        [Some(TelephoneEvent::symmetric(101, 8000)), None]
+    );
     // This came from the temporary route before final-answer adoption, not the recipient.
     route
         .send_to(&packet(1, 100, 0, &[0xa5; 160]), offered)
@@ -533,7 +537,13 @@ async fn outgoing_offer_refuses_unoffered_events_and_uncleared_receive_backlog()
             codec: super::super::media::AudioProfile::Mulaw,
             receive_payload: super::super::media::AudioProfile::Mulaw.payload(),
             send_payload: super::super::media::AudioProfile::Mulaw.payload(),
-            telephone_event: Some(if crowded { 101 } else { 102 }),
+            telephone_events: [
+                Some(TelephoneEvent::symmetric(
+                    if crowded { 101 } else { 102 },
+                    8000,
+                )),
+                None,
+            ],
         }
         .answer(route.local_addr().unwrap(), 78)
         .unwrap();
@@ -590,7 +600,8 @@ async fn outgoing_answer_cannot_reinterpret_an_advertised_format_as_inband_fallb
             .accept(no_events.as_bytes(), jitter)
             .await
             .unwrap()
-            .inband,
+            .digit_capabilities
+            == 64,
         "genuine omission of events retains the existing inband fallback"
     );
 }
@@ -652,4 +663,123 @@ async fn g722_source_credit_uses_pcm_clock_and_keeps_receipt_birth_through_wrap(
     assert_eq!(count, 172);
     assert_eq!(wire[1] & 0x7f, 9);
     assert_eq!(u32::from_be_bytes(wire[4..8].try_into().unwrap()), 160);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn variable_source_spans_keep_original_birth_across_refused_prefixes() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    for frames in [80_usize, 240] {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut media = fixture_media(&sender, jitter).await;
+        let target = media.endpoint.local_addr().unwrap();
+        sender
+            .send_to(&packet(1, 1000, 0, &vec![0xa5; frames]), target)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let mut sink = Sink::default();
+        let born = 1_000_000_000;
+        assert_eq!(read(&mut media, &mut sink, born), 0);
+        let receipt = media
+            .births
+            .iter()
+            .flatten()
+            .next()
+            .expect("valid variable packet admitted")
+            .1;
+        assert!(receipt <= born);
+        assert_eq!(read(&mut media, &mut sink, born + 40_000_000), 2);
+        let storage = media.pcm.as_ptr();
+        sink.credit = frames / 3;
+        assert_eq!(read(&mut media, &mut sink, born + 50_000_000), 2);
+        sink.credit = frames;
+        assert_eq!(read(&mut media, &mut sink, born + 60_000_000), 1);
+        let start = (1_u64 << 32) + 1000;
+        assert_eq!(
+            sink.audio,
+            [
+                (start, 0, receipt),
+                (start, frames / 3, receipt),
+                (start + (frames / 3) as u64, frames - frames / 3, receipt),
+            ]
+        );
+        assert_eq!(sink.pcm.len(), frames);
+        assert_eq!(media.source_end, Some(start + frames as u64));
+        assert_eq!(media.pcm.as_ptr(), storage);
+        assert!(sink.gaps.is_empty());
+        assert_eq!(sink.discontinuities, 1);
+        drop(media);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn variable_packet_offsets_preserve_exact_gap_overlap_and_birth() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    for offset in [-40_i32, 40] {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut media = fixture_media(&sender, jitter).await;
+        let target = media.endpoint.local_addr().unwrap();
+        let now = 1_000_000_000;
+        let start = (1_u64 << 32) + 1000;
+        let mut sink = Sink {
+            credit: 240,
+            ..Sink::default()
+        };
+        sender
+            .send_to(&packet(1, 1000, 0, &[0xa5; 80]), target)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert_eq!(read(&mut media, &mut sink, now), 0);
+        sender
+            .send_to(&packet(2, (1080 + offset) as u32, 0, &[0xb5; 240]), target)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert_eq!(read(&mut media, &mut sink, now + 10_000_000), 0);
+        let first_birth = media.births[0].expect("first10ms packet admitted").1;
+        let second_birth = media.births[1].expect("second30ms packet admitted").1;
+        assert!(first_birth <= now && second_birth <= now + 10_000_000);
+        assert_eq!(read(&mut media, &mut sink, now + 40_000_000), 1);
+        assert_eq!(sink.audio, [(start, 80, first_birth)]);
+        sink.audio.clear();
+        sink.pcm.clear();
+        sink.credit = 0;
+        assert_eq!(read(&mut media, &mut sink, now + 60_000_000), 2);
+        if offset > 0 {
+            sink.credit = 40;
+            assert_eq!(read(&mut media, &mut sink, now + 70_000_000), 1);
+            assert_eq!(sink.gaps, [(start + 80, 0), (start + 80, 40)]);
+            assert!(sink.audio.is_empty());
+            sink.credit = 50;
+            assert_eq!(read(&mut media, &mut sink, now + 80_000_000), 2);
+            sink.credit = 240;
+            assert_eq!(read(&mut media, &mut sink, now + 90_000_000), 1);
+            assert_eq!(
+                sink.audio,
+                [
+                    (start + 120, 50, second_birth),
+                    (start + 170, 190, second_birth)
+                ]
+            );
+        } else {
+            sink.credit = 50;
+            assert_eq!(read(&mut media, &mut sink, now + 70_000_000), 2);
+            sink.credit = 240;
+            assert_eq!(read(&mut media, &mut sink, now + 80_000_000), 1);
+            assert!(sink.gaps.is_empty());
+            assert_eq!(
+                sink.audio,
+                [
+                    (start + 80, 0, second_birth),
+                    (start + 80, 50, second_birth),
+                    (start + 130, 150, second_birth)
+                ]
+            );
+        }
+        let mut expected = [0.0; 240];
+        media.codec.decode(&[0xb5; 240], &mut expected).unwrap();
+        assert_eq!(sink.pcm, expected[if offset < 0 { 40 } else { 0 }..]);
+        assert_eq!(media.source_end, Some(start + (80 + offset + 240) as u64));
+        drop(media);
+    }
 }
