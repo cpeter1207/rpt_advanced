@@ -675,8 +675,8 @@ struct rptadv_host_services_v10 {
      * catalogs/listeners remain unchanged. Null means unavailable; never fall
      * back to generic dial or infer support from an 8-kHz negotiated rate. */
     int (*peer_dial_timed_g711)(void *context, const char *destination, size_t destination_length,
-                               const char *local, size_t local_length, size_t maximum_frames,
-                               rptadv_current_v1 current, void *current_context, void **peer);
+                                const char *local, size_t local_length, size_t maximum_frames,
+                                rptadv_current_v1 current, void *current_context, void **peer);
     /** Optional account-aware outgoing telephone factory. Call only off realtime
      * and provider-reactor threads, after product call policy/isolation admission.
      * Account is a configured label; local is the initiating hosted node, not an
@@ -687,21 +687,20 @@ struct rptadv_host_services_v10 {
      * that exact pending call. Use existing peer operations for media/teardown.
      * Null means unavailable, never a generic node-dial fallback or login grant. */
     int (*peer_dial_phone)(void *context, const char *account, size_t account_length,
-                           const char *local, size_t local_length,
-                           const char *destination, size_t destination_length,
-                           size_t maximum_frames, rptadv_current_v1 current,
-                           void *current_context, void **peer);
+                           const char *local, size_t local_length, const char *destination,
+                           size_t destination_length, size_t maximum_frames,
+                           rptadv_current_v1 current, void *current_context, void **peer);
     /** Optional complete progress-aware telephone factory. Same custody and
      * cancellation contract as peer_dial_phone; the original factory is required.
      * Report actual provisional status while waiting, and zero before every
      * terminal return. Zero/100/183 are not proof of remote ringing. A null tail
      * leaves progress unavailable, without changing the old established-only API. */
     int (*peer_dial_phone_progress)(void *context, const char *account, size_t account_length,
-                           const char *local, size_t local_length,
-                           const char *destination, size_t destination_length,
-                           size_t maximum_frames, rptadv_current_v1 current,
-                           void *current_context, rptadv_phone_progress_v1 progress,
-                           void *progress_context, void **peer);
+                                    const char *local, size_t local_length, const char *destination,
+                                    size_t destination_length, size_t maximum_frames,
+                                    rptadv_current_v1 current, void *current_context,
+                                    rptadv_phone_progress_v1 progress, void *progress_context,
+                                    void **peer);
 };
 
 /** Exact revision of a typed site control request. */
@@ -758,14 +757,14 @@ struct rptadv_site_command_v1 {
  * All spans are borrowed only until return and are never diagnostic payloads.
  */
 struct rptadv_phone_command_v1 {
-    uint32_t struct_size; /**< Complete readable record size. */
-    uint32_t abi_version; /**< Exact RPTADV_PHONE_COMMAND_ABI_VERSION. */
-    uint32_t operation; /**< RPTADV_PHONE_DIAL or RPTADV_PHONE_HANGUP. */
-    const char *account; /**< Configured account label, not provider credentials. */
-    size_t account_length; /**< Account byte count. */
-    const char *destination; /**< Provider destination, not an AllStar node alias. */
+    uint32_t struct_size;      /**< Complete readable record size. */
+    uint32_t abi_version;      /**< Exact RPTADV_PHONE_COMMAND_ABI_VERSION. */
+    uint32_t operation;        /**< RPTADV_PHONE_DIAL or RPTADV_PHONE_HANGUP. */
+    const char *account;       /**< Configured account label, not provider credentials. */
+    size_t account_length;     /**< Account byte count. */
+    const char *destination;   /**< Provider destination, not an AllStar node alias. */
     size_t destination_length; /**< Destination byte count. */
-    uint64_t call_id; /**< Exact prior claim for hangup; zero for dial. */
+    uint64_t call_id;          /**< Exact prior claim for hangup; zero for dial. */
 };
 
 /** Portable runtime entry points.

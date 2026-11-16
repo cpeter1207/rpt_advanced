@@ -89,14 +89,15 @@ typedef struct rptadv_sip_call_v1 {
     uint64_t generation;  /**< Immutable account generation. */
     uint64_t call;        /**< Nonzero call token, never reused in this account. */
     uint32_t sip_status;  /**< Numeric status only. */
-    uint32_t offer_length;  /**< Incoming initial offer or outgoing final answer length; zero before
-                               an outgoing answer. */
-    uint8_t offer[4096];    /**< Remote SDP, not NUL terminated; stable once a successful answer is
-                               observed. */
-    uint16_t source_family; /**< Actual transport source: 0 absent, 4 IPv4, 6 IPv6; never a header. */
-    uint16_t source_port;   /**< Actual source UDP port in host order. */
-    uint8_t source[16];     /**< IPv4 first four octets or all IPv6 octets. */
-    uint32_t direction;     /**< 0 incoming, 1 outgoing; never an authorization grant. */
+    uint32_t offer_length; /**< Incoming initial offer or outgoing final answer length; zero before
+                              an outgoing answer. */
+    uint8_t offer[4096];   /**< Remote SDP, not NUL terminated; stable once a successful answer is
+                              observed. */
+    uint16_t
+        source_family;    /**< Actual transport source: 0 absent, 4 IPv4, 6 IPv6; never a header. */
+    uint16_t source_port; /**< Actual source UDP port in host order. */
+    uint8_t source[16];   /**< IPv4 first four octets or all IPv6 octets. */
+    uint32_t direction;   /**< 0 incoming, 1 outgoing; never an authorization grant. */
 } rptadv_sip_call_v1;
 /** Sized implementation-neutral ABI 1; registration prefix and optional call tail. */
 typedef struct rptadv_sip_descriptor_v1 {
