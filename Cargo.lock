@@ -759,7 +759,7 @@ dependencies = [
 [[package]]
 name = "rptadv-codec-client"
 version = "0.1.0-alpha1"
-source = "git+https://github.com/cpeter1207/rptadv-codec-adapters?rev=becbff939a0817cc91df6dcb0d40e85e381ec87b#becbff939a0817cc91df6dcb0d40e85e381ec87b"
+source = "git+https://github.com/cpeter1207/rptadv-codec-adapters?rev=8596809c3ff8493d705bc2f65371e9f0b6e4fef2#8596809c3ff8493d705bc2f65371e9f0b6e4fef2"
 dependencies = [
  "bindgen",
  "libloading",

@@ -62,6 +62,9 @@ unsafe extern "C" fn discontinuity(context: *mut c_void) -> i32 {
     0
 }
 fn read(media: &mut Media, sink: &mut Sink, now: u64) -> u32 {
+    try_read(media, sink, now).unwrap()
+}
+fn try_read(media: &mut Media, sink: &mut Sink, now: u64) -> Result<u32, MediaError> {
     let input = abi::rptadv_peer_source_sink_v1 {
         struct_size: size_of::<abi::rptadv_peer_source_sink_v1>() as u32,
         abi_version: 1,
@@ -75,9 +78,9 @@ fn read(media: &mut Media, sink: &mut Sink, now: u64) -> u32 {
         ..unsafe { std::mem::zeroed() }
     };
     let mut output: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
-    unsafe { media.read(0, &input, &mut output) }.unwrap();
+    unsafe { media.read(0, &input, &mut output) }?;
     assert_eq!(output.state, 1);
-    output.progress
+    Ok(output.progress)
 }
 fn packet(sequence: u16, timestamp: u32, payload_type: u8, payload: &[u8]) -> Vec<u8> {
     let mut packet = vec![0x80, payload_type];
@@ -803,26 +806,59 @@ async fn variable_packet_offsets_preserve_exact_gap_overlap_and_birth() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn recovered_pcm_keeps_concealed_flag_and_samples_across_refusals() {
+    use super::super::media::AudioProfile;
     let providers = ProviderSet::load().unwrap();
     let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let mut media = fixture_media(&sender, jitter).await;
-    media.pcm[..4].copy_from_slice(&[0.1, 0.2, 0.3, 0.4]);
+    let description = MediaDescription {
+        remote: sender.local_addr().unwrap(),
+        codec: AudioProfile::Ilbc30,
+        receive_payload: 100,
+        send_payload: 100,
+        telephone_events: [None, None],
+    };
+    let endpoint = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), description.clone(), 1, 0)
+        .await
+        .unwrap();
+    let catalog = super::super::codec::load_catalog().unwrap();
+    let mut media =
+        Media::from_endpoint(endpoint, description, Vec::new(), jitter, &catalog).unwrap();
+    let mut packet = [0; 50];
+    media.codec.encode(&[0.25; 240], &mut packet).unwrap();
+    packet[49] |= 1;
+    let mut reference = AudioCodec::load(AudioProfile::Ilbc30).unwrap();
+    let mut expected = [0.0; 240];
+    reference.decode(&packet, &mut expected).unwrap();
+    media.packet[..50].copy_from_slice(&packet);
+    media.last_birth = Some(5);
     media.pending = Some(Pending::Audio {
         start: 100,
-        count: 4,
+        count: 240,
         born: 10,
         prefix: 0,
-        decode: None,
-        provenance: DecodeProvenance::Concealed,
+        decode: Some((50, 0)),
+        pcm_start: 0,
     });
-    let mut sink = Sink::default();
+    let mut sink = Sink {
+        allow_zero: true,
+        ..Sink::default()
+    };
     assert_eq!(read(&mut media, &mut sink, 20), 2);
-    sink.credit = 2;
+    let retained = media.pcm.to_vec();
+    sink.credit = 70;
     assert_eq!(read(&mut media, &mut sink, 20), 2);
+    sink.credit = 240;
     assert_eq!(read(&mut media, &mut sink, 20), 1);
     assert_eq!(sink.flags, [1, 1, 1]);
-    assert_eq!(sink.pcm, [0.1, 0.2, 0.3, 0.4]);
+    assert_eq!(sink.audio, [(100, 0, 5), (100, 70, 5), (170, 170, 5)]);
+    assert_eq!(sink.pcm, expected);
+    assert_eq!(&*media.pcm, retained);
+    assert_eq!(
+        media.last_birth,
+        Some(5),
+        "damaged packet receipt cannot renew source age"
+    );
+    assert_eq!(media.observe().unwrap().decode_recovery_frames, 240);
 }
 
 #[test]
@@ -847,7 +883,54 @@ fn scripted_recovery_reaches_sink_with_one_decision_across_credit() {
             tokio::time::sleep(Duration::from_millis(2)).await;
             let mut sink = Sink::default();
             let now = 1_000_000_000;
+            if std::env::var(CHILD).unwrap() == "recovered" {
+                media.last_birth = Some(now - 10_000_000);
+            }
             assert_eq!(read(&mut media, &mut sink, now), 0);
+            if std::env::var(CHILD).unwrap() == "cancelled" {
+                assert_eq!(read(&mut media, &mut sink, now + 40_000_000), 2);
+                assert!(media.pending.is_some());
+                let library =
+                    unsafe { libloading::Library::new("librptadv_codec_g711.so.1") }.unwrap();
+                drop(media);
+                let live = unsafe {
+                    library
+                        .get::<unsafe extern "C" fn() -> u32>(b"rptadv_test_codec_live_handles\0")
+                }
+                .unwrap();
+                assert_eq!(unsafe { live() }, 0);
+                let mut replacement = fixture_media(&sender, jitter).await;
+                assert!(replacement.codec.decoded_spans().is_empty());
+                sink.credit = 160;
+                assert_eq!(read(&mut replacement, &mut sink, now + 80_000_000), 0);
+                assert!(
+                    sink.pcm.is_empty(),
+                    "replacement cannot replay cancelled retained PCM"
+                );
+                return;
+            }
+            if std::env::var(CHILD).unwrap() == "failed" {
+                for _ in 0..2 {
+                    assert_eq!(
+                        try_read(&mut media, &mut sink, now + 40_000_000),
+                        Err(MediaError::Codec)
+                    );
+                    assert!(sink.audio.is_empty() && sink.pcm.is_empty() && sink.gaps.is_empty());
+                }
+                let library =
+                    unsafe { libloading::Library::new("librptadv_codec_g711.so.1") }.unwrap();
+                let decoded = unsafe {
+                    library.get::<unsafe extern "C" fn() -> u32>(b"rptadv_test_decode_calls\0")
+                }
+                .unwrap();
+                let concealed = unsafe {
+                    library.get::<unsafe extern "C" fn() -> u32>(b"rptadv_test_conceal_calls\0")
+                }
+                .unwrap();
+                assert_eq!(unsafe { decoded() }, 1);
+                assert_eq!(unsafe { concealed() }, 0);
+                return;
+            }
             if std::env::var(CHILD).unwrap() == "missing" {
                 assert_eq!(read(&mut media, &mut sink, now + 40_000_000), 2);
                 sink.credit = 80;
@@ -862,7 +945,7 @@ fn scripted_recovery_reaches_sink_with_one_decision_across_credit() {
                         observation.native_plc_frames,
                         observation.fallback_frames
                     ),
-                    (0, 0, 160)
+                    (160, 0, 160)
                 );
                 return;
             }
@@ -896,6 +979,25 @@ fn scripted_recovery_reaches_sink_with_one_decision_across_credit() {
             assert_eq!(media.observe().unwrap().decode_recovery_frames, 320);
             media.reset().unwrap();
             assert_eq!(media.observe().unwrap().decode_recovery_frames, 320);
+            let library = unsafe { libloading::Library::new("librptadv_codec_g711.so.1") }.unwrap();
+            let decoded = unsafe {
+                library.get::<unsafe extern "C" fn() -> u32>(b"rptadv_test_decode_calls\0")
+            }
+            .unwrap();
+            let concealed = unsafe {
+                library.get::<unsafe extern "C" fn() -> u32>(b"rptadv_test_conceal_calls\0")
+            }
+            .unwrap();
+            assert_eq!(
+                unsafe { decoded() },
+                2,
+                "two retained packets, not one decode per retry"
+            );
+            assert_eq!(
+                unsafe { concealed() },
+                0,
+                "successful native recovery never conceals twice"
+            );
             let fresh = fixture_media(&sender, jitter).await;
             assert_eq!(fresh.observe().unwrap().decode_recovery_frames, 0);
         });
@@ -937,8 +1039,13 @@ fn scripted_recovery_reaches_sink_with_one_decision_across_credit() {
         paths.extend(std::env::split_paths(&original));
     }
     for (mode, fault) in [
-        ("recovered", "malformed_recover"),
-        ("missing", "malformed_missing"),
+        ("recovered", "native_recovered"),
+        ("missing", "native_recovered"),
+        ("cancelled", "native_recovered"),
+        ("failed", "malformed_recover"),
+        ("failed", "span_origin"),
+        ("failed", "span_offset"),
+        ("failed", "span_count"),
     ] {
         let child = std::process::Command::new("timeout").arg("15").arg(std::env::current_exe().unwrap())
             .args(["--exact", "phone::call_media::tests::scripted_recovery_reaches_sink_with_one_decision_across_credit", "--test-threads=1", "--nocapture"])
@@ -1197,7 +1304,7 @@ async fn ilbc_prefix_uses_bounded_scratch_before_decoding_retained_packet() {
             count: 240,
             born: 1_000_000_000,
             prefix: 0,
-            provenance: DecodeProvenance::Original,
+            pcm_start: 0,
             decode: Some((50, 0)),
         });
         let mut sink = Sink {
@@ -1213,7 +1320,7 @@ async fn ilbc_prefix_uses_bounded_scratch_before_decoding_retained_packet() {
             count: 240,
             born: 1_010_000_000,
             prefix,
-            provenance: DecodeProvenance::Original,
+            pcm_start: 0,
             decode: Some((50, 0)),
         });
         sink.credit = 0;
@@ -1261,4 +1368,60 @@ async fn ilbc_prefix_uses_bounded_scratch_before_decoding_retained_packet() {
             "prefix PLC must not overwrite or predecode retained packet"
         );
     }
+}
+
+#[test]
+fn retained_mixed_map_slices_refusal_partial_boundary_and_cross_boundary_overlap() {
+    let spans = [
+        DecodeSpan {
+            offset_frames: 0,
+            frame_count: 2,
+            origin: 1,
+        },
+        DecodeSpan {
+            offset_frames: 2,
+            frame_count: 3,
+            origin: 0,
+        },
+        DecodeSpan {
+            offset_frames: 5,
+            frame_count: 2,
+            origin: 1,
+        },
+    ];
+    let before = spans.map(|s| (s.offset_frames, s.frame_count, s.origin));
+    let pcm = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7];
+    // The artificial map tests the cursor, not newly permitted SIP aggregates.
+    for (overlap, credits, expected) in [
+        (
+            0,
+            vec![0, 1, 1, 3, 2],
+            vec![(0, 0, 1), (0, 1, 1), (1, 1, 1), (2, 3, 0), (5, 2, 1)],
+        ),
+        (3, vec![1, 9, 9], vec![(3, 1, 0), (4, 1, 0), (5, 2, 1)]),
+        (5, vec![2], vec![(5, 2, 1)]),
+    ] {
+        let mut offset = overlap;
+        let mut actual = Vec::new();
+        let mut accepted_pcm = Vec::new();
+        for credit in credits {
+            let (remaining, origin) = retained_span(&spans, offset).unwrap();
+            let accepted = credit.min(remaining);
+            actual.push((
+                offset,
+                accepted,
+                u32::from(origin == DecodeProvenance::Concealed),
+            ));
+            accepted_pcm.extend_from_slice(&pcm[offset..offset + accepted]);
+            offset += accepted;
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(accepted_pcm, pcm[overlap..]);
+        assert_eq!(offset, 7);
+    }
+    assert_eq!(retained_span(&spans, 7), Err(MediaError::Codec));
+    assert_eq!(
+        spans.map(|s| (s.offset_frames, s.frame_count, s.origin)),
+        before
+    );
 }

@@ -321,3 +321,36 @@ hash qualification is not a published package floor. Historical radio alpha11
 or alpha12 and RNNoise alpha2 metadata do not guarantee this contract. Package
 publication remains blocked until real reset-capable versions are qualified
 and every build/runtime lower bound is aligned; no SDK API bump is invented.
+
+
+## Standalone codec-unit provenance (2026-11-16 local checkpoint)
+
+Standalone's neutral codec client is pinned to reviewed candidate
+8596809c3ff8493d705bc2f65371e9f0b6e4fef2. Its append-only ABI-1 provenance
+operation leaves the active descriptor prefix, existing operations, entrypoint
+and SONAME1 unchanged. No retired-alpha compatibility shim is introduced.
+The controller requires the complete provenance tail and probes each actual
+opened SIP decoder configuration with empty input before publishing composition.
+Missing/null/unsupported or mismatched descriptors fail preparation; the existing
+prepare-before-publish reload path retains the prior complete configuration.
+
+The client validates exhaustive caller-owned origins and both capacities; no
+decode, conceal, automatic reset or second decoder advancement follows an error
+in the new receive path. Explicit jitter-missing native conceal remains a
+separate once-only operation. These codecs remain on their existing serial
+non-audio owner; no operation acquires a new audio-thread-safety promise.
+
+The exact iLBC2.0.2 source archive is SHA256
+84d5c99087a35bda3463bcb993245b4f8c28c04fe037215a5ec56570f68ce519.
+The provider build verifies its native header. Source/header/DSO hashes and the
+exact backend selection must be qualified together; a runtime version string is
+only a sanity check, and runtime installations require no development headers.
+
+This source candidate is not released. Historical codec alpha1 metadata does
+not establish the provenance contract. The existing Debian lower bounds describe
+the legacy base only and cannot qualify this new composition. Publication remains
+blocked until the first real codec runtime/development artifacts pass native
+package gates and every affected floor and dependency manifest is aligned to
+those actual artifacts, alongside the separately required radio/RNNoise cohort.
+No SDK API bump, invented package version, or header-only runtime attestation is
+substituted for artifact qualification.

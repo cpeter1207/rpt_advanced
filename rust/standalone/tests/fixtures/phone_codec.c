@@ -15,6 +15,8 @@ static const rptadv_codec_descriptor_v1_table *canonical;
 static rptadv_codec_descriptor_v1_table descriptor;
 static unsigned live_handles;
 static unsigned conceal_calls;
+static unsigned decode_calls;
+static uint32_t decoder_profile;
 
 /** Compare the subprocess's immutable fault selection. */
 static int fault(const char *name) {
@@ -40,6 +42,7 @@ static int32_t open_decoder(const rptadv_codec_config_v1 *config, void **out) {
         *out = NULL;
         return fault("decoder_error") ? RPTADV_CODEC_FAILED : RPTADV_CODEC_COMPLETE;
     }
+    decoder_profile = config->profile_id;
     int32_t status = canonical->open_decoder(config, out);
     if (*out != NULL)
         ++live_handles;
@@ -67,16 +70,55 @@ static int32_t encode(void *handle, const float *pcm, size_t frames, uint8_t *pa
 /** Return a provider error or incomplete count after actual decoding. */
 static int32_t decode(void *handle, const uint8_t *packet, size_t bytes, float *pcm,
                       size_t capacity, size_t *count) {
-    if (fault("malformed_recover") || fault("malformed_missing"))
-        return RPTADV_CODEC_MALFORMED;
     if (fault("decode_error"))
         return RPTADV_CODEC_FAILED;
     int32_t status = canonical->decode(handle, packet, bytes, pcm, capacity, count);
     assert(status == RPTADV_CODEC_COMPLETE);
+    ++decode_calls;
+    if (fault("malformed_recover") || fault("malformed_missing"))
+        return RPTADV_CODEC_MALFORMED;
     if (fault("decoded_frames"))
         --*count;
     return status;
 }
+
+/** Forward exactly one provenance decode; faults occur after native advancement. */
+static int32_t decode_with_provenance(void *handle, const uint8_t *packet, size_t bytes, float *pcm,
+                                      size_t capacity, rptadv_codec_decode_span_v1 *spans,
+                                      size_t span_capacity, rptadv_codec_decode_result_v1 *result) {
+    const char *selected = getenv("RPTADV_TEST_PROBE_PROFILE");
+    if (bytes == 0 && fault("unsupported_provenance") &&
+        (selected == NULL || decoder_profile == strtoul(selected, NULL, 10)))
+        return RPTADV_CODEC_UNSUPPORTED;
+    int32_t status = canonical->decode_with_provenance(handle, packet, bytes, pcm, capacity, spans,
+                                                       span_capacity, result);
+    if (bytes == 0)
+        return status;
+    ++decode_calls;
+    assert(status == RPTADV_CODEC_COMPLETE);
+    if (fault("malformed_recover") || fault("malformed_missing") || fault("decode_error")) {
+        result->frames = 0;
+        result->span_count = 0;
+        return fault("decode_error") ? RPTADV_CODEC_FAILED : RPTADV_CODEC_MALFORMED;
+    }
+    if (fault("decoded_frames"))
+        --result->frames;
+    if (fault("span_origin"))
+        spans[0].origin = 2;
+    if (fault("span_offset"))
+        ++spans[0].offset_frames;
+    if (fault("span_count"))
+        result->span_count = span_capacity + 1;
+    if (fault("native_recovered")) {
+        assert(result->span_count == 1);
+        spans[0].origin = 1;
+        for (size_t i = 0; i < result->frames; ++i)
+            pcm[i] = 0.25f;
+    }
+    return status;
+}
+
+unsigned rptadv_test_decode_calls(void) { return decode_calls; }
 
 /** Preserve native inspection except for one explicit status or result fault. */
 static int32_t inspect(void *handle, const uint8_t *packet, size_t bytes,
@@ -154,6 +196,7 @@ const rptadv_codec_descriptor_v1_table *rptadv_codec_descriptor_v1(void) {
     descriptor.open_decoder = open_decoder;
     descriptor.encode = encode;
     descriptor.decode = decode;
+    descriptor.decode_with_provenance = decode_with_provenance;
     descriptor.inspect = inspect;
     descriptor.conceal = conceal;
     descriptor.destroy = destroy;
@@ -173,6 +216,10 @@ const rptadv_codec_descriptor_v1_table *rptadv_codec_descriptor_v1(void) {
         descriptor.encode = NULL;
     if (fault("missing_decode"))
         descriptor.decode = NULL;
+    if (fault("missing_provenance"))
+        descriptor.decode_with_provenance = NULL;
+    if (fault("short_provenance"))
+        descriptor.struct_size = RPTADV_CODEC_DESCRIPTOR_ACTIVE_SIZE;
     if (fault("missing_destroy"))
         descriptor.destroy = NULL;
     return &descriptor;

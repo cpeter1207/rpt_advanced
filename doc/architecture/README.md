@@ -271,6 +271,18 @@ under ADR 0022. Other protocol adapters can reuse them without an IAX2 dependenc
 protocol-specific format IDs, negotiation and transport framing stay with each
 protocol adapter. The implemented codec boundary does not itself add another
 protocol.
+Standalone SIP receive now requires the neutral codec coding-unit provenance
+tail and an empty-input probe of each opened profile/mode before activation.
+One bounded metadata slot is prepared beside the existing receive workspace:
+the unchanged 30 ms SIP ceiling admits one iLBC30 unit, and the other current
+SIP providers coalesce to one origin span. Retained PCM and its validated map
+keep immutable provider offsets through overlap and zero/partial source credit.
+NativeRecovered units and explicit PLC use the same non-authoritative continuity
+seam; later PacketDecoded units may qualify normally despite ordinary decoder
+history. This is not a sample-purity or arbitrary washout claim. Exact local
+candidate sources, package publication holds and reset ownership are recorded in
+ADRs 0022 and 0044; historical codec alpha1 is not a qualified provenance floor.
+
 The approved human-text codec converts supported messages to speech that mixes
 with live peer audio, including audio from the text sender, only at the local
 transmitter. This is incoming media, not polite controller telemetry, and never

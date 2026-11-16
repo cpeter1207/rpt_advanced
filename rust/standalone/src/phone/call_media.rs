@@ -5,7 +5,7 @@ use super::media::{
 };
 use crate::abi;
 use crate::phone::media::TelephoneEvent;
-use rptadv_codec_client::CodecCatalog;
+use rptadv_codec_client::{CodecCatalog, DecodeSpan};
 use rptadv_jitter_client::{Admission, Jitter, Kind, Observation};
 use std::{mem::size_of, net::SocketAddr, sync::Arc};
 
@@ -16,7 +16,7 @@ enum Pending {
         count: usize,
         born: u64,
         prefix: u32,
-        provenance: DecodeProvenance,
+        pcm_start: usize,
         // Retain encoded packet until its missing prefix has finished using PCM scratch.
         decode: Option<(usize, usize)>,
     },
@@ -25,6 +25,28 @@ enum Pending {
         count: u32,
     },
     Digit(u8),
+}
+
+/// Slice only the current validated origin span; offsets never relabel retained PCM.
+fn retained_span(
+    spans: &[DecodeSpan],
+    offset: usize,
+) -> Result<(usize, DecodeProvenance), MediaError> {
+    spans
+        .iter()
+        .find_map(|span| {
+            let start = span.offset_frames as usize;
+            let end = start + span.frame_count as usize;
+            (start <= offset && offset < end).then_some((
+                end.saturating_sub(offset),
+                if span.origin == 0 {
+                    DecodeProvenance::Original
+                } else {
+                    DecodeProvenance::Concealed
+                },
+            ))
+        })
+        .ok_or(MediaError::Codec)
 }
 
 /// One bounded missing unit, prepared once and retained through exact sink credit.
@@ -382,7 +404,7 @@ impl Media {
                         count,
                         born,
                         prefix,
-                        provenance: DecodeProvenance::Original,
+                        pcm_start: 0,
                         decode: Some((decision.length, skip)),
                     });
                 } else {
@@ -559,23 +581,30 @@ impl Media {
         if let Some(Pending::Audio {
             count,
             decode,
-            provenance,
+            pcm_start,
             ..
         }) = self.pending.as_mut()
         {
             if let Some((length, skip)) = decode.take() {
-                let span = *count + skip;
-                *provenance = self
+                let frames = *count + skip;
+                self.codec
+                    .decode(&self.packet[..length], &mut self.pcm[..frames])?;
+                *pcm_start = skip;
+                let recovered = self
                     .codec
-                    .decode(&self.packet[..length], &mut self.pcm[..span])?;
-                if *provenance == DecodeProvenance::Concealed {
-                    self.decode_recovery_frames =
-                        self.decode_recovery_frames.saturating_add(span as u64);
+                    .decoded_spans()
+                    .iter()
+                    .filter(|span| span.origin == 1)
+                    .map(|span| u64::from(span.frame_count))
+                    .sum::<u64>();
+                self.decode_recovery_frames = self.decode_recovery_frames.saturating_add(recovered);
+                if self.last_birth.is_none() {
+                    self.fallback_frames = self
+                        .fallback_frames
+                        .saturating_add(recovered.saturating_sub(skip as u64));
                 }
-                if *provenance == DecodeProvenance::Missing {
-                    self.fallback_frames = self.fallback_frames.saturating_add(*count as u64);
-                }
-                self.pcm.copy_within(skip..span, 0);
+                // PCM and provider offsets stay intact. Only source credit moves
+                // the retained cursor, including negative jitter overlap.
             }
         }
         let Some(pending) = self.pending else {
@@ -593,37 +622,47 @@ impl Media {
                 start,
                 count,
                 born,
-                provenance,
+                pcm_start,
                 ..
             } => {
                 if born > sink.reference_now_ns {
                     return Err(MediaError::SourceContract);
                 }
-                let birth = abi::rptadv_source_birth_v1 {
-                    struct_size: size_of::<abi::rptadv_source_birth_v1>() as u32,
-                    abi_version: 1,
-                    host_clock_epoch: sink.host_clock_epoch,
-                    born_ns: born,
+                let pcm_offset = pcm_start + self.offset;
+                let (span_remaining, provenance) =
+                    retained_span(self.codec.decoded_spans(), pcm_offset)?;
+                let remaining = (count - self.offset).min(span_remaining);
+                // Recovered audio inherits admitted history, never this corrupt
+                // packet's receipt. No history means a hard counted gap.
+                let source_birth = if provenance == DecodeProvenance::Original {
+                    Some(born)
+                } else {
+                    self.last_birth
                 };
-                let remaining = count - self.offset;
-                let accepted = if provenance == DecodeProvenance::Missing {
+                let accepted = if let Some(born) = source_birth {
+                    let birth = abi::rptadv_source_birth_v1 {
+                        struct_size: size_of::<abi::rptadv_source_birth_v1>() as u32,
+                        abi_version: 1,
+                        host_clock_epoch: sink.host_clock_epoch,
+                        born_ns: born,
+                    };
+                    unsafe {
+                        sink.audio_timed.unwrap()(
+                            sink.context,
+                            start + self.offset as u64,
+                            self.pcm[pcm_offset..pcm_offset + remaining].as_ptr(),
+                            remaining,
+                            u32::from(provenance == DecodeProvenance::Concealed),
+                            &birth,
+                        )
+                    }
+                } else {
                     unsafe {
                         sink.gap.unwrap()(
                             sink.context,
                             start + self.offset as u64,
                             remaining as u32,
                         ) as usize
-                    }
-                } else {
-                    unsafe {
-                        sink.audio_timed.unwrap()(
-                            sink.context,
-                            start + self.offset as u64,
-                            self.pcm[self.offset..count].as_ptr(),
-                            remaining,
-                            u32::from(provenance == DecodeProvenance::Concealed),
-                            &birth,
-                        )
                     }
                 };
                 if accepted > remaining {

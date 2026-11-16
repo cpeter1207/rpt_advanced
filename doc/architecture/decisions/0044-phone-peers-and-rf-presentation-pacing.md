@@ -2383,8 +2383,9 @@ concealed flag with the original source coordinates through sink backpressure;
 unsupported concealment uses the counted ring-fallback seam when its original
 history is qualified; unknown timing remains a hard discontinuity. A per-call payload-free control-side snapshot exposes jitter playout
 observations and measured recovery counts, not a network loss percentage. The
-provider C ABI is unchanged. Native iLBC success can hide internal recovery;
-this boundary does not claim to detect that unreported distinction. The bounded
+original checkpoint left the provider C ABI unchanged and could not distinguish
+hidden native iLBC recovery. The codec-unit amendment below supersedes that
+limitation through an append-only operation. The bounded
 continuity amendment below remains undeployed and is not hardware acceptance.
 
 ### Prepared telephone courtesy ownership
@@ -2465,9 +2466,9 @@ input already owned by AudioPeer's nonzero prepared PhoneCourtesyKey; that slot
 and LinkAudio's exact call/media fences supply the identity when the controller
 consumes the evidence. Replacement inputs cannot adopt predecessor keys. There
 is still no production call to phone_speech_closed and no courtesy emission.
-Explicit recovery provenance cannot classify libilbc2.0.2's internally recovered
-complete units under the current provider result contract; no private-state
-inspection or heuristic classification is claimed.
+The original explicit-recovery checkpoint could not classify internally recovered
+iLBC units. The codec-unit provenance amendment below supersedes that limitation
+without PCM heuristics or controller access to native decoder state.
 
 
 The processing history's conservative possible-tail predicate is not onset
@@ -2501,3 +2502,40 @@ source coordinates. Existing failure propagation remains fail-closed.
 This is local candidate composition, not a reset-capable release/package floor,
 hardware acceptance or permission to activate a node. Courtesy emission and
 the independent codec recovery-provenance integration remain separate work.
+
+
+### Retained codec-unit authority (2026-11-16 local checkpoint)
+
+SIP now calls the reviewed neutral decode-with-provenance operation exactly once
+for each retained packet, replacing both the neutral recovering fallback route
+and AudioCodec's former Malformed-to-conceal branch. Any post-advancement failure
+is one hard codec error and grants no successful PCM authority. Explicit jitter
+missing-span conceal remains separate, once-only and bounded by existing scratch.
+
+The selected current profiles need one preparation-allocated metadata slot under
+the existing 30 ms receive ceiling. The client validates the complete span map
+before any source delivery. Media retains both original PCM and original span
+offsets; it moves only accepted source credit, never shifts/relabels retained
+PCM on overlap or retries. Each offer stops at the current origin boundary.
+Artificial mixed-map cursor tests do not permit longer SIP packets.
+
+NativeRecovered units traverse the existing concealed continuity callback using
+the conservative preceding admitted original birth. A corrupt packet's receipt
+cannot refresh the original hold or source age. Without original history they
+traverse the hard counted-gap seam, not fabricated current-time PCM authority.
+Recovered-only audio cannot initiate speech, DTMF or RF. The existing product
+analysis-only reset still occurs on the first accepted genuine prefix after
+loss, not synthetic audio or refused/retried credit.
+
+PacketDecoded is authority at the accepted coding-unit boundary, not a promise
+of sample purity: native decoder, PLC and enhancer/filter history stays intact.
+A later valid coding unit may requalify using the normal speech thresholds.
+Genuine encoded silence after recovery remains PacketDecoded without any
+exact-zero or amplitude claim. No washout, Opus/FEC negotiation, new classifier,
+programme queue, audio worker, source-age policy or IAX/Asterisk path is added.
+
+This integration remains an inactive local candidate with independent review,
+native ARM64, complete coverage/package/hosted gates and real hardware acceptance
+outstanding. ADR 0022 and debian/control retain explicit publication blocks until
+actual provenance-capable codec and reset-capable radio/RNNoise artifacts exist.
+Courtesy emission remains separate work.

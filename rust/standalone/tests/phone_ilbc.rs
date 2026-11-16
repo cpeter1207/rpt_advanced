@@ -158,3 +158,48 @@ fn ilbc_mode_is_explicit_case_insensitive_and_never_guessed_from_payload_bytes()
         );
     }
 }
+
+#[test]
+fn native_recovered_unit_is_not_original_and_later_valid_unit_remains_authoritative() {
+    let mut codec = AudioCodec::load(AudioProfile::Ilbc30).unwrap();
+    let mut packet = [0; 50];
+    codec.encode(&[0.125; 240], &mut packet).unwrap();
+    let mut damaged = packet;
+    damaged[49] |= 1;
+    let mut pcm = [0.0; 240];
+    for _ in 0..2 {
+        assert_eq!(
+            codec.decode(&damaged, &mut pcm),
+            Ok(DecodeProvenance::Concealed)
+        );
+    }
+    assert_eq!(
+        codec.decode(&packet, &mut pcm),
+        Ok(DecodeProvenance::Original)
+    );
+    assert!(pcm.iter().all(|sample| sample.is_finite()));
+}
+
+#[test]
+fn native_encoded_silence_after_recovery_is_still_packet_decoded_not_a_purity_claim() {
+    let mut codec = AudioCodec::load(AudioProfile::Ilbc30).unwrap();
+    let mut packet = [0; 50];
+    codec.encode(&[0.125; 240], &mut packet).unwrap();
+    packet[49] |= 1;
+    let mut pcm = [0.0; 240];
+    assert_eq!(
+        codec.decode(&packet, &mut pcm),
+        Ok(DecodeProvenance::Concealed)
+    );
+    let mut encoder = AudioCodec::load(AudioProfile::Ilbc30).unwrap();
+    encoder.encode(&[0.0; 240], &mut packet).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            codec.decode(&packet, &mut pcm),
+            Ok(DecodeProvenance::Original)
+        );
+        assert!(pcm.iter().all(|sample| sample.is_finite()));
+    }
+    // No amplitude threshold, invented washout, or exact-zero assertion: decoder
+    // enhancement/history remains native, and speech thresholds remain separate.
+}

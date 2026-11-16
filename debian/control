@@ -2,6 +2,11 @@
 # Historical alpha11 is NOT a reset-capable release floor. Publication is blocked
 # until reset-capable radio/RNNoise packages pass the native package gates and the
 # Build-Depends/Depends lower bounds below are aligned to that qualified release.
+# Standalone SIP also requires the reviewed codec-unit provenance tail/probe.
+# Historical codec alpha1 is NOT a provenance-capable release floor. Publication
+# remains blocked until actual qualified codec runtime/dev artifacts exist and
+# their floors plus dependency manifest are aligned. Header presence is not runtime
+# binary attestation; runtime packages do not require development headers.
 Source: rpt-advanced
 Section: hamradio
 Priority: optional

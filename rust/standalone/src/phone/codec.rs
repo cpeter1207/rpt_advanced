@@ -2,7 +2,7 @@
 use super::media::{AudioParameters, AudioProfile, MAX_RECEIVE_MS, MediaError};
 use crate::abi;
 use rptadv_codec_client::{
-    CodecCatalog, Decoder, EncodeResult, Encoder, Error, ProviderSelection, Status,
+    CodecCatalog, DecodeSpan, Decoder, EncodeResult, Encoder, Error, ProviderSelection, Status,
 };
 
 fn codec_error(status: Status) -> Error {
@@ -58,9 +58,9 @@ pub(crate) fn load_catalog() -> Result<CodecCatalog, MediaError> {
 /// Origin of decoded PCM at the provider boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeProvenance {
-    /// Successfully decoded packet; PCM is valid.
+    /// PacketDecoded coding unit; ordinary prior decoder/filter history remains.
     Original,
-    /// Explicit native recovery supplied PCM; it must not initiate speech.
+    /// NativeRecovered coding unit or explicit PLC; neither initiates speech.
     Concealed,
     /// Native recovery supplied no PCM; use the existing fallback instead.
     Missing,
@@ -77,6 +77,8 @@ pub struct AudioCodec {
     finishing: bool,
     silence: Box<[f32]>,
     decode_native: Box<[u8]>,
+    decode_spans: Box<[DecodeSpan]>,
+    decode_span_count: usize,
 }
 
 impl AudioCodec {
@@ -126,7 +128,7 @@ impl AudioCodec {
                 .ok_or(MediaError::Codec)?,
         )
         .map_err(|_| MediaError::Codec)?;
-        let decoder = catalog
+        let mut decoder = catalog
             .decoder(
                 profile.provider_profile,
                 profile.mode_id,
@@ -134,7 +136,14 @@ impl AudioCodec {
                 receive_bytes,
             )
             .map_err(|_| MediaError::Codec)?;
+        // Probe the actual opened configuration without invented media. Every
+        // current SIP profile coalesces to one span under the unchanged 30 ms bound.
+        decoder
+            .require_provenance()
+            .map_err(|_| MediaError::Codec)?;
         Ok(Self {
+            decode_spans: vec![DecodeSpan::default(); 1].into_boxed_slice(),
+            decode_span_count: 0,
             profile,
             encoder,
             decoder,
@@ -349,12 +358,14 @@ impl AudioCodec {
         }
         Ok(info.frames)
     }
-    /// Decode the actual inspected payload before any PCM overlap trimming.
+    /// Decode once and retain exhaustive coding-unit origins before overlap trimming.
+    /// Failure never grants successful PCM or permission to call native PLC again.
     pub fn decode(
         &mut self,
         packet: &[u8],
         pcm: &mut [f32],
     ) -> Result<DecodeProvenance, MediaError> {
+        self.decode_span_count = 0;
         let frames = self.inspect(packet).map_err(|_| MediaError::Codec)? as usize;
         if pcm.len() != frames {
             return Err(MediaError::Codec);
@@ -369,11 +380,23 @@ impl AudioCodec {
             }
             native
         };
-        match self.decoder.decode(packet, pcm) {
-            Ok(count) if count == frames => Ok(DecodeProvenance::Original),
-            Err(error) if error.status == Status::Malformed => self.conceal(frames as u32, pcm),
-            _ => Err(MediaError::Codec),
+        let decoded = self
+            .decoder
+            .decode_with_provenance(packet, pcm, &mut self.decode_spans)
+            .map_err(|_| MediaError::Codec)?;
+        if decoded.frames != frames || decoded.span_count != 1 {
+            return Err(MediaError::Codec);
         }
+        self.decode_span_count = decoded.span_count;
+        Ok(if self.decode_spans[0].origin == 0 {
+            DecodeProvenance::Original
+        } else {
+            DecodeProvenance::Concealed
+        })
+    }
+    /// Validated immutable packet origins, retained until the next actual decode.
+    pub(crate) fn decoded_spans(&self) -> &[DecodeSpan] {
+        &self.decode_spans[..self.decode_span_count]
     }
     /// Request native PLC exactly once. Missing means the caller must use fallback.
     pub fn conceal(
@@ -396,6 +419,14 @@ impl AudioCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refused_decode_cannot_reuse_the_previous_packets_origin_map() {
+        let mut codec = AudioCodec::load(AudioProfile::Mulaw).unwrap();
+        codec.decode(&[0xa5; 160], &mut [0.0; 160]).unwrap();
+        assert_eq!(codec.decoded_spans().len(), 1);
+        assert_eq!(codec.decode(&[], &mut []), Err(MediaError::Codec));
+        assert!(codec.decoded_spans().is_empty());
+    }
     fn prepare(
         codec: &mut AudioCodec,
         input: &[f32],
