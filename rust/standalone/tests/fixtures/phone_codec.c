@@ -14,6 +14,7 @@
 static const rptadv_codec_descriptor_v1_table *canonical;
 static rptadv_codec_descriptor_v1_table descriptor;
 static unsigned live_handles;
+static unsigned conceal_calls;
 
 /** Compare the subprocess's immutable fault selection. */
 static int fault(const char *name) {
@@ -66,6 +67,8 @@ static int32_t encode(void *handle, const float *pcm, size_t frames, uint8_t *pa
 /** Return a provider error or incomplete count after actual decoding. */
 static int32_t decode(void *handle, const uint8_t *packet, size_t bytes, float *pcm,
                       size_t capacity, size_t *count) {
+    if (fault("malformed_recover") || fault("malformed_missing"))
+        return RPTADV_CODEC_MALFORMED;
     if (fault("decode_error"))
         return RPTADV_CODEC_FAILED;
     int32_t status = canonical->decode(handle, packet, bytes, pcm, capacity, count);
@@ -94,6 +97,25 @@ static int32_t inspect(void *handle, const uint8_t *packet, size_t bytes,
         ++result->mode;
     return status;
 }
+
+/** Script explicit decoder recovery without replacing any production hook. */
+static int32_t conceal(void *handle, uint32_t frames, float *pcm, size_t capacity, size_t *count) {
+    if (fault("malformed_recover") || fault("malformed_missing")) {
+        ++conceal_calls;
+        if (fault("malformed_missing")) {
+            *count = 0;
+            return RPTADV_CODEC_UNSUPPORTED;
+        }
+        assert(capacity >= frames);
+        for (uint32_t i = 0; i < frames; ++i)
+            pcm[i] = 0.25f;
+        *count = frames;
+        return RPTADV_CODEC_COMPLETE;
+    }
+    return canonical->conceal(handle, frames, pcm, capacity, count);
+}
+
+unsigned rptadv_test_conceal_calls(void) { return conceal_calls; }
 
 /** Observe cleanup without replacing the released provider's ownership. */
 static void destroy(void *handle) {
@@ -127,6 +149,7 @@ const rptadv_codec_descriptor_v1_table *rptadv_codec_descriptor_v1(void) {
     descriptor.encode = encode;
     descriptor.decode = decode;
     descriptor.inspect = inspect;
+    descriptor.conceal = conceal;
     descriptor.destroy = destroy;
     if (fault("null_table"))
         return NULL;

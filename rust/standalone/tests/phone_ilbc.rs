@@ -1,4 +1,5 @@
 //! Negotiated mode30 and directional packet-time limits for the released iLBC provider.
+use rpt_advanced_standalone::phone::media::DecodeProvenance;
 use rpt_advanced_standalone::phone::media::{
     AudioCodec, AudioProfile, MediaDescription, MediaError,
 };
@@ -45,7 +46,10 @@ fn ilbc_resolves_explicit_twenty_thirty_and_absent_mode_to_thirty() {
         let mut packet = [0; 50];
         codec.encode(&[0.125; 240], &mut packet).unwrap();
         let mut pcm = [0.0; 240];
-        codec.decode(&packet, &mut pcm).unwrap();
+        assert_eq!(
+            codec.decode(&packet, &mut pcm).unwrap(),
+            DecodeProvenance::Original
+        );
         assert!(pcm.iter().all(|sample| sample.is_finite()));
         assert!(codec.decode(&packet[..49], &mut pcm).is_err());
         assert!(

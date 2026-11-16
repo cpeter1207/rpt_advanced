@@ -1,4 +1,5 @@
 //! Native-unit receive bounds are independent of the fixed transmit packet size.
+use rpt_advanced_standalone::phone::media::DecodeProvenance;
 use rpt_advanced_standalone::phone::media::{
     AudioCodec, AudioProfile, MediaDescription, MediaError, RtpEndpoint, RtpEvent,
 };
@@ -26,9 +27,12 @@ fn bounded_receive_accepts_complete_native_units_through_thirty_ms() {
             let length = p.packet_bytes * ms / tx_ms;
             let repeated = encoded.repeat(2);
             let mut pcm = vec![0.0; frames];
-            codec
-                .decode(&repeated[..length], &mut pcm)
-                .unwrap_or_else(|error| panic!("{profile:?}/{ms}ms: {error:?}"));
+            assert_eq!(
+                codec
+                    .decode(&repeated[..length], &mut pcm)
+                    .unwrap_or_else(|error| panic!("{profile:?}/{ms}ms: {error:?}")),
+                DecodeProvenance::Original
+            );
             assert!(pcm.iter().all(|sample| sample.is_finite()));
         }
         assert!(
@@ -48,7 +52,10 @@ fn gsm_receive_limit_remains_one_complete_twenty_ms_unit() {
     let mut codec = AudioCodec::load(AudioProfile::Gsm).unwrap();
     let mut packet = [0; 33];
     codec.encode(&[0.125; 160], &mut packet).unwrap();
-    codec.decode(&packet, &mut [0.0; 160]).unwrap();
+    assert_eq!(
+        codec.decode(&packet, &mut [0.0; 160]).unwrap(),
+        DecodeProvenance::Original
+    );
     for bytes in [0, 1, 32, 34, 49, 66] {
         assert!(codec.decode(&vec![0; bytes], &mut [0.0; 240]).is_err());
     }

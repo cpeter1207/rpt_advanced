@@ -55,6 +55,17 @@ pub(crate) fn load_catalog() -> Result<CodecCatalog, MediaError> {
     Ok(catalog)
 }
 
+/// Origin of decoded PCM at the provider boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodeProvenance {
+    /// Successfully decoded packet; PCM is valid.
+    Original,
+    /// Explicit native recovery supplied PCM; it must not initiate speech.
+    Concealed,
+    /// Native recovery supplied no PCM; use the existing fallback instead.
+    Missing,
+}
+
 /// One negotiated profile with independent encoder and decoder contexts.
 pub struct AudioCodec {
     profile: AudioParameters,
@@ -339,7 +350,11 @@ impl AudioCodec {
         Ok(info.frames)
     }
     /// Decode the actual inspected payload before any PCM overlap trimming.
-    pub fn decode(&mut self, packet: &[u8], pcm: &mut [f32]) -> Result<(), MediaError> {
+    pub fn decode(
+        &mut self,
+        packet: &[u8],
+        pcm: &mut [f32],
+    ) -> Result<DecodeProvenance, MediaError> {
         let frames = self.inspect(packet).map_err(|_| MediaError::Codec)? as usize;
         if pcm.len() != frames {
             return Err(MediaError::Codec);
@@ -354,14 +369,27 @@ impl AudioCodec {
             }
             native
         };
-        let count = self
-            .decoder
-            .decode_recovering(packet, pcm)
-            .map_err(|_| MediaError::Codec)?;
-        if count != frames {
-            return Err(MediaError::Codec);
+        match self.decoder.decode(packet, pcm) {
+            Ok(count) if count == frames => Ok(DecodeProvenance::Original),
+            Err(error) if error.status == Status::Malformed => self.conceal(frames as u32, pcm),
+            _ => Err(MediaError::Codec),
         }
-        Ok(())
+    }
+    /// Request native PLC exactly once. Missing means the caller must use fallback.
+    pub fn conceal(
+        &mut self,
+        frames: u32,
+        pcm: &mut [f32],
+    ) -> Result<DecodeProvenance, MediaError> {
+        match self
+            .decoder
+            .conceal(frames, pcm)
+            .map_err(|_| MediaError::Codec)?
+        {
+            0 => Ok(DecodeProvenance::Missing),
+            count if count == frames as usize => Ok(DecodeProvenance::Concealed),
+            _ => Err(MediaError::Codec),
+        }
     }
 }
 

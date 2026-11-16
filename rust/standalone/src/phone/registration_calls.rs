@@ -439,7 +439,23 @@ impl Reactor {
                     if slot.observation.state != 5 || slot.step.is_some() {
                         return true;
                     }
-                    !done && native.release_call(*token).is_err()
+                    if !done && native.release_call(*token).is_err() {
+                        return true;
+                    }
+                    if let Some(shared) = &slot.shared {
+                        match shared.media.lock() {
+                            Ok(media) => match media.observe() {
+                                Ok(observation) => eprintln!(
+                                    "phone SIP playout: jitter={:?} decode_recovery_frames={} native_plc_frames={} fallback_frames={}",
+                                    observation.jitter, observation.decode_recovery_frames,
+                                    observation.native_plc_frames, observation.fallback_frames
+                                ),
+                                Err(_) => eprintln!("phone SIP: playout observation unavailable"),
+                            },
+                            Err(_) => eprintln!("phone SIP: media owner unavailable for observation"),
+                        }
+                    }
+                    false
                 });
             }
             // No account, peer or media borrow/lock survives into the product callback.

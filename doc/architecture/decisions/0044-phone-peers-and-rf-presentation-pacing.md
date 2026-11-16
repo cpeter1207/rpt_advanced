@@ -2372,3 +2372,15 @@ receiver extension accepting trailing fractional zeroes such as20.0.
 This adds no codec implementation, provider version, ABI or media queue. Focused
 native-provider, SDP, UDP, finite-tail and source-credit checks are distinct from
 actual full-call, external-peer, hardware and aggregate qualification.
+
+### Explicit SIP decoder recovery provenance
+
+The serial SIP media owner distinguishes successfully decoded packet PCM from
+explicit decoder recovery and unsupported native concealment. It retains the
+concealed flag with the original source coordinates through sink backpressure;
+unsupported concealment takes the existing hard-gap path in this incremental
+checkpoint. A per-call payload-free control-side snapshot exposes jitter playout
+observations and measured recovery counts, not a network loss percentage. The
+provider C ABI is unchanged. Native iLBC success can hide internal recovery;
+this boundary does not claim to detect that unreported distinction. Bounded PLC
+continuity and synthetic-onset protections remain a separate, undeployed step.

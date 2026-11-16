@@ -1,4 +1,5 @@
 //! Batch A wire contracts; the qualified G.722 checkpoint is a separate branch.
+use rpt_advanced_standalone::phone::media::DecodeProvenance;
 use rpt_advanced_standalone::phone::media::{AudioCodec, MediaDescription};
 
 fn description(payload: u8, format: &str) -> MediaDescription {
@@ -68,7 +69,10 @@ fn both_l16_rates_are_network_endian_on_the_wire() {
         codec.encode(&pcm, &mut packet).unwrap();
         assert_eq!(packet, expected);
         let mut decoded = vec![0.0; frames];
-        codec.decode(&expected, &mut decoded).unwrap();
+        assert_eq!(
+            codec.decode(&expected, &mut decoded).unwrap(),
+            DecodeProvenance::Original
+        );
         assert_eq!(decoded, pcm);
     }
 }
@@ -90,10 +94,16 @@ fn g726_wire_variants_differ_only_in_nibble_packing() {
     }
     let mut standard_pcm = [0.0; 160];
     let mut aal2_pcm = [0.0; 160];
-    standard_codec
-        .decode(&standard_packet, &mut standard_pcm)
-        .unwrap();
-    aal2_codec.decode(&aal2_packet, &mut aal2_pcm).unwrap();
+    assert_eq!(
+        standard_codec
+            .decode(&standard_packet, &mut standard_pcm)
+            .unwrap(),
+        DecodeProvenance::Original
+    );
+    assert_eq!(
+        aal2_codec.decode(&aal2_packet, &mut aal2_pcm).unwrap(),
+        DecodeProvenance::Original
+    );
     assert_eq!(standard_pcm, aal2_pcm);
 }
 

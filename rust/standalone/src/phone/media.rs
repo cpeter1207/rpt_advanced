@@ -941,7 +941,7 @@ impl RtpEndpoint {
     }
 }
 /// Independent contexts through the existing protocol-neutral codec client.
-pub use super::codec::AudioCodec;
+pub use super::codec::{AudioCodec, DecodeProvenance};
 
 /// One immutable datagram retained only after socket backpressure. Audio and
 /// telephone events share this one slot, SSRC and sequence-number owner.

@@ -1,5 +1,7 @@
 //! Actual loader/callback contracts using a fault-wrapping released codec DSO.
-use rpt_advanced_standalone::phone::media::{AudioCodec, AudioProfile, MediaError};
+use rpt_advanced_standalone::phone::media::{
+    AudioCodec, AudioProfile, DecodeProvenance, MediaError,
+};
 use std::{ffi::CStr, path::PathBuf, process::Command};
 
 const FAULT: &str = "RPTADV_TEST_CODEC_FAULT";
@@ -35,6 +37,11 @@ fn exercise_fault(fault: &str) {
     let live = unsafe {
         library
             .get::<unsafe extern "C" fn() -> u32>(b"rptadv_test_codec_live_handles\0")
+            .unwrap()
+    };
+    let conceal_calls = unsafe {
+        library
+            .get::<unsafe extern "C" fn() -> u32>(b"rptadv_test_conceal_calls\0")
             .unwrap()
     };
     for (format, silence) in [(AudioProfile::Mulaw, 0xff), (AudioProfile::Alaw, 0xd5)] {
@@ -84,10 +91,26 @@ fn exercise_fault(fault: &str) {
             }
             let mut pcm = [1.0; 160];
             let decoded = codec.decode(&[silence; 160], &mut pcm);
-            if matches!(fault, "decode_error" | "decoded_frames") || fault.starts_with("inspect_") {
+            if fault == "malformed_recover" || fault == "malformed_missing" {
+                let expected = if fault == "malformed_recover" {
+                    DecodeProvenance::Concealed
+                } else {
+                    DecodeProvenance::Missing
+                };
+                assert_eq!(decoded, Ok(expected));
+                if fault == "malformed_recover" {
+                    assert!(pcm.iter().all(|sample| *sample == 0.25));
+                }
+                assert_eq!(
+                    unsafe { conceal_calls() },
+                    if format == AudioProfile::Mulaw { 1 } else { 2 }
+                );
+            } else if matches!(fault, "decode_error" | "decoded_frames")
+                || fault.starts_with("inspect_")
+            {
                 assert_eq!(decoded, Err(MediaError::Codec), "{fault}");
             } else {
-                assert_eq!(decoded, Ok(()));
+                assert_eq!(decoded, Ok(DecodeProvenance::Original));
                 assert!(pcm.iter().all(|sample| sample.abs() < 0.001));
             }
             drop(codec);
@@ -155,6 +178,8 @@ fn codec_rejects_provider_faults_and_reclaims_partial_construction() {
         "encoded_bytes",
         "source_frames",
         "packet_frames",
+        "malformed_recover",
+        "malformed_missing",
         "decode_error",
         "decoded_frames",
         "inspect_malformed",

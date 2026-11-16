@@ -1,4 +1,5 @@
 //! Independent wire-format contract for the native phone media boundary.
+use rpt_advanced_standalone::phone::media::DecodeProvenance;
 use rpt_advanced_standalone::phone::media::TelephoneEvent;
 use rpt_advanced_standalone::phone::media::{
     AudioProfile, MediaDescription, MediaError, SendStatus, TimedAudio,
@@ -244,7 +245,10 @@ fn g711_uses_the_released_dynamic_provider_in_both_directions() {
         codec.encode(&[0.0; 160], &mut packet).unwrap();
         assert_eq!(packet, [silence; 160]);
         let mut decoded = [1.0; 160];
-        codec.decode(&packet, &mut decoded).unwrap();
+        assert_eq!(
+            codec.decode(&packet, &mut decoded).unwrap(),
+            DecodeProvenance::Original
+        );
         assert!(decoded.iter().all(|sample| sample.abs() < 0.001));
     }
 }
@@ -638,7 +642,10 @@ fn g722_negotiates_8000_rtp_clock_and_16000_pcm_without_changing_g711() {
     let mut packet = [0; 160];
     codec.encode(&pcm, &mut packet).unwrap();
     let mut decoded = [0.0; 320];
-    codec.decode(&packet, &mut decoded).unwrap();
+    assert_eq!(
+        codec.decode(&packet, &mut decoded).unwrap(),
+        DecodeProvenance::Original
+    );
     assert!(decoded.iter().all(|sample| sample.is_finite()));
     assert!(decoded.iter().any(|sample| sample.abs() > 0.1));
 }

@@ -11,6 +11,7 @@ struct Sink {
     refuse_digit: bool,
     audio: Vec<(u64, usize, u64)>,
     pcm: Vec<f32>,
+    flags: Vec<u32>,
     gaps: Vec<(u64, u32)>,
     digits: Vec<u32>,
     discontinuities: usize,
@@ -21,10 +22,11 @@ unsafe extern "C" fn audio(
     start: u64,
     samples: *const f32,
     count: usize,
-    _: u32,
+    concealed: u32,
     birth: *const abi::rptadv_source_birth_v1,
 ) -> usize {
     let sink = unsafe { &mut *context.cast::<Sink>() };
+    sink.flags.push(concealed);
     let accepted = count.min(sink.credit);
     assert!(
         unsafe { std::slice::from_raw_parts(samples, count) }
@@ -145,6 +147,16 @@ async fn source_retains_refused_prefix_birth_digits_and_gaps() {
             (start, 60, receipt),
             (start + 60, 100, receipt)
         ]
+    );
+    assert_eq!(sink.flags, [0, 0, 0]);
+    let observation = media.observe().unwrap();
+    assert_eq!(
+        (
+            observation.decode_recovery_frames,
+            observation.native_plc_frames,
+            observation.fallback_frames
+        ),
+        (0, 0, 0)
     );
     assert_eq!(sink.discontinuities, 1);
     assert_eq!(media.timestamp(80), Ok(start + 160));
@@ -296,7 +308,7 @@ async fn jitter_delay_insertion_does_not_publish_a_source_gap() {
     read(&mut media, &mut sink, born + 95_000_000);
     read(&mut media, &mut sink, born + 95_000_000);
     assert!(
-        media.jitter.observe().unwrap().insertion_span > 0,
+        media.observe().unwrap().jitter.insertion_span > 0,
         "exercise an actual owned-provider insertion"
     );
     assert!(
@@ -427,7 +439,7 @@ async fn adaptive_delay_reduction_preserves_exact_source_gap_credit() {
         }
     }
     assert!(
-        media.jitter.observe().unwrap().skipped_span > 0,
+        media.observe().unwrap().jitter.skipped_span > 0,
         "exercise actual adaptive delay reduction"
     );
     let mut end = origin + 1000;
@@ -782,4 +794,256 @@ async fn variable_packet_offsets_preserve_exact_gap_overlap_and_birth() {
         assert_eq!(media.source_end, Some(start + (80 + offset + 240) as u64));
         drop(media);
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovered_pcm_keeps_concealed_flag_and_samples_across_refusals() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    media.pcm[..4].copy_from_slice(&[0.1, 0.2, 0.3, 0.4]);
+    media.pending = Some(Pending::Audio {
+        start: 100,
+        count: 4,
+        born: 10,
+        prefix: 0,
+        provenance: DecodeProvenance::Concealed,
+    });
+    let mut sink = Sink::default();
+    assert_eq!(read(&mut media, &mut sink, 20), 2);
+    sink.credit = 2;
+    assert_eq!(read(&mut media, &mut sink, 20), 2);
+    assert_eq!(read(&mut media, &mut sink, 20), 1);
+    assert_eq!(sink.flags, [1, 1, 1]);
+    assert_eq!(sink.pcm, [0.1, 0.2, 0.3, 0.4]);
+}
+
+#[test]
+fn scripted_recovery_reaches_sink_with_one_decision_across_credit() {
+    const CHILD: &str = "RPTADV_TEST_RECOVERY_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let providers = ProviderSet::load().unwrap();
+            let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+            let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let mut media = fixture_media(&sender, jitter).await;
+            sender
+                .send_to(
+                    &packet(1, 1000, 0, &[0xa5; 160]),
+                    media.endpoint.local_addr().unwrap(),
+                )
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            let mut sink = Sink::default();
+            let now = 1_000_000_000;
+            assert_eq!(read(&mut media, &mut sink, now), 0);
+            if std::env::var(CHILD).unwrap() == "missing" {
+                assert_eq!(read(&mut media, &mut sink, now + 40_000_000), 2);
+                sink.credit = 80;
+                assert_eq!(read(&mut media, &mut sink, now + 60_000_000), 2);
+                assert_eq!(read(&mut media, &mut sink, now + 80_000_000), 1);
+                assert!(sink.flags.is_empty());
+                assert_eq!(sink.gaps.iter().map(|(_, count)| *count).sum::<u32>(), 160);
+                let observation = media.observe().unwrap();
+                assert_eq!(
+                    (
+                        observation.decode_recovery_frames,
+                        observation.native_plc_frames,
+                        observation.fallback_frames
+                    ),
+                    (0, 0, 0)
+                );
+                return;
+            }
+            sender
+                .send_to(
+                    &packet(2, 1120, 0, &[0xa5; 160]),
+                    media.endpoint.local_addr().unwrap(),
+                )
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            assert_eq!(read(&mut media, &mut sink, now + 10_000_000), 0);
+            assert_eq!(read(&mut media, &mut sink, now + 40_000_000), 2);
+            assert_eq!(media.observe().unwrap().decode_recovery_frames, 160);
+            sink.credit = 60;
+            assert_eq!(read(&mut media, &mut sink, now + 60_000_000), 2);
+            assert_eq!(media.observe().unwrap().decode_recovery_frames, 160);
+            sink.credit = 160;
+            assert_eq!(read(&mut media, &mut sink, now + 80_000_000), 1);
+            assert_eq!(media.observe().unwrap().decode_recovery_frames, 160);
+            assert_eq!(sink.flags, [1, 1, 1]);
+            assert_eq!(sink.pcm, vec![0.25; 160]);
+            sink.credit = 0;
+            assert_eq!(read(&mut media, &mut sink, now + 100_000_000), 2);
+            assert_eq!(media.observe().unwrap().decode_recovery_frames, 320);
+            sink.credit = 50;
+            assert_eq!(read(&mut media, &mut sink, now + 120_000_000), 2);
+            sink.credit = 160;
+            assert_eq!(read(&mut media, &mut sink, now + 140_000_000), 1);
+            assert_eq!(sink.flags, [1, 1, 1, 1, 1, 1]);
+            assert_eq!(sink.pcm, vec![0.25; 280]);
+            assert_eq!(media.observe().unwrap().decode_recovery_frames, 320);
+            media.reset().unwrap();
+            assert_eq!(media.observe().unwrap().decode_recovery_frames, 320);
+            let fresh = fixture_media(&sender, jitter).await;
+            assert_eq!(fresh.observe().unwrap().decode_recovery_frames, 0);
+        });
+        return;
+    }
+    let directory = std::env::temp_dir().join(format!("rptadv-recovery-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let source =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phone_codec.c");
+    let output = std::process::Command::new("timeout")
+        .args([
+            "15", "cc", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror", "-I",
+        ])
+        .arg(
+            std::env::var_os("RPTADV_CODEC_INCLUDE")
+                .unwrap_or_else(|| "/usr/include/rptadv-codec".into()),
+        )
+        .arg(source)
+        .args(["-ldl", "-o"])
+        .arg(directory.join("librptadv_codec_g711.so.1"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let provider = unsafe {
+        let library = libloading::Library::new("librptadv_codec_g711.so.1").unwrap();
+        let entry = library
+            .get::<unsafe extern "C" fn()>(b"rptadv_codec_descriptor_v1\0")
+            .unwrap();
+        let mut info: libc::Dl_info = std::mem::zeroed();
+        assert_ne!(libc::dladdr(*entry as *const libc::c_void, &mut info), 0);
+        std::fs::canonicalize(std::ffi::CStr::from_ptr(info.dli_fname).to_str().unwrap()).unwrap()
+    };
+    let mut paths = vec![directory.clone()];
+    if let Some(original) = std::env::var_os("LD_LIBRARY_PATH") {
+        paths.extend(std::env::split_paths(&original));
+    }
+    for (mode, fault) in [
+        ("recovered", "malformed_recover"),
+        ("missing", "malformed_missing"),
+    ] {
+        let child = std::process::Command::new("timeout").arg("15").arg(std::env::current_exe().unwrap())
+            .args(["--exact", "phone::call_media::tests::scripted_recovery_reaches_sink_with_one_decision_across_credit", "--test-threads=1", "--nocapture"])
+            .env(CHILD, mode).env("RPTADV_TEST_CODEC_FAULT", fault)
+            .env("RPTADV_TEST_REAL_CODEC", &provider).env("LD_LIBRARY_PATH", std::env::join_paths(&paths).unwrap())
+            .output().unwrap();
+        assert!(
+            child.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn observation_exposes_jitter_drops_and_preserves_call_boundary() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    assert_eq!(
+        media.jitter.put(1000, 160, 0, &[1]).unwrap(),
+        Admission::Accepted
+    );
+    assert_eq!(
+        media.jitter.put(1000, 160, 0, &[1]).unwrap(),
+        Admission::Duplicate
+    );
+    for i in 1..64 {
+        assert_eq!(
+            media.jitter.put(1000 + i * 160, 160, 0, &[1]).unwrap(),
+            Admission::Accepted
+        );
+    }
+    assert_eq!(
+        media.jitter.put(1000 + 64 * 160, 160, 0, &[1]).unwrap(),
+        Admission::Full
+    );
+    let before = media.observe().unwrap();
+    assert_eq!(
+        (before.jitter.duplicate_drops, before.jitter.full_drops),
+        (1, 1)
+    );
+    assert_eq!(
+        media
+            .jitter
+            .get(40_000_000, 160, &mut media.packet)
+            .unwrap()
+            .kind,
+        Kind::Packet
+    );
+    media.jitter.advance(40_000_000, 0).unwrap();
+    assert_eq!(
+        media.jitter.put(700, 160, 100_000_000, &[1]).unwrap(),
+        Admission::Late
+    );
+    assert_eq!(media.observe().unwrap().jitter.late_drops, 1);
+    media.reset().unwrap(); // Transmit reset must not erase receive-call observations.
+    let after = media.observe().unwrap();
+    assert_eq!(
+        (
+            after.jitter.duplicate_drops,
+            after.jitter.full_drops,
+            after.jitter.late_drops
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        (
+            after.decode_recovery_frames,
+            after.native_plc_frames,
+            after.fallback_frames
+        ),
+        (0, 0, 0)
+    );
+    let fresh = fixture_media(&sender, jitter).await.observe().unwrap();
+    assert_eq!(
+        (
+            fresh.jitter.duplicate_drops,
+            fresh.jitter.full_drops,
+            fresh.jitter.late_drops
+        ),
+        (0, 0, 0)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn observation_distinguishes_missing_from_insertion() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    media.jitter.put(1000, 160, 0, &[1]).unwrap();
+    media.jitter.put(1320, 160, 20_000_000, &[3]).unwrap();
+    assert_eq!(
+        media
+            .jitter
+            .get(40_000_000, 160, &mut media.packet)
+            .unwrap()
+            .kind,
+        Kind::Packet
+    );
+    media.jitter.advance(40_000_000, 0).unwrap();
+    let decision = media
+        .jitter
+        .get(60_000_000, 160, &mut media.packet)
+        .unwrap();
+    assert_eq!(decision.kind, Kind::Missing);
+    let snapshot = media.observe().unwrap();
+    assert_eq!(snapshot.jitter.missing_span, u64::from(decision.span));
+    assert_eq!(snapshot.jitter.insertion_span, 0);
 }

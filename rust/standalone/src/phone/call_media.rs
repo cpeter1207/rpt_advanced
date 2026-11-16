@@ -1,12 +1,12 @@
 //! SIP's thin RTP/codec/jitter translation into the existing product source callbacks.
 use super::media::{
-    AudioCodec, AudioParameters, MediaDescription, MediaError, RtpEndpoint, RtpEvent, SendStatus,
-    TimedAudio,
+    AudioCodec, AudioParameters, DecodeProvenance, MediaDescription, MediaError, RtpEndpoint,
+    RtpEvent, SendStatus, TimedAudio,
 };
 use crate::abi;
 use crate::phone::media::TelephoneEvent;
 use rptadv_codec_client::CodecCatalog;
-use rptadv_jitter_client::{Admission, Jitter, Kind};
+use rptadv_jitter_client::{Admission, Jitter, Kind, Observation};
 use std::{mem::size_of, net::SocketAddr, sync::Arc};
 
 enum Pending {
@@ -15,6 +15,7 @@ enum Pending {
         count: usize,
         born: u64,
         prefix: u32,
+        provenance: DecodeProvenance,
     },
     Gap {
         start: u64,
@@ -71,12 +72,24 @@ impl Offer {
     }
 }
 
+/// Per-call bounded playout observations, never a network-loss percentage.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MediaObservation {
+    pub(crate) jitter: Observation,
+    pub(crate) decode_recovery_frames: u64,
+    pub(crate) native_plc_frames: u64,
+    pub(crate) fallback_frames: u64,
+}
+
 /// One serial media owner; product Outbound still owns PCM conversion and pacing.
 pub(crate) struct Media {
     endpoint: RtpEndpoint,
     codec: AudioCodec,
     profile: AudioParameters,
     jitter: Jitter,
+    decode_recovery_frames: u64,
+    native_plc_frames: u64,
+    fallback_frames: u64,
     clock: Option<(u32, u64)>,
     births: [Option<(u64, u64)>; 64],
     birth_slot: usize,
@@ -141,6 +154,9 @@ impl Media {
             codec,
             profile,
             jitter,
+            decode_recovery_frames: 0,
+            native_plc_frames: 0,
+            fallback_frames: 0,
             clock: None,
             births: [None; 64],
             birth_slot: 0,
@@ -156,6 +172,15 @@ impl Media {
             marker: true,
             answer,
             digit_capabilities,
+        })
+    }
+    /// Snapshot the serial owner's measured counters without advancing playout.
+    pub(crate) fn observe(&self) -> Result<MediaObservation, MediaError> {
+        Ok(MediaObservation {
+            jitter: self.jitter.observe().map_err(|_| MediaError::Jitter)?,
+            decode_recovery_frames: self.decode_recovery_frames,
+            native_plc_frames: self.native_plc_frames,
+            fallback_frames: self.fallback_frames,
         })
     }
     pub(crate) fn pcm_rate(&self) -> u32 {
@@ -323,20 +348,27 @@ impl Media {
                 } else {
                     decision.start_offset.max(0) as u32
                 };
-                self.codec
+                let provenance = self
+                    .codec
                     .decode(&self.packet[..decision.length], &mut self.pcm[..span])?;
+                if provenance == DecodeProvenance::Concealed {
+                    self.decode_recovery_frames =
+                        self.decode_recovery_frames.saturating_add(span as u64);
+                }
                 self.pcm.copy_within(skip..span, 0);
                 if let Some((_, born)) = self
                     .births
                     .iter()
                     .flatten()
                     .find(|(timestamp, _)| *timestamp == decision.timestamp)
+                    .filter(|_| provenance != DecodeProvenance::Missing)
                 {
                     self.pending = Some(Pending::Audio {
                         start,
                         count,
                         born: *born,
                         prefix,
+                        provenance,
                     });
                 } else {
                     self.pending = Some(Pending::Gap {
@@ -450,7 +482,11 @@ impl Media {
                 }
             }
             Pending::Audio {
-                start, count, born, ..
+                start,
+                count,
+                born,
+                provenance,
+                ..
             } => {
                 if born > sink.reference_now_ns {
                     return Err(MediaError::SourceContract);
@@ -468,7 +504,7 @@ impl Media {
                         start + self.offset as u64,
                         self.pcm[self.offset..count].as_ptr(),
                         remaining,
-                        0,
+                        u32::from(provenance == DecodeProvenance::Concealed),
                         &birth,
                     )
                 };
