@@ -49,18 +49,19 @@ def test_standalone_package_does_not_depend_on_asterisk() -> None:
     depends = stanza.split("Depends:", 1)[1].split("Description:", 1)[0]
     assert "asterisk" not in depends.lower()
     assert "app-rpt-advanced" not in depends.lower()
-    assert "librptadv-iax2-client2 (>= 0.1.0~alpha9)" in depends
+    assert "librptadv-iax2-client2 (>= 0.1.0~alpha13)" in depends
 
 
-def test_standalone_requires_current_radio_adapters() -> None:
+def test_standalone_requires_current_native_providers() -> None:
     control = (ROOT / "debian/control").read_text(encoding="utf-8")
     standalone = package_stanza("rpt-advanced")
     for development, runtime, minimum in (
         ("librptadvradio-dev", "librptadvradio5", "0.1.0~alpha11"),
+        ("librptadv-iax2-client-dev", "librptadv-iax2-client2", "0.1.0~alpha13"),
         (
             "librptadv-portaudio-alsa-adapter-dev",
             "librptadv-portaudio-alsa-adapter2",
-            "0.2.0~alpha4",
+            "0.2.0~alpha5",
         ),
         ("librptadv-gpio-adapter-dev", "librptadv-gpio-adapter1", "0.1.0~alpha4"),
     ):
@@ -107,7 +108,7 @@ def test_standalone_check_builds_the_product_before_loading_it() -> None:
         text=True,
     )
     build = plan.find("build --locked --release -p rpt-advanced-standalone")
-    stage = plan.find('"build/librptadv_product.so.2"')
+    stage = plan.find('"build/librptadv_product.so.3"')
     test = plan.find("test --locked -p rpt-advanced-standalone")
     assert 0 <= build < stage < test, "standalone tests need the current shared product"
     assert "-p rptadv-resolver-adapter" in plan[:test]
@@ -126,7 +127,7 @@ def test_shlibdeps_searches_every_private_adapter_library_directory() -> None:
     assert not any(character.isspace() for character in search_path)
     assert all(path.startswith("$(CURDIR)/debian/") for path in search_path.split(":"))
     for package in (
-        "librptadv-product2",
+        "librptadv-product3",
         "librptadv-file-adapter1",
         "librptadv-speech-adapter1",
         "librptadv-resolver-adapter1",
@@ -145,7 +146,7 @@ if __name__ == "__main__":
         test_standalone_package_installs_the_service_configuration_as_a_conffile,
         test_debian_install_manifests_are_not_executable_scripts,
         test_standalone_package_does_not_depend_on_asterisk,
-        test_standalone_requires_current_radio_adapters,
+        test_standalone_requires_current_native_providers,
         test_standalone_package_grants_service_user_cm119_usb_access,
         test_asterisk_adapter_is_separately_installable,
         test_standalone_build_profile_omits_asterisk_build_and_adapter,

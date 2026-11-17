@@ -6,13 +6,20 @@
 #include <stddef.h>
 #include <string.h>
 
-_Static_assert(RPTADV_PRODUCT_ABI_VERSION == 7, "update product ABI probe deliberately");
+_Static_assert(RPTADV_PRODUCT_ABI_VERSION == 8, "update product ABI probe deliberately");
 _Static_assert(RPTADV_HOST_ABI_VERSION == 10, "update host ABI probe deliberately");
 _Static_assert(RPTADV_PEER_PHONE == 3 && RPTADV_PEER_PRIVATE_CALL == 32,
                "phone identity requires an explicit private-call capability");
 _Static_assert(RPTADV_PEER_INFO_PREFIX_SIZE == 80, "preserve the original peer metadata prefix");
 _Static_assert(RPTADV_PEER_INFO_PHONE_SIZE == 96,
                "phone admission requires the complete account tail");
+_Static_assert(RPTADV_PEER_SOURCE_SINK_PREFIX_SIZE == 32, "preserve legacy source sink callbacks");
+_Static_assert(offsetof(struct rptadv_peer_source_sink_v1, digit) == 64,
+               "preserve the complete source birth and retirement prefix");
+_Static_assert(sizeof(struct rptadv_peer_source_sink_v1) == 72,
+               "ordered private digits extend the source sink tail");
+_Static_assert(sizeof(struct rptadv_source_birth_v1) == 24,
+               "original source birth uses the host clock identity");
 _Static_assert(URP_AST_DIRECT_CALLBACKS_ABI_VERSION == 6,
                "use the canonical metadata-aware SDK callbacks");
 _Static_assert(sizeof(UrpNativeReceiveMetadata) == 72,
@@ -27,7 +34,11 @@ _Static_assert(offsetof(struct rptadv_host_services_v10, radio_remote_submit) ==
                "preserve remote callback order");
 _Static_assert(offsetof(struct rptadv_host_services_v10, radio_ready) == 392,
                "preserve the complete remote tail");
-_Static_assert(sizeof(struct rptadv_host_services_v10) == 400,
+_Static_assert(offsetof(struct rptadv_host_services_v10, radio_feedback_bind) == 400,
+               "preserve the complete SDK33 host prefix");
+_Static_assert(offsetof(struct rptadv_host_services_v10, peer_send_prepared_timed) == 408,
+               "preserve the complete previous host prefix");
+_Static_assert(sizeof(struct rptadv_host_services_v10) == 416,
                "update the complete ABI-10 size deliberately");
 
 static int node(void *context, const struct rptadv_node_host_configuration *record) {

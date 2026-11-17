@@ -11,6 +11,8 @@ use std::{
     mem::{offset_of, size_of, size_of_val},
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{self, NonNull},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
 };
 
 #[path = "services_remote.rs"]
@@ -33,8 +35,20 @@ pub enum PeerInput<'a> {
     RadioUnkey,
 }
 
+/// Immutable authoritative private-call digit source, selected at admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneDigitMode {
+    /// Negotiated/native source events; in-band analysis still mutes tones.
+    NativeEvents,
+    /// Explicit supported in-band profile; native symbols are consumed but ignored.
+    InBand,
+}
+
 /// Borrowed provider-owned source input. Only the accepted prefix transfers.
 pub enum SourceInput<'a> {
+    /// One negotiated private telephone digit; one credit accepts it exactly once.
+    /// Refusal retains the same symbol ahead of later source PCM.
+    Digit(char),
     /// Codec-rate PCM and its original position; codec PLC bypasses detection.
     Audio {
         /// Original source-rate position of the offered prefix.
@@ -43,6 +57,8 @@ pub enum SourceInput<'a> {
         samples: &'a [f32],
         /// Codec-native PLC, never fresh in-band detector input.
         concealed: bool,
+        /// Original packet receipt; absence cannot qualify bounded RF playout.
+        birth: Option<SourceBirth>,
     },
     /// Unresolved counted loss in the same source timeline.
     Gap {
@@ -60,6 +76,60 @@ pub enum SourceInput<'a> {
         /// Fresh represented identity from the same read turn, zero if unresolved.
         represented_node_number: u32,
     },
+    /// Retire the actual downstream media generation before more PCM.
+    /// Dispatch credit is one only after retirement completes, zero while pending.
+    Discontinuity,
+}
+
+/// Original packet receipt, preserved across retries and source conversion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceBirth {
+    /// Nonzero identity of the controller I/O clock lifecycle.
+    pub host_clock_epoch: u64,
+    /// Nanoseconds from that clock's original monotonic epoch.
+    pub born_ns: u64,
+}
+
+/// One clock reference captured before entering a synchronous source provider.
+#[derive(Clone, Copy, Default)]
+pub struct SourceTimeReference {
+    /// Stable nonzero controller I/O lifecycle; zero disables qualification.
+    pub host_clock_epoch: u64,
+    /// Nanoseconds from the same lifecycle's original monotonic epoch.
+    pub now_ns: u64,
+}
+
+static NEXT_SOURCE_CLOCK: AtomicU64 = AtomicU64::new(1);
+
+/// One I/O owner's monotonic epoch, retained across configuration replacement.
+#[derive(Clone, Copy)]
+pub(crate) struct SourceTimeClock {
+    identity: u64,
+    origin: Instant,
+}
+
+impl SourceTimeClock {
+    pub(crate) fn new(origin: Instant) -> Option<Self> {
+        let identity = NEXT_SOURCE_CLOCK
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .ok()?;
+        Some(Self { identity, origin })
+    }
+
+    pub(crate) fn reference(self) -> SourceTimeReference {
+        let Some(now_ns) = Instant::now()
+            .checked_duration_since(self.origin)
+            .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok())
+        else {
+            return SourceTimeReference::default();
+        };
+        SourceTimeReference {
+            host_clock_epoch: self.identity,
+            now_ns,
+        }
+    }
 }
 
 /// Exact disposition of the previously accepted product-ring prefix.
@@ -105,7 +175,24 @@ pub struct PcmProcessor {
 // transmit worker, and destruction waits for that generation's quiescence.
 unsafe impl Send for PcmProcessor {}
 
+#[path = "services_history.rs"]
+mod history;
+
 impl PcmProcessor {
+    fn buffering(&mut self) -> Option<abi::UrpProgrammeBuffering> {
+        let query = self.api.programme_buffering?;
+        // This scalar record borrows the same serial graph owner as process.
+        let mut state: abi::UrpProgrammeBuffering = unsafe { std::mem::zeroed() };
+        state.struct_size = size_of_val(&state) as u32;
+        state.abi_version = 1;
+        let status = unsafe { query(self.api.context, &mut state) };
+        (status == 0
+            && state.struct_size as usize >= size_of_val(&state)
+            && state.abi_version == 1
+            && state.reserved == 0)
+            .then_some(state)
+    }
+
     fn process(&mut self, samples: &mut [f32]) -> bool {
         if samples.len() > self.maximum {
             return false;
@@ -134,16 +221,39 @@ impl Drop for PcmProcessor {
 pub struct ProcessedPeer<P> {
     input: P,
     processor: Option<PcmProcessor>,
+    history: Option<Box<history::History>>,
 }
-impl<P> ProcessedPeer<P> {
-    /// Retain preallocated processing alongside this unique ring consumer.
-    pub fn new(input: P, processor: Option<PcmProcessor>) -> Self {
-        Self { input, processor }
+impl<P: rpt_advanced_core::link::PeerInput> ProcessedPeer<P> {
+    /// Prepare optional compact receipt metadata before publishing this unique consumer.
+    pub fn new(input: P, mut processor: Option<PcmProcessor>) -> Self {
+        let history = if input.source_timing_available()
+            && input
+                .phone_reply()
+                .is_some_and(|reply| reply.phone_source().is_some())
+        {
+            processor.as_mut().and_then(history::History::prepare)
+        } else {
+            None
+        };
+        Self {
+            input,
+            processor,
+            history,
+        }
+    }
+
+    fn forget_history(&mut self) {
+        if let Some(history) = self.history.as_mut() {
+            history.invalidate();
+        }
     }
 }
 impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     for ProcessedPeer<P>
 {
+    fn phone_reply(&self) -> Option<&rpt_advanced_core::link::PeerReply> {
+        self.input.phone_reply()
+    }
     fn source_rate(&self) -> u32 {
         self.input.source_rate()
     }
@@ -151,17 +261,26 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         self.input.receive_policy()
     }
     fn source_timing_available(&self) -> bool {
-        self.processor.is_none() && self.input.source_timing_available()
+        (self.processor.is_none() || self.history.is_some()) && self.input.source_timing_available()
     }
     fn render_timed_sample(&mut self) -> Option<rpt_advanced_core::link::TimedPeerSample> {
-        let mut sample = self.input.render_timed_sample()?;
+        let Some(mut sample) = self.input.render_timed_sample() else {
+            self.forget_history();
+            return None;
+        };
         if let Some(processor) = self.processor.as_mut() {
+            let original = sample;
             if !processor.process(std::slice::from_mut(&mut sample.sample)) {
+                self.forget_history();
                 return None;
             }
-            // The existing graph contract does not locate retained output on
-            // its input timeline. Preserve PCM without inventing provenance.
+            // A qualified graph bound can retain an older original receipt bound,
+            // but does not recover an exact coordinate or real/PLC classification.
             sample.provenance = None;
+            sample.age_bound = self
+                .history
+                .as_mut()
+                .and_then(|history| history.output(original, processor.buffering()));
         }
         if self.input.signals().dtmf_muted() {
             sample.sample = 0.0;
@@ -170,6 +289,62 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
             }
         }
         Some(sample)
+    }
+    fn render_timed_block(
+        &mut self,
+        output: &mut [f32],
+    ) -> Option<rpt_advanced_core::link::RenderedPeerBlock> {
+        use rpt_advanced_core::link::RenderedPeerBlock;
+        if self.processor.is_none() {
+            let block = self.input.render_timed_block(output);
+            if block.is_none() || self.input.signals().dtmf_muted() {
+                output.fill(0.0);
+            }
+            return block;
+        }
+        let Some(history) = self.history.as_mut() else {
+            return self.render(output).map(|real| RenderedPeerBlock {
+                real,
+                age_bound: None,
+            });
+        };
+        if output.is_empty() {
+            return Some(RenderedPeerBlock {
+                real: 0,
+                age_bound: None,
+            });
+        }
+        let processor = self
+            .processor
+            .as_mut()
+            .expect("qualified history has a processor");
+        if output.len() > processor.maximum {
+            history.invalidate();
+            output.fill(0.0);
+            return None;
+        }
+        let mut receipt = history.begin_block();
+        let mut real = 0;
+        for sample in output.iter_mut() {
+            let Some(input) = self.input.render_timed_sample() else {
+                history.invalidate();
+                output.fill(0.0);
+                return None;
+            };
+            real += usize::from(input.provenance.is_some_and(|provenance| provenance.real));
+            history.append_block(&mut receipt, input);
+            *sample = input.sample;
+        }
+        if !processor.process(output) {
+            history.invalidate();
+            output.fill(0.0);
+            return None;
+        }
+        let age_bound = history.finish_block(receipt, processor.buffering());
+        if self.input.signals().dtmf_muted() {
+            output.fill(0.0);
+        }
+        Some(RenderedPeerBlock { real, age_bound })
     }
     fn signals(&self) -> &rpt_advanced_core::link::PeerSignals {
         self.input.signals()
@@ -181,6 +356,7 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         self.input.finite_playout()
     }
     fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+        self.forget_history();
         match self.input.render(output) {
             Some(real)
                 if self
@@ -200,6 +376,7 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         }
     }
     fn silence(&mut self, scratch: &mut [f32]) {
+        self.forget_history();
         scratch.fill(0.0);
         if let Some(processor) = self.processor.as_mut() {
             let _ = processor.process(scratch);
@@ -207,6 +384,7 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         scratch.fill(0.0);
     }
     fn render_sample(&mut self) -> Option<f32> {
+        self.forget_history();
         let mut sample = self.input.render_sample()?;
         if self
             .processor
@@ -399,6 +577,8 @@ impl HostServices {
         let metadata_tail = offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind);
         let remote_tail = offset_of!(abi::rptadv_host_services_v10, radio_service);
         let ready_tail = offset_of!(abi::rptadv_host_services_v10, radio_ready);
+        let feedback_tail = offset_of!(abi::rptadv_host_services_v10, radio_feedback_bind);
+        let timed_tail = offset_of!(abi::rptadv_host_services_v10, peer_send_prepared_timed);
         if size < table_size
             && ![
                 required,
@@ -407,6 +587,8 @@ impl HostServices {
                 metadata_tail,
                 remote_tail,
                 ready_tail,
+                feedback_tail,
+                timed_tail,
             ]
             .contains(&size)
         {
@@ -447,6 +629,7 @@ impl HostServices {
             || !matches!(async_count, 0 | 3)
             || !matches!(egress_count, 0 | 6)
             || (egress_count == 6 && async_count != 3)
+            || (api.peer_send_prepared_timed.is_some() && egress_count != 6)
             || (egress_count == 0 && api.peer_write.is_none())
             || (api.peer_read_source.is_some() && egress_count != 6)
         {
@@ -470,6 +653,7 @@ impl HostServices {
             context: ptr::null_mut(),
             process: None,
             destroy: None,
+            programme_buffering: None,
         };
         let code = unsafe {
             prepare(
@@ -485,8 +669,13 @@ impl HostServices {
         match code {
             1 => Ok(None),
             0 => {
+                let prefix = offset_of!(abi::rptadv_pcm_processor_v1, programme_buffering);
+                let readable = api.struct_size as usize;
+                if readable == prefix {
+                    api.programme_buffering = None;
+                }
                 let processor = PcmProcessor { api, maximum };
-                (processor.api.struct_size as usize >= size_of::<abi::rptadv_pcm_processor_v1>()
+                ((readable == prefix || readable >= size_of::<abi::rptadv_pcm_processor_v1>())
                     && processor.api.abi_version == 1
                     && !processor.api.context.is_null()
                     && processor.api.process.is_some()
@@ -698,6 +887,8 @@ impl HostServices {
             account_generation: metadata.account_generation,
             qso_generation: metadata.qso_generation,
             provider_account: metadata.provider_account,
+            source_reset_pending: false,
+            source_digit_pending: None,
         })
     }
     /// Copy admission metadata while borrowing a pending peer; never adopt or destroy it.
@@ -764,21 +955,25 @@ impl HostServices {
         };
         if identity.wire_identity() != remote
             || !local_valid
-            || capabilities & !63 != 0
-            || (protocol != ProtocolId::Phone && capabilities & 32 != 0)
+            || capabilities & !127 != 0
+            || (protocol != ProtocolId::Phone && capabilities & 96 != 0)
             || (protocol == ProtocolId::Phone
                 && (capabilities & 32 == 0
-                    || capabilities & !35 != 0
+                    || capabilities & !115 != 0
                     || raw.account_generation == 0
                     || raw.qso_generation == 0))
+            || (capabilities & abi::RPTADV_PEER_PHONE_INBAND_DIGITS != 0 && capabilities & 51 != 51)
             || (capabilities & 1 != 0 && !self.peer_step_available())
             || (capabilities & 2 != 0
                 && (capabilities & 1 == 0 || self.0.peer_prepare_audio.is_none()))
             || (capabilities & 2 == 0 && self.0.peer_write.is_none())
             || (capabilities & 16 != 0
-                && (protocol != ProtocolId::EchoLink
+                && (!matches!(protocol, ProtocolId::EchoLink | ProtocolId::Phone)
                     || self.0.peer_read_source.is_none()
                     || capabilities & 3 != 3))
+            || (protocol == ProtocolId::Phone
+                && capabilities & 16 != 0
+                && self.0.peer_send_prepared_timed.is_none())
             || (protocol == ProtocolId::EchoLink
                 && capabilities & 4 != 0
                 && self.0.peer_send_human_text.is_none())
@@ -1048,6 +1243,23 @@ impl Radio {
         let code = unsafe { bind(self.services.0.context, self.handle.as_ptr(), metadata) };
         (code == 0).then_some(()).ok_or(Error::Operation)
     }
+    /// Bind the released SDK's stopped-only serial TX feedback port.
+    /// False means the host lacks this optional capability; no binding occurred.
+    ///
+    /// # Safety
+    /// The callback code and context must remain valid through synchronous radio
+    /// destruction. The host serializes feedback with the transmit endpoint.
+    pub unsafe fn bind_feedback(
+        &mut self,
+        port: &abi::UrpRadioFeedbackPort,
+    ) -> Result<bool, Error> {
+        let Some(bind) = self.services.0.radio_feedback_bind else {
+            return Ok(false);
+        };
+        // SAFETY: this unique radio lends its complete port on serialized control.
+        let code = unsafe { bind(self.services.0.context, self.handle.as_ptr(), port) };
+        (code == 0).then_some(true).ok_or(Error::Operation)
+    }
     /// Attach both stable endpoints and start the channel.
     ///
     /// # Safety
@@ -1100,6 +1312,10 @@ impl PeerMetadata {
     pub fn local(&self) -> &str {
         &self.local
     }
+    /// Borrow the inspected account identity without adopting the pending handle.
+    pub(crate) fn phone_account(&self) -> Option<&PhoneAccountId> {
+        self.provider_account.as_ref()
+    }
 }
 
 /// Unique peer media/control handle operated by one reader.
@@ -1113,6 +1329,8 @@ pub struct PeerIo {
     account_generation: u64,
     qso_generation: u64,
     provider_account: Option<PhoneAccountId>,
+    source_reset_pending: bool,
+    source_digit_pending: Option<char>,
 }
 // SAFETY: the handle is uniquely moved to one owner thread.
 unsafe impl Send for PeerIo {}
@@ -1136,6 +1354,17 @@ impl PeerIo {
     /// Copied local provider account; absent for conventional node peers.
     pub fn phone_account(&self) -> Option<&PhoneAccountId> {
         self.provider_account.as_ref()
+    }
+    /// The absence of the explicit in-band capability selects native events,
+    /// never an event-absence fallback. Ordinary peers have no phone digit mode.
+    pub fn phone_digit_mode(&self) -> Option<PhoneDigitMode> {
+        self.phone_account().map(|_| {
+            if self.capabilities & abi::RPTADV_PEER_PHONE_INBAND_DIGITS != 0 {
+                PhoneDigitMode::InBand
+            } else {
+                PhoneDigitMode::NativeEvents
+            }
+        })
     }
     /// Human-text routing support belongs to this connection, not the host table.
     pub fn can_forward_text(&self) -> bool {
@@ -1261,6 +1490,19 @@ impl PeerIo {
     where
         F: FnMut(SourceInput<'_>) -> usize,
     {
+        self.read_source_at(completion, SourceTimeReference::default(), dispatch)
+    }
+
+    /// Read with an original-age clock reference, captured before provider entry.
+    pub fn read_source_at<F>(
+        &mut self,
+        completion: SourceCompletion,
+        reference: SourceTimeReference,
+        dispatch: F,
+    ) -> Result<SourceRead, Error>
+    where
+        F: FnMut(SourceInput<'_>) -> usize,
+    {
         if !self.source_media() {
             return Err(Error::Operation);
         }
@@ -1268,7 +1510,10 @@ impl PeerIo {
             dispatch: F,
             failed: bool,
             completing: bool,
+            reset_pending: bool,
+            pending_digit: Option<char>,
             text: Option<(String, String)>,
+            reference: SourceTimeReference,
         }
         fn accept<F: FnMut(SourceInput<'_>) -> usize>(
             state: &mut State<F>,
@@ -1277,7 +1522,18 @@ impl PeerIo {
         ) -> usize {
             // A prior burst's completion cannot acknowledge samples offered in
             // this same turn. The provider retains them for the next read.
-            if state.completing && !matches!(&input, SourceInput::Text { .. }) {
+            if state.failed
+                || (state.completing
+                    && !matches!(&input, SourceInput::Text { .. } | SourceInput::Digit(_)))
+                || (state.pending_digit.is_some() && !matches!(&input, SourceInput::Digit(_)))
+                || (state.reset_pending
+                    && !matches!(
+                        &input,
+                        SourceInput::Text { .. }
+                            | SourceInput::Digit(_)
+                            | SourceInput::Discontinuity
+                    ))
+            {
                 return 0;
             }
             match catch_unwind(AssertUnwindSafe(|| (state.dispatch)(input))) {
@@ -1295,6 +1551,16 @@ impl PeerIo {
             count: usize,
             concealed: u32,
         ) -> usize {
+            unsafe { audio_timed::<F>(context, start, data, count, concealed, ptr::null()) }
+        }
+        unsafe extern "C" fn audio_timed<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+            start: u64,
+            data: *const f32,
+            count: usize,
+            concealed: u32,
+            time: *const abi::rptadv_source_birth_v1,
+        ) -> usize {
             let state = unsafe { &mut *context.cast::<State<F>>() };
             if count > 4096
                 || (data.is_null() && count != 0)
@@ -1304,6 +1570,29 @@ impl PeerIo {
                 state.failed = true;
                 return 0;
             }
+            let birth = if time.is_null() {
+                None
+            } else {
+                if unsafe { ptr::addr_of!((*time).struct_size).read() }
+                    < size_of::<abi::rptadv_source_birth_v1>() as u32
+                    || unsafe { ptr::addr_of!((*time).abi_version).read() } != 1
+                {
+                    state.failed = true;
+                    return 0;
+                }
+                let time = unsafe { &*time };
+                if time.host_clock_epoch == 0
+                    || time.host_clock_epoch != state.reference.host_clock_epoch
+                    || time.born_ns > state.reference.now_ns
+                {
+                    state.failed = true;
+                    return 0;
+                }
+                Some(SourceBirth {
+                    host_clock_epoch: time.host_clock_epoch,
+                    born_ns: time.born_ns,
+                })
+            };
             let samples = if count == 0 {
                 &[]
             } else {
@@ -1315,9 +1604,45 @@ impl PeerIo {
                     start,
                     samples,
                     concealed: concealed == 1,
+                    birth,
                 },
                 count,
             )
+        }
+        unsafe extern "C" fn digit<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+            symbol: u32,
+        ) -> i32 {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            let Some(symbol) =
+                char::from_u32(symbol).filter(|symbol| "0123456789ABCD*#".contains(*symbol))
+            else {
+                state.failed = true;
+                return -1;
+            };
+            if state.pending_digit.is_some_and(|pending| pending != symbol) {
+                state.failed = true;
+                return -1;
+            }
+            let credit = accept(state, SourceInput::Digit(symbol), 1);
+            if state.failed {
+                -1
+            } else {
+                state.pending_digit = (credit == 0).then_some(symbol);
+                i32::from(credit == 0)
+            }
+        }
+        unsafe extern "C" fn discontinuity<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+        ) -> i32 {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            let complete = accept(state, SourceInput::Discontinuity, 1);
+            state.reset_pending = complete == 0;
+            if state.failed {
+                -1
+            } else {
+                i32::from(complete == 0)
+            }
         }
         unsafe extern "C" fn gap<F: FnMut(SourceInput<'_>) -> usize>(
             context: *mut c_void,
@@ -1365,7 +1690,10 @@ impl PeerIo {
             dispatch,
             failed: false,
             completing: completion != SourceCompletion::Pending,
+            reset_pending: self.source_reset_pending,
+            pending_digit: self.source_digit_pending,
             text: None,
+            reference,
         };
         let context = ptr::from_mut(&mut state).cast();
         let sink = abi::rptadv_peer_source_sink_v1 {
@@ -1374,6 +1702,11 @@ impl PeerIo {
             context,
             audio: Some(audio::<F>),
             gap: Some(gap::<F>),
+            host_clock_epoch: reference.host_clock_epoch,
+            reference_now_ns: reference.now_ns,
+            audio_timed: Some(audio_timed::<F>),
+            source_discontinuity: Some(discontinuity::<F>),
+            digit: (self.identity.protocol() == ProtocolId::Phone).then_some(digit::<F>),
         };
         let mut result: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
         result.struct_size = size_of_val(&result) as u32;
@@ -1389,6 +1722,8 @@ impl PeerIo {
                 &mut result,
             )
         };
+        self.source_reset_pending = state.reset_pending;
+        self.source_digit_pending = state.pending_digit;
         if code != 0
             || state.failed
             || result.struct_size < size_of_val(&result) as u32
@@ -1556,6 +1891,35 @@ impl PeerIo {
             _ => Err(Error::Write),
         }
     }
+    /// Submit private media against its immutable checked provider-clock deadline.
+    /// Zero accepts, one retains the exact packet, two discards without acceptance.
+    pub(crate) fn send_prepared_timed(
+        &mut self,
+        bytes: &[u8],
+        frames: u32,
+        timestamp: u32,
+        deadline: u32,
+    ) -> Result<i32, Error> {
+        let send = self
+            .services
+            .0
+            .peer_send_prepared_timed
+            .ok_or(Error::Admission)?;
+        match unsafe {
+            send(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len(),
+                frames,
+                timestamp,
+                deadline,
+            )
+        } {
+            status @ 0..=2 => Ok(status),
+            _ => Err(Error::Write),
+        }
+    }
     /// Provider call-clock milliseconds, sampled only by the serialized peer owner.
     pub(crate) fn elapsed_ms(&self) -> u32 {
         unsafe {
@@ -1586,3 +1950,7 @@ impl Drop for PeerIo {
 #[cfg(test)]
 #[path = "services_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "services_history_tests.rs"]
+pub(crate) mod history_tests;

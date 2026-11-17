@@ -4,6 +4,11 @@
 #[path = "host_services/echo_tests.rs"]
 pub(crate) mod echo_tests;
 
+#[cfg(test)]
+mod product_phone_tests;
+
+mod iax_phone;
+
 use crate::{
     abi, directory,
     iax::{IaxClient, IaxError, IaxEvent, IaxPeer},
@@ -128,6 +133,8 @@ impl HostServicesOwner {
             radio_quiesce: Some(crate::radio_host::radio_quiesce),
             radio_remote_submit: Some(crate::radio_host::radio_remote_submit),
             radio_ready: Some(crate::radio_host::radio_ready),
+            radio_feedback_bind: Some(crate::radio_host::radio_feedback_bind),
+            peer_send_prepared_timed: Some(peer_send_prepared_timed),
         });
         Ok(Self {
             context,
@@ -174,15 +181,13 @@ impl HostServicesOwner {
         product: &abi::rptadv_product_descriptor_v1,
         configuration: &str,
         preparation: Preparation<'_>,
-        apply: impl FnOnce() -> bool,
-        restore: impl FnOnce() -> bool,
+        apply: impl FnOnce() -> rptadv_peer_support::reload::ReloadOutcome,
     ) -> Result<UpdateOutcome, UpdateError> {
         let (accounts, outcome) = unsafe {
             preparation.reload(
                 self.context.echo_accounts(),
                 |visit| visit_accounts(product, configuration, visit),
                 apply,
-                restore,
             )
         }?;
         *self
@@ -266,17 +271,23 @@ unsafe extern "C" fn peer_processing_prepare(
     output: *mut abi::rptadv_pcm_processor_v1,
 ) -> i32 {
     boundary(-1, || {
-        let (Some(context), Some(configuration), Some(local), Some(output)) = (
+        let (Some(context), Some(configuration), Some(local)) = (
             unsafe { context.cast::<StandaloneHostContext>().as_ref() },
             unsafe { input(configuration, configuration_length) },
             unsafe { input(local, local_length) },
-            unsafe { output.as_mut() },
         ) else {
             return -1;
         };
-        if output.struct_size < size_of::<abi::rptadv_pcm_processor_v1>() as u32
-            || output.abi_version != 1
-        {
+        if output.is_null() {
+            return -1;
+        }
+        // SAFETY: the caller supplies the two-field header. Read it before borrowing
+        // a full record: older callers have only the unchanged ownership prefix.
+        let capacity = unsafe { std::ptr::addr_of!((*output).struct_size).read() } as usize;
+        let version = unsafe { std::ptr::addr_of!((*output).abi_version).read() };
+        let prefix = std::mem::offset_of!(abi::rptadv_pcm_processor_v1, programme_buffering);
+        let complete = size_of::<abi::rptadv_pcm_processor_v1>();
+        if version != 1 || capacity < prefix || (capacity > prefix && capacity < complete) {
             return -1;
         }
         if configuration.is_empty() {
@@ -288,6 +299,9 @@ unsafe extern "C" fn peer_processing_prepare(
         let Ok(descriptors) = providers.radio_runtime_descriptors() else {
             return -1;
         };
+        // Preparation writes local full-size storage; copying the selected prefix
+        // below cannot overwrite a legacy caller or an unknown extension tail.
+        let mut prepared: abi::rptadv_pcm_processor_v1 = unsafe { std::mem::zeroed() };
         match crate::processing::prepare(
             descriptors.product,
             std::ptr::from_ref(descriptors.ffmpeg).cast(),
@@ -295,9 +309,21 @@ unsafe extern "C" fn peer_processing_prepare(
             local,
             maximum_frames,
             Some(&context.radio.observations),
-            output,
+            &mut prepared,
         ) {
-            Ok(true) => 0,
+            Ok(true) => {
+                let written = capacity.min(complete);
+                prepared.struct_size = written as u32;
+                // SAFETY: validation proved this writable caller prefix is complete.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        std::ptr::from_ref(&prepared).cast::<u8>(),
+                        output.cast::<u8>(),
+                        written,
+                    );
+                }
+                0
+            }
             Ok(false) => 1,
             Err(error) => {
                 eprintln!("node {local} link processing preparation failed: {error}");
@@ -436,10 +462,22 @@ enum PeerRegistration {
     Iax(*mut c_void),
     Echo(Registration),
 }
-struct IaxHandle(IaxPeer, Vec<f32>, String, String);
+struct IaxHandle {
+    peer: IaxPeer,
+    samples: Vec<f32>,
+    local: String,
+    remote: String,
+    phone: Option<Box<iax_phone::Phone>>,
+}
 impl IaxHandle {
     fn new(peer: IaxPeer, local: &str, remote: &str) -> Self {
-        Self(peer, vec![0.0; 4096], local.into(), remote.into())
+        Self {
+            peer,
+            samples: vec![0.0; 4096],
+            local: local.into(),
+            remote: remote.into(),
+            phone: None,
+        }
     }
 }
 
@@ -481,15 +519,26 @@ unsafe extern "C" fn peer_info(
         }
         let (protocol, capabilities, account_generation, qso_generation, remote, local, callsign) =
             match peer {
-                HostPeer::Iax(peer) => (
-                    1,
-                    if context.ingress.is_some() { 15 } else { 12 },
-                    0,
-                    0,
-                    peer.3.as_str(),
-                    peer.2.as_str(),
-                    "",
-                ),
+                HostPeer::Iax(peer) => match &peer.phone {
+                    Some(phone) => (
+                        3,
+                        51,
+                        phone.receipt.account_generation,
+                        phone.receipt.call_generation,
+                        peer.remote.as_str(),
+                        peer.local.as_str(),
+                        "",
+                    ),
+                    None => (
+                        1,
+                        if context.ingress.is_some() { 15 } else { 12 },
+                        0,
+                        0,
+                        peer.remote.as_str(),
+                        peer.local.as_str(),
+                        "",
+                    ),
+                },
                 HostPeer::Echo(peer) => {
                     let identity = peer.identity();
                     (
@@ -522,7 +571,13 @@ unsafe extern "C" fn peer_info(
             remote: bytes(remote),
             callsign: bytes(callsign),
             local: bytes(local),
-            provider_account: bytes(""),
+            provider_account: bytes(match peer {
+                HostPeer::Iax(peer) => peer
+                    .phone
+                    .as_ref()
+                    .map_or("", |phone| phone.account.as_str()),
+                HostPeer::Echo(_) => "",
+            }),
         };
         unsafe {
             ptr::copy_nonoverlapping(
@@ -572,7 +627,12 @@ unsafe extern "C" fn peer_step_attach(
             let Some(peer) = (unsafe { iax_peer_ref(peer) }) else {
                 return -1;
             };
-            peer.0.raw_handle()
+            // A typed private handle already required the complete released timed
+            // contract. The provider selects its phone jitter on this same owner.
+            if peer.phone.as_ref().is_some_and(|phone| !phone.live()) {
+                return -1;
+            }
+            peer.peer.raw_handle()
         };
         if unsafe {
             ingress
@@ -678,7 +738,7 @@ unsafe extern "C" fn peer_observe(
         let mut raw: abi::rptadv_iax2_peer_observation_v1 = unsafe { std::mem::zeroed() };
         raw.struct_size = size_of::<abi::rptadv_iax2_peer_observation_v1>() as u32;
         raw.abi_version = 1;
-        if unsafe { executor.observe(peer.0.raw_handle(), ptr::from_mut(&mut raw).cast()) } != 0
+        if unsafe { executor.observe(peer.peer.raw_handle(), ptr::from_mut(&mut raw).cast()) } != 0
             || raw.struct_size as usize != size_of::<abi::rptadv_iax2_peer_observation_v1>()
             || raw.abi_version != 1
         {
@@ -1005,7 +1065,7 @@ fn parse_destination(
 unsafe extern "C" fn peer_rate(_: *mut c_void, peer: *const c_void) -> u32 {
     match unsafe { peer.cast::<PeerHandle>().as_ref() } {
         Some(HostPeer::Echo(_)) => 8000,
-        Some(HostPeer::Iax(peer)) => peer.0.sample_rate_hz(),
+        Some(HostPeer::Iax(peer)) => peer.peer.sample_rate_hz(),
         None => 0,
     }
 }
@@ -1027,21 +1087,28 @@ unsafe extern "C" fn peer_read(
         let (Some(peer), Some(event)) = (unsafe { iax_peer_mut(peer) }, event) else {
             return -1;
         };
+        if peer.phone.is_some() {
+            return -1;
+        }
         // Full legal datagram text remains deliverable; local synthesis has its own limit.
         let mut text = [0_u8; 65507];
-        let mut input = peer.0.poll(&mut peer.1, &mut text);
+        let mut input = peer.peer.poll(&mut peer.samples, &mut text);
         if let Ok(IaxEvent::NeedCapacity(required)) = input {
-            if peer.1.try_reserve_exact(required - peer.1.len()).is_err() {
+            if peer
+                .samples
+                .try_reserve_exact(required - peer.samples.len())
+                .is_err()
+            {
                 return -1;
             }
-            peer.1.resize(required, 0.0);
+            peer.samples.resize(required, 0.0);
             // Native decode/PLC was retained, not consumed; retry once on this owner.
-            input = peer.0.poll(&mut peer.1, &mut text);
+            input = peer.peer.poll(&mut peer.samples, &mut text);
         }
         match input {
             Ok(IaxEvent::None) => 0,
             Ok(IaxEvent::Audio(length)) => unsafe {
-                event(event_context, 3, peer.1.as_ptr().cast(), length);
+                event(event_context, 3, peer.samples.as_ptr().cast(), length);
                 0
             },
             Ok(IaxEvent::Gap(length)) => unsafe {
@@ -1081,7 +1148,10 @@ unsafe extern "C" fn peer_send_text(
         }) else {
             return -1;
         };
-        if peer.0.send_text(text.as_bytes()).is_ok() {
+        if peer.phone.is_some() {
+            return -1;
+        }
+        if peer.peer.send_text(text.as_bytes()).is_ok() {
             0
         } else {
             -1
@@ -1091,7 +1161,7 @@ unsafe extern "C" fn peer_send_text(
 
 unsafe extern "C" fn peer_send_digit(_: *mut c_void, peer: *mut c_void, digit: u8) -> i32 {
     unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| {
-        if peer.0.send_digit(digit).is_ok() {
+        if peer.peer.send_digit(digit).is_ok() {
             0
         } else {
             -1
@@ -1144,9 +1214,15 @@ unsafe extern "C" fn peer_prepare_audio(
                     .map_or(-1, |()| unsafe { (*result).status as i32 })
             }
             Some(HostPeer::Iax(_)) => {
-                unsafe { iax_peer_mut(peer) }
-                    .unwrap()
-                    .0
+                let peer = unsafe { iax_peer_mut(peer) }.unwrap();
+                if peer
+                    .phone
+                    .as_ref()
+                    .is_some_and(|phone| !phone.encoding_ready())
+                {
+                    return -1;
+                }
+                peer.peer
                     .prepare_audio(pcm, output, flush, unsafe { &mut *result })
             }
             None => -1,
@@ -1158,7 +1234,10 @@ unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i3
         if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
             return unsafe { peer.reset_encoder() }.map_or(-1, |()| 0);
         }
-        unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| peer.0.reset_encoder())
+        unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| match &mut peer.phone {
+            Some(phone) => phone.retire_egress(&mut peer.peer).map_or(-1, |()| 0),
+            None => peer.peer.reset_encoder(),
+        })
     })
 }
 unsafe extern "C" fn peer_send_prepared(
@@ -1182,9 +1261,10 @@ unsafe extern "C" fn peer_send_prepared(
             Some(HostPeer::Echo(peer)) => {
                 unsafe { peer.send_prepared(bytes, frames, timestamp) }.map_err(|_| ())
             }
+            Some(HostPeer::Iax(peer)) if peer.phone.is_some() => return -1,
             Some(HostPeer::Iax(_)) => unsafe { iax_peer_mut(peer) }
                 .unwrap()
-                .0
+                .peer
                 .send_prepared(bytes, frames, timestamp)
                 .map_err(|_| ()),
             None => return -1,
@@ -1196,13 +1276,41 @@ unsafe extern "C" fn peer_send_prepared(
         }
     })
 }
+unsafe extern "C" fn peer_send_prepared_timed(
+    _: *mut c_void,
+    peer: *mut c_void,
+    bytes: *const u8,
+    count: usize,
+    frames: u32,
+    timestamp: u32,
+    deadline: u32,
+) -> i32 {
+    boundary(-1, || {
+        // This released private profile is exactly G.711 8 kHz / 20 ms. Empty
+        // radio end markers never become telephone protocol or PCM traffic.
+        if count != 160 || frames != 160 || bytes.is_null() {
+            return -1;
+        }
+        let Some(peer) = (unsafe { iax_peer_mut(peer) }) else {
+            return -1;
+        };
+        let Some(phone) = &mut peer.phone else {
+            return -1;
+        };
+        let bytes = unsafe { std::slice::from_raw_parts(bytes, count) };
+        phone
+            .send_prepared(&mut peer.peer, bytes, frames, timestamp, deadline)
+            .unwrap_or(-1)
+    })
+}
+
 unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
     if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
         return peer
             .elapsed_ms()
             .map_or(0, |value| value.min(u64::from(u32::MAX)) as u32);
     }
-    unsafe { iax_peer_ref(peer) }.map_or(0, |peer| peer.0.elapsed_ms())
+    unsafe { iax_peer_ref(peer) }.map_or(0, |peer| peer.peer.elapsed_ms())
 }
 unsafe extern "C" fn peer_step_wake(context: *mut c_void, registration: *mut c_void) {
     match unsafe { registration.cast::<PeerRegistration>().as_ref() } {
@@ -1228,7 +1336,7 @@ unsafe extern "C" fn peer_set_deadline(context: *mut c_void, peer: *mut c_void, 
         return -1;
     };
     context.ingress.as_ref().map_or(-1, |ingress| unsafe {
-        ingress.executor.set_deadline(peer.0.raw_handle(), after)
+        ingress.executor.set_deadline(peer.peer.raw_handle(), after)
     })
 }
 
@@ -1249,18 +1357,47 @@ unsafe extern "C" fn peer_read_source(
         {
             return -1;
         }
+        if let Some(HostPeer::Iax(peer)) = unsafe { peer.cast::<PeerHandle>().as_mut() } {
+            let Some(phone) = &mut peer.phone else {
+                return -1;
+            };
+            return unsafe {
+                phone.read(
+                    &mut peer.peer,
+                    &mut peer.samples,
+                    completion,
+                    sink,
+                    &mut *output,
+                )
+            }
+            .map_or(-1, |()| 0);
+        }
         let Some(HostPeer::Echo(peer)) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
             return -1;
         };
         let output = unsafe { &mut *output };
-        let sink = unsafe { sink.as_ref() };
-        if sink.is_some_and(|sink| {
-            sink.struct_size < size_of::<abi::rptadv_peer_source_sink_v1>() as u32
-                || sink.abi_version != 1
-        }) {
-            return -1;
-        }
-        let sink = sink.map(|sink| echo::PcmSink {
+        // EchoLink uses only the legacy prefix. Never form a reference to an
+        // appended tail that an older controller did not allocate.
+        let sink = if sink.is_null() {
+            None
+        } else {
+            let prefix = std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, host_clock_epoch);
+            if unsafe { ptr::addr_of!((*sink).struct_size).read() } < prefix as u32
+                || unsafe { ptr::addr_of!((*sink).abi_version).read() } != 1
+            {
+                return -1;
+            }
+            let mut copied: abi::rptadv_peer_source_sink_v1 = unsafe { std::mem::zeroed() };
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    sink.cast::<u8>(),
+                    ptr::from_mut(&mut copied).cast(),
+                    prefix,
+                );
+            }
+            Some(copied)
+        };
+        let sink = sink.as_ref().map(|sink| echo::PcmSink {
             struct_size: size_of::<echo::PcmSink>() as u32,
             abi_version: 1,
             context: sink.context,
@@ -1579,6 +1716,7 @@ mod tests {
             context: ptr::null_mut(),
             process: None,
             destroy: None,
+            programme_buffering: None,
         };
         let invoke = |text: &str, maximum, output: &mut abi::rptadv_pcm_processor_v1| {
             // SAFETY: all borrowed request spans and output storage remain live through this call.
@@ -1644,9 +1782,77 @@ mod tests {
         owner.context.radio.providers = Some(Box::leak(Box::new(
             crate::providers::ProviderSet::load().unwrap(),
         )));
+        // A pre-tail caller must retain its guard and receive the same unique owner.
+        #[repr(C)]
+        struct Legacy {
+            size: u32,
+            version: u32,
+            context: *mut c_void,
+            process: Option<unsafe extern "C" fn(*mut c_void, *mut f32, usize) -> i32>,
+            destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+            guard: u64,
+        }
+        let prefix = std::mem::offset_of!(abi::rptadv_pcm_processor_v1, programme_buffering);
+        let mut legacy = Legacy {
+            size: prefix as u32,
+            version: 1,
+            context: ptr::null_mut(),
+            process: None,
+            destroy: None,
+            guard: 0x1020304050607080,
+        };
+        assert_eq!(
+            unsafe {
+                super::peer_processing_prepare(
+                    context,
+                    c"[1000]\n".as_ptr(),
+                    7,
+                    c"1000".as_ptr(),
+                    4,
+                    4,
+                    ptr::from_mut(&mut legacy).cast(),
+                )
+            },
+            0
+        );
+        assert_eq!(legacy.size as usize, prefix);
+        assert_eq!(legacy.guard, 0x1020304050607080);
+        unsafe { legacy.destroy.unwrap()(legacy.context) };
+        for capacity in [0, prefix - 1]
+            .into_iter()
+            .chain(prefix + 1..size_of::<abi::rptadv_pcm_processor_v1>())
+        {
+            let mut partial = record();
+            partial.struct_size = capacity as u32;
+            assert_eq!(invoke(configuration, 4, &mut partial), -1);
+        }
+        #[repr(C)]
+        struct Extended {
+            record: abi::rptadv_pcm_processor_v1,
+            guard: u64,
+        }
+        let mut extended = Extended {
+            record: record(),
+            guard: 99,
+        };
+        extended.record.struct_size = size_of::<Extended>() as u32;
+        assert_eq!(invoke("[1000]\n", 4, &mut extended.record), 0);
+        assert_eq!(extended.guard, 99);
+        assert_eq!(
+            extended.record.struct_size as usize,
+            size_of::<abi::rptadv_pcm_processor_v1>()
+        );
+        unsafe { extended.record.destroy.unwrap()(extended.record.context) };
         let mut identity = record();
         assert_eq!(invoke("[1000]\n", 4, &mut identity), 0);
         assert!(!identity.context.is_null());
+        let mut before: abi::UrpProgrammeBuffering = unsafe { std::mem::zeroed() };
+        before.struct_size = size_of_val(&before) as u32;
+        before.abi_version = 1;
+        assert_eq!(
+            unsafe { identity.programme_buffering.unwrap()(identity.context, &mut before) },
+            0
+        );
         let expected = [0.25_f32, -0.5, 0.125, -0.25];
         let mut samples = expected;
         assert_eq!(
@@ -1657,6 +1863,21 @@ mod tests {
             0
         );
         assert_eq!(samples, expected);
+        let mut buffering: abi::UrpProgrammeBuffering = unsafe { std::mem::zeroed() };
+        buffering.struct_size = size_of_val(&buffering) as u32;
+        buffering.abi_version = 1;
+        assert_eq!(
+            unsafe { identity.programme_buffering.unwrap()(identity.context, &mut buffering) },
+            0
+        );
+        assert_eq!(
+            buffering.flags & 15,
+            15,
+            "released identity graph has live qualified history"
+        );
+        assert_eq!(buffering.current_max_delay_frames, 0);
+        assert_eq!(buffering.accepted_frames, before.accepted_frames + 4);
+        assert_eq!(buffering.delivered_frames, before.delivered_frames + 4);
         let observed = owner.context.radio.observations.text("1000");
         assert!(
             observed.contains("link_processors_retained=1"),
@@ -3011,3 +3232,7 @@ mod tests {
         owner.destroy_peer(handle);
     }
 }
+
+#[cfg(test)]
+#[path = "host_services/iax_phone_tests.rs"]
+mod iax_phone_tests;

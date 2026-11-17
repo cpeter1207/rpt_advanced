@@ -1,5 +1,6 @@
 //! Both hosts use one account/admission owner and the selected real control backend.
 #![cfg(unix)]
+use rptadv_peer_support::reload::ReloadOutcome;
 use rptadv_peer_support::{
     control::Client,
     echolink::{
@@ -51,6 +52,17 @@ fn account_failures_are_logged_off_callback_once_and_old_generations_are_ignored
         done.recv_timeout(Duration::from_secs(5)).unwrap();
     };
     drain();
+    let update = accounts.prepare_update().unwrap();
+    let outcome = update
+        .commit(|| {
+            // An unchanged enabled entry must still obey the owner-wide update gate.
+            unsafe { event(3, 4, 4) };
+            drain();
+            assert!(received.try_recv().is_err());
+            ReloadOutcome::Rejected
+        })
+        .unwrap_err();
+    assert_eq!(outcome.cause, Error::Product);
     for kind in [u32::MAX, 2] {
         unsafe { raw(kind) };
         drain();
@@ -103,7 +115,7 @@ fn account_failures_are_logged_off_callback_once_and_old_generations_are_ignored
 }
 
 #[test]
-fn failed_replacement_retires_only_new_accounts_and_restores_the_product() {
+fn failed_postpublication_replacement_retains_owners_and_gates_admission() {
     for (new_node, existing_node, rollback_failure) in
         [(3, 42, false), (42, 1, false), (99, 42, true)]
     {
@@ -140,36 +152,17 @@ fn failed_replacement_retires_only_new_accounts_and_restores_the_product() {
         let mut update = accounts.prepare_update().unwrap();
         unsafe { update.prepare(&config("1000", new_node), &path) }.unwrap();
         unsafe { update.prepare(&config("2000", existing_node), &path) }.unwrap();
-        let mut restored = false;
-        let error = update
-            .commit(
-                || true,
-                || {
-                    restored = true;
-                    true
-                },
-            )
-            .unwrap_err();
-        assert_eq!(error.cause, Error::Status(abi::Status::Full));
-        assert_eq!(
-            error.rollback,
-            rollback_failure.then_some(Error::Status(abi::Status::Failed))
-        );
-        assert!(restored);
+        let outcome = update.commit(|| ReloadOutcome::Committed).unwrap();
+        assert_eq!(outcome.product, ReloadOutcome::Committed);
+        assert_eq!(outcome.failure, Some(Error::Status(abi::Status::Full)));
         assert!(accounts.account("1000").is_none());
-        if rollback_failure {
-            assert!(
-                accounts.account("2000").is_none(),
-                "failed rollback must gate admission"
-            );
-            assert!(accounts.observe("2000").unwrap().is_some());
-        } else {
-            assert!(Arc::ptr_eq(&original, &accounts.account("2000").unwrap()));
-        }
+        assert!(accounts.account("2000").is_none());
+        assert!(accounts.observe("1000").unwrap().is_some());
+        assert!(accounts.observe("2000").unwrap().is_some());
         assert_eq!(
             unsafe { count() },
-            if rollback_failure { 2 } else { 1 },
-            "new callback owner survived rolled-back addition"
+            2,
+            "retain candidate callback owners after publication"
         );
         if rollback_failure {
             assert_eq!(accounts.stop(), Err(Error::Status(abi::Status::Failed)));
@@ -224,7 +217,7 @@ fn reload_adds_disables_and_removes_accounts_without_replacing_the_control_owner
         std::fs::remove_file(&path).unwrap();
         assert!(
             update
-                .commit(|| true, || true)
+                .commit(|| ReloadOutcome::Committed)
                 .unwrap()
                 .retirement
                 .is_none()
@@ -243,7 +236,7 @@ fn reload_adds_disables_and_removes_accounts_without_replacing_the_control_owner
     update.remove_unlisted().unwrap();
     assert!(
         update
-            .commit(|| true, || true)
+            .commit(|| ReloadOutcome::Committed)
             .unwrap()
             .retirement
             .is_none()
@@ -279,7 +272,10 @@ fn reload_adds_disables_and_removes_accounts_without_replacing_the_control_owner
             .unwrap();
     unsafe { fault(1) };
     assert_eq!(
-        remove_all.commit(|| true, || true).unwrap().retirement,
+        remove_all
+            .commit(|| ReloadOutcome::Committed)
+            .unwrap()
+            .retirement,
         Some(Error::Status(abi::Status::Failed))
     );
     assert!(accounts.account("2000").is_none());
@@ -389,37 +385,34 @@ fn queued_incoming_is_revalidated_against_the_reload_admission_gate() {
         let mut update = accounts.prepare_update().unwrap();
         unsafe { update.prepare(&config, &path) }.unwrap();
         update
-            .commit(
-                || {
-                    release.send(()).unwrap();
-                    let (barrier, joined) = mpsc::channel();
-                    assert!(
-                        control
-                            .submit(barrier, |barrier| {
-                                barrier.send(()).unwrap();
-                            })
-                            .is_ok()
-                    );
-                    joined.recv_timeout(Duration::from_secs(5)).unwrap();
-                    assert!(
-                        received.try_recv().is_err(),
-                        "queued QSO entered a half-reloaded product"
-                    );
-                    assert!(
-                        notices.try_recv().is_err(),
-                        "queued notice entered a half-reloaded product"
-                    );
-                    true
-                },
-                || true,
-            )
+            .commit(|| {
+                release.send(()).unwrap();
+                let (barrier, joined) = mpsc::channel();
+                assert!(
+                    control
+                        .submit(barrier, |barrier| {
+                            barrier.send(()).unwrap();
+                        })
+                        .is_ok()
+                );
+                joined.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(
+                    received.try_recv().is_err(),
+                    "queued QSO entered a half-reloaded product"
+                );
+                assert!(
+                    notices.try_recv().is_err(),
+                    "queued notice entered a half-reloaded product"
+                );
+                ReloadOutcome::Committed
+            })
             .unwrap();
         accounts.stop().unwrap();
     }
 }
 
 #[test]
-fn prepared_updates_do_not_stop_admission_and_roll_back_before_reopening_it() {
+fn prepared_updates_preserve_rejection_and_gate_postpublication_failure() {
     let fixture = support::Fixture::new("network");
     let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
     let count =
@@ -475,22 +468,13 @@ fn prepared_updates_do_not_stop_admission_and_roll_back_before_reopening_it() {
 
     let mut rejected = accounts.prepare_update().unwrap();
     unsafe { rejected.prepare(&config("1000", 2), &path) }.unwrap();
-    let mut restored_rejection = false;
     let error = rejected
-        .commit(
-            || {
-                assert!(accounts.account("1000").is_none());
-                false
-            },
-            || {
-                restored_rejection = true;
-                true
-            },
-        )
+        .commit(|| {
+            assert!(accounts.account("1000").is_none());
+            ReloadOutcome::Rejected
+        })
         .unwrap_err();
     assert_eq!(error.cause, Error::Product);
-    assert!(restored_rejection);
-    assert!(error.rollback.is_none());
     assert!(accounts.account("1000").is_some());
     assert_eq!(unsafe { count() }, 0);
 
@@ -498,30 +482,22 @@ fn prepared_updates_do_not_stop_admission_and_roll_back_before_reopening_it() {
     unsafe { failed.prepare(&config("1000", 2), &path) }.unwrap();
     unsafe { failed.prepare(&config("2000", 42), &path) }.unwrap();
     std::fs::remove_file(&path).unwrap();
-    let mut restored = false;
-    let error = failed
-        .commit(
-            || {
-                assert!(accounts.account("1000").is_none());
-                true
-            },
-            || {
-                assert!(accounts.account("1000").is_none());
-                restored = true;
-                true
-            },
-        )
-        .unwrap_err();
-    assert!(restored);
-    assert_eq!(error.cause, Error::Status(abi::Status::Full));
-    assert!(error.rollback.is_none());
-    assert!(Arc::ptr_eq(&original, &accounts.account("1000").unwrap()));
+    let outcome = failed
+        .commit(|| {
+            assert!(accounts.account("1000").is_none());
+            ReloadOutcome::Committed
+        })
+        .unwrap();
+    assert_eq!(outcome.failure, Some(Error::Status(abi::Status::Full)));
+    assert!(accounts.account("1000").is_none());
+    assert!(accounts.observe("1000").unwrap().is_some());
     assert_eq!(
         (0..unsafe { count() })
             .map(|index| unsafe { value(index) })
             .collect::<Vec<_>>(),
-        [(1_u64 << 32) | 2, (3_u64 << 32) | 42, (2_u64 << 32) | 1]
+        [(1_u64 << 32) | 2, (3_u64 << 32) | 42]
     );
+    drop(original);
 
     write_keys();
     let mut stale = accounts.prepare_update().unwrap();
@@ -529,14 +505,9 @@ fn prepared_updates_do_not_stop_admission_and_roll_back_before_reopening_it() {
     let mut current = accounts.prepare_update().unwrap();
     unsafe { current.prepare(&config("1000", 2), &path) }.unwrap();
     std::fs::remove_file(&path).unwrap();
-    current
-        .commit(|| true, || panic!("successful commit cannot roll back"))
-        .unwrap();
+    current.commit(|| ReloadOutcome::Committed).unwrap();
     let error = stale
-        .commit(
-            || panic!("stale configuration cannot change product"),
-            || true,
-        )
+        .commit(|| panic!("stale configuration cannot change product"))
         .unwrap_err();
     assert_eq!(error.cause, Error::Contract);
     write_keys();
@@ -545,33 +516,36 @@ fn prepared_updates_do_not_stop_admission_and_roll_back_before_reopening_it() {
         unsafe { rejected.prepare(&config("1000", 2), &path) }.unwrap();
         unsafe { rejected.prepare(&config("2000", if foreign_failure { 42 } else { 3 }), &path) }
             .unwrap();
-        let error = rejected.commit(|| foreign_failure, || false).unwrap_err();
-        assert_eq!(
-            error.cause,
+        let result = rejected.commit(|| {
             if foreign_failure {
-                Error::Status(abi::Status::Full)
+                ReloadOutcome::Committed
             } else {
-                Error::Product
+                ReloadOutcome::Rejected
             }
-        );
-        assert_eq!(error.rollback, Some(Error::Product));
-        assert!(accounts.account("1000").is_none());
+        });
+        if foreign_failure {
+            assert_eq!(
+                result.unwrap().failure,
+                Some(Error::Status(abi::Status::Full))
+            );
+            assert!(accounts.account("1000").is_none());
+        } else {
+            assert_eq!(result.unwrap_err().cause, Error::Product);
+            assert!(accounts.account("1000").is_some());
+        }
         assert!(accounts.observe("1000").unwrap().is_some());
         // An explicit successful reload can recover a previously gated owner.
         let mut recovered = accounts.prepare_update().unwrap();
         unsafe { recovered.prepare(&config("1000", 2), &path) }.unwrap();
         unsafe { recovered.prepare(&config("2000", 3), &path) }.unwrap();
-        recovered.commit(|| true, || true).unwrap();
+        recovered.commit(|| ReloadOutcome::Committed).unwrap();
         assert!(accounts.account("1000").is_some());
     }
     let mut stopped = accounts.prepare_update().unwrap();
     unsafe { stopped.prepare(&config("1000", 4), &path) }.unwrap();
     accounts.stop().unwrap();
     let error = stopped
-        .commit(
-            || panic!("stopped accounts cannot change product"),
-            || panic!("stopped accounts did not change product"),
-        )
+        .commit(|| panic!("stopped accounts cannot change product"))
         .unwrap_err();
     assert_eq!(error.cause, Error::Status(abi::Status::Closed));
 }
@@ -694,26 +668,21 @@ fn reload_preparation_lazily_adds_the_first_account_and_reuses_its_owner() {
         preparation().reload(
             None,
             |visit| visit(&abi::AccountConfig::default(), None),
-            || true,
-            || panic!("successful product reload cannot restore"),
+            || ReloadOutcome::Committed,
         )
     }
     .unwrap();
     assert!(disabled.0.is_none());
-    for restored in [true, false] {
-        let failure = unsafe {
-            preparation().reload(
-                None,
-                |visit| visit(&abi::AccountConfig::default(), None),
-                || false,
-                || restored,
-            )
-        }
-        .err()
-        .unwrap();
-        assert_eq!(failure.cause, Error::Product);
-        assert_eq!(failure.rollback, (!restored).then_some(Error::Product));
+    let failure = unsafe {
+        preparation().reload(
+            None,
+            |visit| visit(&abi::AccountConfig::default(), None),
+            || ReloadOutcome::Rejected,
+        )
     }
+    .err()
+    .unwrap();
+    assert_eq!(failure.cause, Error::Product);
     let path = directory.join("echolink-secrets.conf");
     std::fs::write(&path, "[524950]\ndirectory_password=fixture-value\n").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -726,22 +695,69 @@ fn reload_preparation_lazily_adds_the_first_account_and_reuses_its_owner() {
         },
         ..Default::default()
     };
-    config.node_number = 42; // The existing provider fixture rejects activation.
-    for restored in [true, false] {
-        let error = unsafe {
-            preparation().reload(None, |visit| visit(&config, None), || true, || restored)
-        }
-        .err()
-        .unwrap();
-        assert_eq!(error.cause, Error::Status(abi::Status::Full));
-        assert_eq!(error.rollback, (!restored).then_some(Error::Product));
-    }
-    config.node_number = 1;
-    let owner =
-        unsafe { preparation().reload(None, |visit| visit(&config, None), || true, || true) }
+    for existing in [false, true] {
+        let owner = if existing {
+            unsafe {
+                preparation().reload(
+                    None,
+                    |visit| visit(&config, None),
+                    || ReloadOutcome::Committed,
+                )
+            }
             .unwrap()
             .0
-            .unwrap();
+        } else {
+            None
+        };
+        let (retained, outcome) = unsafe {
+            preparation().reload(
+                owner.clone(),
+                |visit| visit(&config, None),
+                || ReloadOutcome::Fatal(73),
+            )
+        }
+        .unwrap();
+        assert_eq!(outcome.product, ReloadOutcome::Fatal(73));
+        assert_eq!(outcome.failure, None);
+        let retained = retained.unwrap();
+        if let Some(owner) = &owner {
+            assert!(Arc::ptr_eq(owner, &retained));
+        }
+        assert!(
+            retained.account("524950").is_none(),
+            "fatal preparation cannot admit calls"
+        );
+        assert!(retained.observe("524950").unwrap().is_some());
+        retained.stop().unwrap();
+        drop(retained);
+        drop(owner);
+    }
+    config.node_number = 42; // The existing provider fixture rejects activation.
+    let (retained, outcome) = unsafe {
+        preparation().reload(
+            None,
+            |visit| visit(&config, None),
+            || ReloadOutcome::Committed,
+        )
+    }
+    .unwrap();
+    assert_eq!(outcome.failure, Some(Error::Status(abi::Status::Full)));
+    let retained = retained.unwrap();
+    assert!(retained.account("524950").is_none());
+    assert!(retained.observe("524950").unwrap().is_some());
+    retained.stop().unwrap();
+    drop(retained);
+    config.node_number = 1;
+    let owner = unsafe {
+        preparation().reload(
+            None,
+            |visit| visit(&config, None),
+            || ReloadOutcome::Committed,
+        )
+    }
+    .unwrap()
+    .0
+    .unwrap();
     assert!(owner.account("524950").is_some());
     config.enabled = 0;
     std::fs::remove_file(path).unwrap();
@@ -749,8 +765,7 @@ fn reload_preparation_lazily_adds_the_first_account_and_reuses_its_owner() {
         preparation().reload(
             Some(owner.clone()),
             |visit| visit(&config, None),
-            || true,
-            || true,
+            || ReloadOutcome::Committed,
         )
     }
     .unwrap()
@@ -897,4 +912,36 @@ fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking()
         drop(control);
         std::fs::remove_file(path).unwrap();
     }
+}
+
+#[test]
+fn rejected_echo_product_reload_never_invokes_compensating_reload() {
+    let fixture = support::Fixture::new("network");
+    let configuration = fixture.0.parent().unwrap().join("rpt_advanced.conf");
+    let resources = abi::RuntimeConfig::default();
+    let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
+    let preparation = unsafe {
+        Preparation::new(
+            &configuration,
+            &fixture.0,
+            &resources,
+            backend.cast(),
+            |_| {},
+        )
+    };
+    let product_calls = std::cell::Cell::new(0);
+    let error = unsafe {
+        preparation.reload(
+            None,
+            |visit| visit(&abi::AccountConfig::default(), None),
+            || {
+                product_calls.set(product_calls.get() + 1);
+                ReloadOutcome::Rejected
+            },
+        )
+    }
+    .err()
+    .unwrap();
+    assert_eq!(error.cause, Error::Product);
+    assert_eq!(product_calls.get(), 1);
 }

@@ -100,6 +100,8 @@ fn echo_binding_rejects_a_quiesced_radio_reservation() {
     unsafe { radio_destroy(ptr::null_mut(), live) };
     let mut reservation = ReservedRadio {
         metadata: None,
+        feedback: None,
+        callbacks_bound: false,
         radio: None,
         name: CString::new("quiesced fixture").unwrap(),
     };

@@ -10,6 +10,12 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
+#[path = "lifecycle_phone_tests.rs"]
+mod phone;
+
+#[path = "lifecycle_phone_account_tests.rs"]
+mod phone_account;
+
 fn descriptor() -> &'static abi::rptadv_product_descriptor_v1 {
     unsafe { &*rptadv_product_descriptor_v1() }
 }
@@ -111,6 +117,11 @@ fn activation_reload_poll_stays_admitted_until_commit_or_safe_rollback() {
     );
     assert_eq!(unsafe { api.reload_poll.unwrap()() }, 1);
     ACTIVATION.store(0, Ordering::Release);
+    let engine = ENGINE.lock().unwrap().as_ref().unwrap().clone();
+    let clock = engine.clock();
+    engine
+        .run_inner(true, move |host| host.pump(clock))
+        .unwrap();
     assert_eq!(unsafe { api.reload_poll.unwrap()() }, 0);
     assert_eq!(unsafe { api.stop.unwrap()() }, 0);
     SKIP_TICKER_THREAD.store(true, Ordering::Release);
@@ -857,7 +868,7 @@ fn public_phone_admission_borrows_real_metadata_then_transfers_only_the_exact_ca
     SKIP_TICKER_THREAD.store(true, Ordering::Release);
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_info = Some(phone_info);
-    let source = active_configuration("");
+    let source = active_configuration(include_str!("tests/fixtures/phone_account.conf"));
     assert_eq!(
         unsafe {
             descriptor().start.unwrap()(
@@ -1636,9 +1647,21 @@ fn dial_retry_background_and_remote_command_paths_are_serialized() {
     engine
         .background("1000".into(), LinkEffect::Connect(attempt), revision, true)
         .unwrap();
-    engine.pump(engine.clock(), false).unwrap();
-    std::thread::sleep(Duration::from_millis(30));
-    engine.pump(engine.clock(), false).unwrap();
+    // A provider delay is not a deadline for the entire background dial.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        engine.pump(engine.clock(), false).unwrap();
+        let pending = engine.jobs.lock().unwrap().len();
+        if pending == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background dial did not complete: {pending} jobs, {} command notices",
+            crate::fixture::NOTICE_COUNT.load(Ordering::Acquire)
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(crate::fixture::NOTICE_COUNT.load(Ordering::Acquire), 2);
 
     let stale_revision = engine.revision.load(Ordering::Acquire);

@@ -1,5 +1,6 @@
 //! Shared account preparation and nonblocking host admission; no protocol state.
 use super::{Account, Error, Peer, Provider, abi};
+use crate::reload::ReloadOutcome;
 use crate::{
     control::{Client, RejectionReason},
     secrets::{account_secrets_path, load_account_secrets},
@@ -110,8 +111,7 @@ impl<'a> Preparation<'a> {
         mut self,
         current: Option<Arc<Accounts>>,
         visit: impl FnOnce(&mut AccountVisitor<'_>) -> Result<(), Error>,
-        product: impl FnOnce() -> bool,
-        restore_product: impl FnOnce() -> bool,
+        product: impl FnOnce() -> ReloadOutcome,
     ) -> Result<(Option<Arc<Accounts>>, UpdateOutcome), UpdateError> {
         if let Some(accounts) = current {
             let mut update = accounts.prepare_update()?;
@@ -119,29 +119,39 @@ impl<'a> Preparation<'a> {
                 update.prepare(config, &account_secrets_path(self.configuration, path))
             })?;
             update.remove_unlisted()?;
-            let outcome = update.commit(product, restore_product)?;
+            let outcome = update.commit(product)?;
             return Ok((Some(accounts), outcome));
         }
         visit(&mut |config, path| unsafe { self.prepare(config, path) })?;
         let accounts = self.finish().map(Arc::new);
-        if !product() {
-            return Err(UpdateError {
-                cause: Error::Product,
-                rollback: (!restore_product()).then_some(Error::Product),
-            });
+        let product = product();
+        if product == ReloadOutcome::Rejected {
+            return Err(Error::Product.into());
         }
+        let mut outcome = UpdateOutcome {
+            product,
+            ..Default::default()
+        };
         if let Some(accounts) = &accounts {
             accounts.updating.store(true, Ordering::Release);
-            if let Err(cause) = unsafe { accounts.activate() } {
-                let mut rollback = accounts.stop().err();
-                if !restore_product() {
-                    rollback.get_or_insert(Error::Product);
+            if product.published() {
+                // Retain every callback owner even if one activation fails. No
+                // product compensation can undo an already published revision.
+                accounts.activated.store(true, Ordering::Release);
+                for entry in accounts.current_entries() {
+                    if let Err(error) = unsafe { entry.activate() } {
+                        outcome.failure.get_or_insert(error);
+                    }
                 }
-                return Err(UpdateError { cause, rollback });
+                if outcome.failure.is_none() {
+                    for entry in accounts.current_entries() {
+                        entry.notifications.enabled.store(true, Ordering::Release);
+                    }
+                    accounts.updating.store(false, Ordering::Release);
+                }
             }
-            accounts.updating.store(false, Ordering::Release);
         }
-        Ok((accounts, UpdateOutcome::default()))
+        Ok((accounts, outcome))
     }
 }
 
@@ -214,24 +224,23 @@ impl Entry {
 /// reported independently rather than falsely claiming the update rolled back.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UpdateOutcome {
+    /// Exact product publication result, independent of later provider failures.
+    pub product: ReloadOutcome,
+    /// First account activation/application failure; owners remain retained and gated.
+    pub failure: Option<Error>,
     /// Removed accounts whose callback storage must remain owned until stop.
     pub retirement: Option<Error>,
 }
 
-/// First commit failure and an independent rollback failure, without secrets.
+/// Preparation or confirmed product rejection, without secrets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UpdateError {
     /// Original product/account failure.
     pub cause: Error,
-    /// A failed restoration keeps new admissions gated rather than claim success.
-    pub rollback: Option<Error>,
 }
 impl From<Error> for UpdateError {
     fn from(cause: Error) -> Self {
-        Self {
-            cause,
-            rollback: None,
-        }
+        Self { cause }
     }
 }
 
@@ -244,7 +253,7 @@ struct Change {
 }
 
 /// Provider-owned snapshots only. Dropping a staged update never stops the
-/// running admission executor or rereads credentials during commit/rollback.
+/// running admission executor or rereads credentials during commit.
 pub struct PreparedUpdate<'a> {
     owner: &'a Accounts,
     revision: u64,
@@ -319,15 +328,11 @@ impl PreparedUpdate<'_> {
         Ok(())
     }
 
-    /// Commit product configuration and account snapshots with admission gated.
-    /// A product error may follow publication, so it also requires restoration.
-    /// Later account failure restores snapshots in reverse before restoring the
-    /// product. Call both closures off executors. Failed restoration keeps the
-    /// admission gate closed.
+    /// Adopt product disposition without replaying an old document. Once published,
+    /// account failures retain callback owners and keep affected admission gated.
     pub fn commit(
         self,
-        product: impl FnOnce() -> bool,
-        restore_product: impl FnOnce() -> bool,
+        product: impl FnOnce() -> ReloadOutcome,
     ) -> Result<UpdateOutcome, UpdateError> {
         let _operation = self.owner.operation.lock().map_err(|_| Error::Control)?;
         if self.owner.stopped.load(Ordering::Acquire) {
@@ -346,60 +351,33 @@ impl PreparedUpdate<'_> {
                 .enabled
                 .store(false, Ordering::Release);
         }
-        if !product() {
-            let rollback = (!restore_product()).then_some(Error::Product);
-            if rollback.is_none() {
-                for change in self.changes.values() {
-                    change
-                        .entry
-                        .notifications
-                        .enabled
-                        .store(change.was_enabled, Ordering::Release);
-                }
-                self.owner.updating.store(false, Ordering::Release);
+        let product = product();
+        if product == ReloadOutcome::Rejected {
+            for change in self.changes.values() {
+                change
+                    .entry
+                    .notifications
+                    .enabled
+                    .store(change.was_enabled, Ordering::Release);
             }
-            return Err(UpdateError {
-                cause: Error::Product,
-                rollback,
-            });
+            self.owner.updating.store(false, Ordering::Release);
+            return Err(Error::Product.into());
         }
-        let mut applied: Vec<&Change> = Vec::with_capacity(self.changes.len());
+        let mut outcome = UpdateOutcome {
+            product,
+            ..Default::default()
+        };
+        if !product.published() {
+            return Ok(outcome);
+        }
         for change in self.changes.values() {
             let result = if let Some(prepared) = &change.prepared {
                 change.entry.account.apply_prepared(prepared)
             } else {
-                // Even a failed activation may have started a callback producer.
-                applied.push(change);
                 unsafe { change.entry.activate() }
             };
-            if let Err(cause) = result {
-                let mut failure = UpdateError::from(cause);
-                for change in applied.into_iter().rev() {
-                    let restored = match &change.prepared {
-                        Some(prepared) => change.entry.account.apply_prepared(prepared),
-                        None => self.owner.retire(Arc::clone(&change.entry)),
-                    };
-                    if let Err(error) = restored {
-                        failure.rollback.get_or_insert(error);
-                    }
-                }
-                if !restore_product() {
-                    failure.rollback.get_or_insert(Error::Product);
-                }
-                if failure.rollback.is_none() {
-                    for change in self.changes.values() {
-                        change
-                            .entry
-                            .notifications
-                            .enabled
-                            .store(change.was_enabled, Ordering::Release);
-                    }
-                    self.owner.updating.store(false, Ordering::Release);
-                }
-                return Err(failure);
-            }
-            if change.prepared.is_some() {
-                applied.push(change);
+            if let Err(error) = result {
+                outcome.failure.get_or_insert(error);
             }
         }
         {
@@ -414,20 +392,20 @@ impl PreparedUpdate<'_> {
                 } else {
                     entries.insert(local.clone(), Arc::clone(&change.entry));
                 }
-                change
-                    .entry
-                    .notifications
-                    .enabled
-                    .store(change.enabled, Ordering::Release);
+                change.entry.notifications.enabled.store(
+                    change.enabled && outcome.failure.is_none(),
+                    Ordering::Release,
+                );
             }
         }
-        let mut outcome = UpdateOutcome::default();
         for change in self.changes.values().filter(|change| change.removed) {
             if let Err(error) = self.owner.retire(Arc::clone(&change.entry)) {
                 outcome.retirement.get_or_insert(error);
             }
         }
-        self.owner.updating.store(false, Ordering::Release);
+        if outcome.failure.is_none() {
+            self.owner.updating.store(false, Ordering::Release);
+        }
         Ok(outcome)
     }
 }

@@ -6,7 +6,8 @@
 
 use crate::abi;
 use rpt_advanced_core::config::{
-    ConfigDocument, EchoLinkSettings, NodeId, ResolvedNodeSettings, Schema,
+    ConfigDocument, EchoLinkSettings, NodeId, PhoneAccountProtocol, PhoneAccountSettings,
+    ResolvedNodeSettings, Schema, resolve_phone_accounts,
 };
 #[path = "configuration_echolink.rs"]
 mod echolink;
@@ -30,6 +31,7 @@ pub(crate) unsafe extern "C" fn inspect_configuration(
         let source = unsafe { input(configuration, length) }?;
         let document = ConfigDocument::parse(source).map_err(|error| error.to_string())?;
         let resolution = Schema::validate(&document).map_err(|error| error.to_string())?;
+        let phone_accounts = resolve_phone_accounts(&document).value;
         let mut nodes = Vec::new();
         let mut radio_diagnostic = RadioDiagnostic {
             sink: diagnostic,
@@ -64,6 +66,11 @@ pub(crate) unsafe extern "C" fn inspect_configuration(
         }
         if let Some(sink) = node {
             for (identity, settings, radio, account) in nodes {
+                let phones: Vec<_> = phone_accounts
+                    .iter()
+                    .filter(|account| account.local_node == identity)
+                    .map(phone_account_record)
+                    .collect();
                 let secrets_file = account
                     .secrets_file
                     .as_ref()
@@ -87,6 +94,8 @@ pub(crate) unsafe extern "C" fn inspect_configuration(
                             echolink: std::ptr::from_ref(account).cast(),
                             echolink_secrets_file: secrets_file.as_ptr(),
                             echolink_secrets_file_length: secrets_file.len(),
+                            phone_accounts: phones.as_ptr(),
+                            phone_account_count: phones.len(),
                         };
                         unsafe { sink(node_context, &record) }
                     });
@@ -100,6 +109,31 @@ pub(crate) unsafe extern "C" fn inspect_configuration(
         }
         Ok(())
     })
+}
+
+/// Borrow public account fields until the synchronous node visitor returns.
+fn phone_account_record(
+    account: &PhoneAccountSettings,
+) -> abi::rptadv_phone_account_configuration_v1 {
+    let bytes = |text: &str| abi::rptadv_peer_bytes_v1 {
+        data: text.as_ptr(),
+        length: text.len(),
+    };
+    abi::rptadv_phone_account_configuration_v1 {
+        struct_size: size_of::<abi::rptadv_phone_account_configuration_v1>() as u32,
+        id: bytes(account.id.as_str()),
+        protocol: match account.protocol {
+            PhoneAccountProtocol::Iax => abi::RPTADV_PHONE_ACCOUNT_IAX,
+            PhoneAccountProtocol::Sip => abi::RPTADV_PHONE_ACCOUNT_SIP,
+        },
+        enabled: u32::from(account.enabled),
+        server: bytes(&account.server),
+        username: bytes(&account.username),
+        secrets_file: bytes(&account.secrets_file),
+        register_account: u32::from(account.register),
+        registration_interval_s: account.registration_interval_s,
+        authentication_timeout_ms: account.authentication_timeout_ms,
+    }
 }
 
 pub(crate) unsafe extern "C" fn inspect_secrets(

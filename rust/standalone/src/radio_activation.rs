@@ -50,6 +50,8 @@ pub struct ProductRadioCallbacks {
     pub transmit_context: *mut c_void,
     /// Same serial transmit-owner policy/activity endpoint.
     pub metadata: abi::rptadv_radio_metadata_v1,
+    /// Optional stopped-only port, serialized with this same transmit context.
+    pub feedback: Option<abi::UrpRadioFeedbackPort>,
 }
 
 /// Native station handle; its shared product owns every hardware and DSP resource.
@@ -139,6 +141,7 @@ impl ActiveRadio {
         else {
             return Err(RadioActivationError::Product(-2));
         };
+        let feedback = callbacks.feedback;
         let callbacks = abi::UrpAstDirectCallbacks {
             struct_size: std::mem::size_of::<abi::UrpAstDirectCallbacks>() as u32,
             abi_version: abi::URP_AST_DIRECT_CALLBACKS_ABI_VERSION,
@@ -180,6 +183,19 @@ impl ActiveRadio {
             site_publish,
             site_snapshot,
         };
+        if let Some(port) = feedback {
+            // SAFETY: create returned a stopped station; the caller retains this
+            // port's code/context through destruction, including failed startup.
+            let status = api
+                .native_feedback_bind
+                .map_or(-7, |bind| unsafe { bind(handle.as_ptr(), &port) });
+            if status != 0 {
+                return Err(RadioActivationError::Retained {
+                    status,
+                    active: Box::new(active),
+                });
+            }
+        }
         // SAFETY: successful create returns this stopped, uniquely owned station.
         let status = unsafe { start(handle.as_ptr()) };
         if status != 0 {
@@ -379,6 +395,24 @@ impl ActiveRadio {
         Ok(())
     }
 
+    /// Dispatch one final-programme retirement on the existing native owner.
+    /// Completion still requires its matching completed-render feedback, not this result.
+    pub(crate) fn retire_programme(&mut self, request: &mut abi::UrpAstProgrammeRetirement) -> i32 {
+        let (Some(handle), Some(retire)) = (self.handle, self.api.native_programme_retire) else {
+            return -7;
+        };
+        // SAFETY: this is the retained native operation on its serialized control owner.
+        request.result = unsafe {
+            retire(
+                handle.as_ptr(),
+                request.expected_radio_generation,
+                request.request_id,
+            )
+        };
+        request.accepted_abi_version = abi::URP_AST_PROGRAMME_RETIRE_OPTION_ABI_VERSION;
+        0
+    }
+
     /// Borrow the existing native owner for one typed command or session intent.
     /// Mutable command results and provider error codes cross this boundary intact.
     pub(crate) fn maintenance(
@@ -478,7 +512,8 @@ fn retain_operations(api: &abi::UrpAstDescriptor) -> abi::UrpAstDescriptor {
         remote_source,
         remote_take,
         remote_destroy,
-        native_activation_status
+        native_activation_status,
+        native_programme_retire
     );
     retained
 }
@@ -617,6 +652,89 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn native_feedback_binding_precedes_start_and_failure_reclaims_the_stopped_owner() {
+        thread_local! { static QUIESCENT: Cell<bool> = const { Cell::new(false) }; }
+        unsafe extern "C" fn quiesce(_: *mut c_void) -> i32 {
+            i32::from(!QUIESCENT.get())
+        }
+        unsafe extern "C" fn publish(_: *mut c_void, _: *const abi::UrpRadioFeedback) {}
+        unsafe extern "C" fn bind(_: *mut c_void, port: *const abi::UrpRadioFeedbackPort) -> i32 {
+            CALLS.with(|calls| calls.borrow_mut().push("feedback"));
+            let port = unsafe { &*port };
+            assert_eq!(port.struct_size as usize, std::mem::size_of_val(port));
+            assert_eq!(port.abi_version, 1);
+            assert!(port.publish.is_some());
+            if port.context.is_null() { 0 } else { -6 }
+        }
+        for mode in 0..3 {
+            let (mut api, mut providers, mut config): (
+                abi::UrpAstDescriptor,
+                abi::UrpAstProviderManifest,
+                abi::UrpNativeStationConfig,
+            ) = unsafe { std::mem::zeroed() };
+            api.struct_size = std::mem::size_of_val(&api) as u32;
+            api.native_create = Some(create);
+            api.native_start = Some(start);
+            api.native_stop = Some(stop);
+            api.native_destroy = Some(destroy);
+            api.native_site_bind = Some(site_bind);
+            api.native_site_publish = Some(site_publish);
+            api.native_site_snapshot = Some(site_snapshot);
+            api.native_quiesce = Some(quiesce);
+            api.native_feedback_bind = if mode == 0 { None } else { Some(bind) };
+            providers.abi_version = 1;
+            config.receive_output_gain_db = -8;
+            RESULTS.set((0, true, 0));
+            CALLS.with(|calls| calls.borrow_mut().clear());
+            let callbacks = ProductRadioCallbacks {
+                receive: Some(receive),
+                receive_context: NonNull::<u8>::dangling().as_ptr().cast(),
+                transmit: Some(transmit),
+                transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
+                metadata: None,
+                feedback: Some(abi::UrpRadioFeedbackPort {
+                    struct_size: std::mem::size_of::<abi::UrpRadioFeedbackPort>() as u32,
+                    abi_version: 1,
+                    context: if mode == 1 {
+                        NonNull::<u8>::dangling().as_ptr().cast()
+                    } else {
+                        std::ptr::null_mut()
+                    },
+                    publish: Some(publish),
+                }),
+            };
+            let mut result =
+                ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks);
+            if mode == 2 {
+                assert!(result.is_ok());
+            } else {
+                let Err(RadioActivationError::Retained { status, active }) = &mut result else {
+                    panic!("create retained callbacks; a failed bind must retain their owner");
+                };
+                assert_eq!(*status, if mode == 0 { -7 } else { -6 });
+                let expected: &[&str] = if mode == 0 {
+                    &["create"]
+                } else {
+                    &["create", "feedback"]
+                };
+                CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected));
+                QUIESCENT.set(false);
+                assert_eq!(active.quiesce(), 1);
+                CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected));
+                QUIESCENT.set(true);
+                assert_eq!(active.quiesce(), 0);
+            }
+            drop(result);
+            let expected: &[&str] = match mode {
+                0 => &["create", "stop", "destroy"],
+                1 => &["create", "feedback", "stop", "destroy"],
+                _ => &["create", "feedback", "start", "stop", "destroy"],
+            };
+            CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected));
+        }
+    }
+
+    #[test]
     fn native_quiesce_retains_the_station_until_the_physical_owner_finishes() {
         thread_local! { static READY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
         unsafe extern "C" fn quiesce(_: *mut c_void) -> i32 {
@@ -740,6 +858,24 @@ pub(crate) mod tests {
     unsafe extern "C" fn ticket_destroy(ticket: *mut c_void) {
         assert_eq!(ticket, NonNull::<u32>::dangling().as_ptr().cast());
         CALLS.with(|calls| calls.borrow_mut().push("ticket_destroy"));
+    }
+
+    #[test]
+    fn programme_retirement_retains_only_a_complete_released_callback() {
+        unsafe extern "C" fn retire(_: *mut c_void, _: u64, _: u64) -> i32 {
+            0
+        }
+        let mut api = remote_fixture_api();
+        api.native_programme_retire = Some(retire);
+        let end = std::mem::offset_of!(abi::UrpAstDescriptor, native_programme_retire)
+            + std::mem::size_of_val(&api.native_programme_retire);
+        for (size, supported) in [(end - 1, false), (end, true)] {
+            api.struct_size = size as u32;
+            assert_eq!(
+                retain_operations(&api).native_programme_retire.is_some(),
+                supported
+            );
+        }
     }
 
     pub(crate) fn remote_fixture_api() -> abi::UrpAstDescriptor {
@@ -1268,6 +1404,7 @@ pub(crate) mod tests {
                 transmit: Some(transmit),
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 metadata: None,
+                feedback: None,
             },
         )
         .unwrap();
@@ -1385,6 +1522,7 @@ pub(crate) mod tests {
                 transmit: Some(transmit),
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 metadata: None,
+                feedback: None,
             };
             let result = ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks);
             let status = result.as_ref().err().map(|error| match error {
@@ -1429,6 +1567,7 @@ pub(crate) mod tests {
             transmit: Some(transmit),
             transmit_context: std::ptr::null_mut(),
             metadata: None,
+            feedback: None,
         };
         let mut missing_receive = callbacks();
         missing_receive.receive = None;

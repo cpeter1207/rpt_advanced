@@ -40,6 +40,7 @@ struct fixture {
     unsigned int keys;          /**< PTT assertions. */
     unsigned int unkeys;        /**< PTT releases observed in callback output. */
     UrpAstDirectCallbacks callbacks; /**< Retained endpoints. */
+    UrpRadioFeedbackPort feedback;   /**< Stopped-only port; no physical readback is simulated. */
     struct ast_channel *channel;     /**< Borrowed until synchronous hangup joins the clock. */
     float audio[960];                /**< Normalized native-rate PCM. */
 };
@@ -222,6 +223,21 @@ static int setoption(struct ast_channel *channel, int option, void *data, int si
         }
         command->value = 0;
         command->flags = 0;
+        return 0;
+    }
+    if (option == URP_AST_OPTION_RADIO_FEEDBACK) {
+        if (!data || size != sizeof(UrpAstFeedbackBinding)) {
+            return -1;
+        }
+        UrpAstFeedbackBinding *binding = data;
+        binding->accepted_abi_version = 0;
+        if (device->started || binding->struct_size != sizeof(*binding) ||
+            binding->abi_version != URP_AST_FEEDBACK_OPTION_ABI_VERSION || binding->reserved ||
+            binding->port.struct_size < sizeof(binding->port) || binding->port.abi_version != 1) {
+            return -1;
+        }
+        device->feedback = binding->port;
+        binding->accepted_abi_version = URP_AST_FEEDBACK_OPTION_ABI_VERSION;
         return 0;
     }
     if (option == URP_AST_OPTION_REMOTE_CONTROL) {

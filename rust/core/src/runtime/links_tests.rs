@@ -36,6 +36,117 @@ fn links() -> NodeLinkControl {
 }
 
 #[test]
+fn clearing_phone_mode_preserves_unrelated_and_same_call_replacement_collectors() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    let mut links = links();
+    let signals: Vec<_> = (1..=3)
+        .map(|ingress| {
+            PeerSignals::for_phone(
+                PhoneSource::new(
+                    PhoneAccountId::new("provider").unwrap(),
+                    1,
+                    "aabbccddeeff00112233445566778899".parse().unwrap(),
+                    2,
+                    ingress,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    for signal in &signals {
+        assert!(signal.authenticate_phone());
+        let reply = signal.reply_target();
+        for digit in "*7".chars() {
+            assert!(
+                links
+                    .phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone())
+                    .is_none()
+            );
+        }
+    }
+    links.clear_source_input(&signals[0].reply_target());
+    for (index, signal) in signals.iter().enumerate() {
+        let reply = signal.reply_target();
+        let outcomes: Vec<_> = "0#"
+            .chars()
+            .filter_map(|digit| {
+                links.phone_digit(reply.phone_source().unwrap(), digit, 2, reply.clone())
+            })
+            .collect();
+        assert_eq!(outcomes.len(), usize::from(index != 0));
+        assert!(reply.phone_authenticated() && !reply.ended());
+    }
+    links.clear_source_input(&PeerSignals::new().reply_target());
+}
+
+#[test]
+fn clearing_one_phone_macro_cancels_only_its_delayed_steps_and_retains_unlock() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let mut links = links();
+    links.configure_admin(&digest, &digest, 60_000);
+    let limits = crate::dtmf_macro::DtmfMacroLimits::default();
+    let definition = crate::config::ResolvedDtmfMacroSettings {
+        name: "status".into(),
+        trigger: "*95".into(),
+        protected: false,
+        commands: "*70#,*73#".into(),
+    };
+    let compiled = crate::dtmf_macro::compile(
+        &definition,
+        limits,
+        &DtmfCommandMap::standard(),
+        "524950",
+        &[],
+    )
+    .unwrap();
+    links.configure_macros(vec![compiled], limits).unwrap();
+    let signals: Vec<_> = (1..=2)
+        .map(|ingress| {
+            PeerSignals::for_phone(
+                PhoneSource::new(
+                    PhoneAccountId::new("provider").unwrap(),
+                    1,
+                    "aabbccddeeff00112233445566778899".parse().unwrap(),
+                    2,
+                    ingress,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    for signal in &signals {
+        assert!(signal.authenticate_phone());
+        let reply = signal.reply_target();
+        for digit in "*8001234#*95".chars() {
+            links.phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone());
+        }
+    }
+    assert_eq!(links.advance_macros(1).len(), 2);
+    let first = signals[0].reply_target();
+    links.clear_source_input(&first);
+    let remaining = links.advance_macros(2001);
+    assert!(
+        matches!(remaining.as_slice(), [DigitOutcome::Operation(operation)] if operation.reply == Some(signals[1].reply_target()))
+    );
+    let operation = "*804"
+        .chars()
+        .filter_map(|digit| {
+            links.phone_digit(first.phone_source().unwrap(), digit, 2002, first.clone())
+        })
+        .next()
+        .unwrap();
+    assert!(
+        matches!(operation, DigitOutcome::Operation(_)),
+        "mode exit retains this exact source's unlock grant"
+    );
+}
+
+#[test]
 fn phone_pending_connect_and_initial_retry_end_with_the_actual_call() {
     use crate::link::{PhoneAccountId, PhoneSource};
     for permanent in [false, true] {
@@ -79,6 +190,7 @@ fn phone_pending_connect_and_initial_retry_end_with_the_actual_call() {
             panic!("expected a pending private call command")
         };
         assert!(attempt.current_at(2));
+        assert_eq!(attempt.private_reply(), Some(&reply));
         if permanent {
             assert_eq!(
                 links.finish_connect_at(attempt, false, 3, None, |_| None),
@@ -88,6 +200,7 @@ fn phone_pending_connect_and_initial_retry_end_with_the_actual_call() {
                 .take_retry(10_000, host.control().work().unwrap())
                 .unwrap();
             assert!(retry.current_at(10_000));
+            assert_eq!(retry.private_reply(), Some(&reply));
             links.retire_source(&reply);
             assert!(!retry.current_at(10_001));
             assert_eq!(
@@ -3022,4 +3135,322 @@ fn connect_commands_distinguish_temporary_links_and_existing_loops() {
         ),
         Err(AdmissionError::Loop)
     ));
+}
+
+#[test]
+fn phone_collection_query_is_exact_read_only_and_preserves_unlock() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let mut links = links();
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    links.configure_admin(&digest, &digest, 60_000);
+    let signals: Vec<_> = (1..=3)
+        .map(|ingress| {
+            PeerSignals::for_phone(
+                PhoneSource::new(
+                    PhoneAccountId::new("provider").unwrap(),
+                    1,
+                    "aabbccddeeff00112233445566778899".parse().unwrap(),
+                    2,
+                    ingress,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let first = signals[0].reply_target();
+    let source = first.phone_source().unwrap();
+    assert_eq!(links.phone_collection_pending(source, &first), None);
+    for signal in &signals[..2] {
+        assert!(signal.authenticate_phone());
+        let reply = signal.reply_target();
+        let source = reply.phone_source().unwrap();
+        assert_eq!(links.phone_collection_pending(source, &reply), Some(false));
+        for digit in "*8001234#*7".chars() {
+            links.phone_digit(source, digit, 1, reply.clone());
+        }
+        assert_eq!(links.phone_collection_pending(source, &reply), Some(true));
+    }
+    let other = signals[1].reply_target();
+    assert_eq!(links.phone_collection_pending(source, &other), None);
+    let unauthenticated = signals[2].reply_target();
+    assert_eq!(
+        links.phone_collection_pending(unauthenticated.phone_source().unwrap(), &unauthenticated),
+        None
+    );
+    let before = links.peer_commands.len();
+    for _ in 0..3 {
+        assert_eq!(links.phone_collection_pending(source, &first), Some(true));
+    }
+    assert_eq!(
+        links.peer_commands.len(),
+        before,
+        "inspection creates no collector"
+    );
+    links.clear_source_input(&first);
+    assert_eq!(links.phone_collection_pending(source, &first), Some(false));
+    assert_eq!(
+        links.phone_collection_pending(other.phone_source().unwrap(), &other),
+        Some(true)
+    );
+    assert!(
+        "*804"
+            .chars()
+            .filter_map(|digit| { links.phone_digit(source, digit, 2, first.clone()) })
+            .any(|outcome| matches!(outcome, DigitOutcome::Operation(_))),
+        "inspection and cancellation preserve the exact source's unlock"
+    );
+    assert_eq!(links.phone_collection_pending(source, &first), Some(false));
+    assert!(links.expire_peer_digits(3002).is_empty());
+    assert_eq!(
+        links.phone_collection_pending(other.phone_source().unwrap(), &other),
+        Some(false),
+        "the real node timeout ends collection even without an operation"
+    );
+    signals[0].end();
+    assert_eq!(links.phone_collection_pending(source, &first), None);
+    links.close();
+    assert_eq!(
+        links.phone_collection_pending(other.phone_source().unwrap(), &other),
+        None
+    );
+    assert!(links.manager().snapshot().is_empty());
+}
+
+#[test]
+fn private_collection_expiry_notifies_silent_completion_once() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    let signals = PeerSignals::for_phone(source.clone());
+    assert!(signals.authenticate_phone());
+    let reply = signals.reply_target();
+    let mut links = links();
+    for digit in "*7".chars() {
+        assert!(
+            links
+                .phone_digit(&source, digit, 1, reply.clone())
+                .is_none()
+        );
+    }
+    let mut ended = Vec::new();
+    assert!(
+        links
+            .expire_peer_digits_with_collection(3000, |source| ended.push(source.clone()))
+            .is_empty()
+    );
+    assert!(ended.is_empty());
+    assert!(
+        links
+            .expire_peer_digits_with_collection(3001, |source| ended.push(source.clone()))
+            .is_empty()
+    );
+    assert_eq!(ended, [reply.clone()]);
+    assert!(
+        links
+            .expire_peer_digits_with_collection(4000, |source| ended.push(source.clone()))
+            .is_empty()
+    );
+    assert_eq!(ended, [reply]);
+}
+
+#[test]
+fn remote_operation_custody_keeps_only_outstanding_exact_source_collectors() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use crate::remote_base_command::RemoteDtmfAccess;
+    for phone in [false, true] {
+        let mut links = links();
+        links
+            .configure_remote("6", RemoteDtmfAccess::Disabled)
+            .unwrap();
+        links.accept("2000", true).unwrap();
+        let source = PhoneSource::new(
+            PhoneAccountId::new("provider").unwrap(),
+            1,
+            "aabbccddeeff00112233445566778899".parse().unwrap(),
+            2,
+            3,
+        )
+        .unwrap();
+        let signals = if phone {
+            PeerSignals::for_phone(source.clone())
+        } else {
+            PeerSignals::new()
+        };
+        if phone {
+            assert!(signals.authenticate_phone());
+        }
+        let reply = signals.reply_target();
+        let operation = "*652#"
+            .chars()
+            .filter_map(|digit| {
+                if phone {
+                    links.phone_digit(&source, digit, 1, reply.clone())
+                } else {
+                    links.peer_digit("2000", digit, 1, reply.clone())
+                }
+            })
+            .find_map(|outcome| match outcome {
+                DigitOutcome::Operation(operation) => Some(operation),
+                _ => None,
+            })
+            .unwrap();
+        assert!(links.expire_peer_digits(2).is_empty());
+        assert!(links.advance_macros(2).is_empty());
+        assert_eq!(
+            links.peer_commands.len(),
+            1,
+            "queued command keeps its original collector"
+        );
+        assert!(links.remote_authorized(&operation, 2));
+        let copy = operation.clone();
+        drop(operation);
+        links.expire_peer_digits(3);
+        assert_eq!(
+            links.peer_commands.len(),
+            1,
+            "last copy, not first drop, owns custody"
+        );
+        links.lost_digits();
+        links.expire_peer_digits(4);
+        assert!(
+            links.remote_authorized(&copy, 4),
+            "Lost still cancels only partial input/macros, not completed human work"
+        );
+        drop(copy);
+        links.expire_peer_digits(5);
+        assert!(
+            links.peer_commands.is_empty(),
+            "ordinary idle sweep reclaims after final command ownership ends"
+        );
+    }
+}
+
+#[test]
+fn remote_operation_custody_never_overrides_exact_retirement_or_reconfiguration() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use crate::remote_base_command::RemoteDtmfAccess;
+    let mut links = links();
+    links
+        .configure_remote("6", RemoteDtmfAccess::Disabled)
+        .unwrap();
+    let make = |ingress| {
+        let source = PhoneSource::new(
+            PhoneAccountId::new("provider").unwrap(),
+            1,
+            "aabbccddeeff00112233445566778899".parse().unwrap(),
+            2,
+            ingress,
+        )
+        .unwrap();
+        let signals = PeerSignals::for_phone(source);
+        assert!(signals.authenticate_phone());
+        signals
+    };
+    let query = |links: &mut NodeLinkControl, reply: &PeerReply| {
+        "*652#"
+            .chars()
+            .filter_map(|digit| {
+                links.phone_digit(reply.phone_source().unwrap(), digit, 1, reply.clone())
+            })
+            .find_map(|outcome| match outcome {
+                DigitOutcome::Operation(operation) => Some(operation),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let old = make(3);
+    let operation = query(&mut links, &old.reply_target());
+    links.expire_peer_digits(2);
+    assert!(links.remote_authorized(&operation, 2));
+    links.retire_source(&old.reply_target());
+    assert!(links.peer_commands.is_empty());
+    let replacement = make(4);
+    let fresh = query(&mut links, &replacement.reply_target());
+    links.expire_peer_digits(3);
+    assert!(!links.remote_authorized(&operation, 3));
+    assert!(links.remote_authorized(&fresh, 3));
+    links.reconfigure(
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        None,
+    );
+    assert!(
+        links.peer_commands.is_empty(),
+        "configuration owner can reclaim collectors while copies exist"
+    );
+    assert!(!links.remote_authorized(&fresh, 4));
+}
+
+#[test]
+fn remote_operation_custody_does_not_extend_a_private_source_grant() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    use crate::remote_base_command::RemoteDtmfAccess;
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let mut links = links();
+    links.configure_admin(&digest, &digest, 100);
+    links
+        .configure_remote("6", RemoteDtmfAccess::Locked)
+        .unwrap();
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    let signals = PeerSignals::for_phone(source.clone());
+    assert!(signals.authenticate_phone());
+    let reply = signals.reply_target();
+    for digit in "*8001234#".chars() {
+        assert!(
+            links
+                .phone_digit(&source, digit, 1, reply.clone())
+                .is_none()
+        );
+    }
+    let collect = |links: &mut NodeLinkControl, text: &str, now_ms| {
+        text.chars()
+            .filter_map(|digit| links.phone_digit(&source, digit, now_ms, reply.clone()))
+            .find_map(|outcome| match outcome {
+                DigitOutcome::Operation(operation) => Some(operation),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let mutation = collect(&mut links, "*661#", 2);
+    let query = collect(&mut links, "*652#", 3);
+    links.expire_peer_digits(100);
+    assert!(links.remote_authorized(&mutation, 100));
+    links.expire_peer_digits(101);
+    assert!(
+        links.remote_authorized(&query, 101),
+        "read-only permission remains public"
+    );
+    assert!(
+        !links.remote_authorized(&mutation, 101),
+        "retention cannot renew the source's expired grant"
+    );
+    links
+        .configure_remote("6", RemoteDtmfAccess::Disabled)
+        .unwrap();
+    assert!(!links.remote_authorized(&mutation, 102));
+    assert!(links.remote_authorized(&query, 102));
+    drop((query, mutation));
+    links.expire_peer_digits(103);
+    assert!(links.peer_commands.is_empty());
 }

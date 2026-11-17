@@ -16,6 +16,7 @@ struct State {
     configuration: String,
     path: PathBuf,
     control: EchoBackend,
+    reload_fatal: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -185,6 +186,7 @@ unsafe extern "C" fn load(
                     configuration,
                     path,
                     control: EchoBackend(control),
+                    reload_fatal: false,
                 });
                 0
             }
@@ -200,6 +202,7 @@ unsafe extern "C" fn load(
                         configuration,
                         path,
                         control: EchoBackend(control),
+                        reload_fatal: false,
                     });
                     0
                 }
@@ -215,6 +218,9 @@ extern "C" fn reload() -> i32 {
         let Some(state) = selected.as_mut() else {
             return -1;
         };
+        if state.reload_fatal {
+            return -1;
+        }
         let Ok(configuration) = std::fs::read_to_string(&state.path) else {
             return -1;
         };
@@ -228,7 +234,6 @@ extern "C" fn reload() -> i32 {
                     &configuration,
                     preparation,
                     || state.product.reload(&configuration),
-                    || state.product.reload(&state.configuration),
                 )
             },
         );
@@ -237,8 +242,27 @@ extern "C" fn reload() -> i32 {
                 if let Some(error) = outcome.retirement {
                     echo_reload_error(error);
                 }
-                state.configuration = configuration;
-                0
+                if outcome.product.published() {
+                    state.configuration = configuration;
+                }
+                if matches!(
+                    outcome.product,
+                    rptadv_peer_support::reload::ReloadOutcome::Fatal(_)
+                ) {
+                    state.reload_fatal = true;
+                }
+                if let Some(error) = outcome.failure {
+                    echo_reload_error(error);
+                }
+                if outcome.product != rptadv_peer_support::reload::ReloadOutcome::Committed
+                    || outcome.failure.is_some()
+                    || outcome.retirement.is_some()
+                {
+                    echo_reload_error(format!("reload outcome: {:?}", outcome.product));
+                    -1
+                } else {
+                    0
+                }
             }
             Err(error) => {
                 echo_reload_error(error);

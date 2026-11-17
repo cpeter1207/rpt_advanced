@@ -26,6 +26,62 @@ impl Drop for Frame {
 }
 
 impl Radio {
+    /// Bind stopped-only feedback and require the SDK's explicit option acknowledgment.
+    pub(crate) fn bind_feedback(&mut self, port: ffi::UrpRadioFeedbackPort) -> i32 {
+        let mut binding = ffi::UrpAstFeedbackBinding {
+            struct_size: std::mem::size_of::<ffi::UrpAstFeedbackBinding>() as u32,
+            abi_version: ffi::URP_AST_FEEDBACK_OPTION_ABI_VERSION,
+            port,
+            accepted_abi_version: 0,
+            reserved: 0,
+        };
+        // SAFETY: the reserved channel and complete envelope outlive this
+        // synchronous copy. Context lifetime is retained by its stopped owner.
+        let status = unsafe {
+            ffi::ast_channel_setoption(
+                self.connection.channel.pointer.as_ptr(),
+                ffi::URP_AST_OPTION_RADIO_FEEDBACK as i32,
+                std::ptr::from_mut(&mut binding).cast(),
+                std::mem::size_of_val(&binding) as i32,
+                0,
+            )
+        };
+        if status == 0 && binding.accepted_abi_version != ffi::URP_AST_FEEDBACK_OPTION_ABI_VERSION {
+            -7
+        } else {
+            status
+        }
+    }
+    /// Dispatch retirement through the same channel owner without waiting for
+    /// audio adoption. An acknowledged pending result is not completed retirement.
+    pub(crate) fn retire_programme(&mut self, request: &mut ffi::UrpAstProgrammeRetirement) -> i32 {
+        let identity = (request.expected_radio_generation, request.request_id);
+        request.accepted_abi_version = 0;
+        request.result = -7;
+        // SAFETY: this unique channel and complete writable envelope outlive setoption.
+        let status = unsafe {
+            ffi::ast_channel_setoption(
+                self.connection.channel.pointer.as_ptr(),
+                ffi::URP_AST_OPTION_PROGRAMME_RETIRE as i32,
+                std::ptr::from_mut(request).cast(),
+                std::mem::size_of_val(request) as i32,
+                0,
+            )
+        };
+        if status != 0 {
+            return status;
+        }
+        if request.struct_size as usize != std::mem::size_of_val(request)
+            || request.abi_version != ffi::URP_AST_PROGRAMME_RETIRE_OPTION_ABI_VERSION
+            || request.accepted_abi_version != ffi::URP_AST_PROGRAMME_RETIRE_OPTION_ABI_VERSION
+            || (request.expected_radio_generation, request.request_id) != identity
+        {
+            request.accepted_abi_version = 0;
+            request.result = -7;
+            return -7;
+        }
+        0
+    }
     /// Query resolved receive policy before call(), rejecting unknown-option success.
     pub(crate) fn receive_policy(&mut self, command: &mut ffi::UrpAstChannelCommand) -> i32 {
         command.value = -1;

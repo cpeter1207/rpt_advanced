@@ -149,3 +149,1137 @@ still need implementation and automated evidence.
 Actual provider/NAT and physical switching/STE/listening acceptance remain
 separate. The [implementation plan](../../../docs/superpowers/plans/2026-11-09-phone-patch-implementation.md)
 records task ordering; this ADR does not claim completion or authorize deployment.
+
+Host ABI 10 now has an optional `radio_feedback_bind` tail, preserving the
+complete 400-byte predecessor prefix. This is needed because `radio_activate`
+accepts the established separate RX/TX functions and contexts; its function
+signature and the existing metadata callback cannot carry an additional sized
+SDK port. Both hosts copy the stopped-only `UrpRadioFeedbackPort` and forward
+it through the existing native station or acknowledged `RPFB` channel option
+before startup. A partial table is rejected, and an absent tail remains an
+explicitly unavailable capability. Binding does not turn requested or serviced
+PTT into physical readback, add a hardware owner, or enable RF receive windows.
+The callback/context remains owned through checked radio retirement, including
+failed activation. DirectCallbacks remains ABI 6; no SONAME change is required.
+
+## Released IAX provider cohort adoption — 2026-11-11
+
+The controller now selects IAX `v0.1.0-alpha11`
+(`7dd0f98f21c4982c2d71e7f7ba80fe2e6e9a0994`) and requires its development
+and runtime packages. That release provides shared-listener provider account
+configuration, registration, incoming authentication, account dialing and timed
+media contracts. These provider capabilities supersede the alpha10 prerequisite
+status above; their controller composition remains pending.
+
+Existing numeric-only listener creation explicitly supplies an empty account
+list. Consumer fixture tables declare their unused optional provider/timed slots
+as absent. The generated complete-record size checks and package floors reject
+an older runtime cohort before copying its table. No ABI revision or SONAME is
+changed, no alternate protocol implementation is introduced, and this adoption
+does not enable phone accounts or switch existing calls to timed polling. Timed
+media requires genuine ring/DSP/RF retirement integration before activation.
+
+## Public account inspection — 2026-11-11
+
+The existing synchronous configuration visitor now borrows sized public phone
+account records through a pointer/count tail on its node record. Global account
+labels are grouped by their explicit local node, including disabled complete
+accounts. The records contain provider settings and a secrets-file path, never
+secret contents; all spans expire when the visitor returns.
+
+This reuses the existing product table entrypoint without a descriptor revision
+or SONAME change. Existing node fields keep their layout. Current consumers and
+fixtures rebuild from the shared header; exact-size validation rejects mixed
+product/host records, checking the prefix before reading the new tail. Initial-alpha packages must ship a
+matched product/host cohort rather than retaining a legacy parsing path.
+
+Standalone copies these records into separate account values, with diagnostic
+formatting omitting server, username and secrets path. Radio configuration
+identity and lifecycle ownership are unchanged. Inspection does not register an
+account, open a transport, load secrets or activate phone media. Provider
+composition, call lifetimes and the remaining Task 4 acceptance are still pending.
+
+## Physical feedback consumer prerequisite — 2026-11-11
+
+The product binds the existing optional feedback port before activating its sole
+radio TX owner. The stable callback context survives binding/activation failures
+until checked radio retirement; neither host adds a second hardware owner.
+Only the complete SDK33 physical prefix is copied. An absent, malformed,
+wrong-frame, repeated-position or changed-lifecycle record is unavailable for
+that callback; a previous OFF observation cannot be reused.
+
+The existing bounded TX meter snapshot carries these separate facts to station
+control: physical duplex, controller request, rendered signaling demand,
+serviced output, independent readback, acquisition age and the radio's existing
+coarse transmitter state. Service and readback require their own validity bits,
+the current nonzero request and lifecycle, consistent acquisition positions,
+and acquisition age no greater than that callback's native frame count.
+This conservative diagnostic freshness rule is not a measured switching profile.
+Default false, completed GPIO writes, and logical controller duplex cannot
+substitute for independent physical readback or physical duplex declaration.
+
+This prerequisite creates no receive window and does not claim settling,
+STE/rekey completion, DAC presentation time, or the five-second deadline.
+The future arbiter must consume qualified current evidence with its explicit
+freshness/settling policy. Source admission mapping, conservative DSP delay and
+history retirement, RF FIFO/pacing, and both-host composed validation remain
+required before enabling that behavior. No queue, thread, hardware query,
+allocation or clock read is added to either audio callback.
+
+
+## Ordered source-phone digits — 2026-11-11
+
+The optional sized source-sink tail now carries one private telephone digit with
+explicit acceptance/refusal. The provider retains a refused symbol ahead of
+later PCM and retries that same symbol. Product validation accepts only telephone
+symbols and one unit of dispatch credit. Only a typed private phone receives the
+callback; ordinary ASL/Echo source owners cannot route it into public commands.
+
+A source-capable phone retains the existing async/prepared media requirements and
+private-call identity. Its serial owner must consume one source stream for PCM
+and digits, not poll legacy and source APIs for the same events. Provider code
+checks the sink size through the new nullable tail before calling it. The old
+sink prefix, source result, host table, ABI revision and SONAME are unchanged.
+This capability does not authorize RF attachment or qualify absent source timing.
+
+## Prepared private receive generations — 2026-11-11
+
+An authenticated exact-call control owner can now prepare one receive generation
+using the existing phone-policy inbound ring and optional shared processing
+graph. A bounded command on the same private owner queue transfers its unique
+producer to the existing serial provider reader. Preparation is inactive until
+that transfer is adopted; it is not attachment, target authorization, RF readiness
+or successful transmission. No extra provider poller, per-call thread or PCM
+history is added. A live generation is busy rather than implicitly replaced.
+
+Original provider receipt time is kept separately from the ring's exact delayed
+source coordinate. A fixed 64-entry sidecar coalesces original times into 20 ms
+source regions, retaining the earliest time; fractional coordinates also consult
+the following source position. These are conservative age bounds, not invented
+wall-clock conversions or exact DSP provenance. Live metadata collisions refuse
+input before PCM acceptance, and dispatch credit is only the prefix the existing
+ring accepted. Missing birth, an earlier admission, foreign epoch, unmapped
+startup, gaps and PLC do not acquire fresh age evidence. An opaque processing
+graph continues to report unknown provenance.
+
+Digits, source loss/discontinuity, explicit media revocation, consumer retirement
+and exact call retirement fence retained ring and graph output. A digit retires
+the receive generation without disconnecting the authenticated logical call.
+Re-admission is explicit through the control owner, uses a fresh generation and
+cannot reclaim provider-held PCM from the earlier admission. Both block and
+sample output recheck the fence after processing.
+
+Production attachment/manual commands remain explicitly unavailable. Remaining
+requirements include typed phone mixer ownership, in-band DTMF onset/muting,
+two-sided target policy, reverse-call limits, admission/VAD/hangover behavior,
+bidirectional isolation and actual RF age/deadline scheduling with qualified
+processor and physical feedback. Prepared-media tests are not evidence of those
+capabilities or of live provider/RF acceptance.
+
+## Native SIP media boundary, 2026-11-11
+
+The standalone `phone::media` boundary is an independently testable transport
+component, not an activated provider. It negotiates one unencrypted RTP/AVP
+G.711 stream at 8 kHz mono and 20 ms, preserving packet sequence, timestamp
+wrapping and arrival order for the existing jitter owner. SDP is parsed by
+`sdp 0.8.0`; RTP headers by `rtp 0.13.0` with `webrtc-util 0.11.0`.
+Those leaf crates use MIT OR Apache-2.0 licenses and the selected native graph
+builds with the repository's Rust 1.88 toolchain. The component opens only the
+selected released dynamic G.711 encoder and decoder, not the full codec catalog.
+
+Each media owner retains one socket, bounded datagram storage, 16 telephone-event
+identities and the two selected codec contexts. It does not add an OS thread,
+Tokio runtime, PCM ring, clock estimator, jitter owner or DSP path. Callers must
+place it on the existing shared executor, preserve source positions through
+jitter/decode and retire it with the call generation. A connected UDP socket
+accepts only the negotiated media endpoint. RFC 4733 onset and first end remain
+independent of PCM admission; repeated ends do not repeat command digits.
+
+The fixed 172-byte RTP send follows Rust 1.88's
+[atomic UDP send contract](https://github.com/rust-lang/rust/blob/1.88.0/library/std/src/net/udp.rs#L683-L702).
+Real socket errors remain redacted; sequence advances only after successful
+submission of the entire datagram. The caller supplies the original source
+timestamp, including skipped or expired spans. Success does not establish peer
+delivery.
+
+SRTP, SDES/DTLS, ICE, RTCP multiplexing, additional codecs and non-20-ms profiles
+are not advertised. Unsupported security attributes are rejected rather than
+downgraded. RTCP/session reports, outbound telephone-event scheduling, incoming
+SIP admission, signaling, jitter/PCM orchestration, in-band detection and complete
+call lifecycle are separate pending integration work. The existing product DTMF
+provider remains the in-band detection owner. This boundary does not imply a
+secure media session, a usable account or a completed Task 4.
+
+The former signaling candidate `rsipstack 0.8.2` and the `0.8.4` version
+inspected during that historical probe retain unbounded transport, transaction, incoming-call and state queues. A capped
+outer socket does not bound the per-transaction queues. Production SIP activation
+therefore requires a qualified bounded admission/control contract; timer,
+cancellation and teardown must progress even under packet saturation. No
+rsipstack dependency is enabled by this media-only checkpoint.
+
+Conservative receipt bounds are carried on the timed output sample separately
+from exact source provenance. An explicitly qualified processor-history contract
+may retain an age bound without claiming an exact source coordinate or real/PLC
+classification. The current opaque processor clears both independently. The
+input trait can also expose a borrowed exact private-call reply token for typed
+mixer admission; ordinary inputs expose no such token.
+
+
+### Native peer programme-bound capability
+
+The controller processor record keeps its original ABI1 ownership prefix and
+adds an optional sized programme-buffering query. The native adapter forwards it
+to the released SDK query on the same uniquely owned graph and serial audio
+owner. Prefix-only callers remain valid, partial callback tails are rejected,
+and unknown extension bytes are untouched. There is no second graph, observer
+thread, hardware operation or timestamp derived from SDK frame counters.
+
+The callback exposes actual prepared and last-live-block history bounds and
+validity flags. Setup warmup is included in SDK counters; consumers must compare
+actual deltas and retain original source receipt bounds independently. An absent
+or rejected query remains unknown. The existing borrowed private-call identity
+is forwarded through processing unchanged.
+
+This capability alone does not implement RF scheduling or history retirement.
+Asterisk's existing upstream channel audiohook still owns its graph: its
+LINK_ATTACH envelope does not expose that owner's timed receipt/history query
+or graph-retirement transaction. A second product graph would duplicate DSP and
+is not a workaround. Both-host qualification requires a genuine channel-owner
+SDK extension and release; current Asterisk processing stays unqualified.
+
+
+### Native conservative original-age history
+
+A timed private-phone processor prepares compact metadata beside its existing
+graph, before audio publication. Ordinary peers allocate no history. At native
+48 kHz, twenty-millisecond buckets retain the earliest actual original receipt
+bound and source generation, never PCM or a time derived from output counters.
+The array covers at most 24,000 frames with at most 26 buckets. This is a local
+metadata horizon, not a claim that the complete ring, DSP, RF FIFO, converter,
+backend and physical path meets the end-to-end age cap. The real SDK prepared
+maximum remains unchanged even when it exceeds this horizon.
+
+Only a fresh, coherent, single-sample SDK observation with all required validity
+flags can qualify output age. The current delay must fit both the real prepared
+maximum and retained metadata. Exact post-DSP source provenance remains unknown.
+Unknown input, PLC, missing intervals, mixed source generations or clock epochs,
+adapter padding, failed/stale observations and pre-admission history cannot
+become fresh programme. Buckets can retain a slightly older bound or withhold
+qualification rather than underestimate age.
+
+Block rendering, idle processing and failures invalidate the metadata window.
+Resumption requires an actual SDK counter baseline and newly qualified source
+history. These counters establish continuity only and never reset source birth.
+The single serial processor owner performs queries and bounded metadata updates
+without new threads, heap allocation, clocks, locks or hardware operations on
+audio. Revocation still fences the exact phone media generation; graph owners
+are reclaimed off audio after quiescence, never reset speculatively in a callback.
+
+## Released bounded ring cohort — 2026-11-11
+
+The controller selects released ring `v3.0.0-alpha6` at
+`360e7312a4a367418ddac04bd81b8996d8a0ae80` and requires Debian
+`3.0.0~alpha6` or newer. This retains ring ABI 3 and its SONAME while reducing
+prepared converter workspaces and tagged-sample storage. Official amd64 runtime
+and development package hashes were verified before isolated consumer tests.
+The unchanged 2000-peer/48 kHz admission workload remains required; no fixture
+rate, peer count or queue capacity is reduced. The constrained runner allocator
+settings remain test-only and do not change production process defaults.
+## Native IAX account boundary, 2026-11-11
+
+Standalone now wraps the released alpha11 listener account operations separately
+from numeric ASL dialing. A provider-only listener has no invented numeric node
+alias. Account labels, configured local binding, transport login, literal secret,
+presentation caller fields and destination remain distinct. Successful
+registration copies the actual granted interval and endpoints; successful calls
+retain their exact account/call generations and one owned provider handle.
+Malformed successful receipts retire that unique handle rather than leaking it.
+
+These wrappers add no registration scheduler, listener poller, worker, mailbox
+grant or RF attachment. The mixed admission operation consumes one stream and
+preserves the existing numeric policy callbacks. Product activation, same-process
+reload and timed private-media composition remain pending. Alpha11's immediate
+single-listener account replacement cannot implement a multi-listener/product
+reload transaction: failures after an earlier replacement cannot restore retired
+call generations. Activation must use a prepared, reserved provider transaction
+and the product's genuine commit boundary, not sequential mutation with rollback.
+
+## Typed mixer publication and queued-block retirement — 2026-11-11
+
+The existing mixer accepts a typed public identity, or a private phone slot
+checked against the full account/call generation, actual ingress and exact
+authenticated reply token carried by its phone-policy input. A private slot
+never acquires a decimal alias, public last-keyed name or ordinary telemetry
+destination. Ordinary AllStar/EchoLink aliases and routing remain unchanged.
+
+The existing node-lifetime media worker owns one small retirement domain reused
+by successive mixer preparations. Exact ring-generation and call fences register
+with that domain on control, deduplicated by node ownership; repeated refreshes
+do not add history. Configured node ownership bounds registrations, and committed
+reload retires calls before replacing their node ownership. Registration uses an
+atomic release sequence with retirement so neither ordering can miss notification.
+Hardware processing and dispatch read only prepared fences and atomic revisions.
+
+Each queued composite block records which prepared sources actually contributed
+to its peer mix. The dispatcher validates those source fences once, then checks
+one node revision per destination. A later revision change cancels the remainder
+of that block and returns from the bounded pass instead of repeatedly rescanning
+all contributors. Revision saturation fails closed and never wraps. Unrelated
+nodes have independent domains. Revoking a prepared phone receive generation ends
+its ring fence while leaving the logical private call available for control.
+
+This proves typed core publication and revocation of queued composite blocks,
+including actual phone-policy ring consumers. It does not prove cancellation of
+already accepted provider packets, phone-tainted parrot history, final-TX DSP or
+RF presentation. Production attachment remains unavailable until those retained
+owners and the remaining admission requirements are joined safely.
+
+## Final-TX programme retirement bridge
+
+The existing serialized radio-control operation gains opcode 8 with a sized
+request wrapping its unchanged prefix and the released SDK retirement envelope.
+Both hosts validate the complete extension before borrowing it. The native host
+retains the optional callback only within its advertised extent and uses the
+existing radio handle. Asterisk dispatches through the existing owned channel
+and requires an explicit SDK acknowledgment with unchanged generation and
+request identity. Unsupported capabilities fail closed. No host-table layout,
+SONAME, second graph, hardware owner or audio-thread control call is introduced.
+
+Dispatch acknowledgment preserves the SDK's success, pending or error result;
+it is not completed audio retirement. The existing TX feedback consumer now
+copies a complete optional programme tail and reports its completed-render
+retirement ID and separately qualified prepared/current bounds. A partial or
+malformed tail remains unavailable without discarding valid physical-prefix
+facts. Existing frame-count, physical-generation and monotonic-publication
+checks apply to the whole observation. Missing bound flags never become a known
+delay, and an impossible current bound is withheld. These fields do not supply
+source birth, DAC presentation time or physical PTT-off acknowledgment.
+
+This checkpoint exposes and tests actual dispatch and feedback paths, not an
+activated RF policy. A retired source may already be retained in final-TX DSP
+before the next control pump. Zero controller input or requested unkey cannot
+prove that old programme is suppressed. Activation additionally requires an
+immediate generation-aware permit at the existing post-DSP programme boundary,
+before signaling, plus the matching completed-render retirement acknowledgment.
+That capability and the RF FIFO/arbiter consumer remain prerequisites.
+## Revision-qualified outbound spans — 2026-11-11
+
+A dispatcher-side revision check cannot make a later queue write atomic with
+retirement. Each inseparable phone-tainted composite and each private-phone
+destination therefore carries the captured node revision in the existing
+queue's private descriptor. The shared queue allocation binds its node domain
+once on control. The descriptor adds one u64, with no new PCM storage, public
+AudioSpan change or per-publication reference-count operation. Ordinary-only
+spans remain unmarked and retain their existing FIFO behavior.
+
+The sole consumer discards stale marked descriptors and their corresponding
+PCM without copying, bounded by its entry snapshot of queued descriptors.
+Partial spans retain the same revision in a scalar inside the existing shared
+allocation. Only the sole consumer reads or changes this pending scalar; it is
+cleared when a span completes or is discarded. The consumer retains its original
+112-byte representation on 64-bit targets; private descriptors grow from 56 to
+64 bytes. No observer or producer changes the pending state. A read rechecks after
+copying and clears a cancelled prefix; an unclocked read containing an obsolete marked
+prefix is conservatively silenced as a whole. A preceding peek is advisory,
+so serialized egress treats a cancelled read as retirement rather than panic.
+
+Successful consumer admission is a distinct boundary from queued storage.
+This closes publication after completed retirement, but does not revoke PCM
+already accepted into downstream conversion, codec, provider or RF history.
+Those owners still require their own fences before production phone attachment
+can become available.
+
+
+A read of an already peeked or partly consumed span never silently substitutes
+its successor when retirement cancels that pending span. It returns cancellation
+and leaves the successor queued. Serialized egress then reevaluates source due
+time before admitting the successor, so an ordinary future span behind retired
+private media is neither sent early nor lost.
+
+## Prepared phone processor identity join — 2026-11-11
+
+The inner timed ring consumer forwards its exact borrowed private-call token
+before the existing ProcessedPeer graph prepares conservative receipt history.
+Outer mixer identity alone cannot qualify that preparation. Real 8/48 kHz phone
+input therefore uses the same bounded history owner and original receipt bounds
+as the qualified graph contract; exact post-DSP provenance remains unknown.
+Retiring the media generation still revokes its output without ending private
+call control. This joins a prepared path, not production attachment readiness.
+
+## Mixed product mixer input ownership — 2026-11-12
+
+The existing product transmit worker now owns a direct enum of its ordinary
+processed peer input and the exact prepared phone media input. Every PeerInput
+operation forwards to that original owner, including finite drainage, timing,
+provenance, private reply and retirement. The ordinary host and regeneration
+constructors select the ordinary variant without changing their ring policy.
+No second ring, processor, buffer, thread or per-sample reference-count work is
+introduced. The measured amd64 representation is 88 bytes versus the previous
+72-byte ordinary input; the 16-byte ordinary-slot cost avoids another allocation
+or virtual call. The mixed worker remains a preparation prerequisite, not
+permission to attach a phone or publish unqualified RF programme.
+
+## Shared phone account preparation, 2026-11-11
+
+The protocol-neutral standalone account owner consumes copied
+`ResolvedPhoneAccount` records from the existing product visitor. It does not
+parse ordinary configuration or link another controller implementation.
+An immutable prepared account owns its settings, one resolved numeric endpoint,
+literal credential, and nonzero generation. A sorted vector shares unchanged
+accounts through `Arc`; complete settings, endpoint and credential equality
+preserves the exact generation. Changed or newly enabled accounts receive a
+fresh generation from one serialized owner. Failed or abandoned preparation
+leaves active snapshots unchanged; generation gaps are allowed, reuse is not.
+
+Each `secrets_file` is one UTF-8 literal secret, not an INI document. Strip only
+one terminal LF or CRLF; preserve spaces, semicolons and hash characters. Reject
+empty values and remaining control characters. Resolve relative paths against
+the host configuration directory and reuse the shared opened-file ownership,
+regular-file, mode 0600 and no-final-symlink checks. Accept at most 4096 file bytes, with a capped read to reject concurrent
+growth; IAX additionally requires at most 255 credential bytes. SIP
+uses the bounded literal string without a smaller digest-specific limit.
+Diagnostics and Debug output must never contain credentials, credential paths,
+provider usernames or endpoints.
+
+Preparation belongs off foreground/control and accepts a caller-owned resolver;
+numeric endpoints bypass DNS. A blocking resolver's admission permit remains
+inside its actual job until completion, including after async cancellation.
+Stale results cannot publish. This module creates no executor, thread, queue,
+listener, registration refresh or call. The host must know whether product
+publication occurred before committing a reserved listener transaction.
+Rejected preparation preserves existing calls; a post-publication operational
+failure must not be presented as a successful rollback. Account activation,
+shared listener lifecycle and both-host composition remain separate work.
+
+## Timed block rendering and bounded parrot capture — 2026-11-12
+
+Private mixer inputs use a shared timed-block result carrying the original
+real/PLC activity count separately from the conservative oldest receipt bound.
+Ordinary inputs retain their existing block path. Opaque inputs remain unknown.
+The qualified private processor fills PCM and records original metadata once,
+then executes one native block process and one buffering query. It does not
+replace batching with per-sample DSP/FFI calls or scan output PCM for metadata.
+
+For every emitted sample the audited SDK prepared maximum, rather than the
+last output's current delay, bounds the whole block's possible lookback. Before
+new input reuses the existing fixed metadata buckets, a scalar folds retained
+history from block start minus that prepared maximum. The sole fill pass folds
+new source metadata. Missing history, source generation or clock changes, PLC,
+unknown original receipt, invalid counters, zero padding, failed processing,
+or a prepared bound beyond the 500 ms metadata horizon withhold qualification.
+No additional PCM buffer, age vector, native graph or worker is introduced.
+This is a conservative original-age bound, not exact post-DSP provenance or
+end-to-end RF latency qualification.
+
+The existing capture tap includes all active peer inputs, independently of RF
+group selection. During that same render it aggregates private taint and the
+oldest original receipt, including real zero-valued PCM. Unknown or mixed clock
+epochs stay unknown for the whole inseparable clip. Capture and control share
+the existing prepared node retirement domain; adapter refresh must preserve
+that domain's identity. A revision change discards a tainted recording or
+completed clip, while ordinary-only clips survive unrelated retirement. The
+two existing preallocated recording buffers retain only scalar metadata and
+never assign a fresh receipt time.
+
+Phone-tainted replay is currently rejected on control before PCM copying,
+report preparation or playback publication. The existing replay owner has no
+qualified matching host-clock and RF age admission, so retaining the original
+bound alone cannot safely enable it. Legitimate qualified private replay and
+final-RF enforcement remain feature-completion prerequisites. Ordinary replay
+is unchanged. This checkpoint does not enable phone attachment or commands.
+
+## Reserved listener wrapper, 2026-11-12
+
+The alpha12 consumer prepares complete numeric and provider-account listener
+replacements in one borrowed RAII batch. It verifies every transaction slot and
+the same retained provider owner before passing opaque handles. Numeric elements
+remain decimal identities; empty whole profiles can disable admission. Copied
+configuration spans need not outlive preparation. The token retains safe mutable
+listener borrows, not another long-lived transport owner.
+
+All wrapper allocation precedes provider reservation. Commit consumes the token
+without a fallible result; dropping an uncommitted token aborts before releasing
+listener borrows. The wrapper does not decide product publication. Its outer
+coordinator commits after either committed terminal outcome. Confirmed rejection
+discards the uncommitted reservation. Unknown or fatal outcomes keep admission
+fenced: the coordinator may discard only the uncommitted provider reservation
+while retaining all old and candidate listener and DSO owners through orderly
+shutdown. That fail-stop cleanup neither compensates product publication nor
+resumes operation or claims rollback. Current boolean reload results cannot
+activate this path. Committed reload/stop still retire all product phone calls under this ADR.
+
+## Private source digit authority and shared analysis — 2026-11-12
+
+The named PHONE_INBAND_DIGITS capability is an optional bit in the unchanged
+sized peer metadata record. It is valid only with the complete asynchronous,
+prepared, source-media private Phone profile. Its absence explicitly selects
+NativeEvents, not an event-absence fallback. Both modes retain the validated
+source digit callback and its accepted/refused retry contract. NativeEvents
+dispatches native symbols only. InBand consumes non-authoritative native
+symbols without inserting commands or wedging provider order.
+
+Both timed private modes use the existing SourceIngress source-rate detector.
+The released DTMF alpha3 contract accepts exactly 8 or 48 kHz. Current G.711
+phone media is 8 kHz; other timed private formats return UnsupportedFormat
+rather than silently resampling. Legacy private readers and ordinary peers
+keep their existing preparation behavior.
+
+The shared analyzer separates one-time analysis from accepted-prefix commit.
+It retains only source identity, original birth, progress and bounded mute
+intervals. Ordinary source ingress keeps its existing 4096-sample/64-interval
+profile. Private ingress retains the existing 20 ms writer limit, requiring
+at most three 8 ms partitions and four interval slots. A retry copies the
+provider-owned raw suffix back into existing scratch and reapplies cached
+muting without advancing detection or emitting another digit. Outgoing private
+prompts may overwrite that scratch between partial or refused retries.
+
+Before authoritative in-band analysis, the private owner reserves bounded
+command-queue space. Native symbols retain their individual acceptance checks.
+Detected onset revokes its prepared media generation before publication;
+the logical call remains alive for private control. Original birth and actual
+accepted source credit are preserved, including partial writes. Native-event
+backpressure remains exact and only the one serial provider reader is used.
+These changes prepare source-private control and suppression; no provider,
+manual attachment, RF route or remote call-origin capability is activated.
+
+
+Retirement is not automatic re-admission. The source-private completion join
+below replaces the earlier local pound release. No event-absence or elapsed-time
+heuristic reopens a retired generation; the logical call and control events
+remain available. Fresh-media adoption is still required before attachment
+activation.
+The added capability changes no ABI field layout or SONAME; older consumers
+that do not recognize the bit reject that unsupported profile.
+
+
+A source reset cancels provider-owned PCM retries but does not erase an already
+qualified authoritative in-band digit. The serial private owner reserves one
+command slot before flushing that completion and acknowledging the reset. A
+full queue retains the provider reset for retry without advancing detection or
+source position. NativeEvents never dispatches the in-band completion; ordinary
+peer reset behavior is unchanged. Media retirement still happens immediately
+and does not wait for command capacity. This is not the pending private-grammar
+collection-ended/re-admission join described above.
+
+## Selected RF programme metadata, 2026-11-12
+
+The existing LinkAudio owner separately records the peer programme selected for
+its controller input. This is neither the broader all-active parrot capture tap
+nor proof of final admission or RF presentation. Real zero-valued PCM and active
+concealment retain contribution; registration, transport key state and discarded
+idle processor output do not. Ordinary keying and source-activity policy remain
+unchanged.
+
+Selection is snapshotted before the existing single render so original age can
+be folded without a per-peer age vector. Desired groups are still adopted only
+at the existing all-inputs-idle boundary. Exact contributor flags are finalized
+where the selected peer planes are mixed, after rechecking retirement. The full
+composite age is unknown if any selected programme is untimed, has a missing or
+different clock, or raced node retirement. No current clock or output counter
+is substituted for original receipt.
+
+One scalar block record retains that original node revision. Borrowed iteration
+exposes the exact media-generation and private-call fences already owned by each
+actual private contributor, without cloning a token or allocating on audio.
+Retirement after rendering remains visible through those fences; getters never
+renew the block snapshot. Empty or rejected callbacks cannot expose a previous
+block as current. Capture metadata, fresh network fanout and mix-minus retain
+their independent original paths.
+
+This adds no RF FIFO, policy, clock qualification, final-fence consumer or ID
+presentation acknowledgment. Those joins and physical qualification remain
+required before production phone RF attachment can become available.
+
+
+## Authoritative collection inspection prerequisite — 2026-11-12
+
+The outer phone grammar and the exact selected-node source collector expose
+read-only pending-collection state. A selected target or retained administrative
+grant is not itself pending collection. Empty action output is also not proof
+of completion: discard expiry may produce no action, and addressed symbols can
+leave the inner node collector active after the outer grammar becomes idle.
+Inspection does not cancel, reconstruct or renew those owners or their grants.
+The node query requires an authenticated matching source token and open node
+admission, but it is not call-registry authorization; control must still validate
+the actual PhoneSource and PeerReply against the live private call.
+
+Actual released-detector tests distinguish a qualified pending digit from
+current audible suppression at both 8 and 48 kHz. Scalar state inferred during
+the existing 8 ms partitions agrees with the provider's explicit end-of-input
+completion through quiet tails, replacement tones and short unqualified tones.
+The private completion join below uses this scalar proof without automatic
+readmission. Fresh-media adoption remains a separate pending prerequisite.
+No attachment, RF or provider capability is enabled.
+
+
+## Revision-qualified private collection completion — 2026-11-12
+
+Private suppression ends only after the actual outer grammar and exact local
+node collector are idle. The existing ordinary Engine pump reconciles this
+after its normal expiry and scheduled work, inside the same serialized
+accepting/revision/reload/fatal admission fence. Pending-reload servicing does
+not reconcile. Existing grammar expiry marks silent transitions; the node's
+existing collector sweep notifies exact private completions even when no
+operation is emitted. One dirty bit per bounded call avoids repeatedly scanning
+unchanged collectors. Inspection never cancels a selected target, reconstructs
+a collector, or renews a grant.
+
+The existing serial private owner tags its 16-byte digit slots with a checked
+32-bit revision. New authoritative symbols, qualified tone onsets and source
+resets advance it; exhaustion ends the exact call without reuse. Call/account
+generations and actual ingress remain independent typed fences. The same
+bounded command queue carries completion for the last consumed revision.
+Queue refusal retains one dirty intent; a newer processed event replaces that
+intent only after the real grammars run again. The serial owner reads pending
+source activity before applying completion and rejects obsolete revisions.
+A matching request waits for retained raw PCM acceptance and the released
+detector's qualified quiet tail. Only scalar metadata is retained; no extra
+PCM pass, copy, detector or worker is introduced.
+
+Private pound no longer clears suppression on its own, including quoted or
+addressed pound. Ordinary peer analysis keeps its original automatic pound
+behavior and profile footprint. A source reset preserves an existing private
+collection latch while retiring its media, and still emits a qualified in-band
+completion before acknowledging reset when capacity permits.
+
+NativeEvents still cannot correlate a native symbol with a later detected tone
+onset. Such an onset invalidates an earlier completion rather than guessing
+by digit value or timing. Similarly, a reset with no new authoritative symbol
+cannot reuse an old revision to release a preserved latch. These conservative
+orders remain unsupported for automatic readmission under the current source
+contract. InBand completion supplies its actual new revision after the tone
+ends. No timeout is invented in the serial owner.
+
+Completion clears only the source suppression latch. It neither revives the
+retired media generation nor prepares/adopts another ring or graph. A future
+fresh-media handoff must retain the expected revision and full lifecycle,
+source and RF qualification fences. Production attachment, RF routing,
+provider advertisement and remote capability remain unavailable.
+
+
+Global control-input loss already cancels every node's partial collector and
+clears its expiry deadline. That same Host cancellation marks the bounded
+private-call set dirty once, so an idle call does not depend on a now-impossible
+expiry notification. This does not cancel the outer phone grammar or change
+the existing loss scope. Ordinary reconciliation still checks both grammars
+and the exact source revision after processing any newer queued private input;
+loss notification itself neither clears suppression nor admits media.
+
+## Scoped IAX listener cohort composition — 2026-11-12
+
+The existing foreground listener map is the sole control owner. A scoped
+transaction maps prepared IAX accounts to the explicitly named enabled node's
+configured port, preserving numeric ASL bindings separately. New listeners bind
+complete candidate profiles and enable the existing shared receiver before
+product publication, but remain unpolled. The receiver only queues NEW traffic;
+it owns no account credentials or product admission callbacks and performs no
+registration, authentication or call setup by itself.
+
+All candidate map insertion and batch preparation precede product application.
+One borrowed alpha12 batch covers retained, added and removed ports; removed
+listeners receive empty replacement profiles. The same borrowed runtime context
+is lent sequentially to candidate enablement and product application. No map
+reference enters the latter callback, and no extra ownership object or unsafe
+alias is introduced.
+
+Both published terminal outcomes consume commit before obsolete listeners are
+removed. Rejection aborts and removes only additions. Fatal or unknown outcomes
+abort only uncommitted provider preparation, retain every old and new listener
+owner, and return to the existing fenced shutdown path. Original product errors
+remain distinct; no late sequential binding mutation or compensating product
+reload remains.
+
+The initial cohort join supplied no provider accounts. Numeric IAX startup and
+reload now use that transaction as described below. Registration/dial execution,
+typed private IAX admission, timed source reads/egress and complete retirement
+remain required before actual phone admission. No scheduler or worker is added.
+
+## Existing prepared-media source revision fence
+
+The existing private preparation endpoint stamps its own consumed collection
+revision into its one boxed receive Ingress; no public numeric revision or new
+permit API is introduced. Before any authoritative symbol, the only initial
+clean boundary is revision 1. Reset cannot synthesize that boundary again.
+The serial owner records settled revisions only after actual matching command
+release and checks the exact call token before one-time adoption.
+
+Media dequeue stages the same existing box. Cancelled queued boxes cannot
+replace a newer live/prepared generation. The owner first performs its existing
+bounded source read and collection release, then compares expected, current and
+settled revisions. A matching pending release can retain that one box through
+a real qualified tone tail. A mismatch, reset, retirement or unsupported native
+ordering rejects it, and an active/retired generation's admission anchor is
+never rewritten by a later adoption attempt.
+
+An empty cached 20 ms prefix is insufficient: the provider may still own a larger
+unanalysed suffix. Each turn starts without drain evidence, and every actual
+source read replaces it from the existing idle/drained result. Prepared media
+waits until that real boundary and the analyzer's raw/tone state are clear.
+The actual last source-read clock reference and source cursor define adoption.
+Earlier source PCM is discarded, never relabeled or replayed; later accepted
+PCM keeps its original provider birth. No extra read, PCM pass, buffer, graph,
+candidate box or worker is created.
+
+The checked amd64 layout adds one aligned scalar to the existing Ingress
+(56 to 64 bytes). The private session is 11,424 bytes, control and command
+slots are 96 bytes each, and digit slots remain 16 bytes. The shared private
+source profile remains 264 bytes; no per-peer thread or additional retained
+PCM allocation is introduced.
+
+This hardens the existing prepared-media owner only. The Engine ordinary turn
+fences enqueue, but retained call tokens after fatal reload are not a later
+adoption permit. Production attachment still needs the actual two-sided target
+grant, limits, isolation/bypass authority, lifecycle-spanning queued-candidate
+fence, typed publication and RF qualification. No production caller, automatic
+preparation, attachment success or RF route is enabled here.
+
+## Inactive owned private IAX source boundary — 2026-11-12
+
+The standalone host can consume an already uniquely owned ProviderCall and its
+copied receipt under the current account/listener admission fence. It checks
+the committed account generation, exact listener/provider endpoints, nonzero
+provider call generation, call numbers and the current 8 kHz G.711 profile.
+Failed identity allocation or validation destroys that owned peer exactly once.
+No raw incoming callback adoption, account activation, registration or dial
+execution is added.
+
+The standalone host artifact owns one checked call sequence, shared by every
+native private-call creator in that host. Replacing HostServicesOwner or a
+listener cannot reset it. The sequence never wraps; its canonical nonzero
+32-hex representation is an opaque identity, not an authentication secret.
+There is no allocator static in peer-support or a provider/product DSO.
+Asterisk native private-call construction is not yet implemented and must retain
+its host-owned sequence across reload while identities survive.
+
+Actual metadata/source callbacks distinguish Phone from numeric ASL without a
+caller-number alias. A private source retains one 160-frame PCM prefix or one
+control event, with exact accepted offset, provider media epoch and original
+host-clock birth. NativeEvents is the sole digit authority. Refusal retains
+that event before subsequent events. A reset acknowledges the provider target
+only after actual product retirement completes; a digit accompanying reset is
+retained until then. Null-sink queries consume nothing. A changed host clock
+fails closed rather than restamping a retained source.
+
+Alpha12 does not distinguish codec concealment from all other absent-birth PCM.
+Such PCM is discarded as an exact counted interval of unavailable usable source
+audio. The gap contract is unresolved source loss, not a claim about network
+packet loss. Ambiguous PCM reaches neither analysis nor RF and is never assigned
+a fabricated birth or concealment classification. Private legacy reads, ASL
+text and untimed prepared sends fail closed. Ordinary numeric peers are unchanged.
+
+Private executor attachment remains explicitly unavailable. Released alpha12
+already selects the 20/40/100 ms phone jitter profile through its existing
+configure callback when the peer retains authenticated provider ownership.
+Both account call constructors restrict codecs to PCMU/PCMA at 8 kHz with
+160-frame packets. Numeric peers retain their ordinary jitter policy.
+Alpha12 cannot guarantee protocol ACK/expiry progress while an application
+event is refused.
+Zero-capacity polling is not a service-only operation. A separate bounded
+provider progress prerequisite and timed egress/source authorization composition
+must be qualified before production admission. This slice changes no host ABI,
+SONAME, scheduler, thread count or live account behavior.
+
+Remote Hangup and terminal source errors latch the private host owner closed.
+Later null-sink queries report the same closure without consuming input; later
+source reads cannot poll again or publish retained media/control. Destruction
+remains the existing unique handle owner's responsibility, exactly once.
+
+
+The alpha12 profile selection is grounded in released source
+4e7026c5234a7c7fb61907bbe56fbaef3a18963b: client::configure_jitter,
+server::prepare_dial and server_provider's authenticated incoming route.
+Qualification uses genuine loopback incoming/outgoing owned calls and the
+unchanged host configure wrapper, forwarding to the real jitter DSO. Failed
+preparation, retry, duplicate preparation and destruction are checked without
+attaching a private executor. This adds no jitter API, owner or activation.
+
+## Current configured phone account admission
+
+Both borrowed pre-answer authorization and owned incoming admission use one
+private Host validator in the ordinary serialized Engine turn. It resolves only
+the inspected account label through the canonical account resolver, requires
+the current record to be enabled, and requires its configured local_node to
+equal the actual provider-bound local node and remain hosted. The existing
+Call.local string is retained only after that equality check, so the configured
+binding remains the default local target without another stored identity.
+
+Borrowed authorization does not adopt or destroy the pending provider handle
+and creates no call or permission token. Owned admission rechecks the current
+document before creating a private call, prompt or serial owner. A removal,
+disable or rebind between the two calls is therefore a rejection; the existing
+owned error path destroys the transferred handle exactly once. No account map,
+secrets read, native transport or extra worker is created by this check.
+
+The current peer ABI exposes ProtocolId::Phone and nonzero account/call
+generations, but does not expose the native SIP/IAX family or an authoritative
+published provider-generation map. This check does not invent either value or
+compare provider generations with the unrelated Engine revision. Existing
+actual request/metadata identity checks, typed ingress fencing, mailbox/PIN
+authentication and reload admission fencing remain separate and unchanged.
+
+An enabled bound account is permission for private mailbox/control admission,
+not transceive attachment. Two-sided target permission, attachment limits,
+outgoing isolation and source-unlock bypass, queued lifecycle-spanning media
+authority, provider readiness and RF qualification remain required. *3 and
+other unavailable attachment/manual actions remain explicitly unavailable.
+
+## Command-time local attachment policy — 2026-11-12
+
+The existing private Attach consumer reads two explicit current-document lists:
+`attach_local_nodes` in `[phone_account label]` and `phone_allow_accounts` in
+the exact target node section. Both use whitespace-separated exact canonical
+NodeId/PhoneAccountId values. A comma or star in a valid node identity is literal,
+never list punctuation or wildcard expansion. Missing or empty lists deny;
+malformed lists warn and fall back to the empty deny list. Target permission
+does not inherit from `[general]`. The account's `local_node` supplies the
+default target only and satisfies neither attachment permission.
+
+Exact live source/reply ownership and the authenticated mailbox are checked
+before any response. The current enabled account must still match the call's
+authorized local binding, and the requested target must remain hosted. Ordinary
+authenticated policy denial uses the existing private Failed response. Both
+permissions currently yield Unavailable, not successful attachment; no media,
+reservation, queued grant, public alias or remote route is created.
+
+These lists stay in the product configuration document. Provider account ABI
+records, host transport snapshots, per-call storage and worker counts are
+unchanged. Reload still retires the old source, and a replacement call checks
+the replacement document. Existing ordinary local command selection and
+source-scoped unlock remain independent.
+
+The approved one-node-per-call and one-reverse-call-per-node defaults still need
+a real candidate/publication owner before reservation storage is introduced.
+Outgoing bidirectional isolation and its per-call source-unlock bypass are
+separate, unimplemented authority. A command-time decision cannot authorize
+later serial adoption: lifecycle/policy revocation, source revision, qualified
+provider media and RF readiness must join that actual handoff before activation.
+
+## Bound-node private site replies — 2026-11-12
+
+The existing public read-only SiteStatus command now prepares its same compiled
+site recipe for the authenticated caller's private reply queue. It authorizes
+only the sensor/input reading selected by the existing configured DTMF selector
+on that call's bound node: localized label, value/unit and current reading
+quality. It does not enumerate arbitrary site data or expose credentials,
+provider settings, another node's readings or administrative controls.
+
+The ordinary source-scoped node grammar and command permission still produce
+the SiteStatus effect. Before snapshot or producer preparation, Host requires
+the exact live PhoneSource/PeerReply owner, its authenticated mailbox, and the
+current enabled account with unchanged configured local binding. This does not
+grant or renew node unlock, select another destination or grant attachment.
+General Message and RemoteBase private reports retain their existing explicit
+unavailable behavior.
+
+Public and private site replies share the same control-side value snapshot and
+compiled recipe. Private preparation registers one stream with the existing
+station producer and queues it only to the original call; it never enters
+controller telemetry or creates RF demand. Stale, faulted, missing or unknown
+readings retain existing unavailable wording. Invalid selectors, absent clock,
+producer failure and queue refusal propagate without a public fallback.
+A full private queue retains its prior FIFO owners; a rejected prepared reader
+is dropped through the existing producer cancellation contract.
+
+The queued and borrowed reader retain the original call token. Hangup/reload
+cancels them, and an equal provider call ID with a different actual ingress
+cannot inherit their output. There is no new producer, PCM buffer, transport,
+ABI field, worker, cross-node permission, reservation or media activation.
+Provider/RF qualifications and a lifecycle-spanning attachment grant remain
+separate prerequisites.
+
+## Completed source commands retain their collector — 2026-11-12
+
+A completed peer or private-phone RemoteBase operation retains custody of its
+original source collector while the copied operation or native pending receipt
+is owned. One lazy Arc allocation is shared by concurrent completed operations
+from that collector; the collector observes it weakly. Local commands and
+non-remote operations do not allocate custody. When the final owned copy drops,
+the existing idle sweep reclaims a collector that has no other required state.
+A collector retained for selection or a grant can keep the small weak control
+block until its next pending batch or reclamation; no custody history accumulates.
+
+Custody is not authorization. The exact reply/origin, current policy, grant
+expiry, macro cancellation and runtime revision checks remain authoritative.
+Explicit retirement, ended sources and configuration replacement still remove
+collectors even when copied work exists. Lost input keeps its prior semantics:
+partial collection and macro work are canceled, not already completed human
+commands. No remembered target or synthetic grant is introduced.
+
+This prerequisite fixes the same pump-before-dispatch pruning gap for ordinary
+peers and phone callers. It does not enable private RemoteBase responses or
+phone attachment; their existing product authorization and unavailable paths
+remain unchanged.
+
+## Bound-node private radio status — 2026-11-12
+
+Only the existing short/long RemoteCommand::Status query can now use a phone
+caller's private response path. It retains the ordinary node command permission:
+public read-only queries do not require or renew administrative unlock. Other
+read-only radio query variants, mutations, cross-node selection and General
+Message remain unavailable to this path.
+
+The product checks exact live authenticated PhoneSource/PeerReply ownership,
+bound node, mailbox and current enabled account/binding before native submission.
+It rechecks runtime revision and command permission with those private owners
+after source/result callbacks, before registering a producer and queueing output.
+Call retirement, replacement or reload cannot transfer an old result to a new
+caller. No account authorization check was removed.
+
+The existing native ticket queue, parser and localized reply forms are shared.
+Private results use the existing station producer and bounded exact-call reply
+queue; ordinary replies retain their existing audience. Synchronous failures,
+busy and malformed/native failure results use the same trusted presenter.
+Preparation or queue failure does not fall back to public telemetry or RF.
+
+Private pending work is bounded in the existing Host pending vector: at most
+one receipt per exact reply and at most the existing maximum_calls count in
+total. Retired phone identities count until the existing pump/reload/stop owner
+actually drops their receipts. Busy is returned privately before another native
+submission; full reply queues preserve prior queued owners. No extra pending
+queue, permission map, provider capability or radio/media activation is added.
+
+## Owned bounded SIP parsing prerequisite, 2026-11-12
+
+One experimental parser belongs to the existing shared `rptadv-peer-support`
+leaf, reusable by both hosts without a new C ABI, shared-object boundary or
+external dependency. It borrows an admitted immutable wire buffer and keeps a
+fixed header-span index. TCP framing leases one caller-owned buffer generation;
+message borrows prevent reuse while views survive. UDP trailing bytes and TCP
+pipelined bytes have distinct consumption semantics. Retained transactions and
+calls still require their own explicit admission/storage reservations.
+
+The selected limits are 32 KiB wire, 16 KiB start-line/headers, 16 KiB body,
+128 logical fields and 4 KiB unfolded field. The parser/framing index and caller
+unfolding scratch together target at most 8 KiB, excluding admitted wire bytes;
+allocation/layout tests prove the explicit workspace target on native amd64:
+8-byte entries, 1096-byte parser, 1144-byte TCP decoder, 4096-byte scratch,
+48-byte message view, 96-byte URI view, 32-byte header view, 24-byte value
+iterator and 48-byte name-address view (5488 bytes together on the TCP path,
+excluding wire storage and compiler call-stack frames). Instrumented allocation
+checks observe zero allocations across 32 RFC 4475 wsinv datagram/bytewise-TCP
+cycles, 8008 single-byte mutations, four additional RFC fixtures, two reviewed
+header regressions and seven URI cases. These are
+implementation bounds, not universal SIP limits or a process-RSS measurement. RFC 3261 framing/grammar, RFC 5954 IPv6 and RFC 8217
+name-address rules apply; RFC 4475/5118 provide independent torture inputs.
+Valid SIPS syntax remains distinct from unsupported secure routing, which must
+fail closed. URI headers never supply arbitrary request headers or authority.
+
+Owned in-house SIP signaling is the current choice under the owner's no-vendor-
+repairs direction, starting with this parser prerequisite. Third-party signaling
+candidates remain unselected: rsipstack retains unbounded
+queues/state, RVoIP conflicts with runtime/resolver/toolchain ownership, and
+unmodified oSIP 5.3.1/5.3.2 loses allocations on parser list-insertion failure.
+The owner excluded vendor repairs. No native parser/global allocator hook,
+transaction state machine, DNS parser, cryptography, codec or DSP is added here.
+The approved provider/account/host lifecycle, resolver adapter and existing
+`phone::media` remain unchanged. This prerequisite is not SIP activation or
+complete Task 4. Independent parser source review and 100% parser production
+line/branch coverage are complete; full native gates remain required before merge.
+
+## Numeric IAX account foreground composition, 2026-11-12
+
+Standalone startup and reload now prepare enabled, locally hosted IAX accounts
+through the existing secure private-file reader and generation allocator. The
+first production profile requires a numeric endpoint and explicit register=no.
+Enabled SIP, hostname and registration profiles fail before listener/product
+mutation; disabled accounts or disabled local nodes open no account transport.
+No resolver, registrar, thread or runtime is introduced.
+
+One foreground-lifetime allocator preserves identity across failed candidates.
+Complete account profiles feed the existing listener bind and reserved cohort
+transaction. Only published product outcomes replace the active prepared snapshot,
+including published-with-error. Rejection preserves the previous snapshot;
+fatal outcomes retain listener owners and enter the existing fenced shutdown.
+Provider-owned copied credentials survive preparation borrows. Listener-owned
+IAX code and the provider's retained runtime outlive socket-task teardown.
+
+The initial account checkpoint kept numeric-only polling and provider admission
+closed. The following typed incoming join builds on those actual account/listener
+owners. Neither checkpoint alone provides a connected phone call. Registration,
+outgoing dial/isolation, private executor/media and RF composition remain separate
+requirements; mailbox and attachment guards remain.
+
+## Released dependency cohort, 2026-11-12
+
+The controller package floors now select these released prerequisites:
+
+- [IAX alpha13](https://github.com/cpeter1207/librptadviax2/tree/ce9fe2da0d8480c1503f5eb80c3c95d8ac2e5360)
+  supports bounded protocol-only progress while private source delivery is
+  refused. Client package and SONAME 2 are unchanged.
+- [PortAudio adapter alpha5](https://github.com/cpeter1207/rptadv-portaudio-alsa-adapter/tree/cc63a779d9619c9b3c1f9096d33f81cad4ea720d)
+  adds timed output observations while retaining ABI/SONAME 2. Their uncertainty
+  is explicitly unbounded; they do not establish a physical RF deadline.
+- [USBRadioPlus SDK alpha35](https://github.com/cpeter1207/USBRadioPlus/tree/b7dc3d35a242c4bdfea7166b6f959539d500a363)
+  adds stopped-bound post-DSP programme fences on existing owners. Runtime and
+  development packages retain identity 1 and require at least
+  `0.1.0~alpha35-1` (`0.1.0~alpha35-1.deb13` in signed APT).
+
+The immutable source manifest preserves codec-before-IAX ordering. The SDK
+remains a signed-APT dependency rather than an unsupported source-manifest
+entry. Raising these floors does not activate phone attachment or qualify RF
+timing; consumers must still negotiate their required capabilities.
+
+
+## Private IAX protocol progress consumer, 2026-11-12
+
+Standalone private source reads now use the released alpha13 sized ABI2 request
+through the existing `poll_timed` callback. When a PCM/gap suffix, telephone digit
+or retirement acknowledgment is refused, the same serial owner requests one
+bounded `SERVICE_ONLY` turn with no source buffers before retrying it. ACKs,
+protocol replies and retransmissions continue without consuming later source
+items or replacing the held PCM buffer. No second poller, queue or thread is added.
+
+A service-reported media retirement fences held PCM/gaps before further credit.
+An already refused private digit survives that retirement and remains behind its
+required downstream reset acknowledgment. Invalid or terminal provider responses
+latch the exact call closed; null state queries cannot revive or repoll it.
+Legacy source polling and untimed prepared sending remain forbidden for private
+handles. The standalone private async attachment guard remains in place pending
+qualified private timed egress and its complete product/provider lifecycle.
+
+Focused tests include real released-provider loopback signaling: while digit 5
+is refused by the public host callback, a later reliable digit 6 is acknowledged
+without being offered out of order. Accepted-prefix PCM/birth, media reset,
+control retention and terminal cleanup are checked separately. These tests do
+not establish working phone calls, provider admission, RF attachment, a physical
+radio timing profile or live hardware acceptance. The existing host ABI and
+SONAMEs are unchanged; alpha13 build/runtime floors are required.
+
+## Typed incoming IAX product handoff, 2026-11-12
+
+Foreground's existing mixed poll checks each borrowed provider receipt against
+the currently committed account label, generation, username, local binding,
+numeric provider endpoint and exact bound listener. Call generations, negotiated
+G.711 format and call numbers must be valid. Caller presentation and called/context
+fields supply no product identity or permission. Removed/replaced accounts and
+fatal reloads cannot reopen admission.
+
+The released provider's pre-answer callback exposes metadata only, not a peer.
+It therefore performs transport/account fencing, never synthetic product
+authorization. On acceptance the host adopts the unique provider peer, constructs
+its existing opaque private handle, then asks product authorization with that
+actual borrowed handle and protocol 3 before product admission. The provider may
+already have answered; a product rejection destroys the call immediately.
+
+Product authorization never consumes ownership. Incoming success and consumed
+failure transfer it; an unconsumed failure is destroyed by the host. The provider
+callback returns transfer success after local adoption even when product admission
+rejects, preventing double destruction. Request identity bytes remain valid through
+consuming callbacks. Existing current-document product checks, mailbox/PIN login,
+private executor/media qualification and attachment guards remain authoritative.
+No new ABI, runtime, worker, radio binding or RF route is introduced.
+
+## Serial private IAX executor and timed egress, 2026-11-12
+
+The standalone typed private handle can now use the existing bounded serial
+executor. Construction requires the exact committed account/listener and call
+generations, released timed source polling, native timed send and native egress
+retirement. The provider still selects private 8 kHz jitter. No new scheduler,
+call owner, transport, RF attachment or mailbox/command authority is introduced.
+Legacy polling, untimed prepared sends and AllStar text remain refused.
+
+The prepared packet callback previously carried only a source timestamp: neither
+it nor the existing opaque encoder result can carry an immutable maximum age.
+One optional host-v10 tail therefore adds `peer_send_prepared_timed` at offset
+408 (complete size 416). The complete 408-byte prefix remains valid; partial
+409--415-byte tables are rejected before a bounded copy. The tail requires the
+complete prepared-media/async callback groups, and source-phone admission
+requires the tail. Both host constructors and validators are updated; Asterisk
+advertises no timed private send. This compatible sized extension changes no
+ABI version, SONAME or package identity; private IAX still requires alpha13.
+
+The existing original source clock stamps new private prompt PCM once. Before
+creating a pending packet, product samples provider elapsed time first, then
+the same original source clock, and floors the remaining 200 ms age allowance
+into a checked, nonwrapping deadline. Missing, changed or future clock ages fail
+closed. Congestion retains exact bytes, timestamp and deadline; provider expiry
+discards the packet and conversion/encoder history without counting acceptance.
+
+The existing encoder-reset callback is the serial native retirement boundary.
+Product drops staged media before reset; host alone stores the returned nonzero
+provider TX epoch. Pending or failed retirement closes that call, with no
+legacy fallback. Source discontinuity and finish retire immediately even when
+no new PCM follows. Cancellation ends the exact private session. Private sends
+are exactly 160 G.711 bytes/frames at 8 kHz; radio empty unkey markers are never
+sent to a telephone.
+
+Focused tests exercise the public host against the released provider: exact
+private jitter, one attached executor, stop/detach/destruction, ACK progress
+behind held digits, and timed G.711 reception. Product regressions cover the
+physically short prefix, capability groups, immutable retry/expiry and immediate
+reset failure. Actual-product mailbox login/status and manual telephone smoke
+remain separate integration milestones. RF timing, half-duplex receive,
+outgoing authority and live hardware acceptance are not established here.
+
+### Finite private prompt completion
+
+A successful private playback result, not an idle interval or temporary reader
+Pending, authorizes finite converter/encoder drain. The existing Outbound owner
+holds later prompt input until that drain completes. A released G.711 encoder
+may flush a short final packet; after the converter has fully drained, the
+private 8 kHz owner completes its checked retained PCM to 160 frames with silence
+in existing scratch, then asks the codec to encode it. It never appends encoded
+zero bytes, discards spoken tail, or weakens the fixed provider packet contract.
+The original oldest birth, timestamp and immutable retry deadline remain intact;
+padding is excluded from real-source expiry accounting. Waiting incomplete
+history still expires at its original age, while the existing queue consumer
+discards stale queued spans rather than rescheduling them indefinitely.
+
+### Retained codec birth and private sample cadence
+
+A persistent sub-packet codec remainder must not pin later real samples to the
+first span's birth. Conversion retains one source boundary for its existing
+output-end birth mapping. Once a produced packet consumes through that boundary,
+only the next uncommitted encoder sample adopts the mapped birth; the produced
+packet keeps its captured birth, timestamp and immutable deadline. Projection
+is limited to real converted output, so completion silence adds no provenance.
+
+Private prompts advance the existing wake deadline by actual rendered 48 kHz
+sample counts, not by scheduling lateness. The exact next-render deadline joins
+the existing bounded control wake. An unready reader pauses that cadence; its
+next real samples anchor at the actual owner time. No sample birth is advanced
+to hide scheduler delay, and the 200 ms maximum age is unchanged.
+
+
+### Genuine product private-call regression
+
+The standalone loopback fixture now loads the actual product DSO and released
+IAX provider, prepares a numeric account with a synthetic private secret, and
+uses the real product authorization, mailbox/PIN verification and serial
+private executor. It sends telephone digits and checks the exact decoded Morse
+envelopes for login, authenticated/unlock guidance and the no-links status
+reply. Physical radio activate/ready/quiesce are the only simulated host
+callbacks; the fixture checks that private replies never appear in radio TX
+samples or PTT. Stop joins the callback pump and releases both UDP bindings.
+
+This is a shared private-audio integration regression, not a supported
+headless deployment configuration, native SIP acceptance, RF presentation
+qualification or a live hardware milestone. It introduces no production
+interface or authority change.
+
+
+### Prepared timed RTP submission, 2026-11-12
+
+The signaling-neutral media owner now accepts exactly one prepared 160-byte
+G.711 payload with its original wrapping 8 kHz timestamp, marker, immutable
+nonwrapping call-elapsed deadline and transmit epoch. The existing product
+Outbound owner remains responsible for mapping original source age to at most
+200 ms remaining; its millisecond source timestamps must be converted to 8 kHz
+RTP units by the future SIP host. RTP does not stamp a new source birth,
+re-anchor a gap, convert PCM or drain a prompt itself.
+
+Submission uses Tokio try_send on the same connected UDP socket. WouldBlock
+retains one fixed 172-byte datagram, its deadline and sequence; changed retries
+are rejected without replacing it. Only actual WouldBlock requests writable
+readiness, and the existing serial owner must also service the original
+deadline and call lifecycle. No timer, scheduler, task, queue or codec is added.
+Expiry discards uncommitted bytes without consuming a sequence number.
+Retirement discards staged bytes and advances a nonwrapping epoch; old work
+cannot send or clear a newer generation's pending datagram. Already submitted
+UDP datagrams cannot be revoked.
+
+This replaces the unused untimed send interface and removes the redundant
+initial RTP timestamp from bind. It is an internal initial-alpha Rust API
+change with no C ABI, SONAME or package change. Focused framing and loopback
+tests establish source-gap, immutable-retry, expiry and retirement behavior,
+not active SIP signaling, product admission or hardware acceptance.

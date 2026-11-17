@@ -1,6 +1,9 @@
 //! Single-owner media conversion, source-clock timestamps, and bounded retry storage.
 use super::{egress::Egress, source_clock::SourceClock};
-use crate::{Error, services::PeerIo};
+use crate::{
+    Error,
+    services::{PeerIo, SourceTimeClock},
+};
 use rpt_advanced_core::audio::{AudioSpan, LinkAudioConsumer};
 use std::sync::{
     Arc,
@@ -63,6 +66,7 @@ struct Pending {
     source_frames: u32,
     timestamp: u32,
     end_timestamp: u32,
+    deadline: Option<u32>,
     expires: u64,
     stream: u64,
 }
@@ -71,6 +75,8 @@ struct Conversion {
     next: u64,
     output_samples: u64,
     born_ns: u64,
+    /// First source position covered by the current output-end birth mapping.
+    mapped_start: u64,
     drained: bool,
 }
 impl Conversion {
@@ -111,6 +117,9 @@ pub(super) struct Outbound {
     conversion: Option<Conversion>,
     anchor: Option<Anchor>,
     clock: Option<Arc<SourceClock>>,
+    private: bool,
+    private_finishing: bool,
+    private_clock: Option<SourceTimeClock>,
     next_audio_ms: u64,
     unkey_ns: Option<u64>,
     idle_timestamp: u32,
@@ -137,14 +146,68 @@ impl Outbound {
             conversion: None,
             anchor: None,
             clock: None,
+            private: false,
+            private_finishing: false,
+            private_clock: None,
             next_audio_ms: 0,
             unkey_ns: None,
             idle_timestamp: 0,
             sent: false,
         })
     }
+    /// Source phones retain the original worker clock; no PCM/untimed fallback.
+    pub(super) fn private(rate: u32, queue: LinkAudioConsumer) -> Result<Self, Error> {
+        let mut outbound = Self::new(rate, queue)?;
+        outbound.private = true;
+        Ok(outbound)
+    }
+    /// Only successful finite playback authorizes private codec tail completion.
+    pub(super) fn finish_private(&mut self) {
+        self.private_finishing = self.private
+            && (self.pending.is_some()
+                || self.pcm_position != self.pcm_used
+                || self.queue.peek_span().is_some()
+                || self.conversion.as_ref().is_some_and(|value| !value.drained)
+                || self.encoder.as_ref().is_some_and(|value| !value.drained));
+    }
+    pub(super) fn bind_private_clock(&mut self, clock: SourceTimeClock) -> Result<(), Error> {
+        let epoch = clock.reference().host_clock_epoch;
+        if epoch == 0
+            || self
+                .private_clock
+                .is_some_and(|old| old.reference().host_clock_epoch != epoch)
+        {
+            return Err(Error::Admission);
+        }
+        self.private_clock = Some(clock);
+        Ok(())
+    }
+    /// Drop staged media before serial retirement, including when no next PCM arrives.
+    pub(super) fn retire(&mut self, io: &mut PeerIo) -> Result<(), Error> {
+        while self.queue.read_span(&mut self.native).is_some() {}
+        self.discard_media(io)
+    }
+    fn discard_media(&mut self, io: &mut PeerIo) -> Result<(), Error> {
+        self.discard()?;
+        self.private_finishing = false;
+        if self.private {
+            self.anchor = None;
+            self.unkey_ns = None;
+            self.sent = false;
+            io.reset_encoder()?;
+            self.reset_encoder = false;
+        }
+        Ok(())
+    }
     pub(super) fn bind_clock(&mut self, clock: Arc<SourceClock>) {
         self.clock = Some(clock);
+    }
+    /// Private prompt playback admits at most one native block behind retained conversion.
+    pub(super) fn ready_for_input(&mut self) -> bool {
+        !self.private_finishing
+            && self.pending.is_none()
+            && self.pcm_position == self.pcm_used
+            && self.queue.peek_span().is_none()
     }
     pub(super) fn redirect(&mut self, queue: LinkAudioConsumer) -> Result<(), Error> {
         self.retired_rejections = self
@@ -173,7 +236,22 @@ impl Outbound {
             self.pcm_step(io, now_ms)?;
             return Ok(Some(self.next_audio_ms.saturating_mul(1_000_000)));
         }
-        let now = now_ms.saturating_mul(1_000_000);
+        if self.private
+            && self.pending.is_none()
+            && self.conversion.is_none()
+            && self.queue.peek_span().is_none()
+        {
+            return Ok(None);
+        }
+        let now = if self.private {
+            let reference = self.private_clock.ok_or(Error::Admission)?.reference();
+            if reference.host_clock_epoch == 0 {
+                return Err(Error::Admission);
+            }
+            reference.now_ns
+        } else {
+            now_ms.saturating_mul(1_000_000)
+        };
         self.statistics.rejected.store(
             self.retired_rejections
                 .saturating_add(self.queue.dropped_samples()),
@@ -184,11 +262,43 @@ impl Outbound {
             .as_ref()
             .map(|pending| pending.expires.saturating_sub(AGE_NS))
             .or_else(|| self.encoder.as_ref().map(|encoder| encoder.born_ns))
+            .or_else(|| {
+                self.conversion
+                    .as_ref()
+                    .filter(|_| self.private)
+                    .map(|value| value.born_ns)
+            })
             .or_else(|| self.queue.peek_span().and_then(|span| span.span.born_ns));
         if let Some(born) = oldest {
             self.statistics
                 .queue_age
                 .fetch_max(now.saturating_sub(born), Ordering::Relaxed);
+        }
+        if self.private
+            && self.pending.is_none()
+            && (self.encoder.is_some() || self.conversion.is_some())
+            && oldest.is_some_and(|born| now >= born.saturating_add(AGE_NS))
+        {
+            let retained = self.encoder.as_ref().map_or_else(
+                || {
+                    self.conversion.as_ref().map_or(0, |value| {
+                        value.next.saturating_sub(value.span.source_start)
+                    })
+                },
+                |value| {
+                    ((self.pcm_used - self.pcm_position) as u64
+                        + value.input_frames.saturating_sub(value.source_end))
+                        * 48_000
+                        / u64::from(self.rate)
+                },
+            );
+            self.statistics
+                .expired
+                .fetch_add(retained, Ordering::Relaxed);
+            let finishing = self.private_finishing && self.queue.peek_span().is_some();
+            self.discard_media(io)?;
+            self.private_finishing = finishing;
+            return Ok(Some(now));
         }
         if let Some(pending) = &self.pending {
             if now >= pending.expires || !self.current(pending.stream) {
@@ -196,7 +306,7 @@ impl Outbound {
                     u64::from(pending.source_frames) * 48_000 / u64::from(self.rate),
                     Ordering::Relaxed,
                 );
-                self.discard()?;
+                self.discard_media(io)?;
             } else {
                 self.send(io, now)?;
             }
@@ -204,22 +314,26 @@ impl Outbound {
             self.prepare(io, now, false)?;
             self.send(io, now)?;
         } else if self.queue.peek_span().is_some_and(|next| {
-            next.span.born_ns.is_none_or(|born| born <= now) || !self.current(next.span.stream)
+            self.private
+                || next.span.born_ns.is_none_or(|born| born <= now)
+                || !self.current(next.span.stream)
         }) {
-            let read = self
-                .queue
-                .read_span(&mut self.native)
-                .expect("peeked source span");
-            if read
-                .span
-                .born_ns
-                .is_none_or(|born| now >= born.saturating_add(AGE_NS))
-                || !self.current(read.span.stream)
+            #[cfg(test)]
+            tests::before_read();
+            let Some(read) = self.queue.read_span(&mut self.native) else {
+                // A marked span can retire between peek and actual admission.
+                // Cancel retained conversion rather than treating it as fresh PCM.
+                self.discard_media(io)?;
+                return Ok(Some(now));
+            };
+            if read.span.born_ns.is_none_or(|born| {
+                now >= born.saturating_add(AGE_NS) || (self.private && born > now)
+            }) || !self.current(read.span.stream)
             {
                 self.statistics
                     .expired
                     .fetch_add(read.frames as u64, Ordering::Relaxed);
-                self.discard()?;
+                self.discard_media(io)?;
             } else {
                 self.encode(io, read.span, read.frames, now)?;
                 self.send(io, now)?;
@@ -237,6 +351,12 @@ impl Outbound {
             .map(|next| next.span.born_ns.unwrap_or(now));
         if next.is_some_and(|deadline| deadline <= now) {
             return Ok(next);
+        }
+        if self.private && !self.private_finishing {
+            return Ok(next
+                .into_iter()
+                .chain(oldest.map(|born| born.saturating_add(AGE_NS)))
+                .min());
         }
         if let Some(deadline) = self.unkey_ns.filter(|deadline| now >= *deadline) {
             if self
@@ -272,11 +392,16 @@ impl Outbound {
             // An idle marker is uncommitted media too: keep its source timestamp
             // while waiting for writable, but never retain it indefinitely.
             let expires = deadline.saturating_add(AGE_NS);
-            if self.sent && now < expires && !io.send_prepared(&[], 0, self.idle_timestamp)? {
+            if !self.private
+                && self.sent
+                && now < expires
+                && !io.send_prepared(&[], 0, self.idle_timestamp)?
+            {
                 return Ok(next.into_iter().chain(Some(expires)).min());
             }
             self.sent = false;
             self.unkey_ns = None;
+            self.private_finishing = false;
         }
         Ok(next.into_iter().chain(self.unkey_ns).min())
     }
@@ -296,12 +421,16 @@ impl Outbound {
                 && now < previous.born_ns.saturating_add(AGE_NS)
         });
         if !continuous {
-            self.discard()?;
+            // Completion belongs to the newly admitted span, not discarded history.
+            let finishing = self.private_finishing;
+            self.discard_media(io)?;
+            self.private_finishing = finishing;
             self.conversion = Some(Conversion {
                 span,
                 next: span.source_start,
                 output_samples: 0,
                 born_ns: span.born_ns.expect("validated birth"),
+                mapped_start: span.source_start,
                 drained: false,
             });
         }
@@ -333,6 +462,7 @@ impl Outbound {
         // input span may adopt this span's new clock mapping.
         conversion.born_ns =
             if let Some(span) = input.filter(|span| next_origin >= source_ns(span.source_start)) {
+                conversion.mapped_start = span.source_start;
                 span.born_ns
                     .expect("validated birth")
                     .saturating_add((next_origin - source_ns(span.source_start)) as u64)
@@ -379,19 +509,58 @@ impl Outbound {
                     / u64::from(self.rate),
                 Ordering::Relaxed,
             );
-            return self.discard();
+            return self.discard_media(io);
         }
-        let result = io.prepare_audio(
-            &self.converter.retained_output(self.pcm_used)[self.pcm_position..],
-            &mut self.encoded,
-            flush,
-        )?;
+        // Released private G.711 requires complete 160-frame packets. Complete
+        // the retained finite tail with PCM silence before asking the codec to
+        // flush; encoded-byte padding would not represent codec silence.
+        let padding = if self.private && self.rate == 8000 && flush {
+            if !self.private_finishing
+                || self.pcm_position != self.pcm_used
+                || !self.conversion.as_ref().is_some_and(|value| value.drained)
+            {
+                return Err(Error::Translation);
+            }
+            let retained = encoder
+                .input_frames
+                .checked_sub(encoder.source_end)
+                .filter(|retained| *retained < 160)
+                .ok_or(Error::Translation)?;
+            if retained == 0 {
+                0
+            } else {
+                160 - retained as usize
+            }
+        } else {
+            0
+        };
+        let result = if padding != 0 {
+            self.native[..padding].fill(0.0);
+            io.prepare_audio(&self.native[..padding], &mut self.encoded, false)?
+        } else {
+            io.prepare_audio(
+                &self.converter.retained_output(self.pcm_used)[self.pcm_position..],
+                &mut self.encoded,
+                flush,
+            )?
+        };
+        if padding != 0
+            && (result.consumed_frames != padding
+                || result.encoded_bytes != 160
+                || result.packet_frames != 160
+                || result.source_frames != 160)
+        {
+            return Err(Error::Translation);
+        }
+        let source_frames = result.source_frames - padding as u32;
         if result.status == 2
             || (result.consumed_frames == 0 && result.encoded_bytes == 0 && !flush)
         {
             return Err(Error::Translation);
         }
-        self.pcm_position += result.consumed_frames;
+        if padding == 0 {
+            self.pcm_position += result.consumed_frames;
+        }
         let encoder = self.encoder.as_mut().expect("encoder origin");
         encoder.input_frames = encoder
             .input_frames
@@ -411,10 +580,28 @@ impl Outbound {
         let source_end = result
             .source_start_frames
             .saturating_add(u64::from(result.source_frames));
-        encoder.born_ns = encoder.born_ns.saturating_add(
-            (u128::from(source_end.saturating_sub(encoder.source_end)) * 1_000_000_000
-                / u128::from(self.rate)) as u64,
-        );
+        // This packet retains `born` above. Only its NEXT uncommitted sample
+        // may adopt the newer mapping after consuming through its boundary.
+        // Padding beyond real converter output never establishes provenance.
+        let conversion = self.conversion.as_ref().expect("conversion origin");
+        let next_source_ns =
+            encoder.origin_ns + u128::from(source_end) * 1_000_000_000 / u128::from(self.rate);
+        let converted_end = conversion.source_ns(self.rate);
+        let mapped_birth = if next_source_ns >= source_ns(conversion.mapped_start)
+            && next_source_ns <= converted_end
+        {
+            u64::try_from(converted_end - next_source_ns)
+                .ok()
+                .and_then(|offset| conversion.born_ns.checked_sub(offset))
+        } else {
+            None
+        };
+        encoder.born_ns = mapped_birth.unwrap_or_else(|| {
+            encoder.born_ns.saturating_add(
+                (u128::from(source_end.saturating_sub(encoder.source_end)) * 1_000_000_000
+                    / u128::from(self.rate)) as u64,
+            )
+        });
         encoder.source_end = source_end;
         let anchor = self.anchor.get_or_insert_with(|| Anchor {
             stream,
@@ -439,12 +626,37 @@ impl Outbound {
         let end_timestamp = anchor.call_ms.wrapping_add(
             (end_origin as i128 - anchor.source_ns as i128).div_euclid(1_000_000) as u32,
         );
+        let deadline = if self.private {
+            // The native floor MUST precede the original host clock reference.
+            // Birth was stamped by this same retained worker clock at rendering.
+            let elapsed = io.elapsed_ms();
+            let reference = self.private_clock.ok_or(Error::Admission)?.reference();
+            let remaining = (reference.host_clock_epoch != 0)
+                .then(|| reference.now_ns.checked_sub(born))
+                .flatten()
+                .and_then(|age| AGE_NS.checked_sub(age))
+                .map(|remaining| (remaining / 1_000_000) as u32);
+            let Some(deadline) = remaining
+                .filter(|remaining| *remaining != 0)
+                .and_then(|remaining| elapsed.checked_add(remaining))
+            else {
+                self.statistics.expired.fetch_add(
+                    u64::from(source_frames) * 48_000 / u64::from(self.rate),
+                    Ordering::Relaxed,
+                );
+                return self.discard_media(io);
+            };
+            Some(deadline)
+        } else {
+            None
+        };
         self.pending = Some(Pending {
             bytes: result.encoded_bytes,
             frames: result.packet_frames,
-            source_frames: result.source_frames,
+            source_frames,
             timestamp,
             end_timestamp,
+            deadline,
             expires,
             stream,
         });
@@ -452,11 +664,28 @@ impl Outbound {
     }
     fn send(&mut self, io: &mut PeerIo, now: u64) -> Result<(), Error> {
         if let Some(pending) = &self.pending {
-            if io.send_prepared(
-                &self.encoded[..pending.bytes],
-                pending.frames,
-                pending.timestamp,
-            )? {
+            let status = if let Some(deadline) = pending.deadline {
+                io.send_prepared_timed(
+                    &self.encoded[..pending.bytes],
+                    pending.frames,
+                    pending.timestamp,
+                    deadline,
+                )?
+            } else {
+                i32::from(!io.send_prepared(
+                    &self.encoded[..pending.bytes],
+                    pending.frames,
+                    pending.timestamp,
+                )?)
+            };
+            if status == 2 {
+                self.statistics.expired.fetch_add(
+                    u64::from(pending.source_frames) * 48_000 / u64::from(self.rate),
+                    Ordering::Relaxed,
+                );
+                return self.discard_media(io);
+            }
+            if status == 0 {
                 let age = now.saturating_sub(pending.expires.saturating_sub(AGE_NS));
                 self.statistics.ages[(age / 1_000_000).min(200) as usize]
                     .fetch_add(1, Ordering::Relaxed);
@@ -510,6 +739,189 @@ mod tests {
     use super::*;
     use crate::link::session::tests::peer_with_egress;
     use rpt_advanced_core::audio::LinkAudioQueue;
+
+    thread_local! {
+        static BEFORE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn before_read() {
+        let hook = BEFORE_READ.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[test]
+    fn retained_g711_remainder_adopts_next_birth_without_renewing_packet() {
+        let (mut io, state) = peer_with_egress(8000, true, true);
+        state.lock().unwrap().encode_unit = Some(160);
+        let (mut writer, reader) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(8000, reader).unwrap();
+        let mut next_birth = 0;
+        for block in 0..80_u64 {
+            let now_ms = block * 23;
+            assert_eq!(
+                writer.write(
+                    AudioSpan {
+                        source_start: block * BLOCK as u64,
+                        born_ns: Some(now_ms * 1_000_000),
+                        ..AudioSpan::default()
+                    },
+                    &[0.25; BLOCK]
+                ),
+                0
+            );
+            if block == 1 {
+                state.lock().unwrap().prepared_result = 1;
+            }
+            outbound.step(&mut io, now_ms).unwrap();
+            if block == 0 {
+                let encoder = outbound.encoder.as_ref().unwrap();
+                assert!(
+                    (1..160).contains(&encoder.input_frames),
+                    "real FIR leaves a codec remainder"
+                );
+                assert_eq!(encoder.source_end, 0);
+            }
+            if block == 1 {
+                assert_eq!(
+                    outbound.pending.as_ref().unwrap().expires,
+                    AGE_NS,
+                    "mixed first packet must retain the first span's original birth"
+                );
+                next_birth = outbound.encoder.as_ref().unwrap().born_ns;
+                state.lock().unwrap().prepared_result = 0;
+                outbound.step(&mut io, now_ms).unwrap();
+            }
+            outbound.step(&mut io, now_ms).unwrap();
+        }
+        assert_eq!(
+            next_birth, 23_000_000,
+            "next packet starts in the second actual source span"
+        );
+        let observation = outbound.statistics.snapshot();
+        assert_eq!(
+            observation.expired_native_samples, 0,
+            "fresh spans must not inherit accumulated scheduling drift"
+        );
+        assert_eq!(observation.accepted, 79);
+        assert!(observation.maximum_queue_age_ns < 50_000_000);
+        let state = state.lock().unwrap();
+        let accepted = &state.prepared[1..]; // Skip the first blocked attempt.
+        assert_eq!(accepted.len(), 79);
+        assert!(accepted.iter().all(|(bytes, _)| bytes.len() == 160));
+        assert!(
+            accepted
+                .windows(2)
+                .all(|pair| pair[1].1 == pair[0].1.wrapping_add(20))
+        );
+    }
+
+    #[test]
+    fn revocable_egress_peek_cancellation_never_prepares_or_sends_a_packet() {
+        for future in [false, true] {
+            let (mut io, state) = peer_with_egress(8000, true, true);
+            let domain = rpt_advanced_core::link::RetirementDomain::default();
+            let source = rpt_advanced_core::link::PeerSignals::new().reply_target();
+            source.bind_retirement_domain(&domain);
+            let (mut writer, reader) = LinkAudioQueue::new(BLOCK * 2, 2).unwrap().into_endpoints();
+            assert!(writer.bind_retirement_domain(&domain));
+            let span = AudioSpan {
+                born_ns: Some(0),
+                ..AudioSpan::default()
+            };
+            assert_eq!(
+                writer.write_revocable(span, &[0.25; BLOCK], domain.revision()),
+                0
+            );
+            let next = AudioSpan {
+                source_start: BLOCK as u64,
+                born_ns: Some(20_000_000),
+                ..span
+            };
+            if future {
+                assert_eq!(writer.write(next, &[0.5; BLOCK]), 0);
+            }
+            let mut outbound = Outbound::new(8000, reader).unwrap();
+            BEFORE_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(move || source.retire())));
+            let wake = outbound.step(&mut io, 0).unwrap();
+            {
+                let state = state.lock().unwrap();
+                assert!(
+                    state.prepared.is_empty(),
+                    "cancelled peek must not substitute future PCM"
+                );
+                assert!(state.writes.is_empty());
+            }
+            assert_eq!(wake, Some(0));
+            assert!(outbound.pending.is_none());
+            assert!(outbound.conversion.is_none());
+            if future {
+                assert_eq!(outbound.queue.peek_span().unwrap().span, next);
+                assert_eq!(outbound.step(&mut io, 0).unwrap(), Some(20_000_000));
+                assert!(state.lock().unwrap().prepared.is_empty());
+                assert_eq!(outbound.queue.peek_span().unwrap().span, next);
+                outbound.step(&mut io, 20).unwrap();
+                assert!(!state.lock().unwrap().prepared.is_empty());
+            } else {
+                assert!(outbound.queue.peek_span().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn revocable_queue_publication_read_and_retirement_allocate_nothing() {
+        let domain = rpt_advanced_core::link::RetirementDomain::default();
+        let source = rpt_advanced_core::link::PeerSignals::new().reply_target();
+        source.bind_retirement_domain(&domain);
+        let (mut writer, mut reader) = LinkAudioQueue::new(16, 4).unwrap().into_endpoints();
+        assert!(writer.bind_retirement_domain(&domain));
+        let (_, allocations) = crate::fixture::allocations(|| {
+            let span = AudioSpan::default();
+            assert_eq!(
+                writer.write_revocable(span, &[0.25; 8], domain.revision()),
+                0
+            );
+            assert_eq!(reader.read_span(&mut [0.0; 3]).unwrap().frames, 3);
+            source.retire();
+            assert!(reader.peek_span().is_none());
+            assert_eq!(writer.write(span, &[0.5; 8]), 0);
+            assert_eq!(reader.read(&mut [0.0; 8]), 0);
+        });
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn one_block_readiness_preserves_future_pcm_and_retained_codec_input() {
+        let (mut io, state) = peer_with_egress(8000, true, true);
+        state.lock().unwrap().encode_unit = Some(160);
+        let (mut input, output) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(8000, output).unwrap();
+        assert!(outbound.ready_for_input());
+        let span = |source_start, born_ns| AudioSpan {
+            source_start,
+            born_ns: Some(born_ns),
+            ..AudioSpan::default()
+        };
+        assert_eq!(input.write(span(0, 20_000_000), &[0.25; BLOCK]), 0);
+        assert!(!outbound.ready_for_input());
+        outbound.step(&mut io, 0).unwrap();
+        assert!(
+            !outbound.ready_for_input(),
+            "a future block remains in its bounded queue"
+        );
+        outbound.step(&mut io, 20).unwrap();
+        assert!(outbound.ready_for_input());
+        assert_eq!(input.write(span(960, 40_000_000), &[0.5; BLOCK]), 0);
+        outbound.step(&mut io, 40).unwrap();
+        assert!(
+            !outbound.ready_for_input(),
+            "one codec packet consumed only the leading converted samples"
+        );
+        outbound.step(&mut io, 41).unwrap();
+        assert!(outbound.ready_for_input());
+        assert_eq!(input.dropped_samples(), 0);
+    }
 
     #[test]
     fn finite_drain_can_need_more_than_one_bounded_converter_turn() {

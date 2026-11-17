@@ -167,7 +167,7 @@ impl TextExecutor {
         executor.start()?;
         Ok(executor)
     }
-    /// Allocate a replacement without starting workers beside the current pair.
+    /// Allocate a replacement queue set without starting workers.
     pub fn prepare(node_count: usize, preparer: NativeMediaPreparer) -> Result<Self, MediaError> {
         let capacity = node_count
             .checked_mul(64)
@@ -188,7 +188,8 @@ impl TextExecutor {
             node_count,
         })
     }
-    /// Start after the previous executor pair has joined on serialized control.
+    /// Start the prepared pair before publication. Reload may retain one live pair
+    /// until commit so a spawn failure cannot destroy its current executor.
     pub fn start(&mut self) -> Result<(), MediaError> {
         if self.state.stopping.load(Ordering::Acquire) {
             return Err(MediaError::Cancelled);
@@ -197,6 +198,8 @@ impl TextExecutor {
             return Ok(());
         }
         for index in 0..2 {
+            #[cfg(test)]
+            tests::before_spawn(index)?;
             let state = Arc::clone(&self.state);
             self.workers.push(
                 thread::Builder::new()

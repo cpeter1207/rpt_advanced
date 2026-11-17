@@ -1,8 +1,11 @@
 //! Generation-owned peer audio composition; no channel operations or locks.
-use super::{AdmissionError, Mode, PeerSignals, ReceivePolicy, ReceiveState};
+use super::{
+    AdmissionError, Mode, PeerIdentity, PeerReply, PeerSignals, PhoneSource, ProtocolId,
+    ReceivePolicy, ReceiveState, RetirementDomain,
+};
 use crate::{
     audio::{AudioSpan, LinkAudioProducer},
-    controller::{NodeController, ParrotOutput, PeerReplySample},
+    controller::{NodeController, ParrotOutput, ParrotPhoneSource, PeerReplySample},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
@@ -83,7 +86,7 @@ impl GroupMemberSelection {
 /// Control-readable last-keyed direct identity for one prepared peer generation.
 #[derive(Clone)]
 pub struct LinkAudioStatus {
-    names: Arc<[String]>,
+    names: Arc<[Option<String>]>,
     last_keyed: Arc<AtomicUsize>,
     dropped: Arc<AtomicU64>,
 }
@@ -98,7 +101,7 @@ impl LinkAudioStatus {
             .load(Ordering::Acquire)
             .checked_sub(1)
             .and_then(|index| self.names.get(index))
-            .map(String::as_str)
+            .and_then(Option::as_deref)
     }
 }
 
@@ -113,6 +116,17 @@ pub struct SourceCoordinate {
     pub fraction_billionths: u32,
     /// Sign of the coordinate; exact zero is never negative.
     pub negative: bool,
+}
+
+/// Conservative original receipt bound, distinct from an exact source coordinate.
+/// The mapped source region was received no earlier than this value.
+/// This is not an exact DSP latency/contribution contract; never renew it on retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceTimeBound {
+    /// Nonzero identity of the original controller I/O clock lifecycle.
+    pub host_clock_epoch: u64,
+    /// A time no later than the earliest original receipt in the mapped source region.
+    pub not_after_ns: u64,
 }
 
 /// Provenance of one actual emitted sample, independent of PCM amplitude.
@@ -137,12 +151,74 @@ pub struct SampleProvenance {
 pub struct TimedPeerSample {
     /// Actual rendered PCM, including silence and concealment.
     pub sample: f32,
+    /// Conservative receipt bound, independent of exact output provenance.
+    /// Opaque processing without a qualified history contract clears this field.
+    pub age_bound: Option<SourceTimeBound>,
     /// None when an intervening processor cannot prove its output provenance.
     pub provenance: Option<SampleProvenance>,
 }
 
+/// One rendered native block, with original activity independent of DSP sample values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenderedPeerBlock {
+    /// Original real/PLC activity count, with the same meaning as PeerInput::render.
+    pub real: usize,
+    /// Oldest conservative original receipt bound across the complete output block.
+    /// Missing input, mixed clocks or unqualified processing leaves this unknown.
+    pub age_bound: Option<SourceTimeBound>,
+}
+
+/// Selected peer programme supplied to the controller in the last callback.
+/// This excludes local RX, capture, telemetry and signaling. It proves neither
+/// final RF admission nor physical presentation, and getters never renew it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RfProgrammeMetadata {
+    /// At least one selected source actually rendered programme, including zero PCM.
+    /// Transport key state or a registered source alone cannot set this field.
+    pub active: bool,
+    /// An actual private source contributed to the selected programme.
+    pub private: bool,
+    /// Oldest conservative receipt across the whole selected composite.
+    /// Any untimed source, mixed clock or concurrent retirement leaves it unknown.
+    pub age_bound: Option<SourceTimeBound>,
+    /// Node revision captured before rendering, not a current liveness assertion.
+    pub retirement_revision: Option<u64>,
+}
+impl RfProgrammeMetadata {
+    fn include_age(&mut self, incoming: Option<SourceTimeBound>) {
+        let incoming = incoming.filter(|bound| bound.host_clock_epoch != 0);
+        self.age_bound = if self.active {
+            self.age_bound.zip(incoming).and_then(|(first, next)| {
+                (first.host_clock_epoch == next.host_clock_epoch).then_some(SourceTimeBound {
+                    host_clock_epoch: first.host_clock_epoch,
+                    not_after_ns: first.not_after_ns.min(next.not_after_ns),
+                })
+            })
+        } else {
+            incoming
+        };
+        self.active = true;
+    }
+}
+
+/// Borrowed exact fences for a private source actually mixed in the last block.
+/// They remain inspectable after retirement; neither borrowing nor enumeration
+/// clones a token, revives a generation or grants permission to present history.
+#[derive(Clone, Copy, Debug)]
+pub struct RfContributor<'a> {
+    /// Original ring/media generation, independently revocable from the call.
+    pub media: &'a PeerReply,
+    /// Exact authenticated private call retained by the prepared mixer slot.
+    pub call: &'a PeerReply,
+}
+
 /// Unique adapter-owned consumer of one released inbound ring.
 pub trait PeerInput: Send {
+    /// Exact private-call token, never a numeric node identity or mailbox grant.
+    /// Public inputs return None; wrappers forward the original token unchanged.
+    fn phone_reply(&self) -> Option<&super::PeerReply> {
+        None
+    }
     /// Decoded source sample rate.
     fn source_rate(&self) -> u32;
     /// Immutable priming policy prepared with this unique source consumer.
@@ -158,6 +234,14 @@ pub trait PeerInput: Send {
     /// reports failure or absent capability; the default consumes nothing.
     fn render_timed_sample(&mut self) -> Option<TimedPeerSample> {
         None
+    }
+    /// Render once with an optional conservative bound for the whole block.
+    /// Ordinary and opaque inputs retain their existing block path and activity.
+    fn render_timed_block(&mut self, output: &mut [f32]) -> Option<RenderedPeerBlock> {
+        self.render(output).map(|real| RenderedPeerBlock {
+            real,
+            age_bound: None,
+        })
     }
     /// Shared PCM-before-epoch, activity and terminal snapshots.
     fn signals(&self) -> &PeerSignals;
@@ -185,7 +269,8 @@ pub trait PeerInput: Send {
 
 /// Prepared slot whose endpoints move into exactly one generation's transmit owner.
 pub struct AudioPeer<P: PeerInput> {
-    direct: String,
+    identity: PeerIdentity,
+    phone: Option<PeerReply>,
     mode: Mode,
     input: P,
     outbound: Option<LinkAudioProducer>,
@@ -197,23 +282,67 @@ pub struct AudioPeer<P: PeerInput> {
     group: Option<(GroupSelection, std::num::NonZeroUsize)>,
     group_index: Option<usize>,
     reported_active: bool,
+    rf_contributor: bool,
 }
 impl<P: PeerInput> AudioPeer<P> {
-    /// Allocate scratch before publication; no endpoint is cloneable.
+    /// Prepare a public protocol peer; private calls require their exact source token.
     pub fn new(
-        direct: &str,
+        identity: PeerIdentity,
         mode: Mode,
         input: P,
         outbound: LinkAudioProducer,
         maximum: usize,
         kerchunk_ms: u32,
     ) -> Result<Self, AdmissionError> {
-        if !super::decimal_identity(direct) || maximum == 0 {
+        if identity.protocol() == ProtocolId::Phone || input.phone_reply().is_some() {
+            return Err(AdmissionError::Invalid);
+        }
+        Self::prepare(identity, None, mode, input, outbound, maximum, kerchunk_ms)
+    }
+    /// Prepare a private slot only for this admitted account/call/actual ingress.
+    /// This is neither target authorization nor RF readiness; its owner proves those
+    /// before publication. No numeric alias or public telemetry identity is created.
+    pub fn for_phone(
+        source: &PhoneSource,
+        reply: &PeerReply,
+        mode: Mode,
+        input: P,
+        outbound: LinkAudioProducer,
+        maximum: usize,
+    ) -> Result<Self, AdmissionError> {
+        if !reply.phone_authenticated()
+            || reply.phone_source() != Some(source)
+            || input.phone_reply() != Some(reply)
+            || input.receive_policy() != ReceivePolicy::Phone
+        {
+            return Err(AdmissionError::Invalid);
+        }
+        Self::prepare(
+            PeerIdentity::for_phone(source.call_id()),
+            Some(reply.clone()),
+            mode,
+            input,
+            outbound,
+            maximum,
+            0,
+        )
+    }
+    fn prepare(
+        identity: PeerIdentity,
+        phone: Option<PeerReply>,
+        mode: Mode,
+        input: P,
+        outbound: LinkAudioProducer,
+        maximum: usize,
+        kerchunk_ms: u32,
+    ) -> Result<Self, AdmissionError> {
+        if maximum == 0 {
             return Err(AdmissionError::Invalid);
         }
         let receive = ReceiveState::with_policy(input.source_rate(), input.receive_policy())?;
         Ok(Self {
-            direct: direct.into(),
+            identity,
+            phone,
             mode,
             input,
             outbound: Some(outbound),
@@ -225,7 +354,15 @@ impl<P: PeerInput> AudioPeer<P> {
             group: None,
             group_index: None,
             reported_active: false,
+            rf_contributor: false,
         })
+    }
+    fn ended(&self) -> bool {
+        self.input.signals().ended()
+            || self
+                .phone
+                .as_ref()
+                .is_some_and(|reply| !reply.phone_authenticated())
     }
     /// Mark this peer as a one-based member of a configured priority group.
     pub fn with_group(mut self, selection: GroupSelection, slot: std::num::NonZeroUsize) -> Self {
@@ -241,7 +378,9 @@ impl<P: PeerInput> AudioPeer<P> {
 
 /// Fixed prepared peer set retained until its generation is detached and reclaimed.
 pub struct LinkAudio<P: PeerInput> {
+    retirement: RetirementDomain,
     peer_source_active: bool,
+    rf_programme: RfProgrammeMetadata,
     text: Option<Box<dyn LocalTextInput>>,
     text_samples: Vec<f32>,
     peers: Vec<AudioPeer<P>>,
@@ -289,6 +428,7 @@ pub struct SourcePosition {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Destination {
+    contributes: bool,
     enabled: bool,
     broadcast: bool,
     telemetry: bool,
@@ -313,6 +453,10 @@ pub struct LinkDispatcher {
     incoming: Consumer<ProgramBlock>,
     recycle: Producer<ProgramBlock>,
     outbound: Vec<LinkAudioProducer>,
+    fences: Vec<(PeerReply, Option<PeerReply>)>,
+    retirement: RetirementDomain,
+    checked_revision: Option<u64>,
+    private_contributor: bool,
     scratch: Vec<f32>,
     current: Option<ProgramBlock>,
     next_destination: usize,
@@ -349,15 +493,50 @@ impl LinkDispatcher {
             if self.current.is_none() {
                 self.current = self.incoming.pop().ok();
                 self.next_destination = 0;
+                self.checked_revision = None;
+                self.private_contributor = false;
             }
             let Some(block) = &self.current else {
                 break;
             };
+            let revision = self.retirement.revision();
+            let mut private_contributor = self.private_contributor;
+            let contributors_live = match self.checked_revision {
+                Some(checked) => revision == Some(checked),
+                None => {
+                    revision.is_some()
+                        && block.routing.iter().zip(&self.fences).all(
+                            |(route, (generation, phone))| {
+                                private_contributor |= route.contributes && phone.is_some();
+                                !route.contributes
+                                    || (!generation.ended()
+                                        && phone
+                                            .as_ref()
+                                            .is_none_or(PeerReply::phone_authenticated))
+                            },
+                        )
+                        && self.retirement.revision() == revision
+                }
+            };
+            self.private_contributor = private_contributor;
+            if !contributors_live {
+                // One O(peers) validation per block, then O(1) checks. Churn
+                // cancels the rest without rescanning or draining unbounded work.
+                let _ = self
+                    .recycle
+                    .push(self.current.take().expect("cancelled block"));
+                progress.completed_blocks += 1;
+                break;
+            }
+            self.checked_revision = revision;
             let index = self.next_destination;
             let destination = block.routing[index];
             let mut notify = self.activity_edges[index] != destination.activity_edge;
-            self.activity_edges[index] = destination.activity_edge;
-            if destination.eligible {
+            let (generation, phone) = &self.fences[index];
+            let eligible = destination.eligible
+                && !generation.ended()
+                && phone.as_ref().is_none_or(PeerReply::phone_authenticated);
+            if eligible {
                 let offset = (index + 1) * self.scratch.len();
                 for (frame, sample) in self.scratch[..block.frames].iter_mut().enumerate() {
                     *sample = if destination.enabled {
@@ -372,11 +551,32 @@ impl LinkDispatcher {
                         *sample += block.replies[frame].sample;
                     }
                 }
-                if self.outbound[index].write(destination.span, &self.scratch[..block.frames])
-                    < block.frames
-                {
-                    notify = true;
-                }
+            }
+            #[cfg(test)]
+            tests::before_publish();
+            // Composition is bounded but retirement may finish during it. Do
+            // not publish that scratch or consume its activity edge afterward.
+            if self.retirement.revision() != revision {
+                let _ = self
+                    .recycle
+                    .push(self.current.take().expect("cancelled block"));
+                progress.completed_blocks += 1;
+                break;
+            }
+            self.activity_edges[index] = destination.activity_edge;
+            #[cfg(test)]
+            tests::after_validation();
+            if eligible {
+                let rejected = if self.private_contributor || phone.is_some() {
+                    self.outbound[index].write_revocable(
+                        destination.span,
+                        &self.scratch[..block.frames],
+                        revision,
+                    )
+                } else {
+                    self.outbound[index].write(destination.span, &self.scratch[..block.frames])
+                };
+                notify |= rejected < block.frames;
             }
             if notify {
                 on_written(index);
@@ -400,14 +600,26 @@ impl<P: PeerInput> LinkAudio<P> {
     /// Prepare radio and dispatcher owners plus exactly two recycled peer-audio blocks.
     /// Retain the dispatcher with this generation until its producer/callbacks are detached.
     pub fn new(
+        peers: Vec<AudioPeer<P>>,
+        maximum: usize,
+    ) -> Result<(Self, LinkDispatcher), AdmissionError> {
+        Self::new_in_domain(peers, maximum, RetirementDomain::default())
+    }
+    /// Prepare in the existing node-lifetime domain, reused across media refreshes.
+    /// Registration occurs here on control, never on the hardware or dispatch path.
+    pub fn new_in_domain(
         mut peers: Vec<AudioPeer<P>>,
         maximum: usize,
+        retirement: RetirementDomain,
     ) -> Result<(Self, LinkDispatcher), AdmissionError> {
         if maximum == 0 || peers.iter().any(|peer| peer.audio.len() < maximum) {
             return Err(AdmissionError::Invalid);
         }
         let status = LinkAudioStatus {
-            names: peers.iter().map(|peer| peer.direct.clone()).collect(),
+            names: peers
+                .iter()
+                .map(|peer| peer.identity.operator_alias())
+                .collect(),
             last_keyed: Arc::new(AtomicUsize::new(0)),
             dropped: Arc::new(AtomicU64::new(0)),
         };
@@ -426,10 +638,24 @@ impl<P: PeerInput> LinkAudio<P> {
             peer.group_index = Some(index);
         }
         let selected_groups = vec![0; groups.len()];
+        let fences = peers
+            .iter()
+            .map(|peer| {
+                let generation = peer.input.signals().reply_target();
+                generation.bind_retirement_domain(&retirement);
+                if let Some(phone) = &peer.phone {
+                    phone.bind_retirement_domain(&retirement);
+                }
+                (generation, peer.phone.clone())
+            })
+            .collect();
         let mut outbound = Vec::new();
         for peer in &mut peers {
             // Control-only construction consumes each freshly prepared peer exactly once.
-            let producer = peer.outbound.take().expect("prepared outbound owner");
+            let mut producer = peer.outbound.take().expect("prepared outbound owner");
+            if !producer.bind_retirement_domain(&retirement) {
+                return Err(AdmissionError::Invalid);
+            }
             outbound.push(producer);
         }
         let samples = maximum
@@ -452,6 +678,10 @@ impl<P: PeerInput> LinkAudio<P> {
             incoming,
             recycle,
             outbound,
+            fences,
+            retirement: retirement.clone(),
+            checked_revision: None,
+            private_contributor: false,
             scratch: vec![0.0; maximum],
             current: None,
             next_destination: 0,
@@ -459,7 +689,9 @@ impl<P: PeerInput> LinkAudio<P> {
         };
         Ok((
             Self {
+                retirement,
                 peer_source_active: false,
+                rf_programme: RfProgrammeMetadata::default(),
                 text: None,
                 text_samples: vec![0.0; maximum],
                 routing: vec![Destination::default(); peers.len()],
@@ -502,6 +734,24 @@ impl<P: PeerInput> LinkAudio<P> {
     pub fn peer_source_active(&self) -> bool {
         self.peer_source_active
     }
+    /// Last callback's selected peer programme before controller/RF admission.
+    /// A later retirement does not rewrite the original revision or receipt bound.
+    pub fn rf_programme(&self) -> RfProgrammeMetadata {
+        self.rf_programme
+    }
+    /// Borrow original private fences from actual last-block contributors only.
+    /// A retired fence remains visible until the next callback replaces the block.
+    pub fn rf_contributors(&self) -> impl Iterator<Item = RfContributor<'_>> {
+        self.peers.iter().filter_map(|peer| {
+            peer.phone
+                .as_ref()
+                .filter(|_| self.rf_programme.private && peer.rf_contributor)
+                .map(|call| RfContributor {
+                    media: peer.input.signals().reply(),
+                    call,
+                })
+        })
+    }
     /// Render RF and publish one prepared pre-access-tone peer-audio block for the dispatcher.
     /// Terminal peers contribute neither PCM nor key state, even before reclamation.
     pub fn process(
@@ -511,18 +761,33 @@ impl<P: PeerInput> LinkAudio<P> {
         audio: &mut [f32],
         source: SourcePosition,
     ) -> Result<bool, AdmissionError> {
+        // Even a rejected or empty callback cannot expose a prior block as current.
+        self.rf_programme = RfProgrammeMetadata::default();
         let count = audio.len();
         if count > self.local.len() {
             return Err(AdmissionError::Invalid);
+        }
+        let retirement_revision = controller
+            .phone_retirement_matches(&self.retirement)
+            .then(|| self.retirement.revision())
+            .flatten();
+        self.rf_programme.retirement_revision = retirement_revision;
+        let mut capture_phone: Option<ParrotPhoneSource> = None;
+        // Snapshot only. The existing all-inputs-idle boundary below still owns
+        // adoption; an idle block has no rendered programme to misclassify.
+        for (index, group) in self.groups.iter().enumerate() {
+            self.selected_groups[index] = group.callback_slot(false);
         }
         self.local[..count].copy_from_slice(audio);
         self.mix[..count].fill(0.0);
         for peer in &mut self.peers {
             let (pcm_epoch, available, ended) = {
                 let signal = peer.input.signals();
-                (signal.pcm_epoch(), peer.input.available(), signal.ended())
+                (signal.pcm_epoch(), peer.input.available(), peer.ended())
             };
             let mut render_attempted = false;
+            let mut age_bound = None;
+            let private = peer.phone.is_some();
             let audio_active = match peer.input.finite_playout() {
                 Some(pending) => {
                     // An explicit finite boundary bypasses ordinary startup and
@@ -531,11 +796,19 @@ impl<P: PeerInput> LinkAudio<P> {
                     peer.receive.rendered(None, count);
                     !ended && pending && {
                         render_attempted = true;
-                        peer.input
-                            .render(&mut peer.audio[..count])
-                            .is_some_and(|real| {
-                                real != 0 || peer.input.finite_playout() == Some(true)
-                            })
+                        let rendered = if private {
+                            peer.input
+                                .render_timed_block(&mut peer.audio[..count])
+                                .map(|block| {
+                                    age_bound = block.age_bound;
+                                    block.real
+                                })
+                        } else {
+                            peer.input.render(&mut peer.audio[..count])
+                        };
+                        rendered.is_some_and(|real| {
+                            real != 0 || peer.input.finite_playout() == Some(true)
+                        })
                     }
                 }
                 None => {
@@ -543,8 +816,17 @@ impl<P: PeerInput> LinkAudio<P> {
                         .should_render(pcm_epoch, available, ended, count)
                         && {
                             render_attempted = true;
-                            peer.receive
-                                .rendered(peer.input.render(&mut peer.audio[..count]), count)
+                            let rendered = if private {
+                                peer.input.render_timed_block(&mut peer.audio[..count]).map(
+                                    |block| {
+                                        age_bound = block.age_bound;
+                                        block.real
+                                    },
+                                )
+                            } else {
+                                peer.input.render(&mut peer.audio[..count])
+                            };
+                            peer.receive.rendered(rendered, count)
                         }
                 }
             };
@@ -555,37 +837,71 @@ impl<P: PeerInput> LinkAudio<P> {
             if !audio_active {
                 peer.audio[..count].fill(0.0);
             }
-            let active = !ended && (audio_active || peer.input.signals().radio_keyed());
+            let active = !peer.ended() && (audio_active || peer.input.signals().radio_keyed());
             peer.active = active;
-            peer.input.signals().set_active(active);
+            peer.rf_contributor = count != 0 && render_attempted && audio_active && active;
+            let selected = peer.group_index.is_none_or(|group| {
+                peer.group
+                    .as_ref()
+                    .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
+            });
+            if peer.rf_contributor && selected {
+                self.rf_programme.include_age(age_bound);
+            }
+            // The capture tap includes every active peer, independently of RF group
+            // selection. Classify during the sole source render, never by amplitude.
+            if private && count != 0 && render_attempted && audio_active && active {
+                let source = ParrotPhoneSource {
+                    age_bound,
+                    retirement_revision,
+                };
+                if let Some(retained) = capture_phone.as_mut() {
+                    retained.include(source);
+                } else {
+                    capture_phone = Some(source);
+                }
+            }
         }
         let inputs_idle = !receiving && self.peers.iter().all(|peer| !peer.active);
         for (index, group) in self.groups.iter().enumerate() {
             self.selected_groups[index] = group.callback_slot(inputs_idle);
         }
         let selected_groups = &self.selected_groups;
+        self.rf_programme.active = false;
         for (index, peer) in self.peers.iter_mut().enumerate() {
+            peer.active &= !peer.ended();
+            peer.input.signals().set_active(peer.active);
+            let public = self.status.names[index].as_deref();
             let selected = peer.group_index.is_none_or(|group| {
                 peer.group
                     .as_ref()
                     .is_some_and(|(_, slot)| selected_groups[group] == slot.get())
             });
             let active = peer.active && selected;
+            peer.rf_contributor &= active;
+            self.rf_programme.active |= peer.rf_contributor;
+            self.rf_programme.private |= peer.rf_contributor && peer.phone.is_some();
             if active {
                 if !peer.reported_active {
-                    controller.link_keyed(&peer.direct);
+                    if let Some(direct) = public {
+                        controller.link_keyed(direct);
+                        self.status.last_keyed.store(index + 1, Ordering::Release);
+                    }
                     peer.duration = 0;
-                    self.status.last_keyed.store(index + 1, Ordering::Release);
                 }
                 peer.duration = peer.duration.saturating_add(count as u64);
             } else if peer.reported_active {
                 let mut storage = [0; 64];
                 let signal = peer.input.signals();
-                let source = signal
-                    .selected_source(signal.activity_edge(), &mut storage)
-                    .unwrap_or(&peer.direct);
+                let direct = public.unwrap_or("");
+                let source = public.map_or("", |direct| {
+                    signal
+                        .selected_source(signal.activity_edge(), &mut storage)
+                        .unwrap_or(direct)
+                });
+                // The existing nameless release path updates hang without named courtesy.
                 controller.link_unkeyed(
-                    &peer.direct,
+                    direct,
                     source,
                     peer.kerchunk_samples != 0 && peer.duration <= peer.kerchunk_samples,
                 );
@@ -596,6 +912,15 @@ impl<P: PeerInput> LinkAudio<P> {
                     *mixed += input;
                 }
             }
+        }
+        // A source may retire after its bound was folded but before mixing.
+        // Keep the original snapshot and withhold the composite age, never
+        // restamp it or retain a bound from a source that no longer contributed.
+        if !self.rf_programme.active
+            || retirement_revision.is_none()
+            || self.retirement.revision() != retirement_revision
+        {
+            self.rf_programme.age_bound = None;
         }
         let linked_active = self.peers.iter().any(|peer| {
             peer.active
@@ -623,7 +948,13 @@ impl<P: PeerInput> LinkAudio<P> {
         for sample in &mut self.parrot_mix[..count] {
             *sample = sample.clamp(-1.0, 1.0);
         }
-        controller.observe_parrot(receiving || any_peer_active, &self.parrot_mix[..count]);
+        #[cfg(test)]
+        tests::phone_parrot::before_capture();
+        controller.observe_parrot_with_phone(
+            receiving || any_peer_active,
+            &self.parrot_mix[..count],
+            capture_phone,
+        );
         let mut parrot_active = false;
         for sample in &mut self.regeneration_samples[..count] {
             *sample = self
@@ -680,12 +1011,16 @@ impl<P: PeerInput> LinkAudio<P> {
                     .as_ref()
                     .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
             });
-            let own_source = usize::from(peer.active && peer.mode.forwards() && selected);
-            let ended = peer.input.signals().ended();
+            route.contributes = peer.active && peer.mode.forwards() && selected;
+            let own_source = usize::from(route.contributes);
+            let ended = peer.ended();
             route.target = if ended {
                 0
             } else {
-                peer.input.signals().reply_identity()
+                peer.phone.as_ref().map_or_else(
+                    || peer.input.signals().reply_identity(),
+                    PeerReply::identity,
+                )
             };
             route.enabled = !ended
                 && (parrot_active
@@ -693,7 +1028,7 @@ impl<P: PeerInput> LinkAudio<P> {
                         && selected
                         && (receiving || forwarding_sources > own_source)));
             route.broadcast = !ended && peer.mode.transmits() && selected;
-            route.telemetry = peer.input.signals().telemetry_allowed();
+            route.telemetry = peer.phone.is_none() && peer.input.signals().telemetry_allowed();
             let eligible = route.target != 0
                 && (route.enabled
                     || (route.telemetry

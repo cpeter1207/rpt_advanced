@@ -178,6 +178,7 @@ struct RadioHandle {
     active: Option<crate::radio_activation::ActiveRadio>,
     pending: Option<RadioReservation>,
     metadata: crate::abi::rptadv_radio_metadata_v1,
+    feedback: Option<crate::abi::UrpRadioFeedbackPort>,
 }
 
 /// Stage/acknowledge, commit, or roll back a native radio configuration on its
@@ -265,11 +266,36 @@ pub unsafe extern "C" fn radio_control(
     {
         return -1;
     }
+    let pointer = request;
     // SAFETY: this boundary borrows the caller's live handle and complete request.
     let (handle, request) = unsafe { (radio.cast::<RadioHandle>().as_mut(), request.as_mut()) };
     let (Some(handle), Some(request)) = (handle, request) else {
         return -1;
     };
+    if request.operation == 8 {
+        if (header[0] as usize)
+            < std::mem::size_of::<crate::abi::rptadv_radio_programme_control_v1>()
+        {
+            return -1;
+        }
+        // SAFETY: the complete writable extension was validated before borrowing it.
+        let retirement = unsafe {
+            &mut (*pointer.cast::<crate::abi::rptadv_radio_programme_control_v1>()).retirement
+        };
+        retirement.accepted_abi_version = 0;
+        retirement.result = -7;
+        if retirement.struct_size as usize != std::mem::size_of_val(retirement)
+            || retirement.abi_version != crate::abi::URP_AST_PROGRAMME_RETIRE_OPTION_ABI_VERSION
+            || retirement.expected_radio_generation == 0
+            || retirement.request_id == 0
+        {
+            return -1;
+        }
+        return handle
+            .active
+            .as_mut()
+            .map_or(-7, |active| active.retire_programme(retirement));
+    }
     if request.operation == 7 {
         let command = &mut request.command;
         if command.struct_size as usize != std::mem::size_of_val(command)
@@ -457,6 +483,7 @@ pub unsafe extern "C" fn radio_open(
         active: None,
         pending: None,
         metadata: None,
+        feedback: None,
     }))
     .cast();
     0
@@ -480,6 +507,33 @@ pub unsafe extern "C" fn radio_metadata_bind(
         return -1;
     }
     handle.metadata = metadata;
+    0
+}
+
+/// Copy the optional SDK feedback port while this radio is still stopped.
+///
+/// # Safety
+/// The unique reservation is retained on control. A nonnull port exposes a
+/// truthful size prefix; its callback/context outlive radio destruction.
+pub unsafe extern "C" fn radio_feedback_bind(
+    _: *mut c_void,
+    radio: *mut c_void,
+    port: *const crate::abi::UrpRadioFeedbackPort,
+) -> i32 {
+    let Some(handle) = (unsafe { radio.cast::<RadioHandle>().as_mut() }) else {
+        return -1;
+    };
+    if handle.active.is_some()
+        || port.is_null()
+        || (unsafe { std::ptr::addr_of!((*port).struct_size).read() } as usize)
+            < std::mem::size_of::<crate::abi::UrpRadioFeedbackPort>()
+        || unsafe { std::ptr::addr_of!((*port).abi_version).read() } != 1
+    {
+        return -1;
+    }
+    // SAFETY: the complete readable sized port was validated; no borrowed span is kept.
+    let port = unsafe { port.read() };
+    handle.feedback = port.publish.map(|_| port);
     0
 }
 
@@ -523,6 +577,7 @@ pub unsafe extern "C" fn radio_activate(
             transmit,
             transmit_context,
             metadata: handle.metadata,
+            feedback: handle.feedback,
         },
     );
     finish_activation(handle, result)
@@ -661,6 +716,67 @@ mod tests {
     use crate::resolve_radio_nodes;
 
     #[test]
+    fn feedback_binding_copies_only_complete_stopped_ports_and_preserves_context() {
+        use std::{ffi::c_void, ptr};
+        unsafe extern "C" fn publish(_: *mut c_void, _: *const crate::abi::UrpRadioFeedback) {}
+        let radios = resolve_radio_nodes("[1000]\nradio_channel=usb\n").unwrap();
+        let mut handle = RadioHandle {
+            reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+            active: None,
+            pending: None,
+            metadata: None,
+            feedback: None,
+        };
+        let radio = ptr::from_mut(&mut handle).cast();
+        let mut context = 7_u64;
+        let mut port = crate::abi::UrpRadioFeedbackPort {
+            struct_size: std::mem::size_of::<crate::abi::UrpRadioFeedbackPort>() as u32,
+            abi_version: 1,
+            context: ptr::from_mut(&mut context).cast(),
+            publish: Some(publish),
+        };
+        unsafe {
+            assert_eq!(
+                super::radio_feedback_bind(ptr::null_mut(), ptr::null_mut(), &port),
+                -1
+            );
+            assert_eq!(
+                super::radio_feedback_bind(ptr::null_mut(), radio, ptr::null()),
+                -1
+            );
+            for (size, version) in [(8, 1), (port.struct_size, 2)] {
+                let invalid = crate::abi::UrpRadioFeedbackPort {
+                    struct_size: size,
+                    abi_version: version,
+                    ..port
+                };
+                assert_eq!(
+                    super::radio_feedback_bind(ptr::null_mut(), radio, &invalid),
+                    -1
+                );
+                assert!(handle.feedback.is_none());
+            }
+            let short = [8_u32, 1];
+            assert_eq!(
+                super::radio_feedback_bind(ptr::null_mut(), radio, short.as_ptr().cast()),
+                -1
+            );
+            assert_eq!(super::radio_feedback_bind(ptr::null_mut(), radio, &port), 0);
+            assert_eq!(handle.feedback.unwrap().context, port.context);
+            port.publish = None;
+            assert_eq!(super::radio_feedback_bind(ptr::null_mut(), radio, &port), 0);
+            assert!(handle.feedback.is_none());
+            handle.active = Some(crate::radio_activation::tests::fixture_active_radio(
+                crate::radio_activation::tests::remote_fixture_api(),
+            ));
+            assert_eq!(
+                super::radio_feedback_bind(ptr::null_mut(), radio, &port),
+                -1
+            );
+        }
+    }
+
+    #[test]
     fn maintenance_validates_the_request_prefix_and_returns_original_active_source() {
         unsafe extern "C" fn append(
             context: *mut std::ffi::c_void,
@@ -682,6 +798,7 @@ mod tests {
             active: None,
             pending: None,
             metadata: None,
+            feedback: None,
         };
         // SAFETY: the request is a scalar-only ABI record initialized before use.
         let mut request: crate::abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
@@ -803,6 +920,7 @@ mod tests {
             active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
             pending: None,
             metadata: None,
+            feedback: None,
         };
         let context = std::ptr::from_mut(&mut host).cast();
         let radio = std::ptr::from_mut(&mut handle).cast();
@@ -910,6 +1028,7 @@ mod tests {
             active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
             pending: None,
             metadata: None,
+            feedback: None,
         };
         // SAFETY: the request is a scalar-only ABI record initialized before dispatch.
         let mut request: crate::abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
@@ -990,6 +1109,7 @@ mod tests {
             active: None,
             pending: None,
             metadata: None,
+            feedback: None,
         };
         let binding: crate::abi::UrpAstSiteBinding = unsafe { std::mem::zeroed() };
         let request: crate::abi::UrpAstSiteRequest = unsafe { std::mem::zeroed() };
@@ -1489,6 +1609,7 @@ mod tests {
             active: None,
             pending: None,
             metadata: None,
+            feedback: None,
         };
 
         assert_eq!(
@@ -1515,6 +1636,7 @@ mod tests {
             active: None,
             pending: None,
             metadata: None,
+            feedback: None,
         };
         assert_eq!(
             finish_activation(
@@ -1547,6 +1669,7 @@ mod tests {
             active: None,
             pending: None,
             metadata: None,
+            feedback: None,
         };
         let radio = ptr::from_mut(&mut handle).cast();
         let operation = native::remote_operation();
@@ -1731,6 +1854,7 @@ mod receive_policy_tests {
             active: None,
             pending: None,
             metadata: None,
+            feedback: None,
         };
         // SAFETY: the record contains only integers and a fixed integer array.
         let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
@@ -1818,3 +1942,7 @@ mod receive_policy_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "radio_programme_tests.rs"]
+mod programme_tests;

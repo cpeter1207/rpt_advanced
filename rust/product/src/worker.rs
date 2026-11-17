@@ -5,7 +5,7 @@ use crate::{
         InboundConsumer, InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation,
         RingError,
     },
-    services::{PeerIo, ProcessedPeer, Radio},
+    services::{PeerIo, Radio},
 };
 use rpt_advanced_core::{
     link::LinkAudio,
@@ -25,6 +25,9 @@ use std::{
     },
     time::Instant,
 };
+
+#[path = "worker_feedback.rs"]
+mod feedback;
 
 const SNAPSHOT_QUEUE_CAPACITY: usize = 4;
 
@@ -62,6 +65,7 @@ struct MeterSnapshot {
     clipped_samples: u64,
     dropped_snapshots: u64,
     ring: Option<RingSnapshot>,
+    feedback: Option<feedback::PhysicalFeedback>,
 }
 
 struct MeterWindow {
@@ -153,11 +157,17 @@ struct MeterPublisher {
 }
 
 impl MeterPublisher {
-    fn publish(&mut self, audio: &[f32], observer: Option<&InboundObserver>) {
+    fn publish(
+        &mut self,
+        audio: &[f32],
+        observer: Option<&InboundObserver>,
+        feedback: Option<feedback::PhysicalFeedback>,
+    ) {
         let Some(mut snapshot) = self.window.observe(audio) else {
             return;
         };
         snapshot.dropped_snapshots = self.dropped_snapshots;
+        snapshot.feedback = feedback;
         if let Some(observer) = observer {
             // The observer copies lock-free ring counters; it does not consume PCM.
             snapshot.ring = observer.observe().ok().as_ref().map(RingSnapshot::from);
@@ -205,7 +215,7 @@ pub(crate) fn take_test_failure(failure: TestFailure) -> bool {
     })
 }
 /// Unique generation-owned transmit mixer.
-pub type Audio = LinkAudio<ProcessedPeer<InboundConsumer>>;
+pub type Audio = LinkAudio<crate::link::input::AudioInput>;
 /// Fixed registrations transferred once on control.
 pub type AudioOwners = RuntimeAudioOwners<Audio>;
 type ReceiveOwner = OwnedReceiveOwner<DtmfWorker, RuntimeTransmit<Audio>>;
@@ -436,6 +446,7 @@ struct TransmitContext {
     meter: UnsafeCell<MeterPublisher>,
     remote_controls: UnsafeCell<u32>,
     linked_active: UnsafeCell<bool>,
+    feedback: UnsafeCell<feedback::FeedbackState>,
 }
 // SAFETY: callbacks are serialized independently by the host. Control writes owner slots
 // only before release-publishing active, and takes them only after synchronous radio destroy.
@@ -450,6 +461,18 @@ unsafe impl Send for TransmitContext {}
 // handshake publishes the owner cell once. One serial TX callback owns its mutable
 // cells until synchronous radio destroy makes control reclamation exclusive again.
 unsafe impl Sync for TransmitContext {}
+
+/// SDK feedback is serialized immediately before this context's TX callback.
+unsafe extern "C" fn feedback_callback(
+    context: *mut c_void,
+    record: *const crate::abi::UrpRadioFeedback,
+) {
+    // SAFETY: the stopped binding retains this stable context through retirement.
+    if let Some(context) = unsafe { context.cast::<TransmitContext>().as_ref() } {
+        // SAFETY: feedback and TX are one serial owner, never station control.
+        unsafe { (&mut *context.feedback.get()).publish(record) };
+    }
+}
 
 /// Same serial TX endpoint as PCM: no cross-thread controller mutation.
 unsafe extern "C" fn metadata_callback(
@@ -591,7 +614,7 @@ unsafe extern "C" fn receive_callback(
     // SAFETY: processing and its panic boundary returned to the sole serial owner.
     unsafe { &mut *context.state.get() }
         .meter
-        .publish(samples, None);
+        .publish(samples, None, None);
     result
 }
 fn receive(
@@ -778,6 +801,11 @@ unsafe extern "C" fn transmit_callback(
 ) -> i32 {
     // SAFETY: the host retains this callback context through synchronous destroy.
     let callback_context = unsafe { context.cast::<TransmitContext>().as_ref() };
+    if let Some(context) = callback_context {
+        // SAFETY: this serial TX callback consumes its immediately preceding
+        // feedback exactly once, including inactive/error paths.
+        unsafe { &mut *context.feedback.get() }.begin(count as usize, context.maximum);
+    }
     let status = callback_context.map(|context| &context.status);
     // SAFETY: the host supplies writable key storage for this call.
     let keyed = unsafe { keyed.as_mut() };
@@ -829,7 +857,11 @@ fn publish_transmit_samples(context: Option<&TransmitContext>, samples: &[f32]) 
     if let Some(context) = context {
         // SAFETY: the serialized TX callback is the sole writer of this publisher.
         let ring = unsafe { &*context.ring.get() };
-        unsafe { &mut *context.meter.get() }.publish(samples, Some(&ring.current.observer));
+        unsafe { &mut *context.meter.get() }.publish(
+            samples,
+            Some(&ring.current.observer),
+            unsafe { &*context.feedback.get() }.current,
+        );
     }
 }
 fn publish_transmit_keyed(status: Option<&RadioStatus>, keyed: bool) {
@@ -1210,6 +1242,7 @@ impl RadioWorker {
             }),
             remote_controls: UnsafeCell::new(0),
             linked_active: UnsafeCell::new(false),
+            feedback: UnsafeCell::new(feedback::FeedbackState::default()),
         });
         if radio.bind_metadata(Some(metadata_callback)).is_err() {
             return Err(PrepareFailure::Reservation(
@@ -1234,6 +1267,20 @@ impl RadioWorker {
             reported_faults: [0; 6],
             last_report_ms: 0,
         };
+        let port = crate::abi::UrpRadioFeedbackPort {
+            struct_size: std::mem::size_of::<crate::abi::UrpRadioFeedbackPort>() as u32,
+            abi_version: 1,
+            context: std::ptr::from_ref(&*worker.transmit).cast_mut().cast(),
+            publish: Some(feedback_callback),
+        };
+        // SAFETY: the complete worker already owns the stable TX box. Even a
+        // failed binding may retain it; checked retirement precedes reclamation.
+        if unsafe { worker.radio.as_mut().unwrap().bind_feedback(&port) }.is_err() {
+            return Err(PrepareFailure::Activation(
+                Error::Operation,
+                Box::new(worker),
+            ));
+        }
         // SAFETY: the complete owner retains both stable callback boxes on success
         // and failure. Only checked retirement may release them after activation.
         let activated = unsafe {
@@ -1324,6 +1371,12 @@ impl RadioWorker {
         text.push_str(&Self::format_meter("local-rx-audio", self.latest_receive));
         text.push('\n');
         text.push_str(&Self::format_meter("transmit-audio", self.latest_transmit));
+        text.push('\n');
+        text.push_str(&feedback::status(
+            self.latest_transmit
+                .filter(|_| self.radio.is_some())
+                .and_then(|snapshot| snapshot.feedback),
+        ));
         if let Some(ring) = self.latest_transmit.and_then(|snapshot| snapshot.ring) {
             text.push('\n');
             text.push_str(&Self::format_ring_snapshot(ring));
@@ -1427,3 +1480,7 @@ impl Drop for RadioWorker {
 #[cfg(test)]
 #[path = "worker_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "worker_feedback_tests.rs"]
+mod feedback_tests;

@@ -15,6 +15,7 @@ pub(crate) enum Input {
 #[derive(Default)]
 pub(crate) struct State {
     pub(crate) rate: u32,
+    local: Option<Box<str>>,
     capabilities: u32,
     pub(crate) input: VecDeque<Input>,
     pub(crate) texts: Vec<Vec<u8>>,
@@ -23,8 +24,11 @@ pub(crate) struct State {
     pub(crate) writes: Vec<usize>,
     pub(crate) fail_text: bool,
     pub(crate) fail_read: bool,
+    pub(crate) legacy_reads: usize,
+    pub(crate) source_reads: usize,
     pub(crate) fail_ready: bool,
     pub(crate) ready_without_input: bool,
+    pub(crate) duplicate_digit: bool,
     pub(crate) fail_write: bool,
     pub(crate) fail_bind: bool,
     pub(crate) bound_radio: Option<String>,
@@ -36,6 +40,7 @@ pub(crate) struct State {
     pub(crate) async_detaches: usize,
     pub(crate) fail_async_attach: bool,
     no_async_thread: bool,
+    initial_inline_step: bool,
     pub(crate) continuous_async: bool,
     pub(crate) observe_calls: usize,
     pub(crate) echo_observation: Option<abi::rptadv_peer_observation_v1>,
@@ -45,7 +50,8 @@ pub(crate) struct State {
     encoded_calls: usize,
     encoded_bytes: Option<usize>,
     encode_position: u64,
-    encode_unit: Option<usize>,
+    pub(crate) encode_unit: Option<usize>,
+    pub(crate) g711_partial_flush: bool,
     encode_full: bool,
     encode_failure: bool,
     encode_pending: Vec<f32>,
@@ -55,21 +61,27 @@ pub(crate) struct State {
     pub(crate) prepared: Vec<(Vec<u8>, u32)>,
     prepared_frames: Vec<u32>,
     pub(crate) prepared_result: i32,
+    pub(crate) timed_deadlines: Vec<u32>,
+    pub(crate) encoder_resets: usize,
+    pub(crate) encoder_reset_result: i32,
     call_elapsed: u32,
-    deadlines: Vec<u64>,
+    pub(crate) deadlines: Vec<u64>,
     source_position: u64,
     source_keyed: bool,
-    source_closed: bool,
-    source_finish: bool,
+    pub(crate) source_closed: bool,
+    pub(crate) source_finish: bool,
     source_interleave: bool,
     source_acknowledgements: usize,
-    source_completions: Vec<u32>,
-    source_credits: Vec<(u64, usize)>,
-    source_text: VecDeque<(&'static [u8], &'static [u8], u32)>,
+    pub(crate) source_completions: Vec<u32>,
+    pub(crate) source_credits: Vec<(u64, usize)>,
+    pub(crate) source_text: VecDeque<(&'static [u8], &'static [u8], u32)>,
+    pub(crate) source_reference: Option<(u64, u64)>,
+    pub(crate) source_birth: Option<u64>,
+    pub(crate) source_reset: bool,
 }
 type Shared = Arc<Mutex<State>>;
 
-pub(super) fn five_tone(count: usize) -> Vec<f32> {
+pub(crate) fn five_tone(count: usize) -> Vec<f32> {
     (0..count)
         .map(|n| {
             let phase = n as f32 * std::f32::consts::TAU / 8000.0;
@@ -912,6 +924,7 @@ unsafe extern "C" fn read(
     context: *mut c_void,
 ) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
+    state.legacy_reads += 1;
     if state.fail_read {
         return -1;
     }
@@ -921,7 +934,12 @@ unsafe extern "C" fn read(
                 Input::Text(bytes) => {
                     event.unwrap()(context, 1, bytes.as_ptr().cast(), bytes.len())
                 }
-                Input::Digit(digit) => event.unwrap()(context, 2, ptr::from_ref(&digit).cast(), 1),
+                Input::Digit(digit) => {
+                    event.unwrap()(context, 2, ptr::from_ref(&digit).cast(), 1);
+                    if state.duplicate_digit {
+                        event.unwrap()(context, 2, ptr::from_ref(&digit).cast(), 1);
+                    }
+                }
                 Input::Audio(samples) | Input::Concealed(samples) => {
                     event.unwrap()(context, 3, samples.as_ptr().cast(), samples.len())
                 }
@@ -1304,6 +1322,12 @@ unsafe extern "C" fn async_attach(
         return -1;
     }
     state.lock().unwrap().async_attaches += 1;
+    // The host contract permits an initial serialized step before attach returns.
+    // Use it to establish lifecycle ordering without a scheduler-dependent sleep.
+    let initial_inline_step = state.lock().unwrap().initial_inline_step;
+    if initial_inline_step {
+        unsafe { step.unwrap()(step_context) };
+    }
     let address = step_context as usize;
     let worker_state = state.clone();
     let thread = (!state.lock().unwrap().no_async_thread).then(|| {
@@ -1393,6 +1417,17 @@ unsafe extern "C" fn observe_peer(
 pub(crate) fn peer(rate_hz: u32) -> (PeerIo, Shared) {
     peer_with_async(rate_hz, false)
 }
+/// A deterministic initial callback with no background fixture thread.
+pub(crate) fn peer_with_initial_inline_step(rate_hz: u32) -> (PeerIo, Shared) {
+    let (peer, state) = peer_with_async(rate_hz, true);
+    {
+        let mut options = state.lock().unwrap();
+        options.no_async_thread = true;
+        options.initial_inline_step = true;
+    }
+    (peer, state)
+}
+
 pub(crate) fn peer_with_async(rate_hz: u32, async_enabled: bool) -> (PeerIo, Shared) {
     peer_with_egress(rate_hz, async_enabled, false)
 }
@@ -1406,8 +1441,26 @@ pub(crate) fn peer_with_egress(
 pub(crate) fn source_peer() -> (PeerIo, Shared) {
     make_peer(8000, true, true, true, true, false)
 }
+pub(crate) fn phone_source_peer() -> (PeerIo, Shared) {
+    phone_source_peer_at_rate(8000)
+}
+pub(crate) fn phone_source_peer_at_rate(rate: u32) -> (PeerIo, Shared) {
+    make_peer(rate, true, true, true, false, true)
+}
+pub(crate) fn phone_source_peer_inband(rate: u32) -> (PeerIo, Shared) {
+    make_peer_with_local(rate, true, true, true, false, Some(true), None)
+}
 pub(crate) fn phone_peer() -> (PeerIo, Shared) {
     make_peer(8000, false, false, false, false, true)
+}
+pub(crate) fn phone_peer_at_rate(rate: u32) -> (PeerIo, Shared) {
+    make_peer(rate, false, false, false, false, true)
+}
+pub(crate) fn phone_peer_named(local: &str) -> (PeerIo, Shared) {
+    make_peer_with_local(8000, false, false, false, false, Some(false), Some(local))
+}
+pub(crate) fn phone_with_egress(async_enabled: bool, egress: bool) -> (PeerIo, Shared) {
+    make_peer(8000, async_enabled || egress, egress, false, false, true)
 }
 pub(crate) fn peer_without_text(rate_hz: u32) -> (PeerIo, Shared) {
     make_peer(rate_hz, false, false, false, false, false)
@@ -1420,10 +1473,33 @@ fn make_peer(
     forward_text: bool,
     phone: bool,
 ) -> (PeerIo, Shared) {
+    make_peer_with_local(
+        rate_hz,
+        async_enabled,
+        egress,
+        source,
+        forward_text,
+        phone.then_some(false),
+        None,
+    )
+}
+fn make_peer_with_local(
+    rate_hz: u32,
+    async_enabled: bool,
+    egress: bool,
+    source: bool,
+    forward_text: bool,
+    phone: Option<bool>,
+    local: Option<&str>,
+) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
-        capabilities: if phone {
-            32
+        local: local.map(Box::from),
+        capabilities: if let Some(inband) = phone {
+            32 | (u32::from(inband) << 6)
+                | u32::from(async_enabled)
+                | (u32::from(egress) << 1)
+                | (u32::from(source) << 4)
         } else if source {
             23
         } else {
@@ -1457,6 +1533,9 @@ fn make_peer(
         table.peer_step_wake = Some(wake_only);
         table.peer_set_deadline = Some(deadline);
     }
+    if source && phone.is_some() {
+        table.peer_send_prepared_timed = Some(send_prepared_timed);
+    }
     if source {
         table.peer_read_source = Some(read_source);
     }
@@ -1471,11 +1550,15 @@ unsafe extern "C" fn peer_info(
     output: *mut abi::rptadv_peer_info_v1,
 ) -> i32 {
     unsafe { crate::fixture::peer_info(context, peer, output) };
-    let capabilities = unsafe { state(peer.cast_mut()) }
-        .lock()
-        .unwrap()
-        .capabilities;
+    let state = unsafe { state(peer.cast_mut()) }.lock().unwrap();
+    let capabilities = state.capabilities;
     unsafe {
+        if let Some(local) = &state.local {
+            (*output).local = abi::rptadv_peer_bytes_v1 {
+                data: local.as_ptr(),
+                length: local.len(),
+            };
+        }
         (*output).capabilities = capabilities;
         if capabilities & 32 != 0 {
             (*output).protocol = 3;
@@ -1490,7 +1573,7 @@ unsafe extern "C" fn peer_info(
                 length: 8,
             };
         }
-        if capabilities & 16 != 0 {
+        if capabilities & 16 != 0 && capabilities & 32 == 0 {
             (*output).protocol = 2;
             (*output).account_generation = 1;
             (*output).qso_generation = 2;
@@ -1515,11 +1598,26 @@ unsafe extern "C" fn read_source(
     let mut state = unsafe { state(peer) }.lock().unwrap();
     let sink = unsafe { &*sink };
     let result = unsafe { &mut *result };
+    state.source_reads += 1;
+    state.source_reference = Some((sink.host_clock_epoch, sink.reference_now_ns));
     if state.source_closed {
         result.state = 3;
         return 0;
     }
     result.state = 1;
+    if state.source_reset {
+        let code = unsafe { sink.source_discontinuity.unwrap()(sink.context) };
+        if code < 0 {
+            return -1;
+        }
+        if code == 0 {
+            state.source_reset = false;
+            state.source_position = 0;
+            state.input.clear();
+        }
+        result.progress = if code == 0 { 1 } else { 2 };
+        return 0;
+    }
     if let Some((sender, body, represented)) = state.source_text.pop_front() {
         result.represented_node_number = represented;
         unsafe {
@@ -1548,23 +1646,53 @@ unsafe extern "C" fn read_source(
         result.finish_pending = 1;
         result.progress = 2;
     } else if let Some(input) = state.input.pop_front() {
-        if !state.source_keyed {
+        if !state.source_keyed && !matches!(&input, Input::Digit(_)) {
             result.activity = 1;
             state.source_keyed = true;
         }
         let start = state.source_position;
         let concealed = matches!(&input, Input::Concealed(_));
+        let is_digit = matches!(&input, Input::Digit(_));
         let (accepted, offered, remaining) = match input {
+            Input::Digit(symbol) => {
+                assert!(
+                    sink.struct_size as usize
+                        >= std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, digit)
+                            + std::mem::size_of::<abi::rptadv_peer_source_digit_v1>()
+                );
+                let result = unsafe { sink.digit.unwrap()(sink.context, u32::from(symbol)) };
+                if result < 0 {
+                    return -1;
+                }
+                (usize::from(result == 0), 1, Input::Digit(symbol))
+            }
             Input::Audio(mut pcm) | Input::Concealed(mut pcm) => {
                 let offered = pcm.len();
                 let accepted = unsafe {
-                    sink.audio.unwrap()(
-                        sink.context,
-                        start,
-                        pcm.as_ptr(),
-                        offered,
-                        u32::from(concealed),
-                    )
+                    if let Some(born_ns) = state.source_birth {
+                        let birth = abi::rptadv_source_birth_v1 {
+                            struct_size: std::mem::size_of::<abi::rptadv_source_birth_v1>() as u32,
+                            abi_version: 1,
+                            host_clock_epoch: sink.host_clock_epoch,
+                            born_ns,
+                        };
+                        sink.audio_timed.unwrap()(
+                            sink.context,
+                            start,
+                            pcm.as_ptr(),
+                            offered,
+                            u32::from(concealed),
+                            &birth,
+                        )
+                    } else {
+                        sink.audio.unwrap()(
+                            sink.context,
+                            start,
+                            pcm.as_ptr(),
+                            offered,
+                            u32::from(concealed),
+                        )
+                    }
                 };
                 pcm.drain(..accepted);
                 (
@@ -1584,13 +1712,15 @@ unsafe extern "C" fn read_source(
             }
             _ => panic!("not a source fixture"),
         };
-        state.source_position += accepted as u64;
-        state.source_credits.push((start, accepted));
+        if !is_digit {
+            state.source_position += accepted as u64;
+            state.source_credits.push((start, accepted));
+        }
         if accepted < offered {
             state.input.push_front(remaining);
         }
         result.progress = if accepted == offered { 1 } else { 2 };
-    } else if state.source_keyed {
+    } else if state.source_keyed && state.capabilities & 32 == 0 {
         state.source_finish = true;
         result.finish_pending = 1;
         result.progress = 2;
@@ -1648,7 +1778,11 @@ unsafe extern "C" fn prepare_audio(
         .iter()
         .zip(unsafe { std::slice::from_raw_parts_mut(output, bytes) })
     {
-        *output = (input * 100.0) as u8;
+        *output = if state.g711_partial_flush && *input == 0.0 {
+            0xff // PCMU silence is not a zero encoded byte.
+        } else {
+            (input * 100.0) as u8
+        };
     }
     unsafe {
         *result = abi::rptadv_codec_encode_result_v1 {
@@ -1658,7 +1792,13 @@ unsafe extern "C" fn prepare_audio(
             encoded_bytes: bytes,
             source_start_frames: state.encode_position,
             source_frames: real as u32,
-            packet_frames: if ready { unit as u32 } else { 0 },
+            packet_frames: if !ready {
+                0
+            } else if state.g711_partial_flush && flush != 0 {
+                real as u32
+            } else {
+                unit as u32
+            },
             required_capacity: bytes,
         };
     }
@@ -1674,10 +1814,11 @@ unsafe extern "C" fn prepare_audio(
 }
 unsafe extern "C" fn reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
+    state.encoder_resets += 1;
     state.encode_position = 0;
     state.encode_pending.clear();
     state.tail_remaining = state.encode_tail;
-    0
+    state.encoder_reset_result
 }
 unsafe extern "C" fn send_prepared(
     _: *mut c_void,
@@ -1694,6 +1835,27 @@ unsafe extern "C" fn send_prepared(
         timestamp,
     ));
     state.prepared_result
+}
+unsafe extern "C" fn send_prepared_timed(
+    context: *mut c_void,
+    peer: *mut c_void,
+    input: *const u8,
+    count: usize,
+    frames: u32,
+    timestamp: u32,
+    deadline: u32,
+) -> i32 {
+    let strict = {
+        let mut state = unsafe { state(peer) }.lock().unwrap();
+        state.timed_deadlines.push(deadline);
+        state.g711_partial_flush
+    };
+    let result = unsafe { send_prepared(context, peer, input, count, frames, timestamp) };
+    if strict && (count != 160 || frames != 160) {
+        -1
+    } else {
+        result
+    }
 }
 unsafe extern "C" fn elapsed(_: *mut c_void, peer: *mut c_void) -> u32 {
     unsafe { state(peer) }.lock().unwrap().call_elapsed
@@ -1926,6 +2088,8 @@ fn egress_host_contract_and_asterisk_pcm() {
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind),
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_service),
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_ready),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_feedback_bind),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, peer_send_prepared_timed),
         std::mem::size_of_val(&table),
     ];
     for length in boundary..=std::mem::size_of_val(&table) {
@@ -2671,10 +2835,10 @@ fn async_peer_step_is_serial_and_detaches_before_handle_drop() {
 
 #[test]
 fn retained_step_rejects_missing_context_and_unregistered_epoch() {
-    assert_eq!(unsafe { retained_step(ptr::null_mut()) }, -1);
+    assert_eq!(unsafe { retained_step::<PeerSession>(ptr::null_mut()) }, -1);
     let (mut session, control, _state, _) = make_async_session("1000");
     assert_eq!(
-        unsafe { retained_step(ptr::from_mut(&mut session).cast()) },
+        unsafe { retained_step::<PeerSession>(ptr::from_mut(&mut session).cast()) },
         -1
     );
     assert!(control.snapshot().unwrap().ended);
@@ -2687,7 +2851,7 @@ fn egress_retained_step_reports_io_failure_and_ends_the_session() {
     state.lock().unwrap().fail_read = true;
     state.lock().unwrap().input.push_back(Input::RadioKey);
     assert_eq!(
-        unsafe { retained_step(ptr::from_mut(&mut session).cast()) },
+        unsafe { retained_step::<PeerSession>(ptr::from_mut(&mut session).cast()) },
         -1
     );
     assert!(control.snapshot().unwrap().ended);
@@ -2786,6 +2950,8 @@ fn finished_synchronous_owner_rejects_a_new_session_without_consuming_it() {
 
 #[test]
 fn egress_admission_above_1024() {
+    let resources = crate::resource_tests::Recorder::new("admission-2000");
+    resources.record("baseline", 0);
     let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
     let mut owners = Vec::new();
     for number in 0..2000 {
@@ -2796,6 +2962,7 @@ fn egress_admission_above_1024() {
     }
     assert!(worker.thread.is_none());
     assert_eq!(worker.async_peers.len(), 2000);
+    resources.record("admitted", 2000);
     owners[1000].0.stop();
     worker.reap();
     assert_eq!(worker.async_peers.len(), 1999);
@@ -2811,6 +2978,12 @@ fn egress_admission_above_1024() {
             .iter()
             .all(|(_, state, _)| state.lock().unwrap().drops == 1)
     );
+    resources.record("sessions-stopped", 0);
+    drop(owners);
+    drop(worker);
+    drop(state);
+    drop(_output);
+    resources.record("fixtures-dropped", 0);
 }
 
 #[test]
@@ -2849,13 +3022,13 @@ fn egress_admission_failure_keeps_existing_peers() {
 #[test]
 fn egress_sync_allocation_failure_ends_only_the_new_admission() {
     // Measure the standard Vec growth allocation without depending on its
-    // implementation's minimum capacity. Box pointers have usize's layout.
-    let mut probe = Vec::<usize>::new();
+    // implementation's minimum capacity. A boxed serial trait object has two words.
+    let mut probe = Vec::<(usize, usize)>::new();
     probe.try_reserve(1).unwrap();
     let capacity = probe.capacity();
-    probe.resize(capacity, 0);
+    probe.resize(capacity, (0, 0));
     probe.try_reserve(1).unwrap();
-    let failure_bytes = probe.capacity() * std::mem::size_of::<Box<PeerSession>>();
+    let failure_bytes = probe.capacity() * std::mem::size_of::<Box<dyn SerialSession>>();
     let (first, first_control, first_state, _first_output) = make_session("1000");
     let pause = Arc::new(std::sync::Barrier::new(2));
     {
@@ -2913,6 +3086,35 @@ fn missing_sync_queue_and_spawn_failure_return_unconsumed_sessions() {
     drop(session);
     assert_eq!(state.lock().unwrap().drops, 1);
     worker.stop();
+}
+
+#[test]
+fn full_sync_admission_queue_returns_the_last_owner_without_disturbing_existing_sessions() {
+    let (first, first_control, state, _output) = make_session("1000");
+    let pause = Arc::new(std::sync::Barrier::new(2));
+    state.lock().unwrap().pause = Some(Arc::clone(&pause));
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    worker.attach(first).ok().unwrap();
+    pause.wait();
+    let mut admitted = Vec::new();
+    for _ in 0..PENDING_ATTACH_CAPACITY {
+        let (session, control, state, output) = make_session("1000");
+        worker.attach(session).ok().unwrap();
+        admitted.push((control, state, output));
+    }
+    let (session, _control, rejected, _output) = make_session("1000");
+    let returned = worker.attach(session).err().unwrap();
+    assert_eq!(rejected.lock().unwrap().drops, 0);
+    assert!(!first_control.ended());
+    drop(returned);
+    assert_eq!(rejected.lock().unwrap().drops, 1);
+    pause.wait();
+    worker.stop();
+    assert!(
+        admitted
+            .iter()
+            .all(|(_, state, _)| state.lock().unwrap().drops == 1)
+    );
 }
 
 #[test]
@@ -3388,4 +3590,63 @@ fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let writes = state.lock().unwrap().writes.clone();
     assert!(!writes.is_empty());
     assert!(writes.iter().all(|count| *count > 0));
+}
+
+#[test]
+fn public_source_retains_reset_without_acknowledging_media_retirement() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    state.lock().unwrap().source_reset = true;
+    session.step(0).unwrap();
+    session.step(1).unwrap();
+    let state = state.lock().unwrap();
+    assert!(state.source_completions.is_empty());
+    assert!(
+        state.source_reset,
+        "no media retirement ticket has completed"
+    );
+    while let Some(event) = control.event() {
+        assert!(!matches!(event, Event::Digit(_)));
+    }
+}
+
+#[test]
+fn timed_callback_requires_complete_prepared_and_async_groups() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.peer_send_prepared_timed = Some(send_prepared_timed);
+    assert!(unsafe { HostServices::open(&table) }.is_err());
+}
+
+#[test]
+fn source_phone_admission_requires_timed_egress_capability() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.peer_info = Some(peer_info);
+    table.peer_step_attach = Some(async_attach);
+    table.peer_step_stop = Some(async_stop);
+    table.peer_step_detach = Some(async_detach);
+    table.peer_prepare_audio = Some(prepare_audio);
+    table.peer_reset_encoder = Some(reset_encoder);
+    table.peer_send_prepared = Some(send_prepared);
+    table.peer_elapsed_ms = Some(elapsed);
+    table.peer_step_wake = Some(wake_only);
+    table.peer_set_deadline = Some(deadline);
+    table.peer_read_source = Some(read_source);
+    let state = Arc::new(Mutex::new(State {
+        capabilities: 51,
+        ..State::default()
+    }));
+    let handle = Box::into_raw(Box::new(state)).cast();
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(matches!(
+        unsafe { services.inspect_peer(handle) },
+        Err(Error::Admission)
+    ));
+    table.peer_send_prepared_timed = Some(send_prepared_timed);
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(unsafe { services.inspect_peer(handle) }.is_ok());
+    drop(unsafe { Box::from_raw(handle.cast::<Shared>()) });
 }

@@ -41,12 +41,47 @@ fn dbfs(level: f64) -> i32 {
     }
 }
 
+/// Original private contribution retained with a clip, independent of its amplitude.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParrotPhoneSource {
+    /// Oldest original receipt; unknown remains unknown across capture and transfer.
+    pub age_bound: Option<crate::link::SourceTimeBound>,
+    /// Node revision captured before the source render, never renewed during replay.
+    pub retirement_revision: Option<u64>,
+}
+impl ParrotPhoneSource {
+    pub(crate) fn current(&self, domain: Option<&crate::link::RetirementDomain>) -> bool {
+        self.retirement_revision.is_some()
+            && domain.and_then(crate::link::RetirementDomain::revision) == self.retirement_revision
+    }
+    pub(crate) fn include(&mut self, other: Self) {
+        if self.retirement_revision != other.retirement_revision {
+            self.retirement_revision = None;
+        }
+        self.age_bound = self
+            .age_bound
+            .zip(other.age_bound)
+            .and_then(|(first, next)| {
+                (first.host_clock_epoch != 0 && first.host_clock_epoch == next.host_clock_epoch)
+                    .then_some(crate::link::SourceTimeBound {
+                        host_clock_epoch: first.host_clock_epoch,
+                        not_after_ns: first.not_after_ns.min(next.not_after_ns),
+                    })
+            });
+    }
+}
+
 /// Completed native-rate burst transferred to control without copying on the callback.
 pub struct CapturedParrot {
     samples: Vec<f32>,
+    phone: Option<ParrotPhoneSource>,
 }
 
 impl CapturedParrot {
+    /// Private taint is retained even when age is unknown or all PCM is zero.
+    pub fn phone_source(&self) -> Option<ParrotPhoneSource> {
+        self.phone
+    }
     /// Retained prefix, already clamped to normalized F32.
     pub fn samples(&self) -> &[f32] {
         &self.samples
@@ -57,6 +92,7 @@ impl CapturedParrot {
 pub(crate) struct ParrotCapture {
     active: bool,
     recording: bool,
+    phone: Option<ParrotPhoneSource>,
     current: Option<Vec<f32>>,
     free: Vec<Vec<f32>>,
     completed: Producer<CapturedParrot>,
@@ -104,6 +140,7 @@ impl ParrotCapture {
             Self {
                 active: false,
                 recording: false,
+                phone: None,
                 current: None,
                 free,
                 completed,
@@ -134,36 +171,89 @@ impl ParrotCapture {
         )
     }
 
-    /// Capture normalized mixed PCM only while at least one input source is active.
+    #[cfg(test)]
     pub(crate) fn observe(&mut self, active: bool, samples: &[f32]) {
+        self.observe_with_phone(active, samples, None, None);
+    }
+
+    fn cancel_burst(&mut self) {
+        if let Some(mut buffer) = self.current.take() {
+            buffer.clear();
+            self.free.push(buffer);
+        }
+        self.recording = false;
+        self.phone = None;
+    }
+
+    /// Capture into existing storage; retired inseparable private clips are discarded whole.
+    pub(crate) fn observe_with_phone(
+        &mut self,
+        active: bool,
+        samples: &[f32],
+        phone: Option<ParrotPhoneSource>,
+        domain: Option<&crate::link::RetirementDomain>,
+    ) {
         while let Ok(buffer) = self.recycled.pop() {
             self.free.push(buffer);
         }
-
         if active && !self.active {
             self.current = self.free.pop();
             self.recording = self.current.is_some();
+            self.phone = None;
+        }
+        if self.phone.is_some_and(|source| !source.current(domain)) {
+            self.cancel_burst();
         }
         if active && self.recording {
-            let current = self.current.as_mut().expect("recording owns a buffer");
-            let count = samples.len().min(MAX_PARROT_SAMPLES - current.len());
-            current.extend(samples[..count].iter().map(|sample| {
-                if sample.is_finite() {
-                    sample.clamp(-1.0, 1.0)
-                } else {
-                    0.0
+            let count = samples.len().min(
+                MAX_PARROT_SAMPLES
+                    - self
+                        .current
+                        .as_ref()
+                        .expect("recording owns a buffer")
+                        .len(),
+            );
+            if count != 0 {
+                if let Some(mut phone) = phone {
+                    phone.age_bound = phone.age_bound.filter(|bound| bound.host_clock_epoch != 0);
+                    if let Some(retained) = self.phone.as_mut() {
+                        retained.include(phone);
+                    } else {
+                        self.phone = Some(phone);
+                    }
                 }
-            }));
+                if self.phone.is_some_and(|source| !source.current(domain)) {
+                    self.cancel_burst();
+                } else {
+                    self.current
+                        .as_mut()
+                        .expect("recording owns a buffer")
+                        .extend(samples[..count].iter().map(|sample| {
+                            if sample.is_finite() {
+                                sample.clamp(-1.0, 1.0)
+                            } else {
+                                0.0
+                            }
+                        }));
+                    #[cfg(test)]
+                    tests::after_capture();
+                    if self.phone.is_some_and(|source| !source.current(domain)) {
+                        self.cancel_burst();
+                    }
+                }
+            }
         }
         if !active && self.active && self.recording {
             let mut buffer = self.current.take().expect("recording owns a buffer");
             self.recording = false;
+            let phone = self.phone.take();
             if buffer.is_empty() {
                 buffer.clear();
                 self.free.push(buffer);
-            } else if let Err(rtrb::PushError::Full(clip)) =
-                self.completed.push(CapturedParrot { samples: buffer })
-            {
+            } else if let Err(rtrb::PushError::Full(clip)) = self.completed.push(CapturedParrot {
+                samples: buffer,
+                phone,
+            }) {
                 let mut buffer = clip.samples;
                 buffer.clear();
                 self.free.push(buffer);

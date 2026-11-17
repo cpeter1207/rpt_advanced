@@ -33,6 +33,10 @@ pub struct RetryWork {
     work: GenerationWork,
 }
 impl RetryWork {
+    /// Exact private caller of an unfinished initial attempt; established recovery has none.
+    pub fn private_reply(&self) -> Option<&PeerReply> {
+        pending_phone_reply(self.pending_source.as_ref())
+    }
     /// Destination for external directory lookup and dialing.
     pub fn remote(&self) -> &str {
         self.attempt.name()
@@ -51,6 +55,10 @@ impl RetryWork {
     }
 }
 impl ConnectAttempt {
+    /// Retain the actual private caller through external dialing and completion delivery.
+    pub fn private_reply(&self) -> Option<&PeerReply> {
+        pending_phone_reply(self.pending_source.as_ref())
+    }
     /// Exact destination requested by current policy.
     pub fn remote(&self) -> &str {
         &self.remote
@@ -82,12 +90,26 @@ fn pending_source_current(source: Option<&DigitOperation>, now_ms: Option<u64>) 
     })
 }
 
+fn pending_phone_reply(source: Option<&DigitOperation>) -> Option<&PeerReply> {
+    source?
+        .reply
+        .as_ref()
+        .filter(|reply| reply.phone_source().is_some())
+}
+
 /// Adapter-facing consequence of one serialized existing link command.
 pub enum LinkEffect {
     /// Dial outside the serialized owner, then return the token before attaching resources.
     Connect(ConnectAttempt),
     /// Unpublished identities whose external channels/readers must be stopped and drained.
     Detach(Vec<String>),
+    /// Phone-issued detach keeps its solicited completion outside public link announcements.
+    PrivateDetach {
+        /// Existing node peers selected by the authorized command.
+        remotes: Vec<String>,
+        /// Exact authenticated caller, independent of node attachment or numeric aliases.
+        reply: PeerReply,
+    },
     /// Advisory keyed-source messages, queued on the destination channel owner.
     Text(Vec<(String, String)>),
     /// Addressed command envelopes; delivery failures are not advisory.
@@ -614,11 +636,38 @@ impl NodeLinkControl {
         self.source_digit(&source.call_id().to_string(), digit, now_ms, reply)
             .filter(|outcome| !matches!(outcome, DigitOutcome::Regenerate(_)))
     }
+    /// Inspect only this exact reply's collector while node admission is open.
+    /// This is not call-registry admission: the caller must separately validate
+    /// the actual live source. An absent collector is idle, never a new grant.
+    pub fn phone_collection_pending(
+        &self,
+        source: &crate::link::PhoneSource,
+        reply: &PeerReply,
+    ) -> Option<bool> {
+        if !self.admitting || !reply.phone_authenticated() || reply.phone_source() != Some(source) {
+            return None;
+        }
+        Some(
+            self.peer_commands
+                .iter()
+                .any(|(_, actual, commands)| actual == reply && commands.collecting()),
+        )
+    }
+
     /// Retire an actual private ingress before reclaiming its collectors and grants.
     /// Already queued work retains this ended token and fails its dispatch fence.
     pub fn retire_source(&mut self, reply: &PeerReply) {
         reply.retire();
         self.peer_commands.retain(|(_, source, _)| source != reply);
+    }
+    /// Leave one caller's addressed mode without completing its partial command.
+    /// Preserve that source's grant and every unrelated source's collector/macro.
+    pub fn clear_source_input(&mut self, reply: &PeerReply) {
+        for (_, source, commands) in &mut self.peer_commands {
+            if source == reply {
+                commands.feed(DigitEvent::Lost);
+            }
+        }
     }
     fn source_digit(
         &mut self,
@@ -678,14 +727,26 @@ impl NodeLinkControl {
     }
     /// Expire peer commands independently, preserving their exact reply connection.
     pub fn expire_peer_digits(&mut self, now_ms: u64) -> Vec<DigitOutcome> {
+        self.expire_peer_digits_with_collection(now_ms, |_| {})
+    }
+    /// Notify exact private collectors that became idle in this existing sweep,
+    /// including silent discard expiry. This is not permission to admit media.
+    pub fn expire_peer_digits_with_collection(
+        &mut self,
+        now_ms: u64,
+        mut ended: impl FnMut(&PeerReply),
+    ) -> Vec<DigitOutcome> {
         self.peer_commands.retain(|(_, source, _)| !source.ended());
         let outcomes = self
             .peer_commands
             .iter_mut()
             .filter_map(|(origin, reply, commands)| {
-                commands
-                    .expire(now_ms)
-                    .map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
+                let collecting = commands.collecting();
+                let outcome = commands.expire(now_ms);
+                if collecting && !commands.collecting() && reply.phone_source().is_some() {
+                    ended(reply);
+                }
+                outcome.map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
             })
             .collect();
         self.retain_peer_commands(now_ms);
@@ -756,6 +817,11 @@ impl NodeLinkControl {
         } else {
             operation.command.node.clone()
         };
+        let private_reply = operation
+            .reply
+            .as_ref()
+            .filter(|reply| reply.phone_source().is_some())
+            .cloned();
         let effect = match operation.command.action {
             LinkAction::RemoteBase => {
                 operation.remote.ok_or(AdmissionError::Invalid)?;
@@ -986,7 +1052,12 @@ impl NodeLinkControl {
                 return Err(AdmissionError::Denied);
             }
         };
-        Ok(effect)
+        Ok(match (effect, private_reply) {
+            (LinkEffect::Detach(remotes), Some(reply)) => {
+                LinkEffect::PrivateDetach { remotes, reply }
+            }
+            (effect, _) => effect,
+        })
     }
     /// Abandon an externally invalidated dial without adding retry intent or changing topology.
     /// Only its still-matching schedule reservation is released for a later current attempt.

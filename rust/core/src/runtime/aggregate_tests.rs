@@ -1164,6 +1164,7 @@ fn clock() -> RuntimeClock {
 }
 fn adapter(_: &str, _: &ResolvedNodeSettings) -> Result<PreparedAdapter<()>, RuntimeError> {
     Ok(PreparedAdapter {
+        phone_retirement: None,
         remote_commands: None,
         state: (),
         control: (),
@@ -3212,6 +3213,7 @@ fn adapter_dispatcher_is_owned_off_audio_and_requires_explicit_drain_acknowledgm
     let drops = Arc::new(AtomicUsize::new(0));
     let prepare = |_: &str, _: &ResolvedNodeSettings| {
         Ok(PreparedAdapter {
+            phone_retirement: None,
             remote_commands: None,
             state: (),
             control: Dispatcher(drops.clone()),
@@ -3475,6 +3477,7 @@ fn abnormal_runtime_drop_retains_protected_adapter_instead_of_freeing_live_audio
         &Media,
         |_, _| {
             Ok(PreparedAdapter {
+                phone_retirement: None,
                 remote_commands: None,
                 state: Adapter(dropped.clone()),
                 control: (),
@@ -4665,4 +4668,440 @@ fn device_reload_rejects_outstanding_work_and_hazards_but_waits_for_quiescence()
         can_stop.store(true, Ordering::Release);
         assert!(runtime.stop(0));
     }
+}
+
+#[test]
+fn prepared_reload_commit_hook_runs_once_before_any_publication() {
+    struct GatedDevice {
+        channel: String,
+        ready: Arc<AtomicUsize>,
+    }
+    impl DeviceHandoff for GatedDevice {
+        fn quiesce(&mut self) -> bool {
+            true
+        }
+        fn close(&mut self) {}
+        fn open(&mut self, settings: &GenerationSettings) -> bool {
+            self.channel.clone_from(&settings.device);
+            true
+        }
+        fn activation_ready(&mut self) -> Result<bool, RuntimeError> {
+            if self.channel != "next" {
+                return Ok(true);
+            }
+            match self.ready.load(Ordering::Acquire) {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(RuntimeError::Device),
+            }
+        }
+    }
+    for deferred in [false, true] {
+        let ready = Arc::new(AtomicUsize::new(usize::from(!deferred)));
+        let device = |_: &str, _: &ResolvedNodeSettings| {
+            Ok(Box::new(GatedDevice {
+                channel: String::new(),
+                ready: ready.clone(),
+            }) as Box<dyn DeviceHandoff>)
+        };
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse("[1000]\nradio_channel=old\n[2000]\n").unwrap(),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
+        let old_revision = runtime.revision();
+        let old = runtime.status(0);
+        runtime
+            .prepare_reload(
+                ConfigDocument::parse("[1000]\nradio_channel=next\n[2000]\n").unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        assert_eq!(runtime.revision(), old_revision);
+        let mut commits = 0;
+        let mut commit = |runtime: &mut Runtime<_, _>| {
+            assert_eq!(runtime.revision(), old_revision);
+            for (name, status) in &old {
+                assert_eq!(runtime.node(name).unwrap().status(0).active, status.active);
+            }
+            commits += 1;
+        };
+        if deferred {
+            assert_eq!(
+                runtime.poll_reload_with_commit(clock(), &mut commit),
+                Ok(false)
+            );
+            ready.store(1, Ordering::Release);
+        }
+        assert_eq!(
+            runtime.poll_reload_with_commit(clock(), &mut commit),
+            Ok(true)
+        );
+        assert_eq!(
+            runtime.poll_reload_with_commit(clock(), &mut commit),
+            Ok(true)
+        );
+        assert_eq!(commits, 1);
+        assert_eq!(runtime.revision(), old_revision + 1);
+        assert!(runtime.stop(0));
+    }
+}
+
+#[test]
+fn prepared_reload_does_not_run_commit_hook_after_readiness_or_finalization_failure() {
+    struct FailingDevice {
+        name: String,
+        fail_finish: bool,
+        updated: bool,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+    impl DeviceHandoff for FailingDevice {
+        fn quiesce(&mut self) -> bool {
+            true
+        }
+        fn close(&mut self) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("close:{}", self.name));
+        }
+        fn open(&mut self, _: &GenerationSettings) -> bool {
+            true
+        }
+        fn update(&mut self, _: &GenerationSettings) -> Result<bool, RuntimeError> {
+            self.updated = true;
+            Ok(self.fail_finish)
+        }
+        fn activation_ready(&mut self) -> Result<bool, RuntimeError> {
+            if self.updated && !self.fail_finish && self.name == "2000" {
+                self.updated = false;
+                Err(RuntimeError::Device)
+            } else {
+                Ok(true)
+            }
+        }
+        fn finish_update(&mut self, commit: bool) -> Result<(), RuntimeError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("finish:{}:{commit}", self.name));
+            self.updated = false;
+            if commit && self.fail_finish && self.name == "2000" {
+                Err(RuntimeError::Restore)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    for fail_finish in [false, true] {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let device = |name: &str, _: &ResolvedNodeSettings| {
+            Ok(Box::new(FailingDevice {
+                name: name.into(),
+                fail_finish,
+                updated: false,
+                log: log.clone(),
+            }) as Box<dyn DeviceHandoff>)
+        };
+        let initial = ConfigDocument::parse("[1000]\n[2000]\n").unwrap();
+        let mut runtime =
+            Runtime::start(initial.clone(), &Media, adapter, device, clock()).unwrap();
+        runtime
+            .prepare_reload(
+                ConfigDocument::parse("[1000]\n[2000]\n[radio]\nreceive_output_gain_db=-6\n")
+                    .unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        let mut commits = 0;
+        let result = runtime.poll_reload_with_commit(clock(), |_| commits += 1);
+        assert_eq!(commits, 0);
+        assert_eq!(
+            result,
+            Err(if fail_finish {
+                RuntimeError::Restore
+            } else {
+                RuntimeError::Device
+            })
+        );
+        assert_eq!(runtime.revision(), 1);
+        assert_eq!(runtime.document(), &initial);
+        if fail_finish {
+            let log = log.lock().unwrap();
+            assert!(log.contains(&"finish:1000:true".into()));
+            assert!(log.contains(&"finish:2000:true".into()));
+            assert!(
+                runtime
+                    .status(0)
+                    .iter()
+                    .all(|(_, state)| state.active.is_none()),
+                "fatal finalization failure must not claim the old runtime is still coherent"
+            );
+        } else {
+            assert!(
+                runtime
+                    .status(0)
+                    .iter()
+                    .all(|(_, state)| state.active == Some(1))
+            );
+        }
+        assert!(runtime.stop(0));
+    }
+}
+
+#[test]
+fn phone_parrot_tainted_capture_is_rejected_before_copy_or_report_until_clock_is_qualified() {
+    use crate::{
+        controller::ParrotPhoneSource,
+        link::{RetirementDomain, SourceTimeBound},
+    };
+    for private in [
+        None,
+        Some(None),
+        Some(Some(SourceTimeBound {
+            host_clock_epoch: 7,
+            not_after_ns: 1,
+        })),
+    ] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let domain = RetirementDomain::default();
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+            &CapturingMedia(messages.clone()),
+            |local, settings| {
+                let mut prepared = adapter(local, settings)?;
+                prepared.phone_retirement = Some(domain.clone());
+                Ok(prepared)
+            },
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+        let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+        {
+            let mut callback = receive.acquire_pair(&mut transmit).unwrap();
+            let phone = private.map(|age_bound| ParrotPhoneSource {
+                age_bound,
+                retirement_revision: domain.revision(),
+            });
+            callback
+                .transmit()
+                .controller
+                .observe_parrot_with_phone(true, &[0.5, 0.25], phone);
+            callback.transmit().controller.observe_parrot(false, &[]);
+        }
+        runtime.tick_links(clock());
+        assert_eq!(
+            messages.lock().unwrap().is_empty(),
+            private.is_some(),
+            "known old age must not become a fresh recording, and unknown age cannot qualify"
+        );
+        assert!(runtime.stop(clock().now_ms));
+    }
+}
+
+#[test]
+fn phone_parrot_adapter_refresh_retains_domain_and_rejects_changed_identity() {
+    use crate::link::RetirementDomain;
+    for initial in [None, Some(RetirementDomain::default())] {
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse("[1000]\n").unwrap(),
+            &Media,
+            |local, settings| {
+                let mut prepared = adapter(local, settings)?;
+                prepared.phone_retirement = initial.clone();
+                Ok(prepared)
+            },
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+        let settings = runtime.settings("1000").unwrap().clone();
+        for changed in [None, Some(RetirementDomain::default())] {
+            if initial.is_none() && changed.is_none() {
+                continue;
+            }
+            let mut prepared = adapter("1000", &settings).unwrap();
+            prepared.phone_retirement = changed;
+            assert_eq!(
+                runtime.replace_adapter("1000", prepared, 1001),
+                Err(RuntimeError::Preparation)
+            );
+        }
+        let mut prepared = adapter("1000", &settings).unwrap();
+        prepared.phone_retirement = initial.clone();
+        assert_eq!(runtime.replace_adapter("1000", prepared, 1002), Ok(2));
+        if let Some(domain) = initial.as_ref() {
+            let (mut receive, mut transmit) =
+                runtime.node("1000").unwrap().register_audio().unwrap();
+            assert!(
+                receive
+                    .acquire_pair(&mut transmit)
+                    .unwrap()
+                    .transmit()
+                    .controller
+                    .phone_retirement_matches(domain)
+            );
+        }
+        assert!(runtime.stop(1003));
+    }
+}
+
+#[test]
+fn private_site_report_requires_live_phone_and_existing_recipe_producer() {
+    use crate::link::{PeerSignals, PhoneAccountId, PhoneSource};
+    struct Refuse(TestStation, Arc<AtomicBool>);
+    impl StationMediaSession for Refuse {
+        fn register_program(
+            &mut self,
+            program: crate::media::MediaProgram,
+            one_shot: bool,
+        ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+            if self.1.load(Ordering::Acquire) {
+                Err(MediaError::Unavailable)
+            } else {
+                self.0.register_program(program, one_shot)
+            }
+        }
+        fn start(&mut self) -> Result<(), MediaError> {
+            Ok(())
+        }
+    }
+    struct FailingMedia(Arc<Mutex<Vec<String>>>, Arc<AtomicBool>);
+    impl NativeFilePreparer for FailingMedia {
+        fn file(&self, request: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Media.file(request)
+        }
+    }
+    impl NativeSpeechPreparer for FailingMedia {
+        fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Media.speech(request)
+        }
+    }
+    impl NativeMediaPreparer for FailingMedia {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(Refuse(
+                TestStation(Some(Arc::clone(&self.0))),
+                Arc::clone(&self.1),
+            )))
+        }
+    }
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let failure = Arc::new(AtomicBool::new(false));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &FailingMedia(messages.clone(), Arc::clone(&failure)),
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    let signals = PeerSignals::for_phone(source);
+    let reply = signals.reply_target();
+    let radio_parts = [crate::remote_base_command::RemoteReplyPart {
+        id: "remote-applied",
+        arguments: Default::default(),
+    }];
+    for invalid in [PeerSignals::new().reply_target(), reply.clone()] {
+        assert!(matches!(
+            runtime.prepare_phone_site_report("1000", "1", clock(), &invalid),
+            Err(RuntimeError::Rejected)
+        ));
+        assert!(matches!(
+            runtime.prepare_phone_remote_reply("1000", &radio_parts, &invalid),
+            Err(RuntimeError::Rejected)
+        ));
+    }
+    assert!(signals.authenticate_phone());
+    assert!(matches!(
+        runtime.prepare_phone_remote_reply("missing", &radio_parts, &reply),
+        Err(RuntimeError::MissingNode)
+    ));
+    assert!(matches!(
+        runtime.prepare_phone_remote_reply(
+            "1000",
+            &[crate::remote_base_command::RemoteReplyPart {
+                id: "missing-private-radio-form",
+                arguments: Default::default(),
+            }],
+            &reply
+        ),
+        Err(RuntimeError::Preparation)
+    ));
+    for selector in ["", "01"] {
+        assert!(matches!(
+            runtime.prepare_phone_site_report("1000", selector, clock(), &reply),
+            Err(RuntimeError::Rejected)
+        ));
+    }
+    assert!(matches!(
+        runtime.prepare_phone_site_report("missing", "1", clock(), &reply),
+        Err(RuntimeError::MissingNode)
+    ));
+    assert!(matches!(
+        runtime.prepare_phone_site_report(
+            "1000",
+            "1",
+            RuntimeClock {
+                civil: None,
+                ..clock()
+            },
+            &reply
+        ),
+        Err(RuntimeError::Clock)
+    ));
+    let stream = runtime
+        .prepare_phone_site_report("1000", "1", clock(), &reply)
+        .unwrap();
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["The requested site reading is unavailable."]
+    );
+    drop(stream);
+    drop(
+        runtime
+            .prepare_phone_remote_reply("1000", &radio_parts, &reply)
+            .unwrap(),
+    );
+    assert_eq!(
+        messages.lock().unwrap().last().map(String::as_str),
+        Some("Remote radio command completed.")
+    );
+    failure.store(true, Ordering::Release);
+    assert!(matches!(
+        runtime.prepare_phone_remote_reply("1000", &radio_parts, &reply),
+        Err(RuntimeError::Preparation)
+    ));
+    assert!(matches!(
+        runtime.prepare_phone_site_report("1000", "1", clock(), &reply),
+        Err(RuntimeError::Preparation)
+    ));
+    reply.retire();
+    assert!(matches!(
+        runtime.prepare_phone_remote_reply("1000", &radio_parts, &reply),
+        Err(RuntimeError::Rejected)
+    ));
+    assert!(matches!(
+        runtime.prepare_phone_site_report("1000", "1", clock(), &reply),
+        Err(RuntimeError::Rejected)
+    ));
+    assert!(runtime.stop(20));
 }

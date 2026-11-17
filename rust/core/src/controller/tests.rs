@@ -1455,7 +1455,7 @@ fn grouped_test_audio_peer(
         .unwrap()
         .into_endpoints();
     let peer = crate::link::AudioPeer::new(
-        direct,
+        crate::link::PeerIdentity::from_operator(direct).unwrap(),
         crate::link::Mode::TRANSCEIVE,
         input,
         outbound,
@@ -1605,7 +1605,15 @@ fn parrot_capture_includes_local_and_receive_active_nonforwarded_peer_audio() {
     let (local_out, _) = crate::audio::LinkAudioQueue::new(4, 64)
         .unwrap()
         .into_endpoints();
-    let local_monitor = AudioPeer::new("100", Mode::LOCAL_MONITOR, input, local_out, 2, 0).unwrap();
+    let local_monitor = AudioPeer::new(
+        crate::link::PeerIdentity::from_operator("100").unwrap(),
+        Mode::LOCAL_MONITOR,
+        input,
+        local_out,
+        2,
+        0,
+    )
+    .unwrap();
     let (mut links, _) = LinkAudio::new(vec![local_monitor], 2).unwrap();
     let (mut node, mut control) = NodeController::new(
         ControllerSettings {
@@ -1674,7 +1682,7 @@ fn parrot_bypasses_monitor_and_fallback_peer_routing_only_for_its_audio() {
         .into_endpoints();
     let peers = vec![
         AudioPeer::new(
-            "200",
+            crate::link::PeerIdentity::from_operator("200").unwrap(),
             Mode::TRANSCEIVE,
             TestPeerInput::new(None),
             to_transceiver,
@@ -1683,7 +1691,7 @@ fn parrot_bypasses_monitor_and_fallback_peer_routing_only_for_its_audio() {
         )
         .unwrap(),
         AudioPeer::new(
-            "201",
+            crate::link::PeerIdentity::from_operator("201").unwrap(),
             Mode::LOCAL_MONITOR,
             TestPeerInput::new(None),
             to_monitor,
@@ -1744,7 +1752,7 @@ fn parrot_final_callback_block_reaches_every_peer() {
         .unwrap()
         .into_endpoints();
     let peer = AudioPeer::new(
-        "200",
+        crate::link::PeerIdentity::from_operator("200").unwrap(),
         Mode::TRANSCEIVE,
         TestPeerInput::new(None),
         outbound,
@@ -1943,7 +1951,7 @@ fn peer_transmit_is_subtracted_from_its_own_outbound_audio() {
         .unwrap()
         .into_endpoints();
     let peer = crate::link::AudioPeer::new(
-        "200",
+        crate::link::PeerIdentity::from_operator("200").unwrap(),
         crate::link::Mode::TRANSCEIVE,
         TestPeerInput::new(Some(0.25)),
         outbound,
@@ -2009,7 +2017,7 @@ fn monitor_destinations_are_prepared_only_when_they_belong_to_a_group() {
         .unwrap()
         .into_endpoints();
     let grouped_monitor = crate::link::AudioPeer::new(
-        "200",
+        crate::link::PeerIdentity::from_operator("200").unwrap(),
         crate::link::Mode::LOCAL_MONITOR,
         grouped_input,
         grouped_outbound,
@@ -2025,7 +2033,7 @@ fn monitor_destinations_are_prepared_only_when_they_belong_to_a_group() {
         .unwrap()
         .into_endpoints();
     let plain_monitor = crate::link::AudioPeer::new(
-        "201",
+        crate::link::PeerIdentity::from_operator("201").unwrap(),
         crate::link::Mode::MONITOR,
         plain_input,
         plain_outbound,
@@ -2235,7 +2243,7 @@ fn test_audio_peer(
         .into_endpoints();
     (
         crate::link::AudioPeer::new(
-            direct,
+            crate::link::PeerIdentity::from_operator(direct).unwrap(),
             mode,
             TestPeerInput::new(sample),
             outbound,
@@ -2470,7 +2478,7 @@ fn loopback_pool_never_allocates_or_drops_owned_buffers_on_audio_full() {
     }
     let (outbound, mut consumer) = LinkAudioQueue::new(1920, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new(
-        "200",
+        crate::link::PeerIdentity::from_operator("200").unwrap(),
         Mode::TRANSCEIVE,
         Input(PeerSignals::new()),
         outbound,

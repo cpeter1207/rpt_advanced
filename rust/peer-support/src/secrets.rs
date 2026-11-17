@@ -36,15 +36,22 @@ impl AccountSecrets {
 
 /// Read an opened regular file owned by the effective host user with mode 0600.
 pub fn read_private_file(path: &Path) -> Result<String, SecretError> {
+    read_private_file_with_limit(path, u64::MAX)
+}
+
+/// Read a private file with a hard byte bound, retaining the opened-descriptor checks.
+pub fn read_private_file_bounded(path: &Path, maximum_bytes: usize) -> Result<String, SecretError> {
+    read_private_file_with_limit(path, maximum_bytes as u64)
+}
+
+/// Keep descriptor validation and growth-safe bounded reads identical for both callers.
+fn read_private_file_with_limit(path: &Path, maximum_bytes: u64) -> Result<String, SecretError> {
     #[cfg(unix)]
     {
-        use std::{
-            io::Read,
-            os::unix::fs::{MetadataExt, OpenOptionsExt},
-        };
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         // Inspect the opened descriptor, not a pathname that can change underneath us.
         // Nonblocking open also lets us reject a FIFO without waiting for its writer.
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
@@ -60,16 +67,31 @@ pub fn read_private_file(path: &Path) -> Result<String, SecretError> {
                 "secrets file must be owned by this user with mode 0600",
             ));
         }
-        let mut text = String::new();
-        file.read_to_string(&mut text)
-            .map_err(|_| SecretError("cannot read secrets file"))?;
-        Ok(text)
+        if metadata.len() > maximum_bytes {
+            return Err(SecretError("secrets file exceeds size limit"));
+        }
+        read_bounded(file, maximum_bytes)
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = (path, maximum_bytes);
         Err(SecretError("secrets files require Unix permissions"))
     }
+}
+
+/// Bound the opened stream even when a regular file grows after metadata inspection.
+#[cfg(unix)]
+fn read_bounded(reader: impl std::io::Read, maximum_bytes: u64) -> Result<String, SecretError> {
+    use std::io::Read;
+    let mut text = String::new();
+    reader
+        .take(maximum_bytes.saturating_add(1))
+        .read_to_string(&mut text)
+        .map_err(|_| SecretError("cannot read secrets file"))?;
+    if text.len() as u64 > maximum_bytes {
+        return Err(SecretError("secrets file exceeds size limit"));
+    }
+    Ok(text)
 }
 
 /// Resolve omitted and relative paths against the actual host configuration file.
@@ -279,5 +301,42 @@ mod tests {
         }
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn bounded_private_secret_reader_rejects_oversized_utf8() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let path =
+            std::env::temp_dir().join(format!("rptadv-bounded-secret-{}", std::process::id()));
+        fs::write(&path, "éé").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_private_file_bounded(&path, 4).unwrap(), "éé");
+        for limit in [0, 1, 3] {
+            assert_eq!(
+                read_private_file_bounded(&path, limit)
+                    .unwrap_err()
+                    .to_string(),
+                "secrets file exceeds size limit"
+            );
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_opened_stream_rejects_growth_without_reading_the_remaining_secret() {
+        for limit in [0, 1, 4] {
+            let mut reader = std::io::Cursor::new(b"private material");
+            assert_eq!(
+                read_bounded(&mut reader, limit).unwrap_err(),
+                SecretError("secrets file exceeds size limit")
+            );
+            assert_eq!(reader.position(), limit + 1);
+        }
+        assert_eq!(read_bounded(&b"safe"[..], 4).unwrap(), "safe");
+        assert_eq!(
+            read_bounded(&[0xff][..], 1).unwrap_err(),
+            SecretError("cannot read secrets file")
+        );
     }
 }

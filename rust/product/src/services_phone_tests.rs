@@ -1,7 +1,7 @@
 //! Sized metadata admits phones only with a complete explicit private-call contract.
 use super::*;
 
-unsafe extern "C" fn info(
+pub(super) unsafe extern "C" fn info(
     mode: *mut c_void,
     peer: *const c_void,
     output: *mut abi::rptadv_peer_info_v1,
@@ -139,5 +139,40 @@ fn phone_local_binding_uses_node_id_semantics_without_relaxing_asl_wire_ids() {
             expected,
             "phone local binding mode {mode}"
         );
+    }
+}
+
+#[test]
+fn private_inband_capability_requires_the_complete_timed_phone_profile() {
+    unsafe extern "C" fn mode_info(
+        context: *mut c_void,
+        peer: *const c_void,
+        output: *mut abi::rptadv_peer_info_v1,
+    ) -> i32 {
+        unsafe { info(ptr::null_mut(), peer, output) };
+        unsafe { (*output).capabilities = context.addr() as u32 };
+        0
+    }
+    let (source, _state) = crate::link::session::tests::phone_source_peer();
+    for (capabilities, expected) in [
+        (51, true),
+        (115, true),
+        (64, false),
+        (96, false),
+        (99, false),
+        (114, false),
+        (119, false),
+        (83, false),
+        (179, false),
+    ] {
+        let services = host_services(|table| {
+            *table = source.services.0;
+            table.context = ptr::without_provenance_mut(capabilities);
+            table.peer_info = Some(mode_info);
+        });
+        let handle = crate::fixture::peer();
+        let result = unsafe { services.inspect_peer(handle) };
+        unsafe { crate::fixture::release_peer(handle) };
+        assert_eq!(result.is_ok(), expected, "capability mask {capabilities}");
     }
 }

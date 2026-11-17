@@ -496,6 +496,7 @@ impl InboundConsumer {
         }
         Ok(TimedPeerSample {
             sample,
+            age_bound: None,
             provenance: Some(provenance),
         })
     }

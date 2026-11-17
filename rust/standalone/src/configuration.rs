@@ -26,6 +26,55 @@ pub struct ResolvedRadioNode {
     pub radio: NativeRadioConfiguration,
 }
 
+/// Native provider protocol, independent of radio-peer identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneAccountProtocol {
+    /// General IAX2 provider account.
+    Iax,
+    /// SIP provider account.
+    Sip,
+}
+
+/// Owned public account settings; copying does not activate a provider.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResolvedPhoneAccount {
+    /// Local account label, distinct from provider username and mailbox.
+    pub id: String,
+    /// Explicit local node owning this account.
+    pub local_node: String,
+    /// Native signaling family.
+    pub protocol: PhoneAccountProtocol,
+    /// Disabled accounts are reported but must not open transports.
+    pub enabled: bool,
+    /// Provider host/IP and numeric port.
+    pub server: String,
+    /// Provider authentication username.
+    pub username: String,
+    /// Absolute or configuration-relative host path; no secrets are loaded.
+    pub secrets_file: String,
+    /// Whether to request provider registration.
+    pub register: bool,
+    /// Registration refresh interval in seconds.
+    pub registration_interval_s: u16,
+    /// Absolute authentication timeout in milliseconds.
+    pub authentication_timeout_ms: u32,
+}
+
+impl fmt::Debug for ResolvedPhoneAccount {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output
+            .debug_struct("ResolvedPhoneAccount")
+            .field("id", &self.id)
+            .field("local_node", &self.local_node)
+            .field("protocol", &self.protocol)
+            .field("enabled", &self.enabled)
+            .field("register", &self.register)
+            .field("registration_interval_s", &self.registration_interval_s)
+            .field("authentication_timeout_ms", &self.authentication_timeout_ms)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Safely printable product configuration diagnostic.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ConfigError(pub(crate) String);
@@ -40,6 +89,7 @@ impl std::error::Error for ConfigError {}
 #[derive(Debug, Default)]
 struct Inspection {
     nodes: Vec<ResolvedRadioNode>,
+    accounts: Vec<ResolvedPhoneAccount>,
     diagnostics: Vec<String>,
     secrets: Vec<(String, String)>,
     invalid_record: bool,
@@ -53,6 +103,11 @@ pub fn check_config(text: &str) -> Result<Vec<String>, ConfigError> {
 /// Resolve copied records without retaining any pointer into the product's parser.
 pub fn resolve_radio_nodes(text: &str) -> Result<Vec<ResolvedRadioNode>, ConfigError> {
     inspect(text, true, false).map(|result| result.nodes)
+}
+
+/// Copy public provider accounts through the existing product visitor, without activation.
+pub fn resolve_phone_accounts(text: &str) -> Result<Vec<ResolvedPhoneAccount>, ConfigError> {
+    inspect(text, true, false).map(|result| result.accounts)
 }
 
 pub(crate) fn secrets(text: &str) -> Result<Vec<(String, String)>, ConfigError> {
@@ -114,12 +169,20 @@ unsafe extern "C" fn copy_node(
 ) -> i32 {
     let output = unsafe { &mut *context.cast::<Inspection>() };
     let record = (|| {
-        let node = unsafe { node.as_ref() }.ok_or(())?;
-        if node.struct_size as usize != size_of::<abi::rptadv_node_host_configuration>() {
+        if node.is_null()
+            || unsafe { node.cast::<u32>().read_unaligned() } as usize
+                != size_of::<abi::rptadv_node_host_configuration>()
+        {
             return Err(());
         }
-        Ok(ResolvedRadioNode {
-            node: unsafe { text(node.node, node.node_length) }?.to_owned(),
+        // SAFETY: the callback guarantees the advertised storage; the size was checked
+        // before reading beyond the prefix, including for older product records.
+        let node = unsafe { node.read_unaligned() };
+        let local = unsafe { text(node.node, node.node_length) }?.to_owned();
+        let accounts =
+            unsafe { copy_phone_accounts(&local, node.phone_accounts, node.phone_account_count) }?;
+        let radio = ResolvedRadioNode {
+            node: local,
             channel: unsafe { text(node.channel, node.channel_length) }?.to_owned(),
             enabled: node.enabled != 0,
             iax_port: node.iax_port,
@@ -127,11 +190,13 @@ unsafe extern "C" fn copy_node(
                 .to_owned(),
             registration_interval_seconds: node.registration_interval_seconds,
             radio: unsafe { NativeRadioConfiguration::copy_from(node.radio) }.map_err(|_| ())?,
-        })
+        };
+        Ok((radio, accounts))
     })();
     match record {
-        Ok(node) => {
+        Ok((node, accounts)) => {
             output.nodes.push(node);
+            output.accounts.extend(accounts);
             0
         }
         Err(()) => {
@@ -139,6 +204,62 @@ unsafe extern "C" fn copy_node(
             -1
         }
     }
+}
+
+/// Copy only complete public records; the caller supplies their advertised storage.
+unsafe fn copy_phone_accounts(
+    local: &str,
+    records: *const abi::rptadv_phone_account_configuration_v1,
+    count: usize,
+) -> Result<Vec<ResolvedPhoneAccount>, ()> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if records.is_null()
+        || count > isize::MAX as usize / size_of::<abi::rptadv_phone_account_configuration_v1>()
+    {
+        return Err(());
+    }
+    let mut accounts = Vec::new();
+    for index in 0..count {
+        let pointer = unsafe { records.add(index) };
+        if unsafe { pointer.cast::<u32>().read_unaligned() } as usize
+            != size_of::<abi::rptadv_phone_account_configuration_v1>()
+        {
+            return Err(());
+        }
+        // SAFETY: the complete record size was checked before reading its fields.
+        let account = unsafe { pointer.read_unaligned() };
+        let protocol = match account.protocol {
+            abi::RPTADV_PHONE_ACCOUNT_IAX => PhoneAccountProtocol::Iax,
+            abi::RPTADV_PHONE_ACCOUNT_SIP => PhoneAccountProtocol::Sip,
+            _ => return Err(()),
+        };
+        if account.enabled > 1
+            || account.register_account > 1
+            || account.registration_interval_s == 0
+            || !(1..=120000).contains(&account.authentication_timeout_ms)
+        {
+            return Err(());
+        }
+        let copy = |span: abi::rptadv_peer_bytes_v1| {
+            // SAFETY: spans are borrowed for this callback and copied before return.
+            unsafe { text(span.data.cast(), span.length) }.map(str::to_owned)
+        };
+        accounts.push(ResolvedPhoneAccount {
+            id: copy(account.id)?,
+            local_node: local.to_owned(),
+            protocol,
+            enabled: account.enabled == 1,
+            server: copy(account.server)?,
+            username: copy(account.username)?,
+            secrets_file: copy(account.secrets_file)?,
+            register: account.register_account == 1,
+            registration_interval_s: account.registration_interval_s,
+            authentication_timeout_ms: account.authentication_timeout_ms,
+        });
+    }
+    Ok(accounts)
 }
 
 unsafe extern "C" fn copy_secret(
@@ -295,5 +416,89 @@ mod tests {
         output.invalid_record = false;
         unsafe { copy_diagnostic(context, std::ptr::null(), 1) };
         assert!(output.invalid_record);
+    }
+
+    #[test]
+    fn phone_account_inspection_copies_owned_redacted_records() {
+        let source = String::from(
+            "[1000]\n[phone_account office]\nlocal_node=1000\nprotocol=sip\nenabled=yes\nserver=provider.example:5060\nusername=private-user\nsecrets_file=private/path.conf\nregister=yes\nregistration_interval_s=42\nauthentication_timeout_ms=1234\n",
+        );
+        let radios = resolve_radio_nodes(&source).unwrap();
+        let accounts = resolve_phone_accounts(&source).unwrap();
+        assert_eq!(resolve_radio_nodes(&source).unwrap(), radios);
+        drop(source);
+        assert_eq!(accounts.len(), 1);
+        let account = &accounts[0];
+        assert_eq!(account.local_node, "1000");
+        assert_eq!(account.id, "office");
+        assert_eq!(account.protocol, PhoneAccountProtocol::Sip);
+        assert!(account.enabled && account.register);
+        assert_eq!(account.server, "provider.example:5060");
+        assert_eq!(account.username, "private-user");
+        assert_eq!(account.secrets_file, "private/path.conf");
+        assert_eq!(account.registration_interval_s, 42);
+        assert_eq!(account.authentication_timeout_ms, 1234);
+        let debug = format!("{accounts:?}");
+        for private in ["provider.example", "private-user", "private/path.conf"] {
+            assert!(!debug.contains(private), "{debug}");
+        }
+    }
+
+    #[test]
+    fn phone_account_copy_rejects_malformed_public_records() {
+        // SAFETY: this ABI record contains only integers and nullable pointers.
+        let mut record: abi::rptadv_phone_account_configuration_v1 = unsafe { std::mem::zeroed() };
+        record.struct_size = size_of::<abi::rptadv_phone_account_configuration_v1>() as u32;
+        record.protocol = abi::RPTADV_PHONE_ACCOUNT_IAX;
+        record.registration_interval_s = 300;
+        record.authentication_timeout_ms = 30000;
+        assert_eq!(
+            unsafe { copy_phone_accounts("1000", std::ptr::null(), 0) },
+            Ok(Vec::new())
+        );
+        assert!(unsafe { copy_phone_accounts("1000", std::ptr::null(), 1) }.is_err());
+        assert!(unsafe { copy_phone_accounts("1000", &record, usize::MAX) }.is_err());
+        let valid = record;
+        let accounts = unsafe { copy_phone_accounts("1000", &record, 1) }.unwrap();
+        assert_eq!(accounts[0].protocol, PhoneAccountProtocol::Iax);
+        assert!(!accounts[0].enabled && !accounts[0].register);
+        for field in 0..10 {
+            record = valid;
+            match field {
+                0 => record.struct_size -= 1,
+                1 => record.protocol = 99,
+                2 => record.enabled = 2,
+                3 => record.register_account = 2,
+                4 => record.id.length = 1,
+                5 => record.server.length = 1,
+                6 => record.username.length = 1,
+                7 => record.secrets_file.length = 1,
+                8 => record.registration_interval_s = 0,
+                _ => record.authentication_timeout_ms = 120001,
+            }
+            assert!(
+                unsafe { copy_phone_accounts("1000", &record, 1) }.is_err(),
+                "field {field}"
+            );
+        }
+        let old_prefix = 4_u32;
+        assert!(
+            unsafe { copy_phone_accounts("1000", (&old_prefix as *const u32).cast(), 1) }.is_err()
+        );
+        let mut output = Inspection::default();
+        let context = (&mut output as *mut Inspection).cast();
+        assert_eq!(
+            unsafe { copy_node(context, (&old_prefix as *const u32).cast()) },
+            -1
+        );
+        assert!(output.invalid_record);
+        output.invalid_record = false;
+        // SAFETY: the host record contains only scalar fields and nullable pointers.
+        let mut node: abi::rptadv_node_host_configuration = unsafe { std::mem::zeroed() };
+        node.struct_size = size_of::<abi::rptadv_node_host_configuration>() as u32;
+        node.phone_account_count = 1;
+        assert_eq!(unsafe { copy_node(context, &node) }, -1);
+        assert!(output.invalid_record);
+        assert!(output.accounts.is_empty());
     }
 }

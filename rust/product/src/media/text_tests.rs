@@ -12,11 +12,19 @@ use std::{
 
 #[derive(Default)]
 pub(crate) struct SpeechFixture {
+    pub(crate) frames: Option<usize>,
     release: AtomicBool,
     pub(crate) opened: Mutex<Vec<String>>,
     active: AtomicUsize,
     maximum: AtomicUsize,
 }
+impl SpeechFixture {
+    /// Permit ordinary speech in fixtures that do not test the intentional A/é stall.
+    pub(crate) fn release(&self) {
+        self.release.store(true, Ordering::Release);
+    }
+}
+
 struct StreamFixture {
     state: Arc<SpeechFixture>,
     text: String,
@@ -83,8 +91,10 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
             0
         } else if body.starts_with("large") {
             if stream.read < 20 { capacity } else { 0 }
+        } else if stream.read == 0 {
+            stream.state.frames.unwrap_or(1).min(capacity)
         } else {
-            usize::from(stream.read == 0)
+            0
         };
         unsafe {
             *count = frames;
@@ -490,4 +500,79 @@ fn text_job_claim_waits_for_both_sequence_and_previous_worker_release() {
     reader.origin.running.store(false, Ordering::Release);
     assert!(reader.origin.claim(2));
     executor.stop();
+}
+
+thread_local! {
+    static FAIL_START_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn failing_start<T>(index: usize, operation: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FAIL_START_AT.with(|failure| failure.set(None));
+        }
+    }
+    FAIL_START_AT.with(|failure| failure.set(Some(index)));
+    let _reset = Reset;
+    operation()
+}
+
+pub(crate) fn before_spawn(index: usize) -> Result<(), MediaError> {
+    if FAIL_START_AT.with(|failure| failure.get() == Some(index)) {
+        Err(MediaError::Io)
+    } else {
+        Ok(())
+    }
+}
+
+#[test]
+fn replacement_text_pair_is_bounded_and_abort_retains_live_origins() {
+    fn rss_kib() -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+    let mut live = TextExecutor::new(1, preparer(Arc::default())).unwrap();
+    let live_readers: Vec<_> = (0..2000)
+        .map(|peer| {
+            live.register("1000", message(peer, String::new()).origin)
+                .unwrap()
+        })
+        .collect();
+    let before = rss_kib();
+    let mut candidate = TextExecutor::prepare(1, preparer(Arc::default())).unwrap();
+    let candidate_readers: Vec<_> = (0..2000)
+        .map(|peer| {
+            let mut origin = message(peer, String::new()).origin;
+            origin.station_generation = 2;
+            candidate.register("1000", origin).unwrap()
+        })
+        .collect();
+    candidate.start().unwrap();
+    assert_eq!(live.workers.len(), 2);
+    assert_eq!(candidate.workers.len(), 2);
+    let during = rss_kib();
+    candidate.stop();
+    assert!(candidate.workers.is_empty());
+    drop(candidate_readers);
+    drop(candidate);
+    assert_eq!(live.workers.len(), 2);
+    assert!(
+        live_readers
+            .iter()
+            .all(|reader| !reader.origin.cancelled.load(Ordering::Acquire))
+    );
+    println!(
+        "TEXT_RELOAD_RESOURCES origins=2000 live_workers=2 overlap_workers=4 rss_before_kib={before} rss_overlap_kib={during} rss_after_abort_kib={}",
+        rss_kib()
+    );
+    live.stop();
 }

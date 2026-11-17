@@ -26,6 +26,7 @@ struct Replacement {
     banks: BTreeMap<(String, u32), Bank>,
     replaced: BTreeSet<String>,
     released: bool,
+    sealed: bool,
 }
 #[derive(Default)]
 struct Bank {
@@ -35,6 +36,8 @@ struct Bank {
     pending: Option<Pending>,
     fenced: u32,
     releasing: bool,
+    /// Already-safe pins whose release remains obligated during fatal shutdown.
+    retired_mask: u32,
     settled: bool,
     touched: bool,
     error: Option<ReadingQuality>,
@@ -67,6 +70,7 @@ struct Pending {
 impl Bank {
     fn target_mask(&self) -> u32 {
         self.mask()
+            & !self.retired_mask
             & if self.releasing {
                 !self.fenced
             } else {
@@ -255,11 +259,29 @@ impl RadioSite {
             banks: next.banks,
             replaced: replaced.clone(),
             released: false,
+            sealed: false,
         });
         true
     }
+    /// Supersede an indeterminate candidate without restoring live demand.
+    pub fn begin_shutdown(&mut self) {
+        self.replacement = None;
+        for bank in self.banks.values_mut() {
+            if bank.releasing {
+                // Keep their metadata and pending release obligation, but never
+                // reclaim already-safe pins during the remaining safe-write phase.
+                bank.retired_mask |= bank.fenced;
+                bank.releasing = false;
+            }
+            // Preserve accepted commands until their acknowledgment is observed.
+        }
+        assert!(self.begin(Self::default(), &BTreeSet::new()));
+    }
     /// Inspect acknowledgments without waiting on the hardware owner.
     pub fn barrier(&self) -> Option<Result<(), ReadingQuality>> {
+        if self.replacement.as_ref().is_some_and(|next| next.sealed) {
+            return Some(Ok(()));
+        }
         let mut ready = true;
         for bank in self
             .banks
@@ -291,14 +313,32 @@ impl RadioSite {
         }
         true
     }
-    /// Adopt prepared configuration after the controller publishes it.
-    pub fn commit(&mut self) -> bool {
-        if self.barrier() != Some(Ok(()))
-            || !self.replacement.as_ref().is_some_and(|next| next.released)
-        {
+    /// Record completed release independently of subsequent hardware health reports.
+    pub fn seal(&mut self) -> bool {
+        if self.barrier() != Some(Ok(())) {
             return false;
         }
-        let mut next = self.replacement.take().expect("validated radio handoff");
+        let Some(next) = self.replacement.as_mut() else {
+            return false;
+        };
+        if !next.released || next.sealed {
+            return false;
+        }
+        next.sealed = true;
+        true
+    }
+    /// Synchronous callers seal and commit on the same control turn.
+    pub fn commit(&mut self) -> bool {
+        if !self.seal() {
+            return false;
+        }
+        self.commit_prepared();
+        true
+    }
+    /// Adopt sealed configuration without consulting changing hardware observations.
+    pub fn commit_prepared(&mut self) {
+        let mut next = self.replacement.take().expect("sealed radio handoff");
+        assert!(next.sealed);
         for (key, bank) in &mut next.banks {
             if let Some(old) = self.banks.remove(key) {
                 for output in &mut bank.outputs {
@@ -320,7 +360,6 @@ impl RadioSite {
             }
         }
         self.banks = next.banks;
-        true
     }
     /// Retain prior bindings and restore live demand after a failed reload.
     pub fn abort(&mut self) {
@@ -394,6 +433,7 @@ impl RadioSite {
         mut io: impl FnMut(&str, u32, Operation) -> Result<Option<abi::UrpAstSiteSnapshot>, i32>,
     ) -> BTreeMap<String, SiteObservations> {
         let mut observations: BTreeMap<String, SiteObservations> = BTreeMap::new();
+        let sealed = self.replacement.as_ref().is_some_and(|next| next.sealed);
         for ((owner, bank_id), bank) in &mut self.banks {
             if let Ok(Some(snapshot)) = io(owner, *bank_id, Operation::Snapshot) {
                 bank.observe(&snapshot, now_ms);
@@ -401,7 +441,10 @@ impl RadioSite {
                     || (!bank.outputs.is_empty() && validate(&snapshot, bank.mask(), true).is_err())
                 {
                     bank.fault(ReadingQuality::Unavailable);
-                } else if let Some(operation) = bank.operation(&snapshot) {
+                } else if let Some(operation) = bank
+                    .operation(&snapshot)
+                    .filter(|_| !sealed || bank.fenced == 0)
+                {
                     let pending = Pending {
                         binding: matches!(operation, Operation::Bind(_)),
                         generation: snapshot.generation,

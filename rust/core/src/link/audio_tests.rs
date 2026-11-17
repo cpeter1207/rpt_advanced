@@ -67,7 +67,15 @@ fn idle_peer_processing_follows_the_native_clock_without_consuming_media() {
         "absent timed capability cannot consume legacy input"
     );
     let (writer, _reader) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
-    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, input, writer, 960, 0).unwrap();
+    let peer = AudioPeer::new(
+        crate::link::PeerIdentity::from_operator("200").unwrap(),
+        Mode::TRANSCEIVE,
+        input,
+        writer,
+        960,
+        0,
+    )
+    .unwrap();
     let (mut links, _dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
     let (mut controller, _control) = NodeController::new(
         ControllerSettings::default(),
@@ -159,7 +167,15 @@ fn remote_base_link_activity_remains_visible_before_transmit_muting() {
     input.signals.set_radio_keyed(true);
     input.signals.publish_pcm();
     let (writer, _reader) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
-    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, input, writer, 4, 0).unwrap();
+    let peer = AudioPeer::new(
+        crate::link::PeerIdentity::from_operator("200").unwrap(),
+        Mode::TRANSCEIVE,
+        input,
+        writer,
+        4,
+        0,
+    )
+    .unwrap();
     let (mut audio, _dispatcher) = LinkAudio::new(vec![peer], 4).unwrap();
     let (mut node, _control) = NodeController::new(
         ControllerSettings {
@@ -192,7 +208,15 @@ fn regeneration_replaces_rf_not_peer_program_or_parrot_capture() {
         samples: samples.iter().copied().collect(),
     };
     let (writer, mut reader) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
-    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, input(&[]), writer, 4, 0).unwrap();
+    let peer = AudioPeer::new(
+        crate::link::PeerIdentity::from_operator("200").unwrap(),
+        Mode::TRANSCEIVE,
+        input(&[]),
+        writer,
+        4,
+        0,
+    )
+    .unwrap();
     let (audio, mut dispatcher) = LinkAudio::new(vec![peer], 4).unwrap();
     let mut audio = audio.with_regeneration(input(&[0.25, 0.0]));
     let (mut node, mut control) = NodeController::new(
@@ -279,7 +303,7 @@ fn configured_message_suppression_drains_peers_without_negative_mix_minus() {
         let (writer, reader) = LinkAudioQueue::new(4, 64).unwrap().into_endpoints();
         peers.push(
             AudioPeer::new(
-                name,
+                crate::link::PeerIdentity::from_operator(name).unwrap(),
                 Mode::TRANSCEIVE,
                 FiniteInput {
                     signals,
@@ -568,7 +592,7 @@ fn peer_with_kerchunk(
     let signals = Arc::new(PeerSignals::new());
     (
         AudioPeer::new(
-            name,
+            crate::link::PeerIdentity::from_operator(name).unwrap(),
             Mode::TRANSCEIVE,
             Input {
                 signals: Arc::clone(&signals),
@@ -741,22 +765,20 @@ fn addressed_reply_waits_for_local_receive_and_keeps_monitor_routes_scoped() {
 
 #[test]
 fn preparation_and_empty_graph_reject_invalid_shapes_without_dispatch() {
-    for (name, maximum) in [("bad", 1), ("200", 0)] {
-        let (outbound, _) = LinkAudioQueue::new(1, 64).unwrap().into_endpoints();
-        assert!(
-            AudioPeer::new(
-                name,
-                Mode::TRANSCEIVE,
-                Input {
-                    signals: Arc::new(PeerSignals::new()),
-                },
-                outbound,
-                maximum,
-                0,
-            )
-            .is_err()
-        );
-    }
+    let (outbound, _) = LinkAudioQueue::new(1, 64).unwrap().into_endpoints();
+    assert!(
+        AudioPeer::new(
+            crate::link::PeerIdentity::from_operator("200").unwrap(),
+            Mode::TRANSCEIVE,
+            Input {
+                signals: Arc::new(PeerSignals::new())
+            },
+            outbound,
+            0,
+            0,
+        )
+        .is_err()
+    );
 
     assert!(LinkAudio::<Input>::new(vec![], 0).is_err());
     let (undersized, _) = peer("200", 1);
@@ -957,3 +979,35 @@ fn ended_peer_cannot_hold_ptt_or_remain_a_dispatch_destination() {
         assert_eq!(output, [0.0]);
     }
 }
+
+#[path = "audio_phone_tests.rs"]
+mod phone;
+
+thread_local! {
+    static BEFORE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static AFTER_VALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn before_publish() {
+    BEFORE_PUBLISH.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+pub(super) fn after_validation() {
+    AFTER_VALIDATION.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[path = "audio_phone_parrot_tests.rs"]
+pub(crate) mod phone_parrot;
+
+#[path = "audio_rf_tests.rs"]
+mod rf;

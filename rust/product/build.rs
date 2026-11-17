@@ -16,7 +16,7 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=include/rptadv_product.h");
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
-    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_product.so.2");
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_product.so.3");
     println!("cargo:rerun-if-env-changed=URP_PRODUCT_INCLUDE");
     println!("cargo:rerun-if-env-changed=RPTADV_CODEC_INCLUDE");
     let radio_include =
@@ -32,15 +32,19 @@ fn main() {
                 .unwrap_or_else(|_| "/usr/include/rptadv-codec".to_owned())
         ))
         .allowlist_type("rptadv_.*")
+        .allowlist_var("RPTADV_PHONE_ACCOUNT_.*")
         .allowlist_type("Urp.*")
         .allowlist_function("usbradioplus_product_descriptor_v1")
         .allowlist_function("rpcr3_descriptor")
         .allowlist_function("rptadv_samplerate_adapter_descriptor")
         .allowlist_var("RPCR3_.*")
         .allowlist_var("URP_NATIVE_.*")
+        .allowlist_var("URP_RADIO_FEEDBACK_.*")
+        .allowlist_var("URP_PROGRAMME_.*")
         .allowlist_var("URP_AST_.*")
         .allowlist_var("RPTADV_MEDIA_.*")
         .allowlist_var("RPTADV_PEER_EVENT_.*")
+        .allowlist_var("RPTADV_PEER_PHONE_INBAND_DIGITS")
         .allowlist_var("RPTADV_SITE_.*")
         .allowlist_var("RPTADV_PEER_OBSERVATION_.*")
         .layout_tests(false)

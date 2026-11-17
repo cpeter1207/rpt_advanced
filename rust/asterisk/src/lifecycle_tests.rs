@@ -9,6 +9,7 @@ use std::{
 };
 
 thread_local! {
+    static RELOAD_OVERRIDE: Cell<Option<i32>> = const { Cell::new(None) };
     static START_RESULT: Cell<i32> = const { Cell::new(0) };
     static STOP_RESULT: Cell<i32> = const { Cell::new(0) };
     static INCOMING_RESULT: Cell<i32> = const { Cell::new(0) };
@@ -74,6 +75,9 @@ unsafe extern "C" fn reload(configuration: *const std::ffi::c_char, length: usiz
     }
     .unwrap();
     RELOAD_DOCUMENTS.with_borrow_mut(|documents| documents.push(text.to_owned()));
+    if let Some(status) = RELOAD_OVERRIDE.get() {
+        return status;
+    }
     match text {
         "pending-candidate" => 1,
         "rejected-candidate" => -1,
@@ -189,8 +193,8 @@ unsafe extern "C" fn digit(
 
 static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<ffi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 7,
-    capability: *b"rptadv.prod7\0\0\0\0",
+    abi_version: 8,
+    capability: *b"rptadv.prod8\0\0\0\0",
     start: Some(start),
     reload: Some(reload),
     stop: Some(stop),
@@ -311,7 +315,10 @@ fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() 
 #[test]
 fn product_reload_waits_for_pending_completion() {
     let product = unsafe { Product::open(ptr::from_ref(&DESCRIPTOR)) }.unwrap();
-    assert!(product.reload("pending-candidate"));
+    assert_eq!(
+        product.reload("pending-candidate"),
+        rptadv_peer_support::reload::ReloadOutcome::Committed
+    );
     assert_eq!(
         RELOAD_DOCUMENTS.with_borrow(|documents| documents.last().cloned()),
         Some("pending-candidate".to_owned())
@@ -385,8 +392,7 @@ fn lifecycle_retains_live_product_on_failed_stop_and_rolls_back_registration() {
             &[
                 "[1000]\nnode_enabled=no\n",
                 "accepted-candidate",
-                "rejected-candidate",
-                "accepted-candidate"
+                "rejected-candidate"
             ]
         )
     });
@@ -439,6 +445,48 @@ fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
         assert!(STATE.lock().unwrap().is_none());
         std::fs::write(&path, "fixture-echo:7").unwrap();
         assert_eq!(load_selected(), 0);
+        if matches!(
+            mode.to_str(),
+            Some("fatal" | "committed-error" | "activation-error")
+        ) {
+            let fatal = mode == "fatal";
+            let candidate = if mode == "activation-error" {
+                "fixture-echo:42"
+            } else {
+                "fixture-echo:8"
+            };
+            RELOAD_OVERRIDE.set(if fatal {
+                Some(73)
+            } else if mode == "committed-error" {
+                Some(-2)
+            } else {
+                None
+            });
+            RELOAD_DOCUMENTS.with_borrow_mut(Vec::clear);
+            std::fs::write(&path, candidate).unwrap();
+            assert_eq!(super::reload(), -1);
+            {
+                let selected = STATE.lock().unwrap();
+                let state = selected.as_ref().unwrap();
+                assert_eq!(state.reload_fatal, fatal);
+                assert_eq!(
+                    state.configuration,
+                    if fatal { "fixture-echo:7" } else { candidate }
+                );
+            }
+            if fatal {
+                assert_eq!(super::reload(), -1);
+                assert_eq!(
+                    RELOAD_DOCUMENTS.with_borrow(Vec::len),
+                    1,
+                    "fatal gate must not call the product again"
+                );
+            }
+            RELOAD_OVERRIDE.set(None);
+            assert_eq!(unload(), 0);
+            unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
+            return;
+        }
         std::fs::write(&path, "fixture-echo:0").unwrap();
         assert_eq!(super::reload(), 0);
         let library =
@@ -450,8 +498,8 @@ fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
         std::fs::write(&path, "fixture-empty").unwrap();
         assert_eq!(
             super::reload(),
-            0,
-            "retirement failure does not undo the committed reload"
+            -1,
+            "report retirement failure without undoing the committed reload"
         );
         assert_eq!(unload(), -1);
         unsafe { fail(0) };
@@ -459,7 +507,13 @@ fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
         unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
         return;
     }
-    for mode in ["retirement", "rollback-stop"] {
+    for mode in [
+        "retirement",
+        "rollback-stop",
+        "fatal",
+        "committed-error",
+        "activation-error",
+    ] {
         let fixture = EchoFixture::new("network");
         let directory = fixture.0.parent().unwrap();
         symlink(&fixture.0, directory.join("librptadv_echolink.so.1")).unwrap();
@@ -485,5 +539,54 @@ fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
         );
+    }
+}
+
+#[test]
+fn product_reload_preserves_immediate_and_deferred_terminal_disposition() {
+    use rptadv_peer_support::reload::ReloadOutcome;
+    thread_local! {
+        static TERMINAL: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+        static DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    unsafe extern "C" fn begin(_: *const std::ffi::c_char, _: usize) -> i32 {
+        INVOCATIONS.set(INVOCATIONS.get() + 1);
+        if DEFERRED.get() { 1 } else { TERMINAL.get() }
+    }
+    unsafe extern "C" fn poll() -> i32 {
+        TERMINAL.get()
+    }
+    for deferred in [false, true] {
+        for (status, outcome) in [
+            (0, ReloadOutcome::Committed),
+            (-1, ReloadOutcome::Rejected),
+            (-2, ReloadOutcome::CommittedWithError),
+            (-3, ReloadOutcome::Fatal(-3)),
+            (73, ReloadOutcome::Fatal(73)),
+        ] {
+            TERMINAL.set(status);
+            DEFERRED.set(deferred);
+            INVOCATIONS.set(0);
+            let mut descriptor = DESCRIPTOR;
+            descriptor.reload = Some(begin);
+            descriptor.reload_poll = Some(poll);
+            let product = unsafe { Product::open(Box::leak(Box::new(descriptor))) }.unwrap();
+            assert_eq!(product.reload("candidate"), outcome);
+            assert_eq!(INVOCATIONS.get(), 1);
+        }
+    }
+}
+
+#[test]
+fn product_mixed_reload_cohorts_are_rejected_before_use() {
+    for wrong_version in [true, false] {
+        let mut api = DESCRIPTOR;
+        if wrong_version {
+            api.abi_version = 7;
+        } else {
+            api.capability = *b"rptadv.prod7\0\0\0\0";
+        }
+        assert!(unsafe { Product::open(&api) }.is_none());
     }
 }
