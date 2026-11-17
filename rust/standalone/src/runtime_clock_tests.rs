@@ -220,3 +220,11 @@ fn stage_c_clock_host_prefix_and_lifetime() {
         std::fs::remove_dir_all(path).unwrap();
     }
 }
+
+// Test-only adoption after the same ProductRuntime::start used by the constructor.
+impl ProductRuntime {
+    pub(crate) fn c5_retain_providers(&mut self, providers: Box<crate::providers::ProviderSet>) {
+        assert!(self.providers.is_none());
+        self.providers = Some(providers);
+    }
+}

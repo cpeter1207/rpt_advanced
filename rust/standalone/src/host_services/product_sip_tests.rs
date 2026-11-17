@@ -798,6 +798,80 @@ fn stage_c_clock_old_adapter_new_host_preserves_ordinary_source_admission() {
         return;
     }
     let extent: usize = std::env::var(CHILD).unwrap().parse().unwrap();
+    c5_ordinary_media(Some(extent), false);
+}
+
+#[test]
+#[ignore = "C5 exact external cohort required; use workflows/tools/run_c5_cohort_tests.py"]
+fn stage_c5_historical_old_adapter_ordinary_media() {
+    c5_ordinary_media(None, false);
+}
+
+static C5_CLOCK_READS: AtomicUsize = AtomicUsize::new(0);
+static C5_CLOCK_SOURCE: AtomicUsize = AtomicUsize::new(0);
+static C5_CLOCK_IO: AtomicUsize = AtomicUsize::new(0);
+static C5_CLOCK_UNLOADS: AtomicUsize = AtomicUsize::new(0);
+static C5_CLOCK_LIVE: AtomicBool = AtomicBool::new(false);
+static C5_CLOCK_VIOLATION: AtomicBool = AtomicBool::new(false);
+static C5_QUIESCE_FAILURES: AtomicUsize = AtomicUsize::new(0);
+static C5_DESTROYS: AtomicUsize = AtomicUsize::new(0);
+
+static C5_FAIL_QUIESCE: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn c5_read_notice() {
+    if !C5_CLOCK_LIVE.load(Ordering::Acquire) {
+        C5_CLOCK_VIOLATION.store(true, Ordering::Release);
+    }
+    C5_CLOCK_READS.fetch_add(1, Ordering::Relaxed);
+    let mut name = [0_i8; 16];
+    // SAFETY: writable fixed Linux pthread-name buffer for this current thread.
+    let status =
+        unsafe { libc::pthread_getname_np(libc::pthread_self(), name.as_mut_ptr(), name.len()) };
+    if status == 0 {
+        // SAFETY: pthread_getname_np returns a terminated name on success.
+        match unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_bytes() {
+            b"rpt-media" => {
+                C5_CLOCK_SOURCE.fetch_add(1, Ordering::Relaxed);
+            }
+            b"rpt-iax" => {
+                C5_CLOCK_IO.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+}
+extern "C" fn c5_unload_notice() {
+    if RADIO.lock().unwrap().is_some() {
+        C5_CLOCK_VIOLATION.store(true, Ordering::Release);
+    }
+    C5_CLOCK_LIVE.store(false, Ordering::Release);
+    C5_CLOCK_UNLOADS.fetch_add(1, Ordering::Relaxed);
+}
+unsafe extern "C" fn c5_quiesce(context: *mut c_void, radio: *mut c_void) -> i32 {
+    if C5_FAIL_QUIESCE.load(Ordering::Acquire) {
+        C5_QUIESCE_FAILURES.fetch_add(1, Ordering::Relaxed);
+        return -1;
+    }
+    // SAFETY: forward unchanged to the existing physical-only fixture.
+    unsafe { quiesce(context, radio) }
+}
+
+unsafe extern "C" fn c5_destroy(context: *mut c_void, radio: *mut c_void) {
+    // Unlike a poll error, final destruction promises synchronous callback detachment.
+    // SAFETY: directly join the physical simulation, without the poll-failure injection.
+    assert_eq!(unsafe { quiesce(context, radio) }, 0);
+    assert!(RADIO.lock().unwrap().is_none());
+    C5_DESTROYS.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: callbacks are quiescent before forwarding normal reservation destruction.
+    unsafe { destroy_radio(context, radio) }
+}
+
+#[test]
+fn stage_c5_actual_product_quiesce_error_synchronous_destroy() {
+    c5_ordinary_media(None, true);
+}
+
+fn c5_ordinary_media(extent: Option<usize>, lifetime: bool) {
     let directory = std::env::temp_dir().join(format!("rpt-c4-old-audio-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     let mut remote = vox::Remote::new();
@@ -812,17 +886,40 @@ fn stage_c_clock_old_adapter_new_host_preserves_ordinary_source_admission() {
         path.display()
     );
     let mut providers = Box::new(ProviderSet::load().unwrap());
-    let mut audio = unsafe {
-        *providers
-            .descriptor(crate::providers::clock_tests::AUDIO)
-            .unwrap()
-            .as_ptr()
-            .cast::<abi::rptadv_audio_adapter_descriptor>()
-    };
-    if extent == 216 {
-        audio.monotonic_now_ns = None;
+    if lifetime {
+        for counter in [
+            &C5_CLOCK_READS,
+            &C5_CLOCK_SOURCE,
+            &C5_CLOCK_IO,
+            &C5_CLOCK_UNLOADS,
+            &C5_QUIESCE_FAILURES,
+            &C5_DESTROYS,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+        C5_CLOCK_LIVE.store(true, Ordering::Release);
+        C5_CLOCK_VIOLATION.store(false, Ordering::Release);
+        crate::providers::clock_tests::attach_clock_fixture(
+            &mut providers,
+            &directory.join("clock"),
+            c5_read_notice,
+            c5_unload_notice,
+            true,
+        );
     }
-    crate::providers::clock_tests::replace_audio(&mut providers, &audio, extent);
+    if let Some(extent) = extent {
+        let mut audio = unsafe {
+            *providers
+                .descriptor(crate::providers::clock_tests::AUDIO)
+                .unwrap()
+                .as_ptr()
+                .cast::<abi::rptadv_audio_adapter_descriptor>()
+        };
+        if extent == 216 {
+            audio.monotonic_now_ns = None;
+        }
+        crate::providers::clock_tests::replace_audio(&mut providers, &audio, extent);
+    }
     let provider_ref: &'static ProviderSet = unsafe { &*ptr::from_ref(providers.as_ref()) };
     let descriptors = provider_ref.product_runtime_descriptors().unwrap();
     let mut host = HostServicesOwner::new(
@@ -835,6 +932,10 @@ fn stage_c_clock_old_adapter_new_host_preserves_ordinary_source_admission() {
     // the actual C4 consumer regression rather than only a descriptor mismatch.
     let advertised = host.descriptor().media_clock_reader.is_some();
     install_simulated_radio(&mut host);
+    if lifetime {
+        host.descriptor.radio_quiesce = Some(c5_quiesce);
+        host.descriptor.radio_destroy = Some(c5_destroy);
+    }
     let mut runtime = unsafe {
         ProductRuntime::start(
             &descriptors.product,
@@ -846,6 +947,10 @@ fn stage_c_clock_old_adapter_new_host_preserves_ordinary_source_admission() {
         )
     }
     .unwrap();
+    let mut providers = Some(providers);
+    if lifetime {
+        runtime.c5_retain_providers(providers.take().unwrap());
+    }
     runtime.enable_listener(&mut remote.server).unwrap();
     let command = runtime.product_descriptor().link_command.unwrap();
     let ordinary =
@@ -879,9 +984,41 @@ fn stage_c_clock_old_adapter_new_host_preserves_ordinary_source_admission() {
     }
     LOCAL_INPUT.store(false, Ordering::Release);
     let voiced = remote.voiced_samples();
-    runtime.stop().unwrap();
+    if lifetime {
+        assert!(C5_CLOCK_SOURCE.load(Ordering::Acquire) > 0);
+        assert!(C5_CLOCK_IO.load(Ordering::Acquire) > 0);
+        assert_eq!(C5_CLOCK_UNLOADS.load(Ordering::Acquire), 0);
+        C5_FAIL_QUIESCE.store(true, Ordering::Release);
+        let result = runtime.stop();
+        assert!(C5_QUIESCE_FAILURES.load(Ordering::Acquire) > 0);
+        if result.is_err() {
+            assert_eq!(C5_CLOCK_UNLOADS.load(Ordering::Acquire), 0);
+        }
+        C5_FAIL_QUIESCE.store(false, Ordering::Release);
+        if result.is_err() {
+            runtime.stop().unwrap();
+        }
+        // Stop may safely finish through the stronger synchronous destroy callback.
+        // This is not evidence that an actual failed product stop retains all owners.
+        assert_eq!(C5_DESTROYS.load(Ordering::Acquire), 1);
+        assert!(RADIO.lock().unwrap().is_none());
+    } else {
+        runtime.stop().unwrap();
+    }
     drop(remote);
     drop(providers);
+    if lifetime {
+        assert_eq!(C5_CLOCK_UNLOADS.load(Ordering::Acquire), 1);
+        let reads = C5_CLOCK_READS.load(Ordering::Acquire);
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(C5_CLOCK_READS.load(Ordering::Acquire), reads);
+        assert!(!C5_CLOCK_VIOLATION.load(Ordering::Acquire));
+        eprintln!(
+            "C5_ACTUAL_PRODUCT source_reads={} io_reads={} total_reads={reads} unloads=1 sdk=simulated_radio_bypasses_sdk",
+            C5_CLOCK_SOURCE.load(Ordering::Acquire),
+            C5_CLOCK_IO.load(Ordering::Acquire)
+        );
+    }
     fs::remove_dir_all(directory).unwrap();
     assert_eq!(admitted, 0, "old adapter ordinary admission");
     assert!(LOCAL_RX_KEYED_TURNS.load(Ordering::Acquire) > source_turns);
@@ -890,7 +1027,7 @@ fn stage_c_clock_old_adapter_new_host_preserves_ordinary_source_admission() {
         "actual source births must remain qualified and reach the ordinary peer"
     );
     assert!(
-        !advertised,
-        "absent reader must publish absent capability, not a failing getter"
+        advertised == lifetime,
+        "absent reader must publish absent capability; lifetime fixture must advertise its real reader"
     );
 }

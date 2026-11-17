@@ -90,6 +90,17 @@ pub(crate) fn attach_lifetime_fixture(
     on_read: extern "C" fn(),
     on_unload: extern "C" fn(),
 ) {
+    attach_clock_fixture(providers, path, on_read, on_unload, false);
+}
+
+/// C5 retains the real provider clock behind the unload sentinel, without opening hardware.
+pub(crate) fn attach_clock_fixture(
+    providers: &mut ProviderSet,
+    path: &std::path::Path,
+    on_read: extern "C" fn(),
+    on_unload: extern "C" fn(),
+    live_reader: bool,
+) {
     std::fs::create_dir_all(path).unwrap();
     let source = path.join("clock.c");
     std::fs::write(
@@ -100,9 +111,11 @@ pub(crate) fn attach_lifetime_fixture(
 static _Alignas(8) unsigned char descriptor[216];
 static void (*read_notice)(void);
 static void (*unload_notice)(void);
-static uint64_t clock_read(void) { read_notice(); return 4242; }
-void *clock_fixture(const void *source, void (*read)(void), void (*unload)(void)) {
+static uint64_t (*base_read)(void);
+static uint64_t clock_read(void) { read_notice(); return base_read ? base_read() : 4242; }
+void *clock_fixture(const void *source, void (*read)(void), void (*unload)(void), int live) {
     memcpy(descriptor, source, sizeof(descriptor));
+    if (live) memcpy(&base_read, descriptor + 208, sizeof(base_read));
     uint64_t (*reader)(void) = clock_read;
     memcpy(descriptor + 208, &reader, sizeof(reader));
     read_notice = read; unload_notice = unload;
@@ -127,14 +140,21 @@ __attribute__((destructor)) static void unloaded(void) { if (unload_notice) unlo
     );
     let library = unsafe { Library::new(library) }.unwrap();
     type Init =
-        unsafe extern "C" fn(*const c_void, extern "C" fn(), extern "C" fn()) -> *mut c_void;
+        unsafe extern "C" fn(*const c_void, extern "C" fn(), extern "C" fn(), i32) -> *mut c_void;
     let init = unsafe { library.get::<Init>(b"clock_fixture\0") }.unwrap();
     let loaded = providers
         .descriptors
         .iter_mut()
         .find(|p| p.library == AUDIO)
         .unwrap();
-    let descriptor = unsafe { init(loaded.descriptor.as_ptr(), on_read, on_unload) };
+    let descriptor = unsafe {
+        init(
+            loaded.descriptor.as_ptr(),
+            on_read,
+            on_unload,
+            i32::from(live_reader),
+        )
+    };
     loaded.descriptor = NonNull::new(descriptor).unwrap();
     loaded.size = 216;
     providers._libraries.push(library);
