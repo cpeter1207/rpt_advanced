@@ -158,8 +158,11 @@ impl Remote {
     }
 }
 fn media(caller: &mut Caller, codec: &mut AudioCodec, samples: &[f32]) {
-    let mut next = Instant::now();
+    let started = Instant::now();
+    let mut next = started;
+    let mut maximum_lateness = Duration::ZERO;
     for chunk in samples.chunks(160) {
+        maximum_lateness = maximum_lateness.max(Instant::now().saturating_duration_since(next));
         let mut pcm = [0.0; 160];
         pcm[..chunk.len()].copy_from_slice(chunk);
         caller.audio(codec, &pcm);
@@ -170,6 +173,12 @@ fn media(caller: &mut Caller, codec: &mut AudioCodec, samples: &[f32]) {
         next += caller.packet_interval();
         thread::sleep(next.saturating_duration_since(Instant::now()));
     }
+    eprintln!(
+        "vox-courtesy: media samples={} elapsed_us={} maximum_lateness_us={}",
+        samples.len(),
+        started.elapsed().as_micros(),
+        maximum_lateness.as_micros(),
+    );
 }
 
 pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool) {

@@ -2818,3 +2818,38 @@ when another selected source is actually active, not its exact-key invalidation
 rules. Controller tests cover pending public/private selection, local/linked
 activity, exact deadlines, ongoing-source closure ordering, nonselected activity,
 and later fresh closures. Physical/RF acceptance remains unperformed.
+
+### Verified RTP trim uses emitted source coordinates (2026-11-17 checkpoint)
+
+The native RTP adapter now separates extended wire chronology from emitted host
+coordinates. Only an exactly witnessed in-packet negative-offset trim may omit
+its prefix without notifying a source discontinuity. Exclusive native advancement,
+unchanged unrelated counters, packet boundary/offset/span, immutable receipt and
+prior admitted history must all agree. The whole compressed packet is decoded
+once; only its suffix is offered at the next contiguous emitted coordinate. No
+counted gap or PLC fills the omitted interval, and no new speech authority or
+receipt is manufactured. The retained decision, not a global enablement flag,
+owns this proof through zero and partial sink credit.
+
+Wire accounting and receipt lookup remain on the wire axis. All sink audio, loss
+and typed-cut positions use the emitted axis, including cuts after earlier benign
+trims. A later hard cut does not rewind that cursor; its existing retirement and
+acknowledgement authority still precedes new media. Full-packet and unproved skips
+do not acquire benign-trim permission. Host clock-epoch mismatch is terminal and
+cannot relabel retained PCM. RFC4733 delivery remains symbol-only and exactly once;
+in-band detection, lookback and mute use the same emitted coordinates as programme.
+
+The opt-in native-media test fixture exercises real UDP, released jitter/codec,
+the private source owner, genuine collector completion and production adoption,
+then the real paced/stalled ring. It does not assign native decisions or fabricate
+admission revisions. Tests preserve the original SIP positive courtesy assertion
+and cover emitted duration, immutable age, hold, in-band mute and lifecycle fences.
+These are software boundaries, not physical/RF qualification or a deployment claim.
+
+IAX already has an emitted-frame cursor, but its current timed-event provenance
+and the complete codec cohort do not yet establish equivalent loss authority.
+That remains required work, not a reason to remove the SIP-only continuation guard
+or classify unknown PCM as original. Codec provenance policy must distinguish
+ordinary decoder prediction from independently recovered/retained contributors;
+any new analysis-evidence contract requires native branch proof first. See the
+reviewed emitted-timeline and IAX provenance design documents for the open gates.

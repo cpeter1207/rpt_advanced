@@ -816,3 +816,11 @@ cancels the old pending opportunity, including at its deadline; a later genuine
 close may schedule a fresh delay. Held/PLC busy state does not create or renew
 speech, and active-tone and exact phone fence policies are unchanged. See the
 shared uninterrupted courtesy delay checkpoint in ADR 0044.
+
+Verified in-packet RTP delay trims now remain within media: wire chronology stays
+separate from contiguous emitted source coordinates, the full packet is decoded
+once, and only the suffix reaches the source. No gap padding, fresh receipt or
+speech renewal is introduced; unproved changes retain retirement authority.
+Actual-owner native tests cover the paced/stalled ring and command/lifecycle
+boundaries. IAX/codec provenance parity and physical acceptance remain separate
+required gates; see ADR0044's emitted-coordinate checkpoint.
