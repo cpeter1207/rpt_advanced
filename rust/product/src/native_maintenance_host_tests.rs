@@ -153,6 +153,33 @@ fn physical_status_mixer_and_cleanup_keep_the_live_lease_during_controller_retir
 
 #[test]
 fn unsupported_physical_update_uses_handoff_and_later_failure_aborts_the_retained_radio() {
+    unsafe extern "C" fn activate(
+        context: *mut c_void,
+        radio: *mut c_void,
+        receive: abi::rptadv_radio_receive_v3,
+        receive_context: *mut c_void,
+        transmit: abi::rptadv_radio_transmit_v3,
+        transmit_context: *mut c_void,
+    ) -> i32 {
+        // Keep the unsupported handoff target callback-free: this case must reach
+        // the injected open failure, not race the separate protected-owner Busy gate.
+        // SAFETY: the fixture owns this radio throughout activation.
+        if unsafe { crate::fixture::radio_name(radio) }.starts_with("2000\0") {
+            return 0;
+        }
+        // The retained first radio still runs the ordinary live callbacks.
+        // SAFETY: forward the original live handle and callback contexts unchanged.
+        unsafe {
+            (*crate::fixture::host_descriptor()).radio_activate.unwrap()(
+                context,
+                radio,
+                receive,
+                receive_context,
+                transmit,
+                transmit_context,
+            )
+        }
+    }
     unsafe extern "C" fn selective_update(
         context: *mut c_void,
         radio: *mut c_void,
@@ -174,6 +201,7 @@ fn unsupported_physical_update_uses_handoff_and_later_failure_aborts_the_retaine
     // SAFETY: the fixture supplies the complete released host table.
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.context = std::ptr::from_ref(calls.as_ref()).cast_mut().cast();
+    table.radio_activate = Some(activate);
     table.radio_update = Some(selective_update);
     table.radio_control = Some(maintenance);
     // SAFETY: the immutable table and tracker outlive all host workers.
@@ -188,6 +216,11 @@ fn unsupported_physical_update_uses_handoff_and_later_failure_aborts_the_retaine
         "[2000]\nradio_channel=usb2\n[radio 1000]\nreceive_output_gain_db=-6\n[radio 2000]\ndevice_selection=exact\ndevice_identifier=another-device\n",
     );
     assert_eq!(host.reload(candidate, clock()), Err(RuntimeError::Device));
+    assert_eq!(
+        crate::fixture::RADIO_OPEN_RESULT.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "handoff must consume the injected open failure"
+    );
     assert_eq!(host.runtime.revision(), 1);
     assert_eq!(host.runtime.document(), &source);
     // SAFETY: a complete initialized request is borrowed by the current serialized lease.
