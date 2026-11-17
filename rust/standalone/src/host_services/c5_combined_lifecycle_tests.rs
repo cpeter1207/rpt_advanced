@@ -75,6 +75,9 @@ use std::{
 };
 #[path = "c5_fake_hardware.rs"]
 mod hardware;
+#[path = "c5_historical_consumer.rs"]
+mod historical;
+static HISTORICAL_BINDING: AtomicUsize = AtomicUsize::new(0);
 
 static CLOCK_READS: AtomicUsize = AtomicUsize::new(0);
 static SOURCE_READS: AtomicUsize = AtomicUsize::new(0);
@@ -218,6 +221,15 @@ unsafe extern "C" fn native_create(
     };
     // The controller currently forwards V1. This wrapper alone opts the real native
     // owner into V2 after create and before start; later replacement must fail evidence.
+    let historical = HISTORICAL_BINDING.load(Ordering::Acquire);
+    let binding = if historical == 0 {
+        &mut binding
+    } else {
+        unsafe { &mut *(historical as *mut BindingV2) }
+    };
+    if std::env::var_os("C5_OMIT_OBSERVER").is_some() {
+        binding.observed = None;
+    }
     let original = binding.base;
     let original_observer = binding.observed.map(|f| f as usize);
     let status = unsafe { (sdk.bind)(*out, &mut binding.base) };
@@ -232,6 +244,9 @@ unsafe extern "C" fn native_create(
     {
         // Non-null partial handle stays with the actual caller's rollback path.
         return -7;
+    }
+    if historical != 0 {
+        eprintln!("C5_OLD_BIND create_status=0 bind_status=0 accepted_abi=2 identity_unchanged=1");
     }
     BINDS.fetch_add(1, Ordering::AcqRel);
     status
@@ -394,17 +409,30 @@ fn assert_drained() {
 #[test]
 #[ignore = "C5 exact external cohort required; use workflows/tools/run_c5_combined_lifecycle_tests.py"]
 fn stage_c5_combined_native_product_success() {
-    combined(false);
+    combined(false, None);
 }
 
 #[test]
 #[ignore = "C5 exact external cohort required; use workflows/tools/run_c5_combined_lifecycle_tests.py"]
 fn stage_c5_combined_native_product_failed_stop_retry() {
-    combined(true);
+    combined(true, None);
 }
 
-fn combined(failed_stop: bool) {
+#[test]
+#[ignore = "C5 exact historical row required; use workflows historical runner"]
+fn stage_c5_old_consumer_new_sdk() {
+    combined(false, Some(112));
+}
+
+#[test]
+#[ignore = "C5 exact historical row required; use workflows historical runner"]
+fn stage_c5_old_consumer_stage_b_sdk() {
+    combined(false, Some(96));
+}
+
+fn combined(failed_stop: bool, old_size: Option<u32>) {
     reset();
+    let historical = old_size.map(historical::Consumer::load);
     let directory = std::env::temp_dir().join(format!("rpt-c5-combined-{}", std::process::id()));
     std::fs::create_dir(&directory).unwrap();
     let mut remote = vox::Remote::new();
@@ -521,17 +549,21 @@ fn combined(failed_stop: bool) {
     );
     assert!(SOURCE_READS.load(Ordering::Acquire) > 0);
     assert!(IO_READS.load(Ordering::Acquire) > 0);
-    assert!(SDK_READS.load(Ordering::Acquire) >= OBSERVED.load(Ordering::Acquire));
     assert_eq!(BINDS.load(Ordering::Acquire), 1);
-    assert!(
-        OBSERVED.load(Ordering::Acquire) > 0,
-        "missing or replaced native observer"
-    );
-    assert_eq!(
-        OBSERVED.load(Ordering::Acquire),
-        VALID_CLOCK.load(Ordering::Acquire)
-    );
-    assert!(LAST_OBSERVATION.load(Ordering::Acquire) >= RAW_ORIGIN.load(Ordering::Acquire));
+    if let Some(consumer) = historical.as_ref() {
+        consumer.verify(old_size.unwrap());
+    } else {
+        assert!(SDK_READS.load(Ordering::Acquire) >= OBSERVED.load(Ordering::Acquire));
+        assert!(
+            OBSERVED.load(Ordering::Acquire) > 0,
+            "missing or replaced native observer"
+        );
+        assert_eq!(
+            OBSERVED.load(Ordering::Acquire),
+            VALID_CLOCK.load(Ordering::Acquire)
+        );
+        assert!(LAST_OBSERVATION.load(Ordering::Acquire) >= RAW_ORIGIN.load(Ordering::Acquire));
+    }
     eprintln!(
         "C5_CLOCK reads={} sdk_reads={} origin={} last_observed={} fresh_tx_tone_blocks={}",
         CLOCK_READS.load(Ordering::Acquire),

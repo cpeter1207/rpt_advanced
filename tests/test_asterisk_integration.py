@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """! @brief Load, reload, and unload the built module in an isolated Asterisk process."""
 
+import hashlib
 import os
 import re
 import shutil
@@ -172,7 +173,29 @@ def announcement_case(configuration, radio_configuration, logfile, process) -> N
     print(f"Asterisk half-duplex periodic announcement: {records}")
 
 
-def main() -> None:
+def assert_loaded_libraries(process, expected_libraries) -> None:
+    """Verify actual mapped DSO bytes, not only a proposed loader search path."""
+    mapped = {
+        Path(line.split()[-1]).resolve()
+        for line in Path(f"/proc/{process.pid}/maps").read_text().splitlines()
+        if len(line.split()) >= 6 and line.split()[-1].startswith("/")
+    }
+    for path, expected in expected_libraries.items():
+        path = Path(path).resolve()
+        assert path in mapped, f"required historical cohort library not mapped: {path}"
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert actual == expected, f"mapped cohort hash mismatch: {path}"
+        print(f"C5_ASTERISK_MAPPED {actual} {path}", flush=True)
+
+
+def main(
+    *,
+    initial_configuration=Path(
+        "build/stage/usr/share/doc/rpt-advanced/examples/rpt_advanced.conf"
+    ),
+    radio_fixture=Path("build/chan_rpt_fixture.so"),
+    expected_libraries=None,
+) -> None:
     """! @brief Verify the real module ABI and always stop the test-owned process.
     @return None; failures raise an exception.
     """
@@ -196,9 +219,7 @@ def main() -> None:
         )
         radio_configuration = directory / "rpt_advanced.conf"
         radio_configuration.write_text(
-            Path(
-                "build/stage/usr/share/doc/rpt-advanced/examples/rpt_advanced.conf"
-            ).read_text(encoding="utf-8"),
+            initial_configuration.read_text(encoding="utf-8"),
             encoding="utf-8",
         )
         logfile = directory / "console.log"
@@ -235,6 +256,7 @@ def main() -> None:
                     if process.poll() is not None or time.monotonic() >= deadline:
                         raise RuntimeError(f"module did not start: {listing}")
                     time.sleep(0.1)
+                assert_loaded_libraries(process, expected_libraries or {})
                 assert_asl_modules_absent(configuration)
                 radio_configuration.write_text(
                     "[usb]\nfull_duplex=yes\n", encoding="utf-8"
@@ -262,13 +284,30 @@ def main() -> None:
                 # The fixture is copied only into this test's staging tree; it is
                 # not an install artifact and cannot access USB hardware.
                 shutil.copyfile(
-                    "build/chan_rpt_fixture.so",
+                    radio_fixture,
                     module_directory / "chan_rpt_fixture.so",
                 )
                 cli(configuration, "module load chan_rpt_fixture.so")
                 audio_case(configuration, radio_configuration, logfile, process)
                 announcement_case(configuration, radio_configuration, logfile, process)
                 media_case(configuration, radio_configuration, logfile, process)
+                assert_loaded_libraries(process, expected_libraries or {})
+                # Unload only after observed nonzero audio, before fixture unload/process stop.
+                cli(configuration, "module unload app_rpt_advanced.so")
+                listing = cli(configuration, "module show like app_rpt_advanced")
+                assert "0 modules loaded" in listing, (
+                    "controller must unload after audio: " + listing
+                )
+                assert process.poll() is None, (
+                    "same Asterisk must remain alive after controller unload"
+                )
+                assert "1 modules loaded" in cli(
+                    configuration, "module show like chan_rpt_fixture"
+                )
+                print(
+                    "C5_ASTERISK_AFTER_AUDIO_UNLOADED process_alive=1 fixture_loaded=1",
+                    flush=True,
+                )
                 cli(configuration, "module unload chan_rpt_fixture.so")
                 assert "0 modules loaded" in cli(
                     configuration, "module show like chan_rpt_fixture"
