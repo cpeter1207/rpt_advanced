@@ -198,6 +198,8 @@ pub(crate) struct Media {
     adaptation_witness: Option<AdaptationWitness>,
     adaptation_cut: Option<(u64, u32)>,
     adaptation_offered: bool,
+    // First source failure is terminal even while this object awaits cleanup.
+    source_error: Option<MediaError>,
     host_epoch: Option<u64>,
     discontinuity: bool,
     epoch: Option<u64>,
@@ -270,6 +272,7 @@ impl Media {
             adaptation_witness: None,
             adaptation_cut: None,
             adaptation_offered: false,
+            source_error: None,
             host_epoch: None,
             discontinuity: true,
             epoch: None,
@@ -667,12 +670,26 @@ impl Media {
         sink: *const abi::rptadv_peer_source_sink_v1,
         output: &mut abi::rptadv_peer_source_result_v1,
     ) -> Result<(), MediaError> {
+        output.progress = 0;
+        output.activity = 0;
+        output.finish_pending = 0;
+        output.state = 3;
+        output.represented_node_number = 0;
+        if let Some(error) = self.source_error {
+            return Err(error);
+        }
+        output.state = 1;
         let result = unsafe { self.read_checked(completion, sink, output) };
-        if result.is_err() {
-            // Terminal source failures end the bounded native proof even if a
-            // caller retains this object before its ordinary retirement cleanup.
+        if let Err(error) = result {
+            // An offered/refused cause is just as terminal as an unoffered
+            // witness. Never redispatch it or substitute a generic reset.
+            self.source_error = Some(error);
             self.adaptation_witness = None;
             self.completed_packet_end = None;
+            self.adaptation_cut = None;
+            self.adaptation_offered = false;
+            output.progress = 0;
+            output.state = 3;
         }
         result
     }
@@ -684,11 +701,6 @@ impl Media {
         sink: *const abi::rptadv_peer_source_sink_v1,
         output: &mut abi::rptadv_peer_source_result_v1,
     ) -> Result<(), MediaError> {
-        output.progress = 0;
-        output.activity = 0;
-        output.finish_pending = 0;
-        output.state = 1;
-        output.represented_node_number = 0;
         if completion != 0 {
             return Err(MediaError::SourceContract);
         }

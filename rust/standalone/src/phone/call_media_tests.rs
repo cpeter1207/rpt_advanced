@@ -1449,8 +1449,8 @@ unsafe extern "C" fn adaptation(context: *mut c_void, start: u64, count: u32) ->
     sink.adaptations.push((start, count, sink.ranges.len()));
     i32::from(sink.refuse_adaptation)
 }
-fn causal_read(media: &mut Media, sink: &mut Sink, now: u64) -> u32 {
-    let input = CausalSink {
+fn causal_callbacks(sink: &mut Sink, now: u64) -> CausalSink {
+    CausalSink {
         struct_size: size_of::<CausalSink>() as u32,
         abi_version: 1,
         context: ptr::from_mut(sink).cast(),
@@ -1462,7 +1462,10 @@ fn causal_read(media: &mut Media, sink: &mut Sink, now: u64) -> u32 {
         source_discontinuity: Some(discontinuity),
         digit: Some(digit),
         source_adaptation: Some(adaptation),
-    };
+    }
+}
+fn causal_read(media: &mut Media, sink: &mut Sink, now: u64) -> u32 {
+    let input = causal_callbacks(sink, now);
     let mut output = unsafe { std::mem::zeroed() };
     unsafe { media.read(0, ptr::from_ref(&input).cast(), &mut output) }.unwrap();
     output.progress
@@ -1495,13 +1498,45 @@ async fn steady_cadence_media_adaptation_survives_real_put() {
             let before = media.jitter.observe().unwrap();
             assert_eq!(before.skipped_span, 160);
             assert_eq!(media.source_end, Some(origin + 860 * 8));
+            let packet900 = origin + 900 * 8;
+            assert!(
+                media
+                    .births
+                    .iter()
+                    .flatten()
+                    .all(|(timestamp, _)| *timestamp != packet900)
+            );
             sink.refuse_adaptation = true;
             let ranges = sink.ranges.len();
             assert_eq!(causal_read(&mut media, &mut sink, base + ms * 1_000_000), 2);
             // Packet900 has entered via Media::poll before its get. The put may
             // retire skipped packets; gauges are deliberately not authority.
             let after = media.jitter.observe().unwrap();
-            assert!(after.late_drops >= before.late_drops);
+            let admitted_birth = media
+                .births
+                .iter()
+                .flatten()
+                .find(|(timestamp, _)| *timestamp == packet900)
+                .map(|(_, birth)| *birth);
+            assert!(
+                admitted_birth.is_some(),
+                "packet900 must be admitted by the production put before get900"
+            );
+            assert!(admitted_birth.unwrap() <= base + ms * 1_000_000);
+            // Exact pinned trace oracle, not production cause authority: the
+            // accepted put cleans skipped packet860 before get returns packet880.
+            assert_eq!(
+                (
+                    before.queued_packets,
+                    before.buffered_span,
+                    before.late_drops
+                ),
+                (2, 320, 0)
+            );
+            assert_eq!(
+                (after.queued_packets, after.buffered_span, after.late_drops),
+                (1, 160, 1)
+            );
             assert_eq!(sink.adaptations, [(origin + 860 * 8, 160, ranges)]);
             assert_eq!(
                 sink.ranges.len(),
@@ -1989,22 +2024,97 @@ async fn rejected_put_nonpacket_overlap_reset_and_second_advance_discard_witness
 
 #[tokio::test(flavor = "current_thread")]
 async fn terminal_source_read_error_discards_pending_native_proof() {
+    unsafe extern "C" fn reject(context: *mut c_void, start: u64, count: u32) -> i32 {
+        unsafe { adaptation(context, start, count) };
+        -1
+    }
     let providers = ProviderSet::load().unwrap();
     let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
-    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let mut media = fixture_media(&sender, jitter).await;
-    let mut sink = Sink {
-        credit: 160,
-        ..Sink::default()
-    };
-    real_native_cut(&mut media, &sender, &mut sink).await;
-    let mut output = unsafe { std::mem::zeroed() };
-    assert_eq!(
-        unsafe { media.read(1, ptr::null(), &mut output) },
-        Err(MediaError::SourceContract)
-    );
-    assert!(
-        media.adaptation_witness.is_none(),
-        "even a terminal read must not retain a reusable proof"
-    );
+    for fault in 0..7 {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut media = fixture_media(&sender, jitter).await;
+        let mut sink = Sink {
+            credit: 160,
+            ..Sink::default()
+        };
+        real_native_cut(&mut media, &sender, &mut sink).await;
+        // Preserve the original pre-offer case as well as the independently
+        // reviewed case where cause already moved from witness to refused cut.
+        if fault != 6 {
+            sink.refuse_adaptation = true;
+            assert_eq!(causal_read(&mut media, &mut sink, 1_900_000_000), 2);
+            assert!(media.adaptation_cut.is_some() && media.adaptation_offered);
+        }
+        let mut input = causal_callbacks(&mut sink, 1_900_000_000);
+        let completion = match fault {
+            0 | 6 => 1,
+            1 => {
+                input.struct_size = 71;
+                0
+            }
+            2 => {
+                input.host_clock_epoch = 8;
+                0
+            }
+            3 => {
+                input.source_adaptation = None;
+                0
+            }
+            4 => {
+                input.source_adaptation = Some(reject);
+                0
+            }
+            5 => {
+                input.audio_timed = None;
+                0
+            }
+            _ => unreachable!(),
+        };
+        let mut output = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { media.read(completion, ptr::from_ref(&input).cast(), &mut output) },
+            Err(MediaError::SourceContract),
+            "initial terminal error {fault}"
+        );
+        let counts = (
+            sink.adaptations.len(),
+            sink.discontinuities,
+            sink.gaps.len(),
+            sink.audio.len(),
+            sink.ranges.len(),
+            sink.digits.len(),
+        );
+        sink.refuse_adaptation = false;
+        let valid = causal_callbacks(&mut sink, 1_900_000_000);
+        for _ in 0..2 {
+            assert_eq!(
+                unsafe { media.read(0, ptr::from_ref(&valid).cast(), &mut output) },
+                Err(MediaError::SourceContract),
+                "terminal reread must reject without callbacks: {fault}"
+            );
+            assert_eq!(
+                (
+                    sink.adaptations.len(),
+                    sink.discontinuities,
+                    sink.gaps.len(),
+                    sink.audio.len(),
+                    sink.ranges.len(),
+                    sink.digits.len()
+                ),
+                counts,
+                "no native/generic/gap/PCM/digit dispatch after terminal error {fault}"
+            );
+            assert_eq!(
+                (
+                    output.progress,
+                    output.activity,
+                    output.finish_pending,
+                    output.state
+                ),
+                (0, 0, 0, 3)
+            );
+        }
+        assert!(media.adaptation_witness.is_none() && media.completed_packet_end.is_none());
+        assert!(media.adaptation_cut.is_none() && !media.adaptation_offered);
+    }
 }

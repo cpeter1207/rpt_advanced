@@ -2620,3 +2620,9 @@ remain unchanged, mapping adaptation to generic discontinuity. A crate-private
 causal dispatch reaches the SAME private-phone hard-retirement handler.
 No owner recovery, new readiness, collector release, graph replacement, speech
 authority, or RF permission is introduced by this prerequisite.
+
+
+The SIP Media owner latches its first terminal source-read error unchanged.
+Both unoffered witness and offered/refused cut metadata are revoked. Later reads
+return that error with terminal output before callback, source credit or polling;
+a refused native cause cannot be retried as a generic cut after an error.
