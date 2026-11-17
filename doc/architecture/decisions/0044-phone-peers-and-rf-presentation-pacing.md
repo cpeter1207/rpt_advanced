@@ -2795,3 +2795,26 @@ revokes the destination. Each cut still flushes staged output once. Same-call
 replacement retires the previous destination before exchanging queues. Private
 prompt priority and all existing age/expiry limits remain unchanged. Generic
 cuts do not qualify the separate, existing adaptation-only uplink recovery path.
+
+### Shared uninterrupted courtesy delay (2026-11-17 development checkpoint)
+
+A pending courtesy opportunity now requires an uninterrupted quiet interval for
+all selected receive sources, not only its originating source. At each controller
+sample, existing authorized local/selected-link activity cancels any pending
+opportunity after release-edge scheduling and before deadline selection. This
+makes simultaneous closure/activity ordering immaterial, including activity on
+the deadline sample. The old opportunity is discarded, not deferred or restarted;
+a later genuine close can schedule a fresh complete delay. The rule is shared by
+public peers and private phone sources without consulting their transport.
+
+The existing qualified receive/busy state is authoritative, not PCM amplitude or
+unselected-peer activity. A held authorized programme, including concealment,
+can remain busy; observing that state does not create a fresh speech onset,
+renew a hold, qualify synthetic speech, or schedule a courtesy. No new media
+provenance or authorization is inferred. Exact phone generation/retirement
+fences and the prior already-playing-tone policy remain unchanged. This
+supersedes the earlier checkpoint's preservation of unrelated pending tones
+when another selected source is actually active, not its exact-key invalidation
+rules. Controller tests cover pending public/private selection, local/linked
+activity, exact deadlines, ongoing-source closure ordering, nonselected activity,
+and later fresh closures. Physical/RF acceptance remains unperformed.

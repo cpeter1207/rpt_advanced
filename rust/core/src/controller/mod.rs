@@ -824,6 +824,14 @@ impl NodeController {
                 );
             }
         }
+        // All selected, authorized receive activity shares the same quiet-delay
+        // rule. Do this after release scheduling so another source's closure
+        // cannot survive ongoing audio, and before readiness at the deadline.
+        // Held programme/PLC can remain busy; this neither creates speech nor
+        // renews its hold. Nonselected source_activity is not audible here.
+        if receive {
+            self.courtesy.cancel_pending();
+        }
         if self.suppress_release && !receive && (self.receiver || self.linked) {
             // Clear only the final suppressed release, not other ongoing traffic's opportunity.
             let _ = self.courtesy.pop();

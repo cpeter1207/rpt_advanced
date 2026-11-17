@@ -1,4 +1,4 @@
-//! Last-unkey courtesy selection with source-specific rekey cancellation.
+//! Last-unkey courtesy selection with a shared uninterrupted quiet delay.
 use super::PreparedMedia;
 use crate::link::PhoneCourtesyKey;
 
@@ -78,6 +78,10 @@ impl CourtesyPlanner {
         key.get_mut(..source.len())?
             .copy_from_slice(source.as_bytes());
         Some(key)
+    }
+    /// Audible receive activity invalidates every waiting opportunity, not active media.
+    pub fn cancel_pending(&mut self) {
+        self.pending = None;
     }
     pub fn cancel(&mut self, source: &str) {
         let Some(key) = Self::identity(source) else {

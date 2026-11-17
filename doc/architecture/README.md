@@ -809,3 +809,10 @@ from a malformed required audio descriptor: absence publishes a null host getter
 and preserves ordinary new-host/old-adapter behavior; malformed preparation
 fails. An advertised getter/read failure still never selects the legacy axis.
 SDK mandatory audio-function validation remains authoritative.
+
+Pending local courtesy uses one uninterrupted quiet-delay rule across local,
+public-link and phone receive sources. Any selected authorized receive activity
+cancels the old pending opportunity, including at its deadline; a later genuine
+close may schedule a fresh delay. Held/PLC busy state does not create or renew
+speech, and active-tone and exact phone fence policies are unchanged. See the
+shared uninterrupted courtesy delay checkpoint in ADR 0044.

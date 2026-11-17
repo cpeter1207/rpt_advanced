@@ -2900,7 +2900,7 @@ fn kerchunk_unkeys_immediately_without_hang_or_release_messages() {
 }
 
 #[test]
-fn final_kerchunk_discards_an_overlapping_sources_waiting_courtesy() {
+fn overlapping_activity_discards_earlier_courtesy_before_final_kerchunk() {
     for local_last in [false, true] {
         let (mut node, _) = NodeController::new(
             ControllerSettings {
@@ -2933,8 +2933,8 @@ fn final_kerchunk_discards_an_overlapping_sources_waiting_courtesy() {
             node.link_unkeyed("peer", "", true);
         }
         assert!(
-            node.courtesy.pending(),
-            "earlier release has a waiting tone"
+            !node.courtesy.pending(),
+            "ongoing audio already cancelled the earlier release"
         );
         assert!(
             !node.process_event(false, false),
@@ -4024,4 +4024,123 @@ fn phone_courtesy_exact_active_cancel_preserves_unrelated_pending_and_public_act
     node.phone_speech_closed(fences[1].key, false);
     node.phone_speech_rekeyed(fences[1].key);
     assert_eq!(phone_courtesy_tick(&mut node, &fences), 0.2);
+}
+
+#[test]
+fn pending_courtesy_requires_an_uninterrupted_quiet_delay() {
+    for phone in [false, true] {
+        for local in [false, true] {
+            for elapsed in [0, 47, 48] {
+                let fence = phone_courtesy_fence(7);
+                let fences = std::slice::from_ref(&fence);
+                let (mut node, _) = NodeController::new(
+                    ControllerSettings {
+                        courtesy_delay_ms: 1,
+                        ..ControllerSettings::default()
+                    },
+                    vec![],
+                    vec![],
+                    CourtesySettings {
+                        phone: Some(media(0.4, 48)),
+                        link: Some(media(0.4, 48)),
+                        ..CourtesySettings::default()
+                    },
+                )
+                .unwrap();
+                if phone {
+                    node.phone_speech_closed(fence.key, false);
+                } else {
+                    node.link_unkeyed("old", "", false);
+                }
+                for _ in 0..elapsed {
+                    assert_eq!(phone_courtesy_tick(&mut node, fences), 0.0);
+                }
+                // Selected, authorized source activity, not an amplitude test.
+                // Arrival exactly at the deadline must win before tone selection.
+                let mut audio = [0.0];
+                node.process_audio_with_parrot(
+                    local,
+                    !local,
+                    true,
+                    &[],
+                    &mut audio,
+                    ParrotOutput {
+                        phone_courtesy: fences,
+                        samples: &mut [0.0],
+                        active: &mut false,
+                        replies: None,
+                        regeneration: None,
+                        local_media: crate::link::LocalMedia::default(),
+                    },
+                );
+                assert!(
+                    !node.courtesy.pending(),
+                    "phone={phone}, local={local}, elapsed={elapsed}"
+                );
+                // No automatic restart of the old source's opportunity.
+                for _ in 0..96 {
+                    assert_eq!(phone_courtesy_tick(&mut node, fences), 0.0);
+                }
+                // A subsequent genuine closure gets a fresh, complete delay.
+                node.link_unkeyed("new", "", false);
+                for _ in 0..48 {
+                    assert_eq!(phone_courtesy_tick(&mut node, fences), 0.0);
+                }
+                assert_eq!(phone_courtesy_tick(&mut node, fences), 0.4);
+            }
+        }
+    }
+}
+
+#[test]
+fn pending_courtesy_cancels_closures_during_existing_audio_not_nonselected_activity() {
+    for selected in [false, true] {
+        let fence = phone_courtesy_fence(7);
+        let (mut node, _) = NodeController::new(
+            ControllerSettings {
+                courtesy_delay_ms: 1,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings {
+                phone: Some(media(0.4, 48)),
+                ..CourtesySettings::default()
+            },
+        )
+        .unwrap();
+        for tick in 0..2 {
+            if tick == 1 {
+                // The other source closes after the busy source was already
+                // observed. Iteration order must not preserve this old tone.
+                node.phone_speech_closed(fence.key, false);
+            }
+            node.process_audio_with_parrot(
+                false,
+                selected,
+                true,
+                &[],
+                &mut [0.0],
+                ParrotOutput {
+                    phone_courtesy: std::slice::from_ref(&fence),
+                    samples: &mut [0.0],
+                    active: &mut false,
+                    replies: None,
+                    regeneration: None,
+                    local_media: crate::link::LocalMedia::default(),
+                },
+            );
+        }
+        assert_eq!(node.courtesy.pending(), !selected);
+        for _ in 0..47 {
+            assert_eq!(
+                phone_courtesy_tick(&mut node, std::slice::from_ref(&fence)),
+                0.0
+            );
+        }
+        assert_eq!(
+            phone_courtesy_tick(&mut node, std::slice::from_ref(&fence)),
+            if selected { 0.0 } else { 0.4 }
+        );
+    }
 }
