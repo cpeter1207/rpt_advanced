@@ -2669,3 +2669,11 @@ Topology/policy replacement uses normal cancellation rather than the private
 preservation route. No public API, ABI, PCM queue, worker, timer or RF permission
 is added. This local checkpoint still requires independent review and complete
 platform, packaging, coverage, hosted and hardware qualification.
+
+Recovery retains the actual policy-authorized media attachment, which may differ
+from the account's bound/default local node. The outer grammar and inner command
+collector retain their existing bound-node authority; neither is moved to the
+media destination. Host admission validates both sides of the target policy,
+and a committed configuration replacement retires calls before publication.
+Detach or replacement invalidates the exact origin epoch, including a queued
+approval; a refused attachment replacement does not change the retained target.

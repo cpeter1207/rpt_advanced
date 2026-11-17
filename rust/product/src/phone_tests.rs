@@ -1373,6 +1373,15 @@ pub(crate) fn recovery_snapshot(
 
 #[test]
 fn recovery_approval_requires_both_current_collectors_and_exact_attachment() {
+    check_recovery_collectors_and_attachment("1000");
+}
+
+#[test]
+fn recovery_approval_uses_bound_collectors_for_other_hosted_attachment() {
+    check_recovery_collectors_and_attachment("2000");
+}
+
+fn check_recovery_collectors_and_attachment(attachment: &str) {
     use crate::link::session::{SerialSession, tests::Input};
     use crate::services::SourceTimeClock;
     for blocked in [
@@ -1381,6 +1390,9 @@ fn recovery_approval_requires_both_current_collectors_and_exact_attachment() {
         "unknown",
         "detached",
         "queued_detach",
+        "replacement",
+        "queued_replacement",
+        "attachment_busy",
         "revoked",
         "foreign_reply",
         "none",
@@ -1391,7 +1403,7 @@ fn recovery_approval_requires_both_current_collectors_and_exact_attachment() {
             rpt_advanced_core::config::PhoneAccountProtocol::Sip,
         );
         session.set_source_clock(SourceTimeClock::new(std::time::Instant::now()).unwrap());
-        calls.attach(&source, &reply, "1000").unwrap();
+        calls.attach(&source, &reply, attachment).unwrap();
         calls.reconcile_collections(|_, _, _| Some(false));
         session.step(0).unwrap();
         let old = calls.prepare_media(&source, &reply, None).unwrap();
@@ -1415,12 +1427,28 @@ fn recovery_approval_requires_both_current_collectors_and_exact_attachment() {
             "outer" => {
                 calls.actions(&source, &reply, '*', 4).unwrap();
             }
-            "detached" | "queued_detach" => {
-                if blocked == "queued_detach" {
+            "detached" | "queued_detach" | "replacement" | "queued_replacement" => {
+                if blocked.starts_with("queued_") {
                     calls.reconcile_collections(|_, _, _| Some(false));
                 }
                 calls.detach_media(&source, &reply);
-                calls.attach(&source, &reply, "1000").unwrap();
+                let target = if blocked.ends_with("replacement") {
+                    if attachment == "1000" { "2000" } else { "1000" }
+                } else {
+                    attachment
+                };
+                calls.attach(&source, &reply, target).unwrap();
+            }
+            "attachment_busy" => {
+                let other = if attachment == "1000" { "2000" } else { "1000" };
+                assert_eq!(
+                    calls.attach(&source, &reply, other),
+                    Err(Error::Reservation)
+                );
+                assert_eq!(
+                    calls.attachments(attachment),
+                    [(source.clone(), reply.clone())]
+                );
             }
             "revoked" => reply.retire(),
             "foreign_reply" => {
@@ -1436,7 +1464,11 @@ fn recovery_approval_requires_both_current_collectors_and_exact_attachment() {
             _ => {}
         }
         if blocked != "foreign_reply" {
-            calls.reconcile_collections(|_, seen_source, seen_reply| {
+            calls.reconcile_collections(|authority, seen_source, seen_reply| {
+                assert_eq!(
+                    authority, "1000",
+                    "collector remains at the bound command node"
+                );
                 assert_eq!((seen_source, seen_reply), (&source, &reply));
                 match blocked {
                     "inner" => Some(true),
@@ -1447,9 +1479,9 @@ fn recovery_approval_requires_both_current_collectors_and_exact_attachment() {
         }
         let _ = session.step(5);
         assert_eq!(
-            calls.media_refresh_nodes() == ["1000"],
-            blocked == "none",
-            "{blocked}"
+            calls.media_refresh_nodes() == [attachment],
+            matches!(blocked, "none" | "attachment_busy"),
+            "attachment={attachment} blocked={blocked}"
         );
         assert!(calls.event().is_none(), "no fabricated digit");
         assert!(!old.active());

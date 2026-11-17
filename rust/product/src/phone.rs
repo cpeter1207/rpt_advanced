@@ -689,9 +689,12 @@ impl PhoneCalls {
                 }
             }
             if let Some(owner) = call.owner.as_mut() {
+                // Host may authorize a different hosted media destination. The
+                // bound command collectors above remain authoritative; changing
+                // the retained attachment cancels the owner's exact origin epoch.
                 if let Some(ticket) = recovery
                     && call.collection_released
-                    && call.attachment.as_deref() == Some(call.local.as_str())
+                    && call.attachment.is_some()
                 {
                     owner.approve_recovery(&reply, ticket);
                 }

@@ -1039,13 +1039,29 @@ fn phone_rearm_retains_attachment_after_callback_busy() {
 
 #[test]
 fn host_refresh_recovers_exact_approved_generation_after_busy() {
+    check_host_recovery_after_busy("1000");
+}
+
+#[test]
+fn host_refresh_recovers_other_hosted_attachment_after_busy() {
+    check_host_recovery_after_busy("2000");
+}
+
+fn check_host_recovery_after_busy(attachment: &str) {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    for cancellation in ["none", "retire", "same_node", "reload"] {
+    for cancellation in [
+        "none",
+        "retire",
+        "same_node",
+        "other_node",
+        "reload",
+        "policy_reload",
+    ] {
         let (mut host, _) = policy_host(
             "1000",
-            "protocol=sip\nattach_local_nodes=1000\n",
+            "protocol=sip\nattach_local_nodes=1000\t2000\n",
             "phone_allow_accounts=provider\n",
         );
         let (phone, state) = crate::link::session::tests::phone_source_peer_at_rate(8000);
@@ -1059,13 +1075,14 @@ fn host_refresh_recovers_exact_approved_generation_after_busy() {
             .unwrap();
         finish_prompt(&mut host, &source, &reply);
         host.reconcile_private_collections(clock());
-        host.attach_phone(&source, &reply, "1000", clock()).unwrap();
+        host.attach_phone(&source, &reply, attachment, clock())
+            .unwrap();
         pump_until(&mut host, |host| {
             crate::phone::tests::recovery_snapshot(&host.phone_calls, &source)
                 .is_some_and(|(_, active, _, _)| active)
                 && host
                     .runtime
-                    .node("1000")
+                    .node(attachment)
                     .unwrap()
                     .status(10)
                     .retiring
@@ -1077,13 +1094,13 @@ fn host_refresh_recovers_exact_approved_generation_after_busy() {
             &host
                 .leases
                 .iter()
-                .find(|(name, _)| name == "1000")
+                .find(|(name, _)| name == attachment)
                 .unwrap()
                 .1,
         );
         assert!(lease.lock().unwrap().quiesce());
         let mut owners = lease.lock().unwrap().owners.take().unwrap();
-        let old_graph = host.runtime.node("1000").unwrap().status(10).active;
+        let old_graph = host.runtime.node(attachment).unwrap().status(10).active;
         state.lock().unwrap().source_adaptation = Some((1000, 160));
         pump_until(&mut host, |_| {
             state.lock().unwrap().source_adaptation.is_none()
@@ -1108,17 +1125,21 @@ fn host_refresh_recovers_exact_approved_generation_after_busy() {
         // Actual collector reconciliation enqueues approval; pump reads before acknowledging.
         host.phone_calls
             .reconcile_collections(|local, source, reply| {
+                assert_eq!(
+                    local, "1000",
+                    "command collector is not the media destination"
+                );
                 host.runtime
                     .node(local)?
                     .links()
                     .phone_collection_pending(source, reply)
             });
         pump_until(&mut host, |host| {
-            host.phone_calls.media_refresh_nodes() == ["1000"]
+            host.phone_calls.media_refresh_nodes() == [attachment]
         });
         let held = owners.1.acquire().unwrap();
         assert!(matches!(
-            host.refresh_inputs("1000", clock(), true),
+            host.refresh_inputs(attachment, clock(), true),
             Err(RuntimeError::Busy)
         ));
         let (discarded, active, requested, ready) =
@@ -1126,25 +1147,34 @@ fn host_refresh_recovers_exact_approved_generation_after_busy() {
         assert_ne!(discarded, old_generation);
         assert!(!active && requested && ready);
         assert_eq!(
-            host.runtime.node("1000").unwrap().status(10).active,
+            host.runtime.node(attachment).unwrap().status(10).active,
             old_graph
         );
         assert_eq!(
-            host.phone_calls.attachments("1000"),
+            host.phone_calls.attachments(attachment),
             [(source.clone(), reply.clone())]
         );
         match cancellation {
             "retire" => host.phone_calls.retire_media(&source, &reply).unwrap(),
-            "same_node" => {
+            "same_node" | "other_node" => {
                 host.phone_calls.detach_media(&source, &reply);
-                host.phone_calls.attach(&source, &reply, "1000").unwrap();
+                let target = if cancellation == "other_node" {
+                    if attachment == "1000" { "2000" } else { "1000" }
+                } else {
+                    attachment
+                };
+                host.phone_calls.attach(&source, &reply, target).unwrap();
             }
-            "reload" => {
+            "reload" | "policy_reload" => {
                 let revision = host.runtime.revision();
                 host.reload(
                     policy_document(
                         "1000",
-                        "protocol=sip\nattach_local_nodes=1000\n",
+                        if cancellation == "policy_reload" {
+                            "protocol=sip\nattach_local_nodes=\n"
+                        } else {
+                            "protocol=sip\nattach_local_nodes=1000\t2000\n"
+                        },
                         "phone_allow_accounts=provider\n",
                     ),
                     clock(),
@@ -1155,12 +1185,20 @@ fn host_refresh_recovers_exact_approved_generation_after_busy() {
                     "exercise committed reload"
                 );
                 assert!(reply.ended());
+                if cancellation == "policy_reload" {
+                    assert!(
+                        !host
+                            .runtime
+                            .document()
+                            .phone_local_attachment_allowed(source.account(), attachment)
+                    );
+                }
             }
             _ => {}
         }
         drop(held);
         if cancellation == "none" {
-            host.refresh_inputs("1000", clock(), true).unwrap();
+            host.refresh_inputs(attachment, clock(), true).unwrap();
             pump_until(&mut host, |host| {
                 drop(owners.0.acquire());
                 drop(owners.1.acquire());
