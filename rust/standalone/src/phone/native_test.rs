@@ -57,7 +57,7 @@ impl NativeRtp {
             encoder: AudioCodec::load(AudioProfile::Mulaw)?,
             socket,
             _providers: providers,
-            runtime: runtime,
+            runtime,
         })
     }
     fn packet(&self, seq: u16, ts: u32, pt: u8, payload: &[u8]) -> Result<(), MediaError> {

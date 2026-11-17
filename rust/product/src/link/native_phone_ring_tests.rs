@@ -286,6 +286,9 @@ fn drain_to(input: &mut media::PhoneMediaInput, target: u64) {
 /// Preserve the 44th full decision's native advance but stop the consumer
 /// exactly at the full product ring. Only the consumer will create credit.
 fn stalled(discard: u64) -> (Call, media::PhoneMediaInput, u64, Credit) {
+    stalled_with_pcm(discard, false)
+}
+fn stalled_with_pcm(discard: u64, speech: bool) -> (Call, media::PhoneMediaInput, u64, Credit) {
     let mut call = Call::event_control();
     for turn in 0..discard {
         send(turn, &[0.; 160]);
@@ -297,7 +300,15 @@ fn stalled(discard: u64) -> (Call, media::PhoneMediaInput, u64, Credit) {
     credits();
     call.c.set_attached(true);
     for turn in discard..=45_u64 {
-        send(turn, &[0.; 160]);
+        let mut pcm = [0.; 160];
+        if speech && turn >= 17 {
+            let clip = include_bytes!("../tests/fixtures/phone-speech/yes-48000-s16le.pcm");
+            for (i, sample) in pcm.iter_mut().enumerate() {
+                let j = ((turn as usize - 17) * 160 + i) * 12;
+                *sample = f32::from(i16::from_le_bytes([clip[j], clip[j + 1]])) / 32768.;
+            }
+        }
+        send(turn, &pcm);
         for part in [0, PERIOD / 2] {
             let now = BASE + turn * PERIOD + part;
             step(&mut call.s, now);
@@ -387,6 +398,10 @@ fn native_ring_retired_partial_suffix_never_enters_replacement() {
                 call.c.set_attached(false);
             }
             call.c.retire_media();
+            assert!(
+                call.reply.phone_media_authorized() && !call.reply.ended(),
+                "revoking the selected generation is not a mailbox logout"
+            );
             if action == "replace" {
                 let generation = media::tests::input_snapshot(&old).0;
                 let replacement = call.adopt(now + 1_000_000);
@@ -543,3 +558,6 @@ fn native_ring_full_packet_skip_cannot_preserve_the_old_generation() {
     assert!(!input.active() && input.render_timed_sample().is_none());
     assert!(!call.c.media_rearm_ready() && !call.reply.ended());
 }
+
+#[path = "native_phone_expiry_tests.rs"]
+mod expiry;
