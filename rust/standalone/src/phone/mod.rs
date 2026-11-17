@@ -10,3 +10,7 @@ pub(crate) mod registration;
 pub(crate) mod sip_test_registrar;
 
 pub(crate) mod call_media;
+
+/// Opt-in UDP and released-provider fixture for downstream source-owner tests.
+#[cfg(feature = "native-phone-test")]
+pub mod native_test;

@@ -440,6 +440,16 @@ impl<const N: usize> SourceIngress<N> {
 
 #[cfg(test)]
 mod tests {
+    impl<const N: usize> super::SourceIngress<N> {
+        /// Read-only projection of the last actual source-detector mute spans.
+        pub(crate) fn detected_mute_ranges(&self) -> Vec<(u64, u64)> {
+            self.spans[..self.span_count]
+                .iter()
+                .map(|s| (s.start, s.end))
+                .collect()
+        }
+    }
+
     use super::super::tests::five_tone;
     use super::*;
     use crate::link::ring::{InboundPolicy, InboundRing, tests::delayed_mute_endpoints};

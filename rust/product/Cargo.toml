@@ -22,7 +22,7 @@ url = "2.5"
 [dev-dependencies]
 rptadv-jitter-client = { path = "../jitter-client" }
 libc = "0.2"
-rpt-advanced-standalone = { path = "../standalone" }
+rpt-advanced-standalone = { path = "../standalone", features = ["native-phone-test"] }
 rptadv-file-adapter = { path = "../file-adapter" }
 rptadv-speech-adapter = { path = "../speech-adapter" }
 rptadv-control-standalone-adapter = { path = "../control-standalone-adapter" }

@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+native-phone-test = []
+
 [[bin]]
 name = "rpt-advanced"
 path = "src/main.rs"

@@ -2183,3 +2183,108 @@ fn recovery_shared_and_ingress_state_sizes_are_bounded() {
         std::mem::size_of::<Ingress>()
     );
 }
+
+/// A counted prefix is loss duration, not an RTP latency-trim operation.
+#[test]
+fn counted_eighty_sample_prefix_preserves_duration_in_the_voiced_product_ring() {
+    for mode in ["full", "counted-prefix", "emitted-suffix"] {
+        let call = reply();
+        let (mut ingress, mut input, shared) = prepare_voiced(
+            call.clone(),
+            8000,
+            NonZeroU32::MIN,
+            None,
+            PhoneSpeechSettings::default(),
+        )
+        .unwrap();
+        adopt(&mut ingress, 0, reference());
+        // Isolate the ring/ledger seam from detector decisions. Only the initial
+        // original span receives a voice decision; synthetic input cannot add one.
+        ingress.speech = None;
+        assert_eq!(ingress.audio(0, &[0.25; 160], Some(birth(10))), Ok(160));
+        ingress.voice_decision(Some(159));
+        let hold = (ingress.last_voice, ingress.voice_until);
+        let generation = shared.generation;
+        let mut cursor = 160;
+        let mut peak = input.available();
+        for _ in 0..120 {
+            let before = input.available();
+            let prior_age = shared.bound(cursor - 1).unwrap();
+            let duration = if mode == "emitted-suffix" { 80 } else { 160 };
+            if mode == "counted-prefix" {
+                assert_eq!(ingress.gap(cursor, 80), Ok(80));
+                assert_eq!(input.available(), before + 80);
+                assert_eq!(shared.bound(cursor).unwrap(), prior_age);
+                assert!(ingress.analysis_gap);
+                assert_eq!((ingress.last_voice, ingress.voice_until), hold);
+                assert_eq!(
+                    ingress.audio(cursor + 80, &[0.25; 80], Some(birth(20))),
+                    Ok(80)
+                );
+            } else {
+                assert_eq!(
+                    ingress.audio(cursor, &[0.25; 160][..duration], Some(birth(20))),
+                    Ok(duration)
+                );
+            }
+            assert_eq!(
+                input.available(),
+                before + duration as u64,
+                "80 gap + 80 suffix retains the same duration as a full 160-sample packet"
+            );
+            assert_eq!(shared.generation, generation);
+            assert!(shared.active());
+            assert_eq!((ingress.last_voice, ingress.voice_until), hold);
+            cursor += duration as u64;
+            assert_eq!(shared.bound(cursor - 1).unwrap().not_after_ns, 20);
+            peak = peak.max(input.available());
+            assert!(peak <= 2400, "bounded 300 ms ring, peak={peak}");
+            for _ in 0..960 {
+                let _ = input.render_timed_sample();
+            }
+        }
+        eprintln!(
+            "mode={mode} accepted_duration={} peak={peak} queued={}",
+            cursor - 160,
+            input.available()
+        );
+        // Stop the paced consumer: both PCM and counted loss must backpressure,
+        // rather than crediting a skip or growing an unbounded side queue.
+        loop {
+            let accepted = ingress
+                .audio(cursor, &[0.25; 160], Some(birth(20)))
+                .unwrap();
+            cursor += accepted as u64;
+            if accepted == 0 {
+                break;
+            }
+            assert!(input.available() <= 2400);
+        }
+        let full = input.available();
+        assert_eq!(ingress.gap(cursor, 80), Ok(0));
+        assert_eq!(ingress.audio(cursor, &[0.25; 80], Some(birth(20))), Ok(0));
+        assert_eq!(input.available(), full);
+        assert_eq!(ingress.cursor, Some(cursor));
+        shared.retire();
+        adopt(&mut ingress, cursor, reference());
+        assert_eq!(ingress.gap(cursor, 80), Ok(80));
+        assert_eq!(
+            ingress.audio(cursor + 80, &[0.25; 80], Some(birth(20))),
+            Ok(80)
+        );
+        assert!(!shared.active());
+        assert_eq!(shared.generation, generation);
+        assert_eq!(input.render_timed_sample(), None);
+    }
+}
+
+pub(in crate::link::private_phone) fn hold_snapshot(ingress: &Ingress) -> (Option<u64>, u64) {
+    (ingress.last_voice, ingress.voice_until)
+}
+
+pub(in crate::link::private_phone) fn ring_bound(
+    ingress: &Ingress,
+    frame: u64,
+) -> Option<SourceTimeBound> {
+    ingress.shared.bound(frame)
+}

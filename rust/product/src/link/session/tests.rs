@@ -12,8 +12,14 @@ pub(crate) enum Input {
     RadioKey,
     RadioUnkey,
 }
+pub(crate) type NativeReader = unsafe fn(
+    u32,
+    *const abi::rptadv_peer_source_sink_v1,
+    *mut abi::rptadv_peer_source_result_v1,
+) -> i32;
 #[derive(Default)]
 pub(crate) struct State {
+    pub(crate) native_reader: Option<NativeReader>,
     pub(crate) rate: u32,
     local: Option<Box<str>>,
     pub(crate) capabilities: u32,
@@ -1643,6 +1649,10 @@ unsafe extern "C" fn read_source(
     let result = unsafe { &mut *result };
     state.source_reads += 1;
     state.source_reference = Some((sink.host_clock_epoch, sink.reference_now_ns));
+    if let Some(read) = state.native_reader {
+        drop(state);
+        return unsafe { read(drained, sink, result) };
+    }
     if state.source_closed {
         result.state = 3;
         return 0;

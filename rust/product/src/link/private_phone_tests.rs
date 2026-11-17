@@ -3612,3 +3612,6 @@ fn downlink_destination_generic_cut_never_reopens_uplink_or_revoked_destination(
         }
     }
 }
+
+#[path = "native_phone_ring_tests.rs"]
+mod native_ring;
