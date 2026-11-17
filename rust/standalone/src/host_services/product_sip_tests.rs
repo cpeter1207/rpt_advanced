@@ -823,7 +823,7 @@ extern "C" fn c5_read_notice() {
         C5_CLOCK_VIOLATION.store(true, Ordering::Release);
     }
     C5_CLOCK_READS.fetch_add(1, Ordering::Relaxed);
-    let mut name = [0_i8; 16];
+    let mut name = [0 as libc::c_char; 16];
     // SAFETY: writable fixed Linux pthread-name buffer for this current thread.
     let status =
         unsafe { libc::pthread_getname_np(libc::pthread_self(), name.as_mut_ptr(), name.len()) };

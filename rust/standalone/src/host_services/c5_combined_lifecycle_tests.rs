@@ -152,7 +152,7 @@ extern "C" fn read_notice() {
         VIOLATION.store(true, Ordering::Release);
     }
     CLOCK_READS.fetch_add(1, Ordering::Relaxed);
-    let mut name = [0_i8; 16];
+    let mut name = [0 as libc::c_char; 16];
     if unsafe { libc::pthread_getname_np(libc::pthread_self(), name.as_mut_ptr(), name.len()) } == 0
     {
         match unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_bytes() {
