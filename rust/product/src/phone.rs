@@ -424,6 +424,22 @@ impl PhoneCalls {
         call.owner.as_mut().ok_or(Error::Admission)?.retire_media();
         Ok(())
     }
+    /// Only exact acknowledged recovery may survive the host's replacement cut.
+    pub(crate) fn retire_for_graph_replacement(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+    ) -> Result<(), Error> {
+        let call = self.current(source, reply)?;
+        if call.attachment.is_none() || call.mailbox.is_none() || !call.collection_released {
+            return self.retire_media(source, reply);
+        }
+        call.owner
+            .as_mut()
+            .ok_or(Error::Admission)?
+            .retire_for_graph_replacement();
+        Ok(())
+    }
     /// Reserve one media-authorized call per hosted node; repeating the
     /// same reservation is idempotent. This does not authorize the target policy.
     pub(crate) fn attach(
@@ -470,6 +486,10 @@ impl PhoneCalls {
                 Err(Error::Reservation)
             };
         }
+        call.owner
+            .as_ref()
+            .expect("checked owner")
+            .set_attached(true);
         call.attachment = Some(target.to_owned());
         Ok(true)
     }
@@ -477,6 +497,7 @@ impl PhoneCalls {
         if let Ok(call) = self.current(source, reply) {
             call.attachment = None;
             if let Some(owner) = call.owner.as_mut() {
+                owner.set_attached(false);
                 owner.retire_media();
             }
         }
@@ -638,9 +659,14 @@ impl PhoneCalls {
         mut pending: impl FnMut(&str, &PhoneSource, &PeerReply) -> Option<bool>,
     ) {
         for call in &mut self.calls {
-            if !call.collection_dirty {
+            let recovery = call
+                .owner
+                .as_ref()
+                .and_then(PrivatePhoneControl::recovery_request);
+            if !call.collection_dirty && recovery.is_none() {
                 continue;
             }
+            let dirty = call.collection_dirty;
             call.collection_dirty = false;
             let reply = call.signals.reply_target();
             if !reply.phone_media_authorized() {
@@ -663,8 +689,16 @@ impl PhoneCalls {
                 }
             }
             if let Some(owner) = call.owner.as_mut() {
-                call.collection_released = owner.collection_ended(&reply);
-                call.collection_dirty = !call.collection_released;
+                if let Some(ticket) = recovery
+                    && call.collection_released
+                    && call.attachment.as_deref() == Some(call.local.as_str())
+                {
+                    owner.approve_recovery(&reply, ticket);
+                }
+                if dirty {
+                    call.collection_released = owner.collection_ended(&reply);
+                    call.collection_dirty = !call.collection_released;
+                }
             }
         }
     }

@@ -25,7 +25,7 @@ use std::{
     num::NonZeroU32,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -34,6 +34,77 @@ use std::{
 pub(crate) mod media;
 
 const BLOCK: usize = 960;
+
+/// Coherent identity of one source request, never a digit or a media generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RecoveryTicket {
+    revision: NonZeroU32,
+    cancellation_epoch: NonZeroU32,
+}
+impl RecoveryTicket {
+    fn packed(self) -> u64 {
+        (u64::from(self.cancellation_epoch.get()) << 32) | u64::from(self.revision.get())
+    }
+    fn unpack(value: u64) -> Option<Self> {
+        Some(Self {
+            revision: NonZeroU32::new(value as u32)?,
+            cancellation_epoch: NonZeroU32::new((value >> 32) as u32)?,
+        })
+    }
+}
+
+/// Setup-allocated source publication; control alone advances cancellation.
+pub(super) struct SourceReady {
+    revision: AtomicU32,
+    request: AtomicU64,
+    cancellation_epoch: AtomicU32,
+    attached: AtomicBool,
+}
+impl SourceReady {
+    fn new() -> Self {
+        Self {
+            revision: AtomicU32::new(0),
+            request: AtomicU64::new(0),
+            cancellation_epoch: AtomicU32::new(1),
+            attached: AtomicBool::new(false),
+        }
+    }
+    fn epoch(&self) -> Option<NonZeroU32> {
+        NonZeroU32::new(self.cancellation_epoch.load(Ordering::Acquire))
+    }
+    fn invalidate(&self) {
+        // One control writer; zero is permanent exhaustion, never an ABA epoch.
+        let next = self
+            .epoch()
+            .and_then(|e| e.get().checked_add(1))
+            .unwrap_or(0);
+        self.cancellation_epoch.store(next, Ordering::Release);
+        self.request.store(0, Ordering::Release);
+        // Existing settled digit readiness remains valid for ordinary replacement.
+        // A recovery revision cannot authorize it after its exact request is erased.
+    }
+}
+
+/// Captured at preparation, not recaptured when an old origin is cut.
+pub(super) struct MediaOrigin {
+    revision: NonZeroU32,
+    epoch: NonZeroU32,
+    source: Arc<SourceReady>,
+}
+impl MediaOrigin {
+    fn current(&self) -> bool {
+        self.source.epoch() == Some(self.epoch)
+    }
+}
+
+struct RecoveryCut {
+    ticket: RecoveryTicket,
+    reference: SourceTimeReference,
+    start: u64,
+    count: usize,
+    fresh: bool,
+    approved: bool,
+}
 
 /// Private revision only: typed call/account/actual-ingress fences stay independent.
 /// None is terminal exhaustion, never a wrapping generation.
@@ -74,6 +145,7 @@ enum PrivateCommand {
     Reply(PrivatePhoneReply),
     Media(Box<media::Ingress>),
     CollectionEnded(NonZeroU32),
+    Recover(RecoveryTicket),
 }
 
 /// Unpublished source endpoint owned by its graph candidate, not the call queue.
@@ -84,10 +156,11 @@ pub(crate) struct PrivatePhoneControl {
     replies: Producer<PrivateCommand>,
     digits: Consumer<PrivateDigit>,
     consumed_revision: Option<NonZeroU32>,
+    approved_recovery: Option<RecoveryTicket>,
     reply: PeerReply,
     wake: PeerWake,
     stop: Arc<AtomicBool>,
-    source_ready: Arc<AtomicU32>,
+    source_ready: Arc<SourceReady>,
     rate: u32,
     source_media: bool,
     digit_mode: PhoneDigitMode,
@@ -175,16 +248,23 @@ impl PrivatePhoneControl {
         // publishes the exact settled cut, including resets without a digit.
         // Initial preparation remains inert until that owner validates it.
         let revision = if self.reply.phone_outgoing() {
-            NonZeroU32::new(self.source_ready.load(Ordering::Acquire))
+            NonZeroU32::new(self.source_ready.revision.load(Ordering::Acquire))
         } else {
-            self.consumed_revision
+            self.acknowledged_recovery()
+                .map(|t| t.revision)
+                .or(self.consumed_revision)
         }
         .unwrap_or(NonZeroU32::MIN);
+        let origin = MediaOrigin {
+            revision,
+            epoch: self.source_ready.epoch().ok_or(Error::Admission)?,
+            source: Arc::clone(&self.source_ready),
+        };
         let (ingress, input, shared) = match speech {
             Some(settings) => {
-                media::prepare_voiced(self.reply.clone(), self.rate, revision, processor, settings)
+                media::prepare_voiced(self.reply.clone(), self.rate, origin, processor, settings)
             }
-            None => media::prepare(self.reply.clone(), self.rate, revision, processor),
+            None => media::prepare(self.reply.clone(), self.rate, origin, processor),
         }?;
         self.media = Some(shared);
         Ok((PreparedPhoneMedia(ingress), input))
@@ -214,11 +294,12 @@ impl PrivatePhoneControl {
     }
     /// Rearm only after the serial owner has acknowledged this exact source cut.
     pub(crate) fn media_rearm_ready(&self) -> bool {
-        let ready = self.source_ready.load(Ordering::Acquire);
+        let ready = self.source_ready.revision.load(Ordering::Acquire);
         if self.reply.phone_outgoing() {
             ready != 0
         } else {
-            ready == self.consumed_revision.unwrap_or(NonZeroU32::MIN).get()
+            self.acknowledged_recovery().is_some()
+                || ready == self.consumed_revision.unwrap_or(NonZeroU32::MIN).get()
         }
     }
     pub(crate) fn media_occupied(&self) -> bool {
@@ -228,10 +309,55 @@ impl PrivatePhoneControl {
         self.wake.clone()
     }
     pub(crate) fn retire_media(&mut self) {
+        self.source_ready.invalidate();
+        self.approved_recovery = None;
+        self.retire_generation();
+    }
+    fn retire_generation(&mut self) {
         if let Some(media) = self.media.take() {
             media.retire();
         }
         self.wake.notify();
+    }
+    pub(crate) fn set_attached(&self, attached: bool) {
+        self.source_ready
+            .attached
+            .store(attached, Ordering::Release);
+    }
+    pub(crate) fn recovery_request(&self) -> Option<RecoveryTicket> {
+        let ticket = RecoveryTicket::unpack(self.source_ready.request.load(Ordering::Acquire))?;
+        (self.media_capable()
+            && !self.reply.phone_outgoing()
+            && self.source_ready.attached.load(Ordering::Acquire)
+            && self.source_ready.epoch() == Some(ticket.cancellation_epoch))
+        .then_some(ticket)
+    }
+    pub(crate) fn approve_recovery(&mut self, reply: &PeerReply, ticket: RecoveryTicket) -> bool {
+        if self.reply != *reply || self.recovery_request() != Some(ticket) {
+            return false;
+        }
+        if self.approved_recovery == Some(ticket) {
+            return true;
+        }
+        if self.replies.push(PrivateCommand::Recover(ticket)).is_err() {
+            return false;
+        }
+        self.approved_recovery = Some(ticket);
+        self.wake.notify();
+        true
+    }
+    fn acknowledged_recovery(&self) -> Option<RecoveryTicket> {
+        self.approved_recovery.filter(|ticket| {
+            self.recovery_request() == Some(*ticket)
+                && self.source_ready.revision.load(Ordering::Acquire) == ticket.revision.get()
+        })
+    }
+    pub(crate) fn retire_for_graph_replacement(&mut self) {
+        if self.acknowledged_recovery().is_some() {
+            self.retire_generation();
+        } else {
+            self.retire_media();
+        }
     }
     pub(crate) fn digit(&mut self) -> Option<(char, u64)> {
         let event = self.digits.pop().ok()?;
@@ -276,7 +402,7 @@ pub(crate) struct PrivatePhoneSession {
     io: PeerIo,
     reply: PeerReply,
     stop: Arc<AtomicBool>,
-    source_ready: Arc<AtomicU32>,
+    source_ready: Arc<SourceReady>,
     wake: PeerWake,
     epoch: Option<Instant>,
     source_clock: Option<SourceTimeClock>,
@@ -290,6 +416,9 @@ pub(crate) struct PrivatePhoneSession {
     revision: CollectionRevision,
     settled_revision: NonZeroU32,
     pending_release: Option<NonZeroU32>,
+    recovery: Option<RecoveryCut>,
+    pending_recovery: Option<RecoveryTicket>,
+    cut_pending: bool,
     current: Option<PrivatePhoneReply>,
     media: Option<Box<media::Ingress>>,
     source_end: u64,
@@ -340,11 +469,12 @@ impl PrivatePhoneSession {
         let (digits, events) = RingBuffer::new(64);
         let wake = PeerWake::default();
         let stop = Arc::new(AtomicBool::new(false));
-        let source_ready = Arc::new(AtomicU32::new(0));
+        let source_ready = Arc::new(SourceReady::new());
         let control = PrivatePhoneControl {
             replies,
             digits: events,
             consumed_revision: None,
+            approved_recovery: None,
             reply: reply.clone(),
             wake: wake.clone(),
             stop: Arc::clone(&stop),
@@ -372,6 +502,9 @@ impl PrivatePhoneSession {
                 revision: CollectionRevision::new(),
                 settled_revision: NonZeroU32::MIN,
                 pending_release: None,
+                recovery: None,
+                pending_recovery: None,
+                cut_pending: false,
                 current: None,
                 media: None,
                 source_end: 0,
@@ -422,6 +555,11 @@ impl PrivatePhoneSession {
         *admission = reference;
         let outgoing = self.reply.phone_outgoing();
         let pending_release = &mut self.pending_release;
+        let recovery = &mut self.recovery;
+        let cut_pending = &mut self.cut_pending;
+        let ready = &self.source_ready;
+        let settled = self.settled_revision;
+        let authorized = self.reply.phone_media_authorized();
         let digits = &mut self.digits;
         let revision = &self.revision;
         let media = &mut self.media;
@@ -435,7 +573,12 @@ impl PrivatePhoneSession {
         let result = self
             .io
             .read_source_causal_at(self.source_completion, reference, |event| {
-                // Task1 preserves hard retirement; cause grants no owner recovery.
+                let adaptation = match &event {
+                    crate::services::SourceDispatch::AdaptationCut { start, count } => {
+                        Some((*start, *count))
+                    }
+                    _ => None,
+                };
                 let input = match event {
                     crate::services::SourceDispatch::Input(input) => input,
                     crate::services::SourceDispatch::AdaptationCut { start, count } => {
@@ -445,6 +588,9 @@ impl PrivatePhoneSession {
                 };
                 let credit = match input {
                     SourceInput::Digit(digit) => {
+                        *recovery = None;
+                        ready.request.store(0, Ordering::Release);
+                        ready.revision.store(0, Ordering::Release);
                         if mode == PhoneDigitMode::InBand {
                             return 1;
                         }
@@ -497,6 +643,14 @@ impl PrivatePhoneSession {
                                 }
                             },
                         );
+                        if recovery
+                            .as_ref()
+                            .is_some_and(|cut| revision.0.get() != Some(cut.ticket.revision))
+                        {
+                            *recovery = None;
+                            ready.request.store(0, Ordering::Release);
+                            ready.revision.store(0, Ordering::Release);
+                        }
                         analyzed.and_then(|()| {
                             // A prepared candidate may wait for its matching
                             // release through the old tone tail. New onset/digit
@@ -520,6 +674,19 @@ impl PrivatePhoneSession {
                                 None => count,
                             };
                             source.accepted(accepted)?;
+                            if let Some(cut) = recovery.as_mut()
+                                && accepted > 0
+                                && !concealed
+                                && !source.muted()
+                                && birth.is_some_and(|birth| {
+                                    birth.host_clock_epoch == cut.reference.host_clock_epoch
+                                        && birth.host_clock_epoch == reference.host_clock_epoch
+                                        && birth.born_ns >= cut.reference.now_ns
+                                        && birth.born_ns <= reference.now_ns
+                                })
+                            {
+                                cut.fresh = true;
+                            }
                             Ok(accepted)
                         })
                     }
@@ -551,6 +718,57 @@ impl PrivatePhoneSession {
                     }
                     SourceInput::Discontinuity => {
                         retire_egress = true;
+                        if !*cut_pending {
+                            let origin_epoch = recovery
+                                .as_ref()
+                                .filter(|cut| revision.0.get() == Some(cut.ticket.revision))
+                                .map(|cut| cut.ticket.cancellation_epoch)
+                                .or_else(|| {
+                                    media
+                                        .as_ref()
+                                        .filter(|m| {
+                                            m.active()
+                                                && revision.0.get() == Some(settled)
+                                                && m.expected_revision() == settled
+                                                && pending_release.is_none()
+                                                && source.ready_for_media()
+                                        })
+                                        .map(|m| m.origin_epoch())
+                                });
+                            *recovery = adaptation.and_then(|(start, count)| {
+                                let epoch = origin_epoch?;
+                                if !timed_loss
+                                    || outgoing
+                                    || !authorized
+                                    || !ready.attached.load(Ordering::Acquire)
+                                    || ready.epoch() != Some(epoch)
+                                    || reference.host_clock_epoch == 0
+                                {
+                                    return None;
+                                }
+                                Some(RecoveryCut {
+                                    ticket: RecoveryTicket {
+                                        revision: NonZeroU32::new(
+                                            revision.0.get()?.get().checked_add(1)?,
+                                        )?,
+                                        cancellation_epoch: epoch,
+                                    },
+                                    reference,
+                                    start,
+                                    count,
+                                    fresh: false,
+                                    approved: false,
+                                })
+                            });
+                            *cut_pending = true;
+                            ready.request.store(0, Ordering::Release);
+                            ready.revision.store(0, Ordering::Release);
+                        } else if recovery
+                            .as_ref()
+                            .is_some_and(|cut| adaptation != Some((cut.start, cut.count)))
+                        {
+                            *recovery = None;
+                        }
                         // Revoke immediately, but leave DSP destruction to the
                         // existing serial-owner replacement/cleanup path.
                         if let Some(media) = media.as_ref() {
@@ -569,6 +787,7 @@ impl PrivatePhoneSession {
                             }
                         }) {
                             Ok(()) => {
+                                *cut_pending = false;
                                 *source_end = 0;
                                 if outgoing {
                                     // No incoming collector owns a callee reset.
@@ -602,6 +821,8 @@ impl PrivatePhoneSession {
             return Err(Error::Hangup);
         }
         if result.finish_pending {
+            *recovery = None;
+            ready.request.store(0, Ordering::Release);
             if let Some(media) = self.media.take() {
                 media.retire();
             }
@@ -687,6 +908,9 @@ impl PrivatePhoneSession {
                     Some(PrivateCommand::CollectionEnded(revision)) => {
                         self.pending_release = Some(revision);
                     }
+                    Some(PrivateCommand::Recover(ticket)) => {
+                        self.pending_recovery = Some(ticket);
+                    }
                     None => break,
                 }
             }
@@ -710,6 +934,52 @@ impl PrivatePhoneSession {
                 break;
             }
         }
+        // Activity, immutable origin epoch and real detector drain precede approval.
+        if self.recovery.as_ref().is_some_and(|cut| {
+            (!self.cut_pending && self.revision.0.get() != Some(cut.ticket.revision))
+                || self.source_ready.epoch() != Some(cut.ticket.cancellation_epoch)
+                || admission.host_clock_epoch != cut.reference.host_clock_epoch
+                || !self.reply.phone_media_authorized()
+                || !self.source_ready.attached.load(Ordering::Acquire)
+        }) {
+            self.recovery = None;
+        }
+        let ready_recovery = self
+            .recovery
+            .as_ref()
+            .filter(|cut| {
+                cut.fresh
+                    && source_drained
+                    && !self.cut_pending
+                    && self
+                        .source
+                        .as_ref()
+                        .is_some_and(SourceIngress::ready_for_media)
+            })
+            .map(|cut| cut.ticket);
+        self.source_ready.request.store(
+            ready_recovery.map_or(0, RecoveryTicket::packed),
+            Ordering::Release,
+        );
+        if let Some(approval) = self.pending_recovery {
+            if ready_recovery == Some(approval) {
+                self.recovery.as_mut().expect("matching recovery").approved = true;
+                self.pending_recovery = None;
+            } else if self
+                .recovery
+                .as_ref()
+                .is_none_or(|cut| cut.ticket != approval)
+            {
+                self.pending_recovery = None;
+            }
+            // Same-ticket raw suffixes retain this single acknowledgement.
+            // Control already queued it once and must not manufacture another.
+        }
+        let recovery_revision = self
+            .recovery
+            .as_ref()
+            .filter(|cut| cut.approved && ready_recovery == Some(cut.ticket))
+            .map(|cut| cut.ticket.revision);
         // Read source activity first: a queued release cannot clear a newer onset,
         // event or reset. A matching release waits for stable raw-retry completion
         // and the detector's actual qualified tail, never a private timer.
@@ -721,15 +991,16 @@ impl PrivatePhoneSession {
                 self.pending_release = None;
             }
         }
-        self.source_ready.store(
+        self.source_ready.revision.store(
             if source_drained
-                && self.revision.0.get() == Some(self.settled_revision)
+                && (self.revision.0.get() == Some(self.settled_revision)
+                    || recovery_revision == self.revision.0.get())
                 && self
                     .source
                     .as_ref()
                     .is_some_and(SourceIngress::ready_for_media)
             {
-                self.settled_revision.get()
+                recovery_revision.unwrap_or(self.settled_revision).get()
             } else {
                 0
             },
@@ -739,7 +1010,7 @@ impl PrivatePhoneSession {
             let expected = media.expected_revision();
             if self.revision.0.get() != Some(expected) {
                 media.retire();
-            } else if self.settled_revision == expected {
+            } else if self.settled_revision == expected || recovery_revision == Some(expected) {
                 // A provider may retain an unanalysed suffix beyond the cached
                 // 20 ms prefix. Only its real idle/drained result closes that cut.
                 if source_drained
@@ -749,6 +1020,11 @@ impl PrivatePhoneSession {
                         .is_some_and(SourceIngress::ready_for_media)
                 {
                     media.adopt(&self.reply, self.source_end, admission);
+                    if media.active() && recovery_revision == Some(expected) {
+                        self.settled_revision = expected;
+                        self.recovery = None;
+                        self.source_ready.request.store(0, Ordering::Release);
+                    }
                 }
             }
             // Matching Media may reach this serial queue before CollectionEnded.

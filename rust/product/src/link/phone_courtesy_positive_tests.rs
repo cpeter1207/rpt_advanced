@@ -115,7 +115,7 @@ fn configured_native_phone_morse_p_follows_original_hold_and_real_dsp_tail() {
     let source = call.phone_source().unwrap().clone();
     let (dsp, graph) = crate::services::history_tests::processor_fixture(1, 1);
     let render_tap = crate::link::ring::tests::TimedTapGuard::next();
-    let (mut ingress, mut input, shared) = super::super::prepare_voiced(
+    let (mut ingress, mut input, shared) = super::prepare_voiced(
         call.clone(),
         RATE,
         NonZeroU32::MIN,

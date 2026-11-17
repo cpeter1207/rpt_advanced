@@ -414,9 +414,12 @@ fn prepared(
         for (source, reply) in phone_attachments {
             // A graph replacement is an explicit media cut, never a transfer
             // of the private call handle or revival of the previous generation.
-            phones
-                .retire_media(&source, &reply)
-                .map_err(|_| RuntimeError::Rejected)?;
+            if retain_ordinary {
+                phones.retire_for_graph_replacement(&source, &reply)
+            } else {
+                phones.retire_media(&source, &reply)
+            }
+            .map_err(|_| RuntimeError::Rejected)?;
             let processor = services
                 .prepare_peer_processing(
                     &settings.radio.processing_configuration,

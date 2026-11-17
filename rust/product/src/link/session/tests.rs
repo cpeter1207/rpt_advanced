@@ -78,7 +78,9 @@ pub(crate) struct State {
     pub(crate) source_text: VecDeque<(&'static [u8], &'static [u8], u32)>,
     pub(crate) source_reference: Option<(u64, u64)>,
     pub(crate) source_birth: Option<u64>,
+    pub(crate) source_birth_epoch: Option<u64>,
     pub(crate) source_reset: bool,
+    pub(crate) source_adaptation: Option<(u64, u32)>,
 }
 type Shared = Arc<Mutex<State>>;
 
@@ -1646,6 +1648,19 @@ unsafe extern "C" fn read_source(
         return 0;
     }
     result.state = 1;
+    if let Some((start, count)) = state.source_adaptation {
+        let code = unsafe { sink.source_adaptation.unwrap()(sink.context, start, count) };
+        if code < 0 {
+            return -1;
+        }
+        if code == 0 {
+            state.source_adaptation = None;
+            state.source_position = 0;
+            state.input.clear();
+        }
+        result.progress = if code == 0 { 1 } else { 2 };
+        return 0;
+    }
     if state.source_reset {
         let code = unsafe { sink.source_discontinuity.unwrap()(sink.context) };
         if code < 0 {
@@ -1714,7 +1729,9 @@ unsafe extern "C" fn read_source(
                         let birth = abi::rptadv_source_birth_v1 {
                             struct_size: std::mem::size_of::<abi::rptadv_source_birth_v1>() as u32,
                             abi_version: 1,
-                            host_clock_epoch: sink.host_clock_epoch,
+                            host_clock_epoch: state
+                                .source_birth_epoch
+                                .unwrap_or(sink.host_clock_epoch),
                             born_ns,
                         };
                         sink.audio_timed.unwrap()(

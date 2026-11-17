@@ -1036,3 +1036,151 @@ fn phone_rearm_retains_attachment_after_callback_busy() {
         "callback Busy detached authorized intent: retained={retained}, old_unchanged={old_unchanged}, still_retired={still_retired}, authenticated={authenticated}"
     );
 }
+
+#[test]
+fn host_refresh_recovers_exact_approved_generation_after_busy() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for cancellation in ["none", "retire", "same_node", "reload"] {
+        let (mut host, _) = policy_host(
+            "1000",
+            "protocol=sip\nattach_local_nodes=1000\n",
+            "phone_allow_accounts=provider\n",
+        );
+        let (phone, state) = crate::link::session::tests::phone_source_peer_at_rate(8000);
+        state.lock().unwrap().continuous_async = true;
+        let id = phone.identity().call_id().unwrap();
+        host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+        let source = host.phone_source(id).unwrap().clone();
+        let reply = host.phone_reply(&source).unwrap();
+        finish_prompt(&mut host, &source, &reply);
+        host.authenticate_phone(&source, &reply, "100", "1234", clock())
+            .unwrap();
+        finish_prompt(&mut host, &source, &reply);
+        host.reconcile_private_collections(clock());
+        host.attach_phone(&source, &reply, "1000", clock()).unwrap();
+        pump_until(&mut host, |host| {
+            crate::phone::tests::recovery_snapshot(&host.phone_calls, &source)
+                .is_some_and(|(_, active, _, _)| active)
+                && host
+                    .runtime
+                    .node("1000")
+                    .unwrap()
+                    .status(10)
+                    .retiring
+                    .is_none()
+        });
+        let (old_generation, _, _, _) =
+            crate::phone::tests::recovery_snapshot(&host.phone_calls, &source).unwrap();
+        let lease = Arc::clone(
+            &host
+                .leases
+                .iter()
+                .find(|(name, _)| name == "1000")
+                .unwrap()
+                .1,
+        );
+        assert!(lease.lock().unwrap().quiesce());
+        let mut owners = lease.lock().unwrap().owners.take().unwrap();
+        let old_graph = host.runtime.node("1000").unwrap().status(10).active;
+        state.lock().unwrap().source_adaptation = Some((1000, 160));
+        pump_until(&mut host, |_| {
+            state.lock().unwrap().source_adaptation.is_none()
+        });
+        assert!(
+            !crate::phone::tests::recovery_snapshot(&host.phone_calls, &source)
+                .unwrap()
+                .1
+        );
+        {
+            let mut input = state.lock().unwrap();
+            input.source_birth = Some(input.source_reference.unwrap().1);
+            input
+                .input
+                .push_back(crate::link::session::tests::Input::Audio(vec![0.0; 160]));
+        }
+        pump_until(&mut host, |host| {
+            crate::phone::tests::recovery_snapshot(&host.phone_calls, &source)
+                .unwrap()
+                .2
+        });
+        // Actual collector reconciliation enqueues approval; pump reads before acknowledging.
+        host.phone_calls
+            .reconcile_collections(|local, source, reply| {
+                host.runtime
+                    .node(local)?
+                    .links()
+                    .phone_collection_pending(source, reply)
+            });
+        pump_until(&mut host, |host| {
+            host.phone_calls.media_refresh_nodes() == ["1000"]
+        });
+        let held = owners.1.acquire().unwrap();
+        assert!(matches!(
+            host.refresh_inputs("1000", clock(), true),
+            Err(RuntimeError::Busy)
+        ));
+        let (discarded, active, requested, ready) =
+            crate::phone::tests::recovery_snapshot(&host.phone_calls, &source).unwrap();
+        assert_ne!(discarded, old_generation);
+        assert!(!active && requested && ready);
+        assert_eq!(
+            host.runtime.node("1000").unwrap().status(10).active,
+            old_graph
+        );
+        assert_eq!(
+            host.phone_calls.attachments("1000"),
+            [(source.clone(), reply.clone())]
+        );
+        match cancellation {
+            "retire" => host.phone_calls.retire_media(&source, &reply).unwrap(),
+            "same_node" => {
+                host.phone_calls.detach_media(&source, &reply);
+                host.phone_calls.attach(&source, &reply, "1000").unwrap();
+            }
+            "reload" => {
+                let revision = host.runtime.revision();
+                host.reload(
+                    policy_document(
+                        "1000",
+                        "protocol=sip\nattach_local_nodes=1000\n",
+                        "phone_allow_accounts=provider\n",
+                    ),
+                    clock(),
+                )
+                .unwrap();
+                assert!(
+                    host.runtime.revision() > revision,
+                    "exercise committed reload"
+                );
+                assert!(reply.ended());
+            }
+            _ => {}
+        }
+        drop(held);
+        if cancellation == "none" {
+            host.refresh_inputs("1000", clock(), true).unwrap();
+            pump_until(&mut host, |host| {
+                drop(owners.0.acquire());
+                drop(owners.1.acquire());
+                crate::phone::tests::recovery_snapshot(&host.phone_calls, &source)
+                    .is_some_and(|(_, active, requested, _)| active && !requested)
+            });
+            let (replacement, active, requested, _) =
+                crate::phone::tests::recovery_snapshot(&host.phone_calls, &source).unwrap();
+            assert!(active && !requested);
+            assert_ne!(replacement, old_generation);
+            assert_ne!(replacement, discarded);
+        } else {
+            assert!(
+                crate::phone::tests::recovery_snapshot(&host.phone_calls, &source)
+                    .is_none_or(|(_, active, requested, ready)| !active && !requested && !ready),
+                "{cancellation}"
+            );
+        }
+        lease.lock().unwrap().owners = Some(owners);
+        assert!(host.stop(20));
+        await_private_drop(&state);
+    }
+}

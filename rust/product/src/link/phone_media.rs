@@ -1,4 +1,5 @@
 //! One prepared phone receive generation, using the common ring and shared graph.
+use super::MediaOrigin;
 use crate::link::phone_speech::SpeechAnalysis;
 use crate::{
     Error,
@@ -37,6 +38,7 @@ struct Bucket {
 /// Exact call and one independently revocable media generation; no node identity.
 pub(super) struct Shared {
     reply: PeerReply,
+    origin: MediaOrigin,
     observer: InboundObserver,
     phase: AtomicU8,
     generation: u64,
@@ -52,10 +54,14 @@ pub(super) struct Shared {
 }
 impl Shared {
     pub(super) fn occupied(&self) -> bool {
-        self.phase.load(Ordering::Acquire) != RETIRED && self.reply.phone_media_authorized()
+        self.phase.load(Ordering::Acquire) != RETIRED
+            && self.origin.current()
+            && self.reply.phone_media_authorized()
     }
     fn active(&self) -> bool {
-        self.phase.load(Ordering::Acquire) == ACTIVE && self.reply.phone_media_authorized()
+        self.phase.load(Ordering::Acquire) == ACTIVE
+            && self.origin.current()
+            && self.reply.phone_media_authorized()
     }
     pub(super) fn retire(&self) {
         self.phase.store(RETIRED, Ordering::Release);
@@ -273,7 +279,6 @@ impl Shared {
 /// Serial source endpoint; the existing phone I/O owner is its sole writer.
 pub(super) struct Ingress {
     shared: Arc<Shared>,
-    expected_revision: NonZeroU32,
     writer: InboundProducer,
     minimum_frame: u64,
     admission: SourceTimeReference,
@@ -312,13 +317,16 @@ impl Ingress {
         self.outbound.take()
     }
     pub(super) fn prepared(&self) -> bool {
-        self.shared.phase.load(Ordering::Acquire) == PREPARED
+        self.shared.phase.load(Ordering::Acquire) == PREPARED && self.shared.origin.current()
     }
     pub(super) fn occupied(&self) -> bool {
         self.shared.occupied()
     }
+    pub(super) fn origin_epoch(&self) -> NonZeroU32 {
+        self.shared.origin.epoch
+    }
     pub(super) fn expected_revision(&self) -> NonZeroU32 {
-        self.expected_revision
+        self.shared.origin.revision
     }
     /// Publish once, and only to the serial owner of this exact call token.
     /// Active or retired generations never receive a replacement admission anchor.
@@ -787,13 +795,13 @@ impl Drop for PhoneMediaInput {
 pub(super) fn prepare(
     reply: PeerReply,
     rate: u32,
-    expected_revision: NonZeroU32,
+    origin: MediaOrigin,
     processor: Option<PcmProcessor>,
 ) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
     prepare_with_speech(
         reply,
         rate,
-        expected_revision,
+        origin,
         processor,
         None,
         PhoneSpeechSettings::default(),
@@ -803,7 +811,7 @@ pub(super) fn prepare(
 pub(super) fn prepare_voiced(
     reply: PeerReply,
     rate: u32,
-    expected_revision: NonZeroU32,
+    origin: MediaOrigin,
     processor: Option<PcmProcessor>,
     settings: PhoneSpeechSettings,
 ) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
@@ -811,20 +819,13 @@ pub(super) fn prepare_voiced(
         return Err(Error::Admission);
     }
     let speech = SpeechAnalysis::new(rate, (rate / 50) as usize, settings)?;
-    prepare_with_speech(
-        reply,
-        rate,
-        expected_revision,
-        processor,
-        Some(speech),
-        settings,
-    )
+    prepare_with_speech(reply, rate, origin, processor, Some(speech), settings)
 }
 
 fn prepare_with_speech(
     reply: PeerReply,
     rate: u32,
-    expected_revision: NonZeroU32,
+    origin: MediaOrigin,
     processor: Option<PcmProcessor>,
     speech: Option<SpeechAnalysis>,
     settings: PhoneSpeechSettings,
@@ -852,6 +853,7 @@ fn prepare_with_speech(
     }
     let shared = Arc::new(Shared {
         reply,
+        origin,
         observer: writer.observer(),
         phase: AtomicU8::new(PREPARED),
         generation,
@@ -894,7 +896,6 @@ fn prepare_with_speech(
             preroll_frames: u64::from(rate) * u64::from(settings.preroll_ms) / 1000,
             hold_frames: u64::from(rate) * u64::from(settings.hold_ms) / 1000,
             shared: Arc::clone(&shared),
-            expected_revision,
             writer,
             minimum_frame: 0,
             admission: SourceTimeReference::default(),
@@ -907,4 +908,4 @@ fn prepare_with_speech(
 
 #[cfg(test)]
 #[path = "phone_media_tests.rs"]
-mod tests;
+pub(super) mod tests;

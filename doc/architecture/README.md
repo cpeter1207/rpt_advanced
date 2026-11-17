@@ -626,6 +626,14 @@ defines the full reload, hardware-handoff, and failure policy.
   key; only a rendered Open interval followed by Closed schedules local courtesy.
   Generic private inactivity never closes speech. Fences are checked before and
   after each telephone courtesy PCM read, including its first/last sample. See ADR 0044.
+  A proved native adaptation may request a fresh incoming SIP generation only
+  from an active, settled, attached origin. Original credited post-cut receipt
+  evidence, actual detector/drain and both current idle collectors are required.
+  One revision/immutable-epoch ticket crosses the existing queue and exact
+  host replacement path; old input, analyzer, hold and courtesy never transfer.
+  Generic/prepared cuts remain fail-closed; explicit cancellation wins queued
+  approvals and dropped candidates. ADR 0044 records the local qualification limit.
+
 - A received-traffic timeout mutes receive and regenerated traffic only at
   local RF. Its local-only priority notice completes before PTT drops; recovery
   waits for every local and linked input to become inactive and completes the

@@ -2626,3 +2626,46 @@ The SIP Media owner latches its first terminal source-read error unchanged.
 Both unoffered witness and offered/refused cut metadata are revoked. Later reads
 return that error with terminal output before callback, source credit or polling;
 a refused native cause cannot be retried as a generic cut after an error.
+
+### Fresh-generation incoming SIP adaptation recovery — 2026-11-17 local checkpoint
+
+A proved adaptation cut may request one replacement only from an already active,
+settled, detector-ready incoming SIP origin with current authorization and
+attachment. The cut still immediately and permanently retires old input and
+egress. Generic resets, merely prepared origins and IAX/outgoing semantics are
+unchanged. The immutable origin cancellation epoch is captured at preparation,
+not resampled from shared state during a cut; explicit retirement and detach
+invalidate it before shared-generation retirement, with checked exhaustion.
+
+One owner-local cut record and one packed revision/epoch request extend the
+existing setup-allocated ready state. Only positive credited original PCM whose
+unchanged receipt belongs to the cut's host epoch and is no earlier than its
+captured reference can qualify it. Real detector readiness and provider/raw-tail
+drain remain required. Actual onset/digit, generic cut, finite source termination
+or clock/cancellation change clears the request. Repeated eligible cuts replace
+one record; refused reset retries retain the first origin and reference.
+
+Ordinary collector reconciliation observes requests even without dirty digits.
+Current exact call/authentication/attachment, released outer grammar and an
+explicit idle destination collector are required. The existing bounded queue
+carries an idempotent approval. The owner reads source before acknowledging it;
+a same-ticket raw suffix retains the acknowledgement until actual drain.
+Recovery never calls end_command, clears command suppression, emits a digit or
+CollectionEnded, or rewrites consumed_revision.
+
+Only exact acknowledged recovery survives the private host graph-replacement
+cut. Public retirement remains cancellation. Busy/drop retires unpublished
+candidates permanently, but a still-current ticket may prepare a distinct
+generation. Preparation binds the origin epoch and allocates a new analyzer;
+adoption and render recheck that epoch. Successful adoption consumes the ticket.
+Eligibility PCM is never replayed and no old hold, VAD or courtesy transfers.
+Silence may permit preparation but cannot independently open output or close an
+old utterance; later genuine speech must earn its own ordinary held/drained close.
+
+Reload continues to prepare graphs without phone inputs and to retire all calls
+in its existing pre-publication commit hook. A failed preparation retains the
+old configuration/call contract; no recovery grant enters a new configuration.
+Topology/policy replacement uses normal cancellation rather than the private
+preservation route. No public API, ABI, PCM queue, worker, timer or RF permission
+is added. This local checkpoint still requires independent review and complete
+platform, packaging, coverage, hosted and hardware qualification.

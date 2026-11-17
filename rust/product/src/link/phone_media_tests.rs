@@ -25,7 +25,24 @@ fn prepare(
     rate: u32,
     processor: Option<PcmProcessor>,
 ) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
-    super::prepare(reply, rate, NonZeroU32::MIN, processor)
+    super::prepare(reply, rate, origin(NonZeroU32::MIN), processor)
+}
+
+fn origin(revision: NonZeroU32) -> MediaOrigin {
+    MediaOrigin {
+        revision,
+        epoch: NonZeroU32::MIN,
+        source: Arc::new(super::super::SourceReady::new()),
+    }
+}
+fn prepare_voiced(
+    reply: PeerReply,
+    rate: u32,
+    revision: NonZeroU32,
+    processor: Option<PcmProcessor>,
+    settings: PhoneSpeechSettings,
+) -> Result<(Box<Ingress>, PhoneMediaInput, Arc<Shared>), Error> {
+    super::prepare_voiced(reply, rate, origin(revision), processor, settings)
 }
 
 fn adopt(ingress: &mut Ingress, minimum_frame: u64, reference: SourceTimeReference) {
@@ -744,7 +761,7 @@ fn mixed_audio_inputs_delegate_live_timed_and_untimed_output_and_silence() {
 
 #[test]
 fn voiced_phone_silence_does_not_create_receive_or_transmit_activity() {
-    let (mut ingress, mut input, _) = super::prepare_voiced(
+    let (mut ingress, mut input, _) = prepare_voiced(
         reply(),
         8000,
         NonZeroU32::MIN,
@@ -773,7 +790,7 @@ fn voiced_phone_silence_does_not_create_receive_or_transmit_activity() {
 fn voiced_phone_delayed_decision_preserves_short_onset_in_the_existing_ring() {
     use rpt_advanced_core::link::ReceiveState;
     for chunk in [160, 7] {
-        let (mut ingress, mut input, _) = super::prepare_voiced(
+        let (mut ingress, mut input, _) = prepare_voiced(
             reply(),
             8000,
             NonZeroU32::MIN,
@@ -872,7 +889,7 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
         let call = reply();
         let source = call.phone_source().unwrap().clone();
         let (_graph_state, graph) = crate::services::history_tests::processor_fixture(1, 1);
-        let (mut ingress, mut private, shared) = super::prepare_voiced(
+        let (mut ingress, mut private, shared) = prepare_voiced(
             call.clone(),
             8000,
             NonZeroU32::MIN,
@@ -1027,7 +1044,7 @@ fn voiced_phone_released_speech_composes_with_the_existing_product_mixer() {
 #[test]
 fn voiced_phone_preserves_the_qualified_dsp_tail_after_source_gate_closes() {
     let (state, graph) = crate::services::history_tests::processor_fixture(1, 1);
-    let (mut ingress, mut input, shared) = super::prepare_voiced(
+    let (mut ingress, mut input, shared) = prepare_voiced(
         reply(),
         48000,
         NonZeroU32::MIN,
@@ -1127,7 +1144,7 @@ fn configured_phone_lookback_and_hold_are_independent_of_programme_reserve() {
                 ..Default::default()
             };
             let (mut ingress, input, shared) =
-                super::prepare_voiced(reply(), 8000, NonZeroU32::MIN, None, settings).unwrap();
+                prepare_voiced(reply(), 8000, NonZeroU32::MIN, None, settings).unwrap();
             adopt(&mut ingress, 0, reference());
             for start in (0..1600).step_by(160) {
                 assert_eq!(ingress.audio(start, &[0.0; 160], Some(birth(10))), Ok(160));
@@ -1163,7 +1180,7 @@ fn configured_phone_analysis_transmits_original_accepted_pcm_and_retries_only_un
             ..Default::default()
         };
         let (mut ingress, mut input, _) =
-            super::prepare_voiced(reply(), rate, NonZeroU32::MIN, None, settings).unwrap();
+            prepare_voiced(reply(), rate, NonZeroU32::MIN, None, settings).unwrap();
         adopt(&mut ingress, 0, reference());
         let width = rate as usize / 50;
         let offered = vec![0.25; width + 1];
@@ -1205,7 +1222,7 @@ fn configured_phone_analysis_transmits_original_accepted_pcm_and_retries_only_un
 fn configured_phone_media_rejects_unbounded_history_and_reserve_before_publication() {
     for (preroll_ms, reserve_ms) in [(301, 160), (160, 85), (160, 281)] {
         assert!(
-            super::prepare_voiced(
+            prepare_voiced(
                 reply(),
                 8000,
                 NonZeroU32::MIN,
@@ -1224,7 +1241,7 @@ fn configured_phone_media_rejects_unbounded_history_and_reserve_before_publicati
 #[test]
 fn timed_loss_continues_open_original_hold_without_refreshing_it() {
     for rate in [8000, 16000] {
-        let (mut ingress, mut input, shared) = super::prepare_voiced(
+        let (mut ingress, mut input, shared) = prepare_voiced(
             reply(),
             rate,
             NonZeroU32::MIN,
@@ -1257,7 +1274,7 @@ fn timed_loss_continues_open_original_hold_without_refreshing_it() {
 #[test]
 fn mixed_single_sample_credit_preserves_plc_origin() {
     for rate in [8000, 16000] {
-        let (mut ingress, mut input, shared) = super::prepare_voiced(
+        let (mut ingress, mut input, shared) = prepare_voiced(
             reply(),
             rate,
             NonZeroU32::MIN,
@@ -1322,7 +1339,7 @@ fn mixed_single_sample_credit_preserves_plc_origin() {
 
 #[test]
 fn later_voice_does_not_promote_synthetic_preroll_to_rf_onset() {
-    let (mut ingress, mut input, shared) = super::prepare_voiced(
+    let (mut ingress, mut input, shared) = prepare_voiced(
         reply(),
         8000,
         NonZeroU32::MIN,
@@ -1378,7 +1395,7 @@ fn phone_speech_closes_only_after_original_hold_and_processed_tail_drain() {
     for processed in [false, true] {
         let (_state, graph) = crate::services::history_tests::processor_fixture(1, 1);
         let graph = processed.then_some(graph);
-        let (mut ingress, mut input, shared) = super::prepare_voiced(
+        let (mut ingress, mut input, shared) = prepare_voiced(
             reply(),
             48000,
             NonZeroU32::MIN,
@@ -1449,7 +1466,7 @@ fn phone_speech_closes_only_after_original_hold_and_processed_tail_drain() {
 fn native_and_fallback_loss_render_only_inside_the_original_hold() {
     for rate in [8000, 16000] {
         for (native, queued) in [(false, false), (false, true), (true, false), (true, true)] {
-            let (mut ingress, mut input, shared) = super::prepare_voiced(
+            let (mut ingress, mut input, shared) = prepare_voiced(
                 reply(),
                 rate,
                 NonZeroU32::MIN,
@@ -1533,7 +1550,7 @@ fn native_and_fallback_loss_render_only_inside_the_original_hold() {
 #[test]
 fn synthetic_age_does_not_poison_fresh_original_receipts_in_the_same_bucket() {
     for rate in [8000, 16000] {
-        let (mut ingress, _input, shared) = super::prepare_voiced(
+        let (mut ingress, _input, shared) = prepare_voiced(
             reply(),
             rate,
             NonZeroU32::MIN,
@@ -1612,7 +1629,7 @@ fn delayed_dsp_cannot_open_from_new_input_before_genuine_output_sample_or_block(
         for native in [false, true] {
             for genuine_frames in [16, 32] {
                 let (state, graph) = crate::services::history_tests::processor_fixture(8, 1);
-                let (mut ingress, mut input, shared) = super::prepare_voiced(
+                let (mut ingress, mut input, shared) = prepare_voiced(
                     reply(),
                     48000,
                     NonZeroU32::MIN,
@@ -1695,7 +1712,7 @@ fn native_and_fallback_inherit_expired_age_even_with_fresh_egress_birth() {
     for rate in [8000, 16000] {
         for native in [false, true] {
             let width = rate as usize / 50;
-            let (mut ingress, mut input, shared) = super::prepare_voiced(
+            let (mut ingress, mut input, shared) = prepare_voiced(
                 reply(),
                 rate,
                 NonZeroU32::MIN,
@@ -1785,7 +1802,7 @@ fn configured_phone_media_reset_preserves_programme_hold_birth_and_requalifies_r
         .map(|p| f32::from(i16::from_le_bytes([p[0], p[1]])) / 32768.0)
         .collect();
     for native in [false, true] {
-        let (mut ingress, mut input, shared) = super::prepare_voiced(
+        let (mut ingress, mut input, shared) = prepare_voiced(
             reply(),
             8000,
             NonZeroU32::MIN,
@@ -1867,7 +1884,7 @@ fn configured_phone_media_reset_preserves_programme_hold_birth_and_requalifies_r
 fn configured_phone_media_defers_loss_reset_until_a_genuine_retry_is_accepted() {
     for rate in [8000, 16000] {
         let width = rate as usize / 50;
-        let (mut ingress, mut input, shared) = super::prepare_voiced(
+        let (mut ingress, mut input, shared) = prepare_voiced(
             reply(),
             rate,
             NonZeroU32::MIN,
@@ -1982,7 +1999,7 @@ fn native_ilbc_units_preserve_product_authority_hold_age_and_normal_requalificat
         codec.decode(&packet, &mut pcm).unwrap();
     }
     packet[49] |= 1;
-    let (mut ingress, mut input, shared) = super::prepare_voiced(
+    let (mut ingress, mut input, shared) = prepare_voiced(
         reply(),
         8000,
         NonZeroU32::MIN,
@@ -2070,7 +2087,7 @@ fn phone_speech_invalidation_starvation_and_temporary_processor_pending_are_not_
     for cut in 0..6 {
         let call = reply();
         let (state, graph) = crate::services::history_tests::processor_fixture(1, 1);
-        let (mut ingress, mut input, shared) = super::prepare_voiced(
+        let (mut ingress, mut input, shared) = prepare_voiced(
             call.clone(),
             48000,
             NonZeroU32::MIN,
@@ -2144,3 +2161,24 @@ fn phone_speech_invalidation_starvation_and_temporary_processor_pending_are_not_
 
 #[path = "phone_courtesy_positive_tests.rs"]
 mod courtesy_positive;
+
+pub(in crate::link::private_phone) fn recovery_snapshot(shared: &Shared) -> (u64, bool) {
+    (shared.generation, shared.active())
+}
+
+pub(in crate::link::private_phone) fn input_snapshot(input: &PhoneMediaInput) -> (u64, bool) {
+    (input.shared.generation, input.active())
+}
+pub(in crate::link::private_phone) fn fresh_analysis(ingress: &Ingress) -> bool {
+    ingress.speech.is_some() && ingress.last_voice.is_none() && ingress.voice_until == 0
+}
+
+#[test]
+fn recovery_shared_and_ingress_state_sizes_are_bounded() {
+    assert!(std::mem::size_of::<Shared>() <= 4304);
+    eprintln!(
+        "recovery_media_bytes shared={} ingress={}",
+        std::mem::size_of::<Shared>(),
+        std::mem::size_of::<Ingress>()
+    );
+}

@@ -1356,3 +1356,102 @@ fn radio_telephone_digit_requires_answered_attachment_and_exact_claim() {
         previous = Some(claim.id());
     }
 }
+
+pub(crate) fn recovery_snapshot(
+    calls: &PhoneCalls,
+    source: &PhoneSource,
+) -> Option<(u64, bool, bool, bool)> {
+    crate::link::private_phone::tests::recovery_snapshot(
+        calls
+            .calls
+            .iter()
+            .find(|call| &call.source == source)?
+            .owner
+            .as_ref()?,
+    )
+}
+
+#[test]
+fn recovery_approval_requires_both_current_collectors_and_exact_attachment() {
+    use crate::link::session::{SerialSession, tests::Input};
+    use crate::services::SourceTimeClock;
+    for blocked in [
+        "outer",
+        "inner",
+        "unknown",
+        "detached",
+        "queued_detach",
+        "revoked",
+        "foreign_reply",
+        "none",
+    ] {
+        let (mut calls, mut session, state, source, reply) = controlled_source_session_protocol(
+            8000,
+            false,
+            rpt_advanced_core::config::PhoneAccountProtocol::Sip,
+        );
+        session.set_source_clock(SourceTimeClock::new(std::time::Instant::now()).unwrap());
+        calls.attach(&source, &reply, "1000").unwrap();
+        calls.reconcile_collections(|_, _, _| Some(false));
+        session.step(0).unwrap();
+        let old = calls.prepare_media(&source, &reply, None).unwrap();
+        session.step(1).unwrap();
+        assert!(old.active());
+        state.lock().unwrap().source_adaptation = Some((1000, 160));
+        session.step(2).unwrap();
+        {
+            let mut input = state.lock().unwrap();
+            input.source_birth = Some(input.source_reference.unwrap().1);
+            input.input.push_back(Input::Audio(vec![0.0; 160]));
+        }
+        session.step(3).unwrap();
+        let ticket = calls.calls[0]
+            .owner
+            .as_ref()
+            .unwrap()
+            .recovery_request()
+            .unwrap();
+        match blocked {
+            "outer" => {
+                calls.actions(&source, &reply, '*', 4).unwrap();
+            }
+            "detached" | "queued_detach" => {
+                if blocked == "queued_detach" {
+                    calls.reconcile_collections(|_, _, _| Some(false));
+                }
+                calls.detach_media(&source, &reply);
+                calls.attach(&source, &reply, "1000").unwrap();
+            }
+            "revoked" => reply.retire(),
+            "foreign_reply" => {
+                let foreign = PeerSignals::for_phone(source.clone()).reply_target();
+                assert!(
+                    !calls.calls[0]
+                        .owner
+                        .as_mut()
+                        .unwrap()
+                        .approve_recovery(&foreign, ticket)
+                );
+            }
+            _ => {}
+        }
+        if blocked != "foreign_reply" {
+            calls.reconcile_collections(|_, seen_source, seen_reply| {
+                assert_eq!((seen_source, seen_reply), (&source, &reply));
+                match blocked {
+                    "inner" => Some(true),
+                    "unknown" => None,
+                    _ => Some(false),
+                }
+            });
+        }
+        let _ = session.step(5);
+        assert_eq!(
+            calls.media_refresh_nodes() == ["1000"],
+            blocked == "none",
+            "{blocked}"
+        );
+        assert!(calls.event().is_none(), "no fabricated digit");
+        assert!(!old.active());
+    }
+}

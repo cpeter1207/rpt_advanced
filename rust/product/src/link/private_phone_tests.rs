@@ -3438,3 +3438,13 @@ fn prepared_phone_media_awaiting_release_cannot_survive_cuts_or_stale_release() 
 
 #[path = "phone_adaptation_tests.rs"]
 mod adaptation;
+
+pub(crate) fn recovery_snapshot(control: &PrivatePhoneControl) -> Option<(u64, bool, bool, bool)> {
+    let (generation, active) = media::tests::recovery_snapshot(control.media.as_ref()?);
+    Some((
+        generation,
+        active,
+        control.recovery_request().is_some(),
+        control.media_rearm_ready(),
+    ))
+}
