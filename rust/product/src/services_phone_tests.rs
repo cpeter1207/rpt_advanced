@@ -460,13 +460,17 @@ fn phone_progress_tail_retains_established_factory_prefix_and_rejects_every_part
     table.struct_size = prior as u32;
     let old = unsafe { HostServices::open(&table) }.unwrap();
     assert!(old.0.peer_dial_phone_progress.is_none());
-    for size in prior + 1..std::mem::size_of_val(&table) {
+    let complete = std::mem::offset_of!(abi::rptadv_host_services_v10, media_clock_reader);
+    assert_eq!(complete, 440);
+    for size in prior + 1..complete {
         table.struct_size = size as u32;
         assert!(
             unsafe { HostServices::open(&table) }.is_err(),
             "partial progress tail {size}"
         );
     }
+    table.struct_size = complete as u32;
+    assert!(unsafe { HostServices::open(&table) }.is_ok());
     table.struct_size = std::mem::size_of_val(&table) as u32;
     assert!(unsafe { HostServices::open(&table) }.is_ok());
 }

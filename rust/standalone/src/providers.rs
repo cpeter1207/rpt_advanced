@@ -332,8 +332,8 @@ pub struct RadioRuntimeDescriptors {
     pub product: &'static crate::abi::UrpAstDescriptor,
     /// Retained radio capability; the native owner validates its consumed session prefix.
     pub radio: *const c_void,
-    /// PortAudio/ALSA stream API.
-    pub audio: &'static crate::abi::rptadv_audio_adapter_descriptor,
+    /// Original retained audio descriptor; SDK validates its consumed prefix before acquisition.
+    pub audio: *const c_void,
     /// CM119 HID/GPIO API.
     pub gpio: &'static crate::abi::rptadv_gpio_adapter_descriptor,
     /// Exact-frame FFmpeg graph API.
@@ -608,13 +608,48 @@ impl ProviderSet {
             radio: self
                 .checked_descriptor::<NamedDescriptorHeader>("librptadvradio.so.5")?
                 .as_ptr(),
-            audio: self.typed_descriptor("librptadv_portaudio_alsa_adapter.so.2")?,
+            audio: self
+                .checked_descriptor::<NamedDescriptorHeader>(
+                    "librptadv_portaudio_alsa_adapter.so.2",
+                )?
+                .as_ptr(),
             gpio: self.typed_descriptor("librptadv_gpio_adapter.so.1")?,
             ffmpeg: self.typed_descriptor("librptadv_ffmpeg_adapter.so.1")?,
             rnnoise: self
                 .checked_descriptor::<NamedDescriptorHeader>("librptadv_rnnoise_adapter.so.1")?
                 .as_ptr(),
         })
+    }
+
+    /// Prepare the optional reader off audio from the same retained native audio descriptor.
+    /// Never forms a complete new-layout reference to older provider storage.
+    pub(crate) fn media_clock_reader(&self) -> Option<unsafe extern "C" fn() -> u64> {
+        const AUDIO: &str = "librptadv_portaudio_alsa_adapter.so.2";
+        type Reader = Option<unsafe extern "C" fn() -> u64>;
+        let pointer = self
+            .checked_descriptor::<NamedDescriptorHeader>(AUDIO)
+            .ok()?;
+        let offset = std::mem::offset_of!(
+            crate::abi::rptadv_audio_adapter_descriptor,
+            monotonic_now_ns
+        );
+        let end = offset + std::mem::size_of::<Reader>();
+        let loaded = self
+            .descriptors
+            .iter()
+            .find(|provider| provider.library == AUDIO)?;
+        if loaded.size < end || descriptor_size(pointer.as_ptr(), DescriptorLayout::Named) < end {
+            return None;
+        }
+        // SAFETY: both retained extent and advertised size contain this entire optional field.
+        unsafe {
+            pointer
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<Reader>()
+                .read_unaligned()
+        }
     }
 
     /// Borrow validated product lifecycle descriptors while retaining all provider libraries.
@@ -1902,6 +1937,36 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn stage_c_clock_old_audio_storage_is_forwarded_without_enlarged_reference() {
+        const AUDIO: &str = "librptadv_portaudio_alsa_adapter.so.2";
+        let mut providers = Box::new(super::ProviderSet::load().unwrap());
+        let original = providers.descriptor(AUDIO).unwrap();
+        let mut prefix = Box::new([0_u64; 24]);
+        // The actual allocation contains only the SDK-supported 192-byte prefix.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                original.as_ptr().cast::<u8>(),
+                prefix.as_mut_ptr().cast::<u8>(),
+                192,
+            );
+            prefix.as_mut_ptr().cast::<u32>().write(192);
+        }
+        let pointer = std::ptr::NonNull::from(Box::leak(prefix)).cast();
+        let loaded = providers
+            .descriptors
+            .iter_mut()
+            .find(|p| p.library == AUDIO)
+            .unwrap();
+        loaded.descriptor = pointer;
+        loaded.size = 192;
+        let providers = Box::leak(providers);
+        assert!(
+            providers.radio_runtime_descriptors().is_ok(),
+            "the original complete audio prefix must reach SDK validation"
+        );
+    }
+
     pub(crate) fn replace_descriptor<T>(
         providers: &mut super::ProviderSet,
         library: &str,
@@ -2033,3 +2098,7 @@ pub(crate) mod tests {
         "#
     }
 }
+
+#[cfg(test)]
+#[path = "providers_clock_tests.rs"]
+pub(crate) mod clock_tests;

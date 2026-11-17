@@ -97,7 +97,7 @@ impl ActiveRadio {
             abi_version: 1,
             ffmpeg: std::ptr::from_ref(descriptors.ffmpeg).cast(),
             radio: descriptors.radio,
-            audio: std::ptr::from_ref(descriptors.audio).cast(),
+            audio: descriptors.audio,
             gpio: std::ptr::from_ref(descriptors.gpio).cast(),
             rnnoise: descriptors.rnnoise,
             ring: std::ptr::null(),
@@ -1561,6 +1561,65 @@ pub(crate) mod tests {
                     std::ptr::null_mut()
                 ),
                 -1
+            );
+        }
+    }
+
+    #[test]
+    fn stage_c_clock_audio_prefix_is_validated_by_sdk_before_hardware_acquisition() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SELECTS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn reject_selection(
+            _: *const abi::rptadv_audio_usb_device_selector,
+            _: *mut abi::rptadv_audio_usb_device_match,
+        ) -> abi::rptadv_audio_result {
+            SELECTS.fetch_add(1, Ordering::Relaxed);
+            1 // Stop preflight before any mixer, GPIO or stream can open.
+        }
+        let radio = crate::configuration::resolve_radio_nodes(
+            "[1000]\nradio_channel=fixture\n[radio 1000]\ndevice_identifier=3-1\n",
+        )
+        .unwrap()
+        .remove(0);
+        for size in [16, 191, 192, 193, 199, 200, 208, 209, 215, 216] {
+            let mut providers = Box::new(ProviderSet::load().unwrap());
+            let mut audio = unsafe {
+                *providers
+                    .descriptor(crate::providers::clock_tests::AUDIO)
+                    .unwrap()
+                    .as_ptr()
+                    .cast::<abi::rptadv_audio_adapter_descriptor>()
+            };
+            audio.usb_device_select = Some(reject_selection);
+            crate::providers::clock_tests::replace_audio(&mut providers, &audio, size);
+            SELECTS.store(0, Ordering::Relaxed);
+            // No successful handle may escape this bounded call; keep actual providers live.
+            let retained = unsafe { &*(providers.as_ref() as *const ProviderSet) };
+            let error = ActiveRadio::open(
+                retained,
+                &radio,
+                73,
+                128,
+                ProductRadioCallbacks {
+                    receive: Some(receive),
+                    receive_context: std::ptr::null_mut(),
+                    transmit: Some(transmit),
+                    transmit_context: std::ptr::null_mut(),
+                    metadata: None,
+                    feedback: None,
+                    fence: None,
+                },
+            )
+            .unwrap_err();
+            let accepted = size == 192 || size >= 200;
+            assert!(
+                matches!(error, super::RadioActivationError::Product(status) if status == if accepted { -6 } else { -2 }),
+                "extent {size}: {error}"
+            );
+            assert_eq!(
+                SELECTS.load(Ordering::Relaxed),
+                usize::from(accepted),
+                "SDK audio extent {size}: {error}"
             );
         }
     }

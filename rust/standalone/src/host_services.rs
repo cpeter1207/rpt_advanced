@@ -141,6 +141,7 @@ impl HostServicesOwner {
             peer_dial_timed_g711: Some(peer_dial_timed_g711),
             peer_dial_phone: Some(sip_phone::dial),
             peer_dial_phone_progress: Some(sip_phone::dial_progress),
+            media_clock_reader: Some(media_clock_reader),
         });
         Ok(Self {
             context,
@@ -905,6 +906,39 @@ unsafe extern "C" fn local_time(
         result.minute = local.tm_min as u8;
         result.second = local.tm_sec as u8;
         result.valid = 1;
+        0
+    })
+}
+
+/// Obtain a reader only on the control path, without acquiring a radio or stream.
+unsafe extern "C" fn media_clock_reader(
+    context: *mut c_void,
+    out: *mut abi::rptadv_media_clock_reader_v1,
+) -> i32 {
+    boundary(-1, || {
+        if out.is_null() {
+            return -1;
+        }
+        // SAFETY: the caller supplies a readable size word; inspect no nonexistent tail.
+        let size = unsafe { ptr::addr_of!((*out).struct_size).read() } as usize;
+        if size < size_of::<abi::rptadv_media_clock_reader_v1>()
+            || unsafe { ptr::addr_of!((*out).abi_version).read() } != 1
+        {
+            return -1;
+        }
+        // SAFETY: a complete ABI-1 request is writable; preserve its capacity and unknown tail.
+        let out = unsafe { &mut *out };
+        out.clock_kind = 0;
+        out.reserved = 0;
+        out.read_ns = None;
+        let reader = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
+            .and_then(|context| context.radio.providers)
+            .and_then(crate::providers::ProviderSet::media_clock_reader);
+        let Some(reader) = reader else {
+            return -1;
+        };
+        out.clock_kind = 1;
+        out.read_ns = Some(reader);
         0
     })
 }
@@ -2187,6 +2221,126 @@ pub(crate) mod tests {
             owner.context.radio.observations.text("1000"),
             "link_processors_retained=0\n"
         );
+    }
+
+    #[test]
+    fn stage_c_clock_host_getter_is_optional_and_capacity_bounded() {
+        #[repr(C)]
+        struct Reader {
+            size: u32,
+            version: u32,
+            kind: u32,
+            reserved: u32,
+            read: Option<unsafe extern "C" fn() -> u64>,
+            sentinel: u64,
+        }
+        type Getter = unsafe extern "C" fn(*mut c_void, *mut Reader) -> i32;
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+        let api = owner.descriptor();
+        assert_eq!(
+            api.struct_size, 448,
+            "append a control-only clock getter to ABI 10"
+        );
+        let getter = unsafe {
+            std::ptr::from_ref(api)
+                .cast::<u8>()
+                .add(440)
+                .cast::<Option<Getter>>()
+                .read()
+        }
+        .expect("standalone advertises the optional getter");
+        assert_ne!(unsafe { getter(api.context, std::ptr::null_mut()) }, 0);
+        for size in [0, 4, 8, 16, 23, 24, 32] {
+            for version in [0, 1, 2] {
+                let mut out = Reader {
+                    size,
+                    version,
+                    kind: 77,
+                    reserved: 88,
+                    read: None,
+                    sentinel: 0xabcdef,
+                };
+                assert_ne!(unsafe { getter(api.context, &mut out) }, 0);
+                assert_eq!(
+                    (out.size, out.version, out.sentinel),
+                    (size, version, 0xabcdef)
+                );
+                let payload = if size >= 24 && version == 1 {
+                    (0, 0)
+                } else {
+                    (77, 88)
+                };
+                assert_eq!((out.kind, out.reserved), payload);
+                assert!(out.read.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn stage_c_clock_getter_returns_same_retained_reader_without_sampling() {
+        #[repr(C)]
+        struct Extended {
+            reader: abi::rptadv_media_clock_reader_v1,
+            sentinel: [u64; 2],
+        }
+        unsafe extern "C" fn forbidden_read() -> u64 {
+            panic!("getter must not sample the clock");
+        }
+        let mut providers = crate::providers::ProviderSet::load().unwrap();
+        let mut audio = unsafe {
+            *providers
+                .descriptor(crate::providers::clock_tests::AUDIO)
+                .unwrap()
+                .as_ptr()
+                .cast::<abi::rptadv_audio_adapter_descriptor>()
+        };
+        audio.monotonic_now_ns = Some(forbidden_read);
+        crate::providers::tests::replace_descriptor(
+            &mut providers,
+            crate::providers::clock_tests::AUDIO,
+            audio,
+        );
+        let providers = Box::leak(Box::new(providers));
+        let owner =
+            HostServicesOwner::new(Vec::new(), Some(providers), SecretsFile::parse("").unwrap())
+                .unwrap();
+        let api = owner.descriptor();
+        let mut out = Extended {
+            reader: abi::rptadv_media_clock_reader_v1 {
+                struct_size: 40,
+                abi_version: 1,
+                clock_kind: 99,
+                reserved: 99,
+                read_ns: None,
+            },
+            sentinel: [0xabcdef, 0x123456],
+        };
+        let getter = api.media_clock_reader.unwrap();
+        assert_eq!(unsafe { getter(api.context, &mut out.reader) }, 0);
+        assert_eq!(
+            (
+                out.reader.struct_size,
+                out.reader.abi_version,
+                out.reader.clock_kind,
+                out.reader.reserved
+            ),
+            (40, 1, 1, 0)
+        );
+        let raw = providers.radio_runtime_descriptors().unwrap().audio;
+        let expected = unsafe {
+            (*raw.cast::<abi::rptadv_audio_adapter_descriptor>())
+                .monotonic_now_ns
+                .unwrap()
+        };
+        assert!(std::ptr::fn_addr_eq(out.reader.read_ns.unwrap(), expected));
+        assert_eq!(out.sentinel, [0xabcdef, 0x123456]);
+        // Failure clears a formerly successful result; no stale pointer escapes as available.
+        assert_ne!(unsafe { getter(std::ptr::null_mut(), &mut out.reader) }, 0);
+        assert_eq!((out.reader.clock_kind, out.reader.reserved), (0, 0));
+        assert!(out.reader.read_ns.is_none());
+        assert_eq!(out.reader.struct_size, 40);
+        assert_eq!(out.sentinel, [0xabcdef, 0x123456]);
     }
 
     #[test]

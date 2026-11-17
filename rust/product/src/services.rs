@@ -625,6 +625,7 @@ impl HostServices {
                 timed_dial_tail,
                 phone_dial_tail,
                 phone_progress_tail,
+                offset_of!(abi::rptadv_host_services_v10, media_clock_reader),
             ]
             .contains(&size)
         {

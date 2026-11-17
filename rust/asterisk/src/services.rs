@@ -1332,6 +1332,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v10 {
     peer_dial_timed_g711: None,
     peer_dial_phone: None,
     peer_dial_phone_progress: None,
+    media_clock_reader: None,
     radio_remote_submit: Some(radio_remote_submit),
 });
 

@@ -723,7 +723,7 @@ fn complete_pre_remote_host_v10_prefix_has_no_remote_callbacks() {
         std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_phone_progress),
         432
     );
-    assert_eq!(size_of_val(&table), 440);
+    assert_eq!(size_of_val(&table), 448);
     table.struct_size =
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind) as u32;
     assert_eq!(table.struct_size, 360);
@@ -1599,4 +1599,44 @@ pub(crate) fn phone_factory_fixture(
     let mut table = phone.services.0;
     configure(&mut table);
     unsafe { HostServices::open(&table) }.unwrap()
+}
+
+#[test]
+fn stage_c_clock_host_prefixes_reject_partial_getter_without_invoking_it() {
+    unsafe extern "C" fn unexpected(
+        _: *mut c_void,
+        _: *mut abi::rptadv_media_clock_reader_v1,
+    ) -> i32 {
+        panic!("opening HostServices must not acquire or sample a clock");
+    }
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.media_clock_reader = Some(unexpected);
+    for size in [336, 344, 352, 360, 368, 392, 400, 408, 416, 424, 432, 440] {
+        table.struct_size = size;
+        let mut prefix = vec![0_u64; size as usize / 8];
+        unsafe {
+            ptr::copy_nonoverlapping(
+                ptr::from_ref(&table).cast::<u8>(),
+                prefix.as_mut_ptr().cast(),
+                size as usize,
+            )
+        };
+        let host = unsafe { HostServices::open(prefix.as_ptr().cast()) }.unwrap();
+        assert!(
+            host.0.media_clock_reader.is_none(),
+            "old complete size {size}"
+        );
+    }
+    for size in 441..448 {
+        table.struct_size = size;
+        assert!(
+            unsafe { HostServices::open(&table) }.is_err(),
+            "partial size {size}"
+        );
+    }
+    for getter in [None, Some(unexpected as unsafe extern "C" fn(_, _) -> _)] {
+        table.struct_size = 448;
+        table.media_clock_reader = getter;
+        assert!(unsafe { HostServices::open(&table) }.is_ok());
+    }
 }

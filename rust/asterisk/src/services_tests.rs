@@ -1137,6 +1137,7 @@ fn programme_retirement_rejects_malformed_or_unacknowledged_channel_requests() {
 fn outgoing_phone_factory_is_explicitly_unavailable_in_asterisk() {
     assert!(descriptor().peer_dial_phone.is_none());
     assert!(descriptor().peer_dial_phone_progress.is_none());
+    assert!(descriptor().media_clock_reader.is_none());
 }
 
 #[repr(C)]

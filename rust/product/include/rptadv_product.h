@@ -466,10 +466,23 @@ struct rptadv_remote_ticket_v1 {
     int (*take)(void *ticket, rptadv_remote_sink_v1 sink, void *context); /**< Copy completion. */
     void (*destroy)(void *ticket); /**< Cancel before releasing, including while pending. */
 };
+/** Optional current software-clock capability, prepared off audio.
+ * The caller supplies a complete writable capacity, ABI 1 and zero payload.
+ * Kind 1 is Linux CLOCK_MONOTONIC in this retained process/time namespace,
+ * not an epoch identity or physical presentation bound. Suspend is excluded.
+ * Keep provider code loaded until every reader user has quiesced. */
+struct rptadv_media_clock_reader_v1 {
+    uint32_t struct_size;      /**< Caller capacity; at least the complete known record. */
+    uint32_t abi_version;      /**< Exact version 1. */
+    uint32_t clock_kind;       /**< Output 1 for CLOCK_MONOTONIC, zero for unavailable. */
+    uint32_t reserved;         /**< Output zero. */
+    uint64_t (*read_ns)(void); /**< Current nanoseconds; zero means unavailable/failure. */
+};
+
 /** Host I/O primitives consumed by the portable product owner.
  * ABI 10 preserves its required prefix and complete optional tail boundaries.
- * The final optional timed-G.711 dial callback adds one pointer; older complete
- * tables remain valid but cannot advertise this dial capability.
+ * The optional clock getter adds one pointer; older complete tables remain valid
+ * without advertising current-clock access.
  * Omitted complete capability tails are copied as null; partial tails are rejected.
  * The immutable table, context and callback code remain valid through successful
  * product stop. The context supports concurrent calls. Each non-null radio/peer
@@ -735,6 +748,13 @@ struct rptadv_host_services_v10 {
                                     rptadv_current_v1 current, void *current_context,
                                     rptadv_phone_progress_v1 progress, void *progress_context,
                                     void **peer);
+    /** Optional control-only getter, called before preparing reader users.
+     * Uses the same retained audio provider as native radio activation; never opens
+     * hardware or retains out. Null, short or wrong-version requests fail without
+     * touching payload. Complete ABI-1 requests preserve capacity/unknown tails;
+     * failure clears kind/reserved/read_ns, success returns zero, kind 1, reserved
+     * zero and a non-null reader. Missing/null getter means unavailable. */
+    int (*media_clock_reader)(void *context, struct rptadv_media_clock_reader_v1 *out);
 };
 
 /** Exact revision of a typed site control request. */

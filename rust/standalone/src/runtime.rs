@@ -1877,3 +1877,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_clock_tests.rs"]
+mod clock_tests;

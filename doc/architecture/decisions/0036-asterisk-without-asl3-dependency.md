@@ -252,3 +252,28 @@ deployment environment: the ordinary Asterisk/ASL3 independence checks and
 full platform/integration gate above remain required. Current release and
 live-radio limits are tracked in
 [implementation status](../../implementation-status.md).
+
+
+### Optional standalone current-clock bridge (2026-11-17)
+
+Host-services ABI 10 appends a control-only `media_clock_reader` getter after
+its 440-byte complete prefix. The 24-byte sized ABI-1 result returns the optional
+reader from the same retained audio descriptor supplied to the native SDK.
+Absent complete tails and null readers remain unavailable; malformed partial
+host tables are still rejected. Standalone retains the original audio descriptor
+pointer instead of forming a full new-layout reference to an older allocation.
+The SDK validates its consumed audio prefix before hardware acquisition.
+
+The getter does not sample the clock, open a device or retain the output record.
+Product creation, source/I/O and SDK reader users must all end before successful
+product stop releases host state and the ProviderSet. Failed stop retains these
+owners; reload, including added devices, uses the same retained provider cohort.
+Bounded test probes cover these ownership seams; production source/media-origin
+and SDK observation consumers are separate, not introduced by this bridge.
+
+The reader denotes Linux CLOCK_MONOTONIC in the retained process/time namespace,
+not a portable epoch or elapsed physical age across suspend. Physical presentation
+remains Unknown. Asterisk advertises no getter and gains no clock capability.
+No host ABI version, DirectCallbacks ABI, SONAME, package version, dependency pin
+or activation policy changes. Candidate header/provider qualification and any
+release update remain separate gates.
