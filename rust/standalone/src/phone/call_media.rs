@@ -762,6 +762,18 @@ impl Media {
                     unsafe { sink.source_discontinuity.unwrap()(sink.context) }
                 }
             };
+            // Test diagnostics correlate custody cuts with the real SIP courtesy window.
+            #[cfg(test)]
+            eprintln!(
+                "vox-courtesy: continuity unix_ms={} source_now_ns={} adaptation={:?} result={result} jitter={:?}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                sink.reference_now_ns,
+                self.adaptation_cut,
+                self.jitter.observe(),
+            );
             match result {
                 0 => {
                     self.discontinuity = false;

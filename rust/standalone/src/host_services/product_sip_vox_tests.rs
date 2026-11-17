@@ -246,7 +246,23 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool
         0,
         "silence after the private result does not open radio VOX"
     );
+    let speech_first = RADIO_TURNS.load(Ordering::Acquire);
+    eprintln!(
+        "vox-courtesy: existing={existing} speech-start unix_ms={} radio_turn={speech_first}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
     media(&mut caller, &mut codec, &speech);
+    eprintln!(
+        "vox-courtesy: existing={existing} speech-end unix_ms={} radio_turn={}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+        RADIO_TURNS.load(Ordering::Acquire)
+    );
     media(&mut caller, &mut codec, &[0.0; 4000]);
     eprintln!(
         "vox-courtesy: existing={existing} voice_remote={} rf={}",
@@ -266,6 +282,14 @@ pub(super) fn call(sip: UdpSocket, observation: Arc<Observation>, existing: bool
     media(&mut caller, &mut codec, &[0.0; 16000]);
     let last = RADIO_TURNS.load(Ordering::Acquire);
     assert!(last - first < RF_MORSE.len());
+    // Keep the original assertion window; wider history is diagnostic only.
+    let history_start = speech_first.max(last.saturating_sub(RF_MORSE.len()));
+    let tone_turns: Vec<_> = (history_start..last)
+        .filter(|frame| RF_MORSE[frame % RF_MORSE.len()].load(Ordering::Acquire))
+        .collect();
+    eprintln!(
+        "vox-courtesy: existing={existing} capture={first}..{last} history={history_start} tone_turns={tone_turns:?}"
+    );
     let mut bursts = Vec::new();
     let mut on = 0;
     for frame in first..last {
