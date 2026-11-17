@@ -33,7 +33,9 @@ Development root: `/home/codex/rpt-development` (development host only).
 
 ## Task 1: isolated provider implementation first
 
-This is the nonconflicting first implementation assignment. Own only the new
+Only inventory and isolated failing-test preparation may proceed initially.
+Steps 3-6 are conditional on the codec policy prerequisites below, not a grant
+to implement an unproved provenance contract. Own only the new
 IAX worktree; do not edit controller Cargo files, product tests, standalone
 support or codec worktree. Coordinate dependency revision with the codec owner.
 
@@ -126,14 +128,30 @@ never bypass a denied action. Preserve first-failure logs and exact run IDs.
 
 ## Readiness, blockers and estimate
 
-Ready: design approved; exact pinned IAX baseline and concrete codec API located;
-provider-only task can proceed in an isolated worktree without RTP file overlap.
-Before implementation: inspect provider rules, create that worktree, agree exact
-codec source pin/support matrix, and reserve a resource-safe targeted-test slot.
-Before consumer work: stable provider interface and controller ownership handoff.
-Before parity claim: both consumer paths, matching native cohort and binary/source
-provenance; no existing published alpha13 attestation has established the latter.
+The earlier provider-ready assessment and 2-3 day estimate are superseded by
+the [codec provenance policy](../specs/2026-11-17-codec-provenance-policy.md).
+The approved IAX transport design does not establish codec provenance support
+or authorize unproved classification/API changes.
 
-Estimate remains 2-3 focused engineering days plus 0.5-1 day for review and native
-qualification without new defects. Full gate remediation and physical acceptance
-can add time. These are estimates, not a deployment or parity-completion claim.
+Ready: pinned IAX baseline inspection and isolated provider RED tests, with a
+reserved resource-safe slot. The current codec candidate covers only 9 of 16
+active formats; disabling the other formats or treating successful decode as
+fresh authority is not an acceptable shortcut. Before provider production
+steps 3-6: complete native branch proof, resolve the policy's semantic choices,
+review any necessary API change, and agree the exact codec support matrix/pin.
+Ordinary current-parameter reconstruction is not old PLC merely because it uses
+filter history. Independently retained or concealed contributors must preserve
+conservative programme age without rejuvenation, in either mixed-origin
+direction. LPC10 failed correction must be traced through delayed parameters,
+smoothing and synthesis buffering, including a proved clear without permanent
+taint. Do not introduce a new analysis API without a demonstrated need.
+
+Before consumer work: stable reviewed provider interface and controller ownership
+handoff. Before parity claim: both consumer paths, matching native cohort and
+binary/source provenance; no existing alpha13 attestation establishes the latter.
+
+Revised estimate: 5.5-9 focused engineering days for codec prerequisites, provider,
+adapters and qualification; conditionally 7.5-13 days if native proof demonstrates
+that a new analysis API is necessary. Review findings, full-gate remediation and
+physical acceptance can add time. These are planning ranges, not deployment or
+parity-completion claims.
