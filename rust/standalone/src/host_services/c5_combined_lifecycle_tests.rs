@@ -90,6 +90,7 @@ static VIOLATION: AtomicBool = AtomicBool::new(false);
 static LIVE: AtomicBool = AtomicBool::new(false);
 static EXPECTED_READER: AtomicUsize = AtomicUsize::new(0);
 static RAW_ORIGIN: AtomicU64 = AtomicU64::new(0);
+static NATIVE_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static BINDS: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(C)]
@@ -111,6 +112,7 @@ struct BindingV2 {
     observed: Option<unsafe extern "C" fn(*mut c_void, *const Observation) -> u32>,
 }
 struct Native {
+    snapshot: unsafe extern "C" fn(*mut c_void, u32, *mut abi::UrpAstSiteSnapshot) -> i32,
     create: unsafe extern "C" fn(*const abi::UrpNativeCreateArgs, *mut *mut c_void) -> i32,
     destroy: unsafe extern "C" fn(*mut c_void),
     bind: unsafe extern "C" fn(*mut c_void, *mut abi::UrpProgrammeFenceBinding) -> i32,
@@ -194,6 +196,7 @@ unsafe extern "C" fn native_create(
     let status = unsafe { (sdk.create)(args, out) };
     if unsafe { !(*out).is_null() } {
         NATIVE_LIVE.fetch_add(1, Ordering::AcqRel);
+        NATIVE_HANDLE.store(unsafe { *out } as usize, Ordering::Release);
     }
     if status != 0 || unsafe { (*out).is_null() } {
         return status;
@@ -242,6 +245,7 @@ unsafe extern "C" fn native_destroy(handle: *mut c_void) {
     if hardware::PUMPS.load(Ordering::Acquire) != 0 {
         VIOLATION.store(true, Ordering::Release);
     }
+    NATIVE_HANDLE.store(0, Ordering::Release);
     NATIVE_LIVE.fetch_sub(1, Ordering::AcqRel);
     NATIVE_DESTROYED.fetch_add(1, Ordering::AcqRel);
 }
@@ -269,11 +273,19 @@ fn reset() {
         &hardware::TX_TONE,
         &hardware::PARTIAL_CALLBACKS,
         &hardware::PARTIAL_OWNERS,
+        &hardware::GPIO_DESIRED,
+        &hardware::GPIO_SERVICED,
+        &hardware::GPIO_SEQUENCE,
+        &hardware::GPIO_SAFE_SEQUENCE,
+        &hardware::GPIO_FAULTS,
+        &hardware::GPIO_FAULT_SEQUENCE,
+        &hardware::GPIO_FAULT_HIGH,
     ] {
         counter.store(0, Ordering::Release);
     }
     LIVE.store(true, Ordering::Release);
     VIOLATION.store(false, Ordering::Release);
+    hardware::FAIL_SAFE_SERVICE.store(false, Ordering::Release);
     hardware::INPUT.store(false, Ordering::Release);
     hardware::FAIL_START.store(false, Ordering::Release);
     hardware::FAIL_STOP.store(false, Ordering::Release);
@@ -318,6 +330,7 @@ fn providers(directory: &Path) -> ProviderSet {
             .cast::<abi::UrpAstDescriptor>()
     };
     *SDK.lock().unwrap() = Some(Native {
+        snapshot: native.native_site_snapshot.unwrap(),
         create: native.native_create.unwrap(),
         destroy: native.native_destroy.unwrap(),
         bind: native.native_programme_fence_bind.unwrap(),
@@ -381,6 +394,16 @@ fn assert_drained() {
 #[test]
 #[ignore = "C5 exact external cohort required; use workflows/tools/run_c5_combined_lifecycle_tests.py"]
 fn stage_c5_combined_native_product_success() {
+    combined(false);
+}
+
+#[test]
+#[ignore = "C5 exact external cohort required; use workflows/tools/run_c5_combined_lifecycle_tests.py"]
+fn stage_c5_combined_native_product_failed_stop_retry() {
+    combined(true);
+}
+
+fn combined(failed_stop: bool) {
     reset();
     let directory = std::env::temp_dir().join(format!("rpt-c5-combined-{}", std::process::id()));
     std::fs::create_dir(&directory).unwrap();
@@ -395,6 +418,13 @@ fn stage_c5_combined_native_product_success() {
         "[general]\nnode_enabled=yes\n[1000]\nradio_channel=fixture\nduplex=full\nlink_lookup_method=file\nlink_static_directory_file={}\n[radio 1000]\ndevice_identifier=3-1:1.0\n",
         nodes.display()
     );
+    let config = if failed_stop {
+        format!(
+            "{config}cm119_gpio_7_mode=out0\n[output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=7\nstartup_state=on\nsafe_state=off\n"
+        )
+    } else {
+        config
+    };
     let providers = providers(&directory.join("clock"));
     let mut runtime = ProductRuntime::start_with_providers(
         Path::new("rpt_advanced.conf"),
@@ -465,11 +495,17 @@ fn stage_c5_combined_native_product_success() {
     }
     let sent = remote.sent_return_packets();
     let output = hardware::TX_TONE.load(Ordering::Acquire);
-    runtime.stop().unwrap();
+    let stop_evidence = failed_stop.then(|| failed_stop_retry(&mut runtime));
+    if !failed_stop {
+        runtime.stop().unwrap();
+    }
     drop(runtime);
     drop(remote);
     assert_drained();
     std::fs::remove_dir_all(directory).unwrap();
+    if let Some(evidence) = stop_evidence {
+        evidence.assert_retention();
+    }
     assert_eq!(admitted, 0);
     eprintln!(
         "C5_RX_PATTERN voiced={received} matched_windows={}",
@@ -672,4 +708,201 @@ fn stage_c5_rx_pattern_recognizes_only_injected_tone() {
             );
         }
     }
+}
+
+/// Read the real SDK cache only while the actual native owner is retained.
+fn site_snapshot() -> abi::UrpAstSiteSnapshot {
+    let handle = NATIVE_HANDLE.load(Ordering::Acquire);
+    assert_ne!(handle, 0);
+    let mut snapshot: abi::UrpAstSiteSnapshot = unsafe { std::mem::zeroed() };
+    snapshot.struct_size = size_of::<abi::UrpAstSiteSnapshot>() as u32;
+    snapshot.abi_version = 1;
+    assert_eq!(
+        unsafe {
+            (SDK.lock().unwrap().as_ref().unwrap().snapshot)(
+                handle as *mut c_void,
+                0,
+                &mut snapshot,
+            )
+        },
+        0
+    );
+    snapshot
+}
+
+struct FailedStopEvidence {
+    stopped: Result<(), crate::runtime::RuntimeError>,
+    claimed: bool,
+    retained: bool,
+    reader_usable: bool,
+    native_progress: bool,
+    backend_faults: usize,
+    safe_sequence: usize,
+    before_sequence: usize,
+    snapshot_fault: bool,
+    fault_sequence: usize,
+    fault_high: usize,
+    recovered: bool,
+}
+impl FailedStopEvidence {
+    fn assert_retention(self) {
+        assert!(
+            self.claimed,
+            "non-safe output must have a real SDK service acknowledgment before injection"
+        );
+        assert_eq!(
+            self.stopped,
+            Err(crate::runtime::RuntimeError::Stop),
+            "actual outer stop must fail on the new safe-output service failure"
+        );
+        assert!(
+            self.backend_faults > 0 && self.safe_sequence > self.before_sequence,
+            "fault must follow a fresh non-safe to safe publication"
+        );
+        assert!(
+            self.snapshot_fault,
+            "real SDK must publish failed safe-output service"
+        );
+        assert!(
+            self.fault_sequence >= self.safe_sequence && self.fault_high & 0x40 == 0,
+            "backend failure must service the new safe demand, not an earlier phase"
+        );
+        assert!(
+            self.recovered,
+            "clear fault must produce fresh successful safe service before retry"
+        );
+        assert!(
+            self.retained && self.reader_usable && self.native_progress,
+            "failed stop must retain usable provider code and native callback owners"
+        );
+    }
+}
+
+fn failed_stop_retry(runtime: &mut ProductRuntime) -> FailedStopEvidence {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut initial = site_snapshot();
+    while !(initial.claimed_mask == 0x40
+        && initial.serviced_generation == initial.generation
+        && initial.serviced_high_mask & 0x40 != 0)
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(1));
+        initial = site_snapshot();
+    }
+    eprintln!(
+        "C5_INITIAL_SITE {initial:?} backend_desired={} backend_serviced={}",
+        hardware::GPIO_DESIRED.load(Ordering::Acquire),
+        hardware::GPIO_SERVICED.load(Ordering::Acquire)
+    );
+    let claimed = initial.claimed_mask == 0x40
+        && initial.generation != 0
+        && initial.submitted_generation == initial.generation
+        && initial.serviced_generation == initial.generation
+        && initial.requested_high_mask & 0x40 != 0
+        && initial.serviced_high_mask & 0x40 != 0
+        && hardware::GPIO_SERVICED.load(Ordering::Acquire) & 0x40 != 0;
+    let before_sequence = hardware::GPIO_SEQUENCE.load(Ordering::Acquire);
+    hardware::GPIO_FAULT_MODE.store(
+        if std::env::var_os("C5_NO_SAFE_FAILURE").is_some() {
+            0
+        } else if std::env::var_os("C5_WRONG_FAILURE_PHASE").is_some() {
+            2
+        } else {
+            1
+        },
+        Ordering::Release,
+    );
+    hardware::FAIL_SAFE_SERVICE.store(true, Ordering::Release);
+    // Make the wrong-phase control actually fail a non-safe service before shutdown.
+    if hardware::GPIO_FAULT_MODE.load(Ordering::Acquire) == 2 {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while hardware::GPIO_FAULTS.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+    }
+    let stopped = runtime.stop();
+    let retained = runtime.c5_retained_reader().is_some()
+        && UNLOADS.load(Ordering::Acquire) == 0
+        && NATIVE_LIVE.load(Ordering::Acquire) == 1
+        && NATIVE_DESTROYED.load(Ordering::Acquire) == 0
+        && hardware::PUMPS.load(Ordering::Acquire) == 1
+        && hardware::STREAMS.load(Ordering::Acquire) == 1;
+    let mut reader_usable = false;
+    let mut native_progress = false;
+    let mut snapshot_fault = false;
+    if retained {
+        let reader = runtime.c5_retained_reader().unwrap();
+        reader_usable = reader as usize == EXPECTED_READER.load(Ordering::Acquire)
+            && unsafe { reader() } >= RAW_ORIGIN.load(Ordering::Acquire);
+        let snapshot = site_snapshot();
+        eprintln!("C5_FAILED_SITE {snapshot:?}");
+        snapshot_fault = snapshot.claimed_mask == 0x40
+            && snapshot.requested_high_mask & 0x40 == 0
+            && (snapshot.observed_at_valid == 0 || snapshot.input_quality != 1)
+            && (snapshot.serviced_generation != snapshot.generation
+                || snapshot.serviced_high_mask & 0x40 != 0);
+        let observed = OBSERVED.load(Ordering::Acquire);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while OBSERVED.load(Ordering::Acquire) == observed && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        native_progress = OBSERVED.load(Ordering::Acquire) > observed;
+    }
+    let mut evidence = FailedStopEvidence {
+        stopped,
+        claimed,
+        retained,
+        reader_usable,
+        native_progress,
+        backend_faults: hardware::GPIO_FAULTS.load(Ordering::Acquire),
+        safe_sequence: hardware::GPIO_SAFE_SEQUENCE.load(Ordering::Acquire),
+        before_sequence,
+        snapshot_fault,
+        fault_sequence: hardware::GPIO_FAULT_SEQUENCE.load(Ordering::Acquire),
+        fault_high: hardware::GPIO_FAULT_HIGH.load(Ordering::Acquire),
+        recovered: false,
+    };
+    eprintln!(
+        "C5_FAILED_STOP stop={:?} claimed={} retained={} reader={} progress={} faults={} before_sequence={} safe_sequence={} sdk_fault={} fault_sequence={} fault_high={}",
+        evidence.stopped,
+        claimed,
+        retained,
+        reader_usable,
+        native_progress,
+        evidence.backend_faults,
+        before_sequence,
+        evidence.safe_sequence,
+        snapshot_fault,
+        evidence.fault_sequence,
+        evidence.fault_high
+    );
+    // Clear only the physical backend fault and retry the actual production stop.
+    // Even a negative control cleans up before asserting; no fixture joins or owner drops.
+    hardware::FAIL_SAFE_SERVICE.store(false, Ordering::Release);
+    if stopped.is_err() {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut recovered = site_snapshot();
+        while !(recovered.input_quality == 1
+            && recovered.serviced_generation == recovered.generation
+            && recovered.serviced_high_mask & 0x40 == 0)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(1));
+            recovered = site_snapshot();
+        }
+        evidence.recovered = recovered.input_quality == 1
+            && recovered.claimed_mask == 0x40
+            && recovered.generation == initial.generation
+            && recovered.submitted_generation == recovered.generation
+            && recovered.serviced_generation == recovered.generation
+            && recovered.serviced_high_mask & 0x40 == 0
+            && recovered.observed_at_valid == 1
+            && recovered.observed_at_ms > initial.observed_at_ms;
+        eprintln!(
+            "C5_RECOVERED_SITE {recovered:?} fresh={}",
+            evidence.recovered
+        );
+        runtime.stop().unwrap();
+    }
+    evidence
 }

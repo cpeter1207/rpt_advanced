@@ -271,13 +271,44 @@ unsafe extern "C" fn gpio_open(
 unsafe extern "C" fn gpio_close(raw: *mut rptadv_gpio_device) {
     drop(unsafe { Box::from_raw(raw.cast::<u8>()) });
 }
+// Scalar fake-backend receipts, distinct from the real SDK site acknowledgment.
+pub(super) static GPIO_DESIRED: AtomicUsize = AtomicUsize::new(0);
+pub(super) static GPIO_SERVICED: AtomicUsize = AtomicUsize::new(0);
+pub(super) static GPIO_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+pub(super) static GPIO_SAFE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+pub(super) static GPIO_FAULT_MODE: AtomicUsize = AtomicUsize::new(1);
+pub(super) static GPIO_FAULT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+pub(super) static GPIO_FAULT_HIGH: AtomicUsize = AtomicUsize::new(0);
+pub(super) static GPIO_FAULTS: AtomicUsize = AtomicUsize::new(0);
+pub(super) static FAIL_SAFE_SERVICE: AtomicBool = AtomicBool::new(false);
+
 unsafe extern "C" fn gpio_service(_: *mut rptadv_gpio_device) -> i32 {
+    let high = GPIO_DESIRED.load(Ordering::Acquire);
+    let safe = GPIO_SAFE_SEQUENCE.load(Ordering::Acquire);
+    let fail = match GPIO_FAULT_MODE.load(Ordering::Acquire) {
+        1 => safe != 0 && high & 0x40 == 0,
+        2 => safe == 0 && high & 0x40 != 0,
+        _ => false,
+    };
+    if FAIL_SAFE_SERVICE.load(Ordering::Acquire) && fail {
+        GPIO_FAULT_SEQUENCE.store(GPIO_SEQUENCE.load(Ordering::Acquire), Ordering::Release);
+        GPIO_FAULT_HIGH.store(high, Ordering::Release);
+        GPIO_FAULTS.fetch_add(1, Ordering::AcqRel);
+        return -1;
+    }
+    GPIO_SERVICED.store(GPIO_DESIRED.load(Ordering::Acquire), Ordering::Release);
     0
 }
 unsafe extern "C" fn gpio_publish(
     _: *mut rptadv_gpio_device,
-    _: *const rptadv_gpio_output_action,
+    action: *const rptadv_gpio_output_action,
 ) -> i32 {
+    let high = unsafe { (*action).gpio_output_mask } as usize;
+    let prior = GPIO_DESIRED.swap(high, Ordering::AcqRel);
+    let sequence = GPIO_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1;
+    if FAIL_SAFE_SERVICE.load(Ordering::Acquire) && prior & 0x40 != 0 && high & 0x40 == 0 {
+        GPIO_SAFE_SEQUENCE.store(sequence, Ordering::Release);
+    }
     0
 }
 unsafe extern "C" fn inputs(

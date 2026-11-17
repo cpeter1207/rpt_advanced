@@ -228,3 +228,25 @@ impl ProductRuntime {
         self.providers = Some(providers);
     }
 }
+
+// Inspect actual outer owners without replacing the production stop callback.
+impl ProductRuntime {
+    pub(crate) fn c5_retained_reader(&self) -> Option<unsafe extern "C" fn() -> u64> {
+        self.composition.as_ref()?;
+        let providers = self.providers.as_ref()?;
+        let host = self.host.as_ref()?.descriptor();
+        let mut out: abi::rptadv_media_clock_reader_v1 = unsafe { std::mem::zeroed() };
+        out.struct_size = size_of::<abi::rptadv_media_clock_reader_v1>() as u32;
+        out.abi_version = 1;
+        if unsafe { host.media_clock_reader?(host.context, &mut out) } != 0 {
+            return None;
+        }
+        let reader = providers.media_clock_reader().ok()??;
+        (out.clock_kind == 1
+            && out.reserved == 0
+            && out
+                .read_ns
+                .is_some_and(|host_reader| std::ptr::fn_addr_eq(host_reader, reader)))
+        .then_some(reader)
+    }
+}
