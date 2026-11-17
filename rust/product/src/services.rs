@@ -1446,20 +1446,54 @@ impl Radio {
         {
             return Err(-1);
         }
+        self.bind_programme_fence_request(abi::UrpProgrammeFenceBindingV2 {
+            base: *binding,
+            observed_permit: None,
+        })
+    }
+
+    /// Bind the SDK's observed stopped port using the existing sized operation 9.
+    ///
+    /// # Safety
+    /// The callback has the same bounded, allocation-free contract as the legacy
+    /// port. Retain old and proposed contexts through every ambiguous failure until
+    /// confirmed stopped replacement/unbind or synchronous quiescent destruction.
+    pub unsafe fn bind_programme_fence_observed(
+        &mut self,
+        binding: &abi::UrpProgrammeFenceBindingV2,
+    ) -> Result<ProgrammeFenceBindingStatus, i32> {
+        if binding.base.struct_size as usize != size_of_val(binding)
+            || binding.base.abi_version != abi::URP_PROGRAMME_FENCE_V2_ABI_VERSION
+            || binding.base.accepted_abi_version != 0
+            || binding.base.reserved != 0
+            || binding.base.permit.is_some()
+        {
+            return Err(-1);
+        }
+        self.bind_programme_fence_request(*binding)
+    }
+
+    /// Forward one validated known payload, without advertising spare stack bytes.
+    fn bind_programme_fence_request(
+        &mut self,
+        binding: abi::UrpProgrammeFenceBindingV2,
+    ) -> Result<ProgrammeFenceBindingStatus, i32> {
         let call = self.services.0.radio_control.ok_or(-7)?;
-        // SAFETY: this flat request contains only scalar fields and nullable pointers.
-        let mut request: abi::rptadv_radio_fence_control_v1 = unsafe { std::mem::zeroed() };
-        request.control.struct_size = size_of_val(&request) as u32;
+        // SAFETY: this flat request contains only scalars and nullable pointers.
+        let mut request: abi::rptadv_radio_fence_control_v2 = unsafe { std::mem::zeroed() };
+        let extent = std::mem::offset_of!(abi::rptadv_radio_fence_control_v2, binding) as u32
+            + binding.base.struct_size;
+        request.control.struct_size = extent;
         request.control.abi_version = 1;
         request.control.operation = 9;
-        request.binding = *binding;
-        // SAFETY: the unique control owner lends only the local request; callback
-        // storage remains separately retained by this method's caller on all paths.
+        request.binding = binding;
+        // SAFETY: serialized control borrows the request only; the unsafe public
+        // entry requires separately retained callback contexts on every outcome.
         let status = unsafe {
             call(
                 self.services.0.context,
                 self.handle.as_ptr(),
-                &mut request.control,
+                ptr::from_mut(&mut request).cast(),
                 None,
                 ptr::null_mut(),
             )
@@ -1467,21 +1501,26 @@ impl Radio {
         if !matches!(status, 0 | 1) {
             return Err(status);
         }
-        let reply = request.binding;
-        if request.control.struct_size as usize != size_of_val(&request)
+        let original = binding.base;
+        let reply = request.binding.base;
+        if request.control.struct_size != extent
             || request.control.abi_version != 1
             || request.control.operation != 9
-            || reply.struct_size != binding.struct_size
-            || reply.abi_version != binding.abi_version
-            || reply.context != binding.context
-            || reply.reserved != binding.reserved
-            || reply.permit.map(|call| call as usize) != binding.permit.map(|call| call as usize)
+            || reply.struct_size != original.struct_size
+            || reply.abi_version != original.abi_version
+            || reply.context != original.context
+            || reply.reserved != original.reserved
+            || reply.permit.map(|call| call as usize) != original.permit.map(|call| call as usize)
+            || request.binding.observed_permit.map(|call| call as usize)
+                != binding.observed_permit.map(|call| call as usize)
         {
             return Err(-7);
         }
         match (status, reply.accepted_abi_version) {
             (1, 0) => Ok(ProgrammeFenceBindingStatus::Staged),
-            (0, abi::URP_PROGRAMME_FENCE_ABI_VERSION) => Ok(ProgrammeFenceBindingStatus::Retained),
+            (0, version) if version == original.abi_version => {
+                Ok(ProgrammeFenceBindingStatus::Retained)
+            }
             _ => Err(-7),
         }
     }

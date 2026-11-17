@@ -38,6 +38,38 @@ impl std::fmt::Display for RadioActivationError {
 }
 impl std::error::Error for RadioActivationError {}
 
+/// Copied known stopped-binding payload; no request pointer or unknown tail is retained.
+#[derive(Clone, Copy)]
+pub enum ProgrammeFenceBinding {
+    /// Legacy generation/frame callback.
+    Legacy(abi::UrpProgrammeFenceBinding),
+    /// Observed post-DSP callback with a null legacy permit.
+    Observed(abi::UrpProgrammeFenceBindingV2),
+}
+impl ProgrammeFenceBinding {
+    /// Borrow the common wire prefix without treating enum storage as C layout.
+    pub(crate) fn base(&self) -> &abi::UrpProgrammeFenceBinding {
+        match self {
+            Self::Legacy(base) => base,
+            Self::Observed(value) => &value.base,
+        }
+    }
+    /// Borrow the common prefix inside the selected complete payload.
+    pub(crate) fn base_mut(&mut self) -> &mut abi::UrpProgrammeFenceBinding {
+        match self {
+            Self::Legacy(base) => base,
+            Self::Observed(value) => &mut value.base,
+        }
+    }
+    /// Identity of the optional observed callback, never a V1 tail read.
+    fn observed(&self) -> Option<usize> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Observed(value) => value.observed_permit.map(|call| call as usize),
+        }
+    }
+}
+
 /// Borrowed native callback pair retained through synchronous station destruction.
 pub struct ProductRadioCallbacks {
     /// Qualified receive audio callback.
@@ -53,7 +85,7 @@ pub struct ProductRadioCallbacks {
     /// Optional stopped-only port, serialized with this same transmit context.
     pub feedback: Option<abi::UrpRadioFeedbackPort>,
     /// Copied stopped-only request; context/code remain owned by the caller.
-    pub fence: Option<abi::UrpProgrammeFenceBinding>,
+    pub fence: Option<ProgrammeFenceBinding>,
 }
 
 /// Native station handle; its shared product owns every hardware and DSP resource.
@@ -226,10 +258,7 @@ impl ActiveRadio {
 
     /// Bind only after actual stopped-state confirmation, preserving the SDK ACK.
     /// Failed calls may retain either context; their caller must retain both.
-    pub(crate) fn bind_programme_fence(
-        &mut self,
-        binding: &mut abi::UrpProgrammeFenceBinding,
-    ) -> i32 {
+    pub(crate) fn bind_programme_fence(&mut self, binding: &mut ProgrammeFenceBinding) -> i32 {
         if !self.quiescent {
             return -1;
         }
@@ -238,24 +267,30 @@ impl ActiveRadio {
         };
         let original = *binding;
         let mut reply = original;
-        reply.accepted_abi_version = 0;
-        // SAFETY: confirmed stopped owner and caller-retained callback context/code.
-        let status = unsafe { bind(handle.as_ptr(), &mut reply) };
-        let unchanged = reply.struct_size == original.struct_size
-            && reply.abi_version == original.abi_version
-            && reply.context == original.context
-            && reply.permit.map(|call| call as usize) == original.permit.map(|call| call as usize)
-            && reply.reserved == original.reserved;
-        binding.accepted_abi_version = 0;
+        reply.base_mut().accepted_abi_version = 0;
+        // SAFETY: this pointer addresses the prefix inside the selected complete
+        // C payload, not the enclosing enum. Context/code outlive every failed call.
+        let pointer = match &mut reply {
+            ProgrammeFenceBinding::Legacy(value) => std::ptr::from_mut(value),
+            ProgrammeFenceBinding::Observed(value) => std::ptr::from_mut(value).cast(),
+        };
+        let status = unsafe { bind(handle.as_ptr(), pointer) };
+        let before = original.base();
+        let after = reply.base();
+        let unchanged = after.struct_size == before.struct_size
+            && after.abi_version == before.abi_version
+            && after.context == before.context
+            && after.permit.map(|call| call as usize) == before.permit.map(|call| call as usize)
+            && after.reserved == before.reserved
+            && reply.observed() == original.observed();
+        binding.base_mut().accepted_abi_version = 0;
         if status != 0 {
-            // Positive staging is reserved for a controller reservation, never
-            // an SDK bind or channel enqueue result without actual retention.
             return if status > 0 { -7 } else { status };
         }
-        if !unchanged || reply.accepted_abi_version != abi::URP_PROGRAMME_FENCE_ABI_VERSION {
+        if !unchanged || after.accepted_abi_version != before.abi_version {
             return -7;
         }
-        binding.accepted_abi_version = reply.accepted_abi_version;
+        binding.base_mut().accepted_abi_version = after.accepted_abi_version;
         0
     }
 
@@ -708,10 +743,19 @@ pub(crate) mod tests {
 
     #[test]
     fn native_programme_fence_binds_before_start_and_retains_failed_activation_owner() {
+        check_programme_fence_lifetime(1);
+    }
+
+    #[test]
+    fn stage_d_observed_binding_contract_lifetime() {
+        check_programme_fence_lifetime(2);
+    }
+
+    fn check_programme_fence_lifetime(version: u32) {
         thread_local! {
             static BIND_STATUS: Cell<(i32, u32)> = const { Cell::new((0, 1)) };
             static STOP_STATUS: Cell<i32> = const { Cell::new(0) };
-            static BOUND: Cell<Option<abi::UrpProgrammeFenceBinding>> = const { Cell::new(None) };
+            static BOUND: Cell<Option<ProgrammeFenceBinding>> = const { Cell::new(None) };
         }
         struct Context {
             calls: Cell<u32>,
@@ -728,11 +772,70 @@ pub(crate) mod tests {
             context.calls.set(context.calls.get() + 1);
             0
         }
+        unsafe extern "C" fn observed(
+            context: *mut c_void,
+            raw: *const abi::UrpProgrammeObservationV1,
+        ) -> u32 {
+            let observation = unsafe { &*raw };
+            unsafe {
+                permit(
+                    context,
+                    observation.radio_generation,
+                    observation.frame_count,
+                )
+            }
+        }
+        fn call_binding(binding: ProgrammeFenceBinding) {
+            let result = match binding {
+                ProgrammeFenceBinding::Legacy(base) => unsafe {
+                    base.permit.unwrap()(base.context, 73, 128)
+                },
+                ProgrammeFenceBinding::Observed(value) => {
+                    let mut observation: abi::UrpProgrammeObservationV1 =
+                        unsafe { std::mem::zeroed() };
+                    observation.struct_size = std::mem::size_of_val(&observation) as u32;
+                    observation.abi_version = 1;
+                    observation.radio_generation = 73;
+                    observation.frame_count = 128;
+                    unsafe { value.observed_permit.unwrap()(value.base.context, &observation) }
+                }
+            };
+            assert_eq!(result, 0);
+        }
+        fn request(version: u32, context: *mut c_void) -> ProgrammeFenceBinding {
+            let base = abi::UrpProgrammeFenceBinding {
+                struct_size: 32,
+                abi_version: version,
+                context,
+                permit: Some(permit),
+                accepted_abi_version: 0,
+                reserved: 0,
+            };
+            if version == 1 {
+                ProgrammeFenceBinding::Legacy(base)
+            } else {
+                ProgrammeFenceBinding::Observed(abi::UrpProgrammeFenceBindingV2 {
+                    base: abi::UrpProgrammeFenceBinding {
+                        struct_size: 40,
+                        permit: None,
+                        ..base
+                    },
+                    observed_permit: Some(observed),
+                })
+            }
+        }
         unsafe extern "C" fn bind(_: *mut c_void, raw: *mut abi::UrpProgrammeFenceBinding) -> i32 {
             CALLS.with(|calls| calls.borrow_mut().push("fence"));
+            let copied = if unsafe { (*raw).abi_version } == 2 {
+                ProgrammeFenceBinding::Observed(unsafe {
+                    raw.cast::<abi::UrpProgrammeFenceBindingV2>().read()
+                })
+            } else {
+                ProgrammeFenceBinding::Legacy(unsafe { raw.read() })
+            };
             let binding = unsafe { &mut *raw };
             assert_eq!(binding.accepted_abi_version, 0);
-            BOUND.set(Some(*binding));
+            BOUND.set(Some(copied));
             let (status, ack) = BIND_STATUS.get();
             binding.accepted_abi_version = ack;
             status
@@ -741,16 +844,18 @@ pub(crate) mod tests {
             let status = unsafe { start(handle) };
             let binding = BOUND.get().unwrap();
             // A partially failed start may already have reached its borrowed context.
-            assert_eq!(
-                unsafe { binding.permit.unwrap()(binding.context, 73, 128) },
-                0
-            );
+            call_binding(binding);
             status
         }
         unsafe extern "C" fn quiesce(_: *mut c_void) -> i32 {
             STOP_STATUS.get()
         }
-        for (status, ack, start_status) in [(0, 1, 0), (0, 0, 0), (-9, 1, 0), (0, 1, -8)] {
+        for (status, ack, start_status) in [
+            (0, version, 0),
+            (0, 0, 0),
+            (-9, version, 0),
+            (0, version, -8),
+        ] {
             let drops = std::rc::Rc::new(Cell::new(0));
             let context = Box::new(Context {
                 calls: Cell::new(0),
@@ -783,19 +888,15 @@ pub(crate) mod tests {
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 metadata: None,
                 feedback: None,
-                fence: Some(abi::UrpProgrammeFenceBinding {
-                    struct_size: std::mem::size_of::<abi::UrpProgrammeFenceBinding>() as u32,
-                    abi_version: 1,
-                    context: std::ptr::from_ref(&*context).cast_mut().cast(),
-                    permit: Some(permit),
-                    accepted_abi_version: 0,
-                    reserved: 0,
-                }),
+                fence: Some(request(
+                    version,
+                    std::ptr::from_ref(&*context).cast_mut().cast(),
+                )),
             };
             let result = ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks);
             let mut active = match result {
                 Ok(active) => {
-                    assert_eq!((status, ack, start_status), (0, 1, 0));
+                    assert_eq!((status, ack, start_status), (0, version, 0));
                     active
                 }
                 Err(RadioActivationError::Retained {
@@ -806,7 +907,7 @@ pub(crate) mod tests {
                         actual,
                         if status != 0 {
                             status
-                        } else if ack != 1 {
+                        } else if ack != version {
                             -7
                         } else {
                             start_status
@@ -816,29 +917,53 @@ pub(crate) mod tests {
                 }
                 other => panic!("unexpected result: {other:?}"),
             };
-            let expected = if status == 0 && ack == 1 {
+            let expected = if status == 0 && ack == version {
                 &["create", "fence", "start"][..]
             } else {
                 &["create", "fence"][..]
             };
             CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected));
-            assert_eq!(context.calls.get(), u32::from(status == 0 && ack == 1));
+            assert_eq!(
+                context.calls.get(),
+                u32::from(status == 0 && ack == version)
+            );
             for pending in [1, -9] {
                 STOP_STATUS.set(pending);
                 assert_eq!(active.quiesce(), pending);
                 let mut replacement = BOUND.get().unwrap();
-                replacement.permit = None;
+                replacement.base_mut().permit = None;
                 assert_eq!(active.bind_programme_fence(&mut replacement), -1);
                 assert_eq!(drops.get(), 0);
                 CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected));
             }
             STOP_STATUS.set(0);
             assert_eq!(active.quiesce(), 0);
+            let proposed = Box::new(Context {
+                calls: Cell::new(0),
+                drops: drops.clone(),
+            });
+            let previous = request(version, std::ptr::from_ref(&*context).cast_mut().cast());
+            let mut replacement =
+                request(version, std::ptr::from_ref(&*proposed).cast_mut().cast());
+            BIND_STATUS.set((-9, version));
+            assert_eq!(active.bind_programme_fence(&mut replacement), -9);
+            assert_eq!(replacement.base().accepted_abi_version, 0);
+            // An ambiguous failed bind may retain either old or proposed context.
+            call_binding(previous);
+            call_binding(BOUND.get().unwrap());
+            assert_eq!(drops.get(), 0);
+            assert_eq!(proposed.calls.get(), 1);
             drop(active);
             assert_eq!(drops.get(), 0);
             drop(context);
-            assert_eq!(drops.get(), 1);
-            CALLS.with(|calls| assert_eq!(&calls.borrow()[expected.len()..], &["stop", "destroy"]));
+            drop(proposed);
+            assert_eq!(drops.get(), 2);
+            CALLS.with(|calls| {
+                assert_eq!(
+                    &calls.borrow()[expected.len()..],
+                    &["fence", "stop", "destroy"]
+                )
+            });
         }
     }
 

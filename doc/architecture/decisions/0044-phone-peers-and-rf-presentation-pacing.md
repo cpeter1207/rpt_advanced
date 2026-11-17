@@ -2759,3 +2759,21 @@ preparation instead of selecting Legacy. This narrow capability-publication
 correction does not duplicate SDK validation of mandatory audio function
 pointers, sample a clock in the host constructor, change getter statuses or ABI,
 or permit fallback after an advertised getter/read fails.
+
+## Observed programme-fence forwarding checkpoint — 2026-11-17
+
+Operation 9 also carries the existing SDK V2 observed binding after the unchanged
+control prefix. The complete nested extent is checked before reading the observed
+callback; a V2 legacy permit must be null. Hosts copy only the known V1 or V2
+payload and normalize its advertised size, leaving caller tails untouched.
+Standalone stores an explicit variant and binds after native create, before start.
+Status 1/ACK 0 remains reservation staging; native/channel success requires zero
+status and exact ACK 2 with unchanged identity. Old SDK rejection never downgrades
+the request. V1 still requires exact ACK 1.
+
+The product's unsafe observed entry retains the same caller-owned context
+contract. Old and proposed contexts survive ambiguous bind/start/stop failures
+until confirmed stopped replacement/unbind or synchronous quiescent destruction.
+This checkpoint changes no host table, descriptor ABI, SONAME, callback scheduling,
+production permit, private admission, or Asterisk phone capability. It establishes
+forwarding only, not final-programme policy or physical presentation qualification.

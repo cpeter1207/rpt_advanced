@@ -153,3 +153,108 @@ fn programme_fence_wrapper_distinguishes_staging_and_rejects_false_or_changed_ac
     drop(radio);
     drop(context);
 }
+
+#[test]
+fn stage_d_observed_binding_contract() {
+    thread_local! { static MODE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+    #[repr(C)]
+    struct Request {
+        control: abi::rptadv_radio_control_v1,
+        binding: abi::UrpProgrammeFenceBindingV2,
+    }
+    unsafe extern "C" fn permit(_: *mut c_void, _: *const abi::UrpProgrammeObservationV1) -> u32 {
+        1
+    }
+    unsafe extern "C" fn control(
+        _: *mut c_void,
+        _: *mut c_void,
+        raw: *mut abi::rptadv_radio_control_v1,
+        _: abi::rptadv_text_sink_v1,
+        _: *mut c_void,
+    ) -> i32 {
+        let request = unsafe { &mut *raw.cast::<Request>() };
+        assert_eq!(request.control.struct_size as usize, size_of::<Request>());
+        assert_eq!(request.binding.base.abi_version, 2);
+        assert_eq!(request.binding.base.accepted_abi_version, 0);
+        assert!(request.binding.base.permit.is_none());
+        assert_eq!(
+            request.binding.observed_permit.map(|f| f as usize),
+            Some(permit as usize)
+        );
+        request.binding.base.accepted_abi_version = 2;
+        match MODE.get() {
+            0 => {
+                request.binding.base.accepted_abi_version = 0;
+                return 1;
+            }
+            1 => {}
+            2 => request.binding.base.accepted_abi_version = 0,
+            3 => request.binding.base.accepted_abi_version = 1,
+            4 => request.binding.base.context = ptr::null_mut(),
+            5 => request.binding.observed_permit = None,
+            6 => request.binding.base.struct_size -= 1,
+            7 => request.binding.base.abi_version = 1,
+            8 => request.binding.base.reserved = 1,
+            9 => request.control.operation = 8,
+            10 => request.control.struct_size -= 1,
+            11 => request.control.abi_version = 2,
+            12 => return -9,
+            _ => return 1,
+        }
+        0
+    }
+    let services = host_services(|table| table.radio_control = Some(control));
+    let mut context = Box::new(7_u64);
+    let binding = abi::UrpProgrammeFenceBindingV2 {
+        base: abi::UrpProgrammeFenceBinding {
+            struct_size: 40,
+            abi_version: 2,
+            context: ptr::from_mut(&mut *context).cast(),
+            permit: None,
+            accepted_abi_version: 0,
+            reserved: 0,
+        },
+        observed_permit: Some(permit),
+    };
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    for mode in 0..14 {
+        MODE.set(mode);
+        let expected = match mode {
+            0 => Ok(ProgrammeFenceBindingStatus::Staged),
+            1 => Ok(ProgrammeFenceBindingStatus::Retained),
+            12 => Err(-9),
+            _ => Err(-7),
+        };
+        assert_eq!(
+            unsafe { radio.bind_programme_fence_observed(&binding) },
+            expected,
+            "mode {mode}"
+        );
+        assert_eq!(binding.base.accepted_abi_version, 0);
+    }
+    MODE.set(1);
+    for fault in 0..7 {
+        let mut invalid = binding;
+        match fault {
+            0 => invalid.base.struct_size = 39,
+            1 => invalid.base.struct_size = 48,
+            2 => invalid.base.abi_version = 1,
+            3 => invalid.base.abi_version = 3,
+            4 => invalid.base.accepted_abi_version = 2,
+            5 => invalid.base.reserved = 1,
+            _ => {
+                unsafe extern "C" fn legacy(_: *mut c_void, _: u64, _: u32) -> u32 {
+                    0
+                }
+                invalid.base.permit = Some(legacy);
+            }
+        }
+        assert_eq!(
+            unsafe { radio.bind_programme_fence_observed(&invalid) },
+            Err(-1),
+            "invalid {fault}"
+        );
+    }
+    drop(radio);
+    assert_eq!(*context, 7);
+}

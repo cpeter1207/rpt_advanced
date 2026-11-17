@@ -48,7 +48,10 @@ fn main() {
         .clang_arg("-I../file-adapter/include")
         .clang_arg("-I../speech-adapter/include")
         .clang_arg("-I../control-standalone-adapter/include")
-        .clang_arg("-I/usr/include")
+        .clang_arg(format!(
+            "-I{}",
+            env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned())
+        ))
         .clang_arg(format!(
             "-I{}",
             env::var("RPTADV_CODEC_INCLUDE")
@@ -58,10 +61,6 @@ fn main() {
             "-I{}",
             env::var("RPTADV_IAX2_INCLUDE")
                 .unwrap_or_else(|_| "/usr/include/rptadv_iax2".to_owned())
-        ))
-        .clang_arg(format!(
-            "-I{}",
-            env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned())
         ))
         .allowlist_type("rptadv_.*")
         .allowlist_var("RPTADV_PHONE_ACCOUNT_.*")

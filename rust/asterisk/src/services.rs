@@ -225,12 +225,13 @@ unsafe extern "C" fn radio_control(
             if (header[0] as usize) < size_of::<ffi::rptadv_radio_fence_control_v1>() {
                 return -1;
             }
-            // SAFETY: the complete known extension is writable; no unknown tail is touched.
-            let binding =
-                unsafe { &mut (*pointer.cast::<ffi::rptadv_radio_fence_control_v1>()).binding };
-            if (binding.struct_size as usize) < size_of_val(binding)
+            // SAFETY: the known prefix fits; copy it without retaining an overlapping reference.
+            let binding = unsafe {
+                std::ptr::addr_of!((*pointer.cast::<ffi::rptadv_radio_fence_control_v1>()).binding)
+                    .read()
+            };
+            if (binding.struct_size as usize) < size_of_val(&binding)
                 || binding.struct_size as usize > header[0] as usize - offset
-                || binding.abi_version != ffi::URP_PROGRAMME_FENCE_ABI_VERSION
                 || binding.accepted_abi_version != 0
                 || binding.reserved != 0
                 || !reserved.quiescent
@@ -240,13 +241,44 @@ unsafe extern "C" fn radio_control(
             let Some(radio) = reserved.radio.as_mut() else {
                 return -7;
             };
-            let mut copied = *binding;
-            copied.struct_size = size_of_val(&copied) as u32;
+            let mut copied = match binding.abi_version {
+                1 => ffi::UrpProgrammeFenceBindingV2 {
+                    base: ffi::UrpProgrammeFenceBinding {
+                        struct_size: size_of::<ffi::UrpProgrammeFenceBinding>() as u32,
+                        ..binding
+                    },
+                    observed_permit: None,
+                },
+                2 if binding.struct_size as usize
+                    >= size_of::<ffi::UrpProgrammeFenceBindingV2>()
+                    && binding.permit.is_none() =>
+                {
+                    // SAFETY: validated full outer and nested V2 extents.
+                    let mut value = unsafe {
+                        pointer
+                            .cast::<u8>()
+                            .add(offset)
+                            .cast::<ffi::UrpProgrammeFenceBindingV2>()
+                            .read()
+                    };
+                    value.base.struct_size = size_of_val(&value) as u32;
+                    value
+                }
+                _ => return -1,
+            };
             reserved.fence_unacknowledged = true;
             let status = radio.bind_programme_fence(&mut copied);
             if status == 0 {
                 reserved.fence_unacknowledged = false;
-                binding.accepted_abi_version = copied.accepted_abi_version;
+                // SAFETY: checked writable ACK; no prefix reference overlaps the V2 raw read.
+                unsafe {
+                    std::ptr::addr_of_mut!(
+                        (*pointer.cast::<ffi::rptadv_radio_fence_control_v1>())
+                            .binding
+                            .accepted_abi_version
+                    )
+                    .write(copied.base.accepted_abi_version);
+                }
             }
             return status;
         }

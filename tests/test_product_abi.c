@@ -36,6 +36,16 @@ _Static_assert(offsetof(struct rptadv_radio_fence_control_v1, binding) ==
 _Static_assert(sizeof(struct rptadv_radio_fence_control_v1) ==
                    sizeof(struct rptadv_radio_control_v1) + sizeof(UrpProgrammeFenceBinding),
                "the extension contains only the unchanged control and SDK prefixes");
+_Static_assert(URP_PROGRAMME_FENCE_V2_ABI_VERSION == 2, "reuse the SDK observed binding version");
+_Static_assert(sizeof(UrpProgrammeFenceBindingV2) == 40, "complete observed binding extent");
+_Static_assert(offsetof(UrpProgrammeFenceBindingV2, base) == 0, "unchanged SDK prefix");
+_Static_assert(offsetof(UrpProgrammeFenceBindingV2, observed_permit) == 32, "observed tail offset");
+_Static_assert(offsetof(struct rptadv_radio_fence_control_v2, binding) ==
+                   offsetof(struct rptadv_radio_fence_control_v1, binding),
+               "same operation-9 control prefix");
+_Static_assert(sizeof(struct rptadv_radio_fence_control_v2) ==
+                   sizeof(struct rptadv_radio_fence_control_v1) + 8,
+               "only the existing SDK observed callback extends this envelope");
 _Static_assert(sizeof(UrpNativeReceiveMetadata) == 72,
                "preserve the source-associated receive metadata record");
 _Static_assert(offsetof(struct rptadv_host_services_v10, radio_metadata_bind) == 360,

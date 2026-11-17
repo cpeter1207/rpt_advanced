@@ -30,36 +30,38 @@ impl Radio {
     /// Context/code stay borrowed through every failed call until safe destruction.
     pub(crate) fn bind_programme_fence(
         &mut self,
-        binding: &mut ffi::UrpProgrammeFenceBinding,
+        binding: &mut ffi::UrpProgrammeFenceBindingV2,
     ) -> i32 {
         let original = *binding;
         let mut reply = original;
-        reply.accepted_abi_version = 0;
+        reply.base.accepted_abi_version = 0;
         // SAFETY: the stopped reservation retains the channel and borrowed callback.
         let status = unsafe {
             ffi::ast_channel_setoption(
                 self.connection.channel.pointer.as_ptr(),
                 ffi::URP_AST_OPTION_PROGRAMME_FENCE as i32,
                 std::ptr::from_mut(&mut reply).cast(),
-                std::mem::size_of_val(&reply) as i32,
+                reply.base.struct_size as i32,
                 0,
             )
         };
-        let unchanged = reply.struct_size == original.struct_size
-            && reply.abi_version == original.abi_version
-            && reply.context == original.context
-            && reply.permit.map(|call| call as usize) == original.permit.map(|call| call as usize)
-            && reply.reserved == original.reserved;
-        binding.accepted_abi_version = 0;
+        let before = original.base;
+        let after = reply.base;
+        let unchanged = after.struct_size == before.struct_size
+            && after.abi_version == before.abi_version
+            && after.context == before.context
+            && after.permit.map(|call| call as usize) == before.permit.map(|call| call as usize)
+            && after.reserved == before.reserved
+            && reply.observed_permit.map(|call| call as usize)
+                == original.observed_permit.map(|call| call as usize);
+        binding.base.accepted_abi_version = 0;
         if status != 0 {
-            // Positive staging is reserved for a controller reservation, never
-            // an SDK bind or channel enqueue result without actual retention.
             return if status > 0 { -7 } else { status };
         }
-        if !unchanged || reply.accepted_abi_version != ffi::URP_PROGRAMME_FENCE_ABI_VERSION {
+        if !unchanged || after.accepted_abi_version != before.abi_version {
             return -7;
         }
-        binding.accepted_abi_version = reply.accepted_abi_version;
+        binding.base.accepted_abi_version = after.accepted_abi_version;
         0
     }
 

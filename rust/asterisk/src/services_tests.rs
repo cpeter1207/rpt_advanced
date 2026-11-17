@@ -368,6 +368,29 @@ unsafe extern "C" fn ast_channel_setoption(
 ) -> i32 {
     assert_eq!(block, 0);
     if option == 0x52505046 {
+        PROGRAMME_FENCE_CALLS.set(PROGRAMME_FENCE_CALLS.get() + 1);
+        let base = unsafe { &mut *data.cast::<ffi::UrpProgrammeFenceBinding>() };
+        if base.abi_version == 2 {
+            assert_eq!(length, 40);
+            let binding = unsafe { &mut *data.cast::<ffi::UrpProgrammeFenceBindingV2>() };
+            assert_eq!(binding.base.accepted_abi_version, 0);
+            binding.base.accepted_abi_version = 2;
+            match PROGRAMME_FAULT.get() {
+                1 => return -9,
+                2 => binding.base.accepted_abi_version = 0,
+                3 => binding.base.accepted_abi_version = 1,
+                4 => binding.base.struct_size -= 1,
+                5 => binding.base.abi_version = 1,
+                6 => binding.base.context = ptr::null_mut(),
+                7 => binding.base.reserved = 1,
+                8 => return 1,
+                9 => binding.observed_permit = None,
+                10 => binding.base.permit = Some(legacy_permit),
+                11 => return -7, // Old SDK rejects V2 but still accepts V1 below.
+                _ => {}
+            }
+            return 0;
+        }
         assert_eq!(length as usize, size_of::<ProgrammeFenceBinding>());
         let binding = unsafe { &mut *data.cast::<ProgrammeFenceBinding>() };
         assert_eq!(binding.accepted_abi_version, 0);
@@ -1016,6 +1039,7 @@ struct ProgrammeRequest {
 }
 thread_local! {
     static PROGRAMME_RESULT: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static PROGRAMME_FENCE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PROGRAMME_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PROGRAMME_FAULT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
@@ -1317,4 +1341,106 @@ fn programme_fence_failed_retention_cannot_activate_the_channel() {
         unsafe { radio_destroy(null, radio) };
         host(|state| state.clean());
     }
+}
+
+#[repr(C)]
+struct ObservedRequest {
+    control: ffi::rptadv_radio_control_v1,
+    binding: ffi::UrpProgrammeFenceBindingV2,
+    tail: u64,
+}
+unsafe extern "C" fn observed_permit(
+    context: *mut c_void,
+    _: *const ffi::UrpProgrammeObservationV1,
+) -> u32 {
+    unsafe { *context.cast::<u32>() }
+}
+unsafe extern "C" fn legacy_permit(_: *mut c_void, _: u64, _: u32) -> u32 {
+    0
+}
+fn observed_request(context: *mut c_void) -> ObservedRequest {
+    let mut value: ObservedRequest = unsafe { std::mem::zeroed() };
+    value.control.struct_size = size_of_val(&value) as u32;
+    value.control.abi_version = 1;
+    value.control.operation = 9;
+    value.binding.base.struct_size = 40;
+    value.binding.base.abi_version = 2;
+    value.binding.base.context = context;
+    value.binding.observed_permit = Some(observed_permit);
+    value.tail = 0x123456789abcdef;
+    value
+}
+
+#[test]
+fn stage_d_observed_binding_contract() {
+    reset();
+    let null = ptr::null_mut();
+    let mut radio = null;
+    assert_eq!(
+        unsafe { radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio) },
+        0
+    );
+    let mut context = Box::new(1_u32);
+    for fault in 0..12 {
+        PROGRAMME_FAULT.set(fault);
+        PROGRAMME_FENCE_CALLS.set(0);
+        let mut value = observed_request(ptr::from_mut(&mut *context).cast());
+        value.binding.base.struct_size = 48;
+        assert_eq!(
+            unsafe { radio_control(null, radio, ptr::from_mut(&mut value).cast(), None, null) },
+            match fault {
+                0 => 0,
+                1 => -9,
+                _ => -7,
+            },
+            "fault {fault}"
+        );
+        assert_eq!(
+            PROGRAMME_FENCE_CALLS.get(),
+            1,
+            "never retry a V2 request as V1"
+        );
+        assert_eq!(
+            value.binding.base.accepted_abi_version,
+            if fault == 0 { 2 } else { 0 }
+        );
+        assert_eq!(value.binding.base.struct_size, 48);
+        assert_eq!(value.tail, 0x123456789abcdef);
+    }
+    let mut legacy = fence_request();
+    PROGRAMME_FENCE_CALLS.set(0);
+    assert_eq!(
+        unsafe { radio_control(null, radio, ptr::from_mut(&mut legacy).cast(), None, null) },
+        0
+    );
+    assert_eq!(
+        legacy.binding.accepted_abi_version, 1,
+        "same old SDK still supports V1"
+    );
+    assert_eq!(PROGRAMME_FENCE_CALLS.get(), 1);
+    PROGRAMME_FAULT.set(0);
+    for fault in 0..10 {
+        let mut value = observed_request(ptr::from_mut(&mut *context).cast());
+        match fault {
+            0 => value.control.struct_size -= 9,
+            1 => value.binding.base.struct_size = 39,
+            2 => value.binding.base.struct_size = 49,
+            3 => value.binding.base.abi_version = 3,
+            4 => value.binding.base.permit = Some(legacy_permit),
+            5 => value.binding.base.reserved = 1,
+            6 => value.binding.base.accepted_abi_version = 2,
+            7 => value.control.abi_version = 2,
+            8 => value.binding.observed_permit = None,
+            _ => value.binding.base.struct_size = 48,
+        }
+        assert_eq!(
+            unsafe { radio_control(null, radio, ptr::from_mut(&mut value).cast(), None, null) },
+            if fault >= 8 { 0 } else { -1 },
+            "extent {fault}"
+        );
+        assert_eq!(value.tail, 0x123456789abcdef);
+    }
+    PROGRAMME_FAULT.set(0);
+    unsafe { radio_destroy(null, radio) };
+    host(|state| state.clean());
 }

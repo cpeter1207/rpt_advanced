@@ -450,6 +450,18 @@ struct rptadv_radio_fence_control_v1 {
     struct UrpProgrammeFenceBinding binding;
 };
 
+/** Observed stopped binding on the same operation 9 and unchanged control prefix.
+ * The SDK V2 record requires a null legacy permit and actual accepted ABI 2.
+ * Status 1/ACK 0 still means staging only. V1 remains supported independently.
+ * Extent validation, unknown tails and callback lifetime follow the V1 envelope.
+ * This adds no host-table entry, ABI version, SONAME or phone activation. */
+struct rptadv_radio_fence_control_v2 {
+    /** Unchanged operation-9 request prefix. */
+    struct rptadv_radio_control_v1 control;
+    /** Complete known observed binding, never downgraded to V1. */
+    struct UrpProgrammeFenceBindingV2 binding;
+};
+
 /** Borrowed UTF-8 result emitted synchronously by a remote operation ticket. */
 typedef void (*rptadv_remote_sink_v1)(void *context, const uint8_t *text, uint32_t length);
 /** One uniquely owned asynchronous operation. Functions and context stay live

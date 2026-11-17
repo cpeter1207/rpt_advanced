@@ -179,7 +179,7 @@ struct RadioHandle {
     pending: Option<RadioReservation>,
     metadata: crate::abi::rptadv_radio_metadata_v1,
     feedback: Option<crate::abi::UrpRadioFeedbackPort>,
-    fence: Option<crate::abi::UrpProgrammeFenceBinding>,
+    fence: Option<crate::radio_activation::ProgrammeFenceBinding>,
 }
 
 /// Stage/acknowledge, commit, or roll back a native radio configuration on its
@@ -281,26 +281,59 @@ pub unsafe extern "C" fn radio_control(
         if (header[0] as usize) < std::mem::size_of::<crate::abi::rptadv_radio_fence_control_v1>() {
             return -1;
         }
-        // SAFETY: the full known extension is writable; unknown tails stay borrowed.
-        let binding =
-            unsafe { &mut (*pointer.cast::<crate::abi::rptadv_radio_fence_control_v1>()).binding };
-        if (binding.struct_size as usize) < std::mem::size_of_val(binding)
+        // SAFETY: the known prefix fits; copy it without retaining an overlapping reference.
+        let binding = unsafe {
+            std::ptr::addr_of!(
+                (*pointer.cast::<crate::abi::rptadv_radio_fence_control_v1>()).binding
+            )
+            .read()
+        };
+        if (binding.struct_size as usize) < std::mem::size_of_val(&binding)
             || binding.struct_size as usize > header[0] as usize - offset
-            || binding.abi_version != crate::abi::URP_PROGRAMME_FENCE_ABI_VERSION
             || binding.accepted_abi_version != 0
             || binding.reserved != 0
         {
             return -1;
         }
-        let mut copied = *binding;
-        copied.struct_size = std::mem::size_of_val(&copied) as u32;
+        use crate::radio_activation::ProgrammeFenceBinding;
+        let mut copied = match binding.abi_version {
+            1 => {
+                let mut base = binding;
+                base.struct_size = std::mem::size_of_val(&base) as u32;
+                ProgrammeFenceBinding::Legacy(base)
+            }
+            2 if binding.struct_size as usize
+                >= std::mem::size_of::<crate::abi::UrpProgrammeFenceBindingV2>()
+                && binding.permit.is_none() =>
+            {
+                // SAFETY: both complete nested and outer V2 extents were checked.
+                let mut value = unsafe {
+                    pointer
+                        .cast::<u8>()
+                        .add(offset)
+                        .cast::<crate::abi::UrpProgrammeFenceBindingV2>()
+                        .read()
+                };
+                value.base.struct_size = std::mem::size_of_val(&value) as u32;
+                ProgrammeFenceBinding::Observed(value)
+            }
+            _ => return -1,
+        };
         if let Some(active) = handle.active.as_mut() {
             let status = active.bind_programme_fence(&mut copied);
             if status != 0 {
                 return status;
             }
-            binding.accepted_abi_version = copied.accepted_abi_version;
-            copied.accepted_abi_version = 0;
+            // SAFETY: checked writable ACK; no prefix reference overlaps the V2 raw read.
+            unsafe {
+                std::ptr::addr_of_mut!(
+                    (*pointer.cast::<crate::abi::rptadv_radio_fence_control_v1>())
+                        .binding
+                        .accepted_abi_version
+                )
+                .write(copied.base().accepted_abi_version);
+            }
+            copied.base_mut().accepted_abi_version = 0;
             handle.fence = Some(copied);
             return 0;
         }
