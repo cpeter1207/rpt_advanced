@@ -52,6 +52,8 @@ pub struct ProductRadioCallbacks {
     pub metadata: abi::rptadv_radio_metadata_v1,
     /// Optional stopped-only port, serialized with this same transmit context.
     pub feedback: Option<abi::UrpRadioFeedbackPort>,
+    /// Copied stopped-only request; context/code remain owned by the caller.
+    pub fence: Option<abi::UrpProgrammeFenceBinding>,
 }
 
 /// Native station handle; its shared product owns every hardware and DSP resource.
@@ -59,6 +61,7 @@ pub struct ActiveRadio {
     handle: Option<NonNull<c_void>>,
     api: abi::UrpAstDescriptor,
     updating: bool,
+    quiescent: bool,
     stop: unsafe extern "C" fn(*mut c_void) -> i32,
     destroy: unsafe extern "C" fn(*mut c_void),
     site_bind: unsafe extern "C" fn(*mut c_void, u32, *const abi::UrpAstSiteBinding) -> i32,
@@ -142,6 +145,7 @@ impl ActiveRadio {
             return Err(RadioActivationError::Product(-2));
         };
         let feedback = callbacks.feedback;
+        let fence = callbacks.fence;
         let callbacks = abi::UrpAstDirectCallbacks {
             struct_size: std::mem::size_of::<abi::UrpAstDirectCallbacks>() as u32,
             abi_version: abi::URP_AST_DIRECT_CALLBACKS_ABI_VERSION,
@@ -173,16 +177,28 @@ impl ActiveRadio {
             return Err(RadioActivationError::Product(status));
         }
         let handle = NonNull::new(handle).ok_or(RadioActivationError::Product(-1))?;
-        let active = Self {
+        let mut active = Self {
             handle: Some(handle),
             api: retain_operations(api),
             updating: false,
+            quiescent: false,
             stop,
             destroy,
             site_bind,
             site_publish,
             site_snapshot,
         };
+        // Successful create returns a stopped native owner.
+        active.quiescent = true;
+        if let Some(mut binding) = fence {
+            let status = active.bind_programme_fence(&mut binding);
+            if status != 0 {
+                return Err(RadioActivationError::Retained {
+                    status,
+                    active: Box::new(active),
+                });
+            }
+        }
         if let Some(port) = feedback {
             // SAFETY: create returned a stopped station; the caller retains this
             // port's code/context through destruction, including failed startup.
@@ -197,6 +213,7 @@ impl ActiveRadio {
             }
         }
         // SAFETY: successful create returns this stopped, uniquely owned station.
+        active.quiescent = false;
         let status = unsafe { start(handle.as_ptr()) };
         if status != 0 {
             return Err(RadioActivationError::Retained {
@@ -205,6 +222,41 @@ impl ActiveRadio {
             });
         }
         Ok(active)
+    }
+
+    /// Bind only after actual stopped-state confirmation, preserving the SDK ACK.
+    /// Failed calls may retain either context; their caller must retain both.
+    pub(crate) fn bind_programme_fence(
+        &mut self,
+        binding: &mut abi::UrpProgrammeFenceBinding,
+    ) -> i32 {
+        if !self.quiescent {
+            return -1;
+        }
+        let (Some(handle), Some(bind)) = (self.handle, self.api.native_programme_fence_bind) else {
+            return -7;
+        };
+        let original = *binding;
+        let mut reply = original;
+        reply.accepted_abi_version = 0;
+        // SAFETY: confirmed stopped owner and caller-retained callback context/code.
+        let status = unsafe { bind(handle.as_ptr(), &mut reply) };
+        let unchanged = reply.struct_size == original.struct_size
+            && reply.abi_version == original.abi_version
+            && reply.context == original.context
+            && reply.permit.map(|call| call as usize) == original.permit.map(|call| call as usize)
+            && reply.reserved == original.reserved;
+        binding.accepted_abi_version = 0;
+        if status != 0 {
+            // Positive staging is reserved for a controller reservation, never
+            // an SDK bind or channel enqueue result without actual retention.
+            return if status > 0 { -7 } else { status };
+        }
+        if !unchanged || reply.accepted_abi_version != abi::URP_PROGRAMME_FENCE_ABI_VERSION {
+            return -7;
+        }
+        binding.accepted_abi_version = reply.accepted_abi_version;
+        0
     }
 
     /// Queue spare-pin ownership on the existing worker; snapshots confirm service.
@@ -255,7 +307,9 @@ impl ActiveRadio {
         self.handle.map_or(0, |handle| {
             let call = self.api.native_quiesce.unwrap_or(self.stop);
             // SAFETY: no handle or callback is released by this poll.
-            unsafe { call(handle.as_ptr()) }
+            let status = unsafe { call(handle.as_ptr()) };
+            self.quiescent = status == 0;
+            status
         })
     }
 
@@ -513,7 +567,8 @@ fn retain_operations(api: &abi::UrpAstDescriptor) -> abi::UrpAstDescriptor {
         remote_take,
         remote_destroy,
         native_activation_status,
-        native_programme_retire
+        native_programme_retire,
+        native_programme_fence_bind
     );
     retained
 }
@@ -652,6 +707,162 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn native_programme_fence_binds_before_start_and_retains_failed_activation_owner() {
+        thread_local! {
+            static BIND_STATUS: Cell<(i32, u32)> = const { Cell::new((0, 1)) };
+            static STOP_STATUS: Cell<i32> = const { Cell::new(0) };
+            static BOUND: Cell<Option<abi::UrpProgrammeFenceBinding>> = const { Cell::new(None) };
+        }
+        struct Context {
+            calls: Cell<u32>,
+            drops: std::rc::Rc<Cell<u32>>,
+        }
+        impl Drop for Context {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+        unsafe extern "C" fn permit(context: *mut c_void, generation: u64, frames: u32) -> u32 {
+            let context = unsafe { &*context.cast::<Context>() };
+            assert_eq!((generation, frames), (73, 128));
+            context.calls.set(context.calls.get() + 1);
+            0
+        }
+        unsafe extern "C" fn bind(_: *mut c_void, raw: *mut abi::UrpProgrammeFenceBinding) -> i32 {
+            CALLS.with(|calls| calls.borrow_mut().push("fence"));
+            let binding = unsafe { &mut *raw };
+            assert_eq!(binding.accepted_abi_version, 0);
+            BOUND.set(Some(*binding));
+            let (status, ack) = BIND_STATUS.get();
+            binding.accepted_abi_version = ack;
+            status
+        }
+        unsafe extern "C" fn start_with_fence(handle: *mut c_void) -> i32 {
+            let status = unsafe { start(handle) };
+            let binding = BOUND.get().unwrap();
+            // A partially failed start may already have reached its borrowed context.
+            assert_eq!(
+                unsafe { binding.permit.unwrap()(binding.context, 73, 128) },
+                0
+            );
+            status
+        }
+        unsafe extern "C" fn quiesce(_: *mut c_void) -> i32 {
+            STOP_STATUS.get()
+        }
+        for (status, ack, start_status) in [(0, 1, 0), (0, 0, 0), (-9, 1, 0), (0, 1, -8)] {
+            let drops = std::rc::Rc::new(Cell::new(0));
+            let context = Box::new(Context {
+                calls: Cell::new(0),
+                drops: drops.clone(),
+            });
+            let (mut api, mut providers, mut config): (
+                abi::UrpAstDescriptor,
+                abi::UrpAstProviderManifest,
+                abi::UrpNativeStationConfig,
+            ) = unsafe { std::mem::zeroed() };
+            api.struct_size = std::mem::size_of_val(&api) as u32;
+            api.native_create = Some(create);
+            api.native_start = Some(start_with_fence);
+            api.native_stop = Some(stop);
+            api.native_destroy = Some(destroy);
+            api.native_site_bind = Some(site_bind);
+            api.native_site_publish = Some(site_publish);
+            api.native_site_snapshot = Some(site_snapshot);
+            api.native_quiesce = Some(quiesce);
+            api.native_programme_fence_bind = Some(bind);
+            providers.abi_version = 1;
+            config.receive_output_gain_db = -8;
+            BIND_STATUS.set((status, ack));
+            RESULTS.set((0, true, start_status));
+            CALLS.with(|calls| calls.borrow_mut().clear());
+            let callbacks = ProductRadioCallbacks {
+                receive: Some(receive),
+                receive_context: NonNull::<u8>::dangling().as_ptr().cast(),
+                transmit: Some(transmit),
+                transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
+                metadata: None,
+                feedback: None,
+                fence: Some(abi::UrpProgrammeFenceBinding {
+                    struct_size: std::mem::size_of::<abi::UrpProgrammeFenceBinding>() as u32,
+                    abi_version: 1,
+                    context: std::ptr::from_ref(&*context).cast_mut().cast(),
+                    permit: Some(permit),
+                    accepted_abi_version: 0,
+                    reserved: 0,
+                }),
+            };
+            let result = ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks);
+            let mut active = match result {
+                Ok(active) => {
+                    assert_eq!((status, ack, start_status), (0, 1, 0));
+                    active
+                }
+                Err(RadioActivationError::Retained {
+                    status: actual,
+                    active,
+                }) => {
+                    assert_eq!(
+                        actual,
+                        if status != 0 {
+                            status
+                        } else if ack != 1 {
+                            -7
+                        } else {
+                            start_status
+                        }
+                    );
+                    *active
+                }
+                other => panic!("unexpected result: {other:?}"),
+            };
+            let expected = if status == 0 && ack == 1 {
+                &["create", "fence", "start"][..]
+            } else {
+                &["create", "fence"][..]
+            };
+            CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected));
+            assert_eq!(context.calls.get(), u32::from(status == 0 && ack == 1));
+            for pending in [1, -9] {
+                STOP_STATUS.set(pending);
+                assert_eq!(active.quiesce(), pending);
+                let mut replacement = BOUND.get().unwrap();
+                replacement.permit = None;
+                assert_eq!(active.bind_programme_fence(&mut replacement), -1);
+                assert_eq!(drops.get(), 0);
+                CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected));
+            }
+            STOP_STATUS.set(0);
+            assert_eq!(active.quiesce(), 0);
+            drop(active);
+            assert_eq!(drops.get(), 0);
+            drop(context);
+            assert_eq!(drops.get(), 1);
+            CALLS.with(|calls| assert_eq!(&calls.borrow()[expected.len()..], &["stop", "destroy"]));
+        }
+    }
+
+    #[test]
+    fn programme_fence_descriptor_requires_the_complete_optional_function() {
+        unsafe extern "C" fn bind(_: *mut c_void, _: *mut abi::UrpProgrammeFenceBinding) -> i32 {
+            0
+        }
+        let mut api: abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        api.native_programme_fence_bind = Some(bind);
+        let offset = std::mem::offset_of!(abi::UrpAstDescriptor, native_programme_fence_bind);
+        let width = std::mem::size_of_val(&api.native_programme_fence_bind);
+        for size in offset..=offset + width {
+            api.struct_size = size as u32;
+            assert_eq!(
+                retain_operations(&api)
+                    .native_programme_fence_bind
+                    .is_some(),
+                size == offset + width
+            );
+        }
+    }
+
+    #[test]
     fn native_feedback_binding_precedes_start_and_failure_reclaims_the_stopped_owner() {
         thread_local! { static QUIESCENT: Cell<bool> = const { Cell::new(false) }; }
         unsafe extern "C" fn quiesce(_: *mut c_void) -> i32 {
@@ -692,6 +903,7 @@ pub(crate) mod tests {
                 transmit: Some(transmit),
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 metadata: None,
+                fence: None,
                 feedback: Some(abi::UrpRadioFeedbackPort {
                     struct_size: std::mem::size_of::<abi::UrpRadioFeedbackPort>() as u32,
                     abi_version: 1,
@@ -788,6 +1000,7 @@ pub(crate) mod tests {
             // SAFETY: test operations are nullable pointers until assigned explicitly.
             api: unsafe { std::mem::zeroed() },
             updating: false,
+            quiescent: false,
             stop,
             destroy,
             site_bind,
@@ -1405,6 +1618,7 @@ pub(crate) mod tests {
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 metadata: None,
                 feedback: None,
+                fence: None,
             },
         )
         .unwrap();
@@ -1523,6 +1737,7 @@ pub(crate) mod tests {
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 metadata: None,
                 feedback: None,
+                fence: None,
             };
             let result = ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks);
             let status = result.as_ref().err().map(|error| match error {
@@ -1568,6 +1783,7 @@ pub(crate) mod tests {
             transmit_context: std::ptr::null_mut(),
             metadata: None,
             feedback: None,
+            fence: None,
         };
         let mut missing_receive = callbacks();
         missing_receive.receive = None;

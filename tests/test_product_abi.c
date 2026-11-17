@@ -28,6 +28,14 @@ _Static_assert(sizeof(struct rptadv_source_birth_v1) == 24,
                "original source birth uses the host clock identity");
 _Static_assert(URP_AST_DIRECT_CALLBACKS_ABI_VERSION == 6,
                "use the canonical metadata-aware SDK callbacks");
+_Static_assert(URP_PROGRAMME_FENCE_ABI_VERSION == 1, "preserve the released SDK binding ABI");
+_Static_assert(sizeof(UrpProgrammeFenceBinding) == 32, "preserve the released SDK binding prefix");
+_Static_assert(offsetof(struct rptadv_radio_fence_control_v1, binding) ==
+                   sizeof(struct rptadv_radio_control_v1),
+               "append binding without changing the radio control prefix");
+_Static_assert(sizeof(struct rptadv_radio_fence_control_v1) ==
+                   sizeof(struct rptadv_radio_control_v1) + sizeof(UrpProgrammeFenceBinding),
+               "the extension contains only the unchanged control and SDK prefixes");
 _Static_assert(sizeof(UrpNativeReceiveMetadata) == 72,
                "preserve the source-associated receive metadata record");
 _Static_assert(offsetof(struct rptadv_host_services_v10, radio_metadata_bind) == 360,

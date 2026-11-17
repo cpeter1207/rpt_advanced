@@ -402,7 +402,8 @@ struct rptadv_pcm_processor_v1 {
 
 /** Authorized physical-radio operation, executed only on serialized control.
  * STATUS=1, COMMAND=2, TRANSMIT=3, CLEAR_MANUAL=4,
- * PROCESSING_STATUS=5, ACTIVE_CONFIGURATION=6, RECEIVE_POLICY=7, PROGRAMME_RETIRE=8.
+ * PROCESSING_STATUS=5, ACTIVE_CONFIGURATION=6, RECEIVE_POLICY=7, PROGRAMME_RETIRE=8,
+ * PROGRAMME_FENCE=9.
  * RECEIVE_POLICY works before activation and uses GET_RECEIVE_POLICY in the
  * nested command: value is effective VAD mode, flags is minimum native preroll.
  * COMMAND also uses the nested command. Text uses the synchronous sink.
@@ -429,6 +430,24 @@ struct rptadv_radio_programme_control_v1 {
     struct rptadv_radio_control_v1 control;
     /** Exact released SDK envelope. */
     struct UrpAstProgrammeRetirement retirement;
+};
+
+/** Stopped-only final-programme callback binding on the existing radio owner.
+ * Pass operation 9 and this complete extent. Return 1 with accepted ABI zero
+ * means a copied standalone reservation only, NOT SDK retention. Activation
+ * must perform the actual bind and verify its acknowledgment before starting.
+ * Return zero requires actual SDK success and accepted ABI 1. Null permit
+ * explicitly unbinds. Larger outer/nested tails are untouched; the copied SDK
+ * request advertises only its actual prefix size.
+ * Callback code and stable context must outlive every possibly retained binding,
+ * including failures, until confirmed stopped replacement/unbind or synchronous
+ * destruction. Never retain the caller's request pointer. No audio-thread calls.
+ * No private-media qualification, retirement, source age or timing is implied. */
+struct rptadv_radio_fence_control_v1 {
+    /** Unchanged request prefix. */
+    struct rptadv_radio_control_v1 control;
+    /** Unchanged released SDK binding prefix. */
+    struct UrpProgrammeFenceBinding binding;
 };
 
 /** Borrowed UTF-8 result emitted synchronously by a remote operation ticket. */

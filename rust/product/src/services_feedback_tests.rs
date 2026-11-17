@@ -87,3 +87,69 @@ fn timed_egress_tail_preserves_physically_short_408_byte_host() {
         ));
     }
 }
+
+#[test]
+fn programme_fence_wrapper_distinguishes_staging_and_rejects_false_or_changed_ack() {
+    thread_local! { static MODE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+    unsafe extern "C" fn control(
+        _: *mut c_void,
+        _: *mut c_void,
+        raw: *mut abi::rptadv_radio_control_v1,
+        _: abi::rptadv_text_sink_v1,
+        _: *mut c_void,
+    ) -> i32 {
+        let request = unsafe { &mut *raw.cast::<abi::rptadv_radio_fence_control_v1>() };
+        assert_eq!(request.control.operation, 9);
+        assert_eq!(request.binding.accepted_abi_version, 0);
+        match MODE.get() {
+            0 => return 1,
+            1 => request.binding.accepted_abi_version = 1,
+            2 => return 0,
+            3 => {
+                request.binding.accepted_abi_version = 1;
+                return -9;
+            }
+            4 => request.binding.accepted_abi_version = 2,
+            5 => {
+                request.binding.accepted_abi_version = 1;
+                request.binding.context = ptr::null_mut();
+            }
+            6 => {
+                request.binding.accepted_abi_version = 1;
+                request.control.operation = 8;
+            }
+            _ => {
+                request.binding.accepted_abi_version = 1;
+                return 1;
+            }
+        }
+        0
+    }
+    let services = host_services(|table| table.radio_control = Some(control));
+    let mut context = Box::new(7_u64);
+    let binding = abi::UrpProgrammeFenceBinding {
+        struct_size: size_of::<abi::UrpProgrammeFenceBinding>() as u32,
+        abi_version: 1,
+        context: ptr::from_mut(&mut *context).cast(),
+        permit: None,
+        accepted_abi_version: 0,
+        reserved: 0,
+    };
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    for mode in 0..8 {
+        MODE.set(mode);
+        assert_eq!(
+            unsafe { radio.bind_programme_fence(&binding) },
+            match mode {
+                0 => Ok(ProgrammeFenceBindingStatus::Staged),
+                1 => Ok(ProgrammeFenceBindingStatus::Retained),
+                3 => Err(-9),
+                _ => Err(-7),
+            }
+        );
+        assert_eq!(binding.accepted_abi_version, 0);
+        assert_eq!(*context, 7);
+    }
+    drop(radio);
+    drop(context);
+}

@@ -151,6 +151,8 @@ struct ReservedRadio {
     metadata: ffi::rptadv_radio_metadata_v1,
     feedback: Option<ffi::UrpRadioFeedbackPort>,
     callbacks_bound: bool,
+    quiescent: bool,
+    fence_unacknowledged: bool,
 }
 unsafe extern "C" fn radio_open(
     _context: *mut c_void,
@@ -185,6 +187,8 @@ unsafe extern "C" fn radio_open(
                     metadata: None,
                     feedback: None,
                     callbacks_bound: false,
+                    quiescent: true,
+                    fence_unacknowledged: false,
                 }))
                 .cast();
                 0
@@ -216,6 +220,36 @@ unsafe extern "C" fn radio_control(
         let (Some(reserved), Some(request)) = (reserved, request) else {
             return -1;
         };
+        if request.operation == 9 {
+            let offset = std::mem::offset_of!(ffi::rptadv_radio_fence_control_v1, binding);
+            if (header[0] as usize) < size_of::<ffi::rptadv_radio_fence_control_v1>() {
+                return -1;
+            }
+            // SAFETY: the complete known extension is writable; no unknown tail is touched.
+            let binding =
+                unsafe { &mut (*pointer.cast::<ffi::rptadv_radio_fence_control_v1>()).binding };
+            if (binding.struct_size as usize) < size_of_val(binding)
+                || binding.struct_size as usize > header[0] as usize - offset
+                || binding.abi_version != ffi::URP_PROGRAMME_FENCE_ABI_VERSION
+                || binding.accepted_abi_version != 0
+                || binding.reserved != 0
+                || !reserved.quiescent
+            {
+                return -1;
+            }
+            let Some(radio) = reserved.radio.as_mut() else {
+                return -7;
+            };
+            let mut copied = *binding;
+            copied.struct_size = size_of_val(&copied) as u32;
+            reserved.fence_unacknowledged = true;
+            let status = radio.bind_programme_fence(&mut copied);
+            if status == 0 {
+                reserved.fence_unacknowledged = false;
+                binding.accepted_abi_version = copied.accepted_abi_version;
+            }
+            return status;
+        }
         if request.operation == 8 {
             if (header[0] as usize) < size_of::<ffi::rptadv_radio_programme_control_v1>() {
                 return -1;
@@ -267,7 +301,7 @@ unsafe extern "C" fn radio_activate(
         let Some(reserved) = (unsafe { radio.cast::<ReservedRadio>().as_mut() }) else {
             return -1;
         };
-        if reserved.callbacks_bound {
+        if reserved.callbacks_bound || reserved.fence_unacknowledged {
             return -1;
         }
         let Some(radio) = reserved.radio.as_mut() else {
@@ -278,6 +312,7 @@ unsafe extern "C" fn radio_activate(
             return -1;
         }
         reserved.callbacks_bound = true;
+        reserved.quiescent = false;
         if let Some(port) = reserved.feedback {
             if radio.bind_feedback(port) != 0 {
                 return -1;
@@ -384,7 +419,13 @@ unsafe extern "C" fn radio_service(_: *mut c_void, radio: *mut c_void) -> i32 {
 unsafe extern "C" fn radio_quiesce(_: *mut c_void, radio: *mut c_void) -> i32 {
     boundary(-1, || {
         // SAFETY: pending results retain channel and callback ownership in the caller.
-        unsafe { remote_control(radio, &mut remote_envelope(ffi::URP_AST_REMOTE_QUIESCE)) }
+        let status =
+            unsafe { remote_control(radio, &mut remote_envelope(ffi::URP_AST_REMOTE_QUIESCE)) };
+        // SAFETY: the same serialized reservation remains retained after the option.
+        if let Some(reserved) = unsafe { radio.cast::<ReservedRadio>().as_mut() } {
+            reserved.quiescent = status == 0;
+        }
+        status
     })
 }
 

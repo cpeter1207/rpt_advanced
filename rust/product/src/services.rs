@@ -1254,6 +1254,15 @@ impl ReceivePolicy {
     }
 }
 
+/// Outcome of a control-only final-programme binding, never RF qualification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProgrammeFenceBindingStatus {
+    /// Copied by a reservation; activation must still obtain actual SDK retention.
+    Staged,
+    /// The stopped SDK owner returned zero and acknowledged the exact binding.
+    Retained,
+}
+
 /// Unique radio handle operated by one product worker.
 pub struct Radio {
     services: HostServices,
@@ -1442,6 +1451,66 @@ impl Radio {
         let code = unsafe { bind(self.services.0.context, self.handle.as_ptr(), metadata) };
         (code == 0).then_some(()).ok_or(Error::Operation)
     }
+    /// Bind a stopped final-programme port through the existing sized control operation.
+    ///
+    /// # Safety
+    /// Callback code and stable context storage must outlive this radio, including
+    /// failed binding/activation/stop, unless a confirmed stopped unbind/rebind
+    /// releases that exact old binding. Never borrow temporary request storage as
+    /// context. Keep both old and proposed contexts after any ambiguous failure.
+    /// The callback is bounded, allocation-free, nonblocking and non-unwinding.
+    /// It may not call control/hardware APIs, clocks, logging or I/O.
+    pub unsafe fn bind_programme_fence(
+        &mut self,
+        binding: &abi::UrpProgrammeFenceBinding,
+    ) -> Result<ProgrammeFenceBindingStatus, i32> {
+        if binding.struct_size as usize != size_of_val(binding)
+            || binding.abi_version != abi::URP_PROGRAMME_FENCE_ABI_VERSION
+            || binding.accepted_abi_version != 0
+            || binding.reserved != 0
+        {
+            return Err(-1);
+        }
+        let call = self.services.0.radio_control.ok_or(-7)?;
+        // SAFETY: this flat request contains only scalar fields and nullable pointers.
+        let mut request: abi::rptadv_radio_fence_control_v1 = unsafe { std::mem::zeroed() };
+        request.control.struct_size = size_of_val(&request) as u32;
+        request.control.abi_version = 1;
+        request.control.operation = 9;
+        request.binding = *binding;
+        // SAFETY: the unique control owner lends only the local request; callback
+        // storage remains separately retained by this method's caller on all paths.
+        let status = unsafe {
+            call(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                &mut request.control,
+                None,
+                ptr::null_mut(),
+            )
+        };
+        if !matches!(status, 0 | 1) {
+            return Err(status);
+        }
+        let reply = request.binding;
+        if request.control.struct_size as usize != size_of_val(&request)
+            || request.control.abi_version != 1
+            || request.control.operation != 9
+            || reply.struct_size != binding.struct_size
+            || reply.abi_version != binding.abi_version
+            || reply.context != binding.context
+            || reply.reserved != binding.reserved
+            || reply.permit.map(|call| call as usize) != binding.permit.map(|call| call as usize)
+        {
+            return Err(-7);
+        }
+        match (status, reply.accepted_abi_version) {
+            (1, 0) => Ok(ProgrammeFenceBindingStatus::Staged),
+            (0, abi::URP_PROGRAMME_FENCE_ABI_VERSION) => Ok(ProgrammeFenceBindingStatus::Retained),
+            _ => Err(-7),
+        }
+    }
+
     /// Bind the released SDK's stopped-only serial TX feedback port.
     /// False means the host lacks this optional capability; no binding occurred.
     ///

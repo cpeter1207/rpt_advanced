@@ -102,6 +102,8 @@ fn echo_binding_rejects_a_quiesced_radio_reservation() {
         metadata: None,
         feedback: None,
         callbacks_bound: false,
+        quiescent: true,
+        fence_unacknowledged: false,
         radio: None,
         name: CString::new("quiesced fixture").unwrap(),
     };

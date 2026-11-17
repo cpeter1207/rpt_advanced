@@ -44,6 +44,7 @@ fn programme_retirement_uses_existing_native_owner_and_preserves_actual_sdk_resu
         pending: None,
         metadata: None,
         feedback: None,
+        fence: None,
     };
     for code in [0, 1, -9] {
         STATUS.set(code);
@@ -82,6 +83,7 @@ fn programme_retirement_rejects_partial_or_unsupported_native_requests() {
         pending: None,
         metadata: None,
         feedback: None,
+        fence: None,
     };
     let invoke = |handle: &mut RadioHandle, value: &mut crate::abi::rptadv_radio_control_v1| unsafe {
         radio_control(
@@ -121,4 +123,216 @@ fn programme_retirement_rejects_partial_or_unsupported_native_requests() {
         ),
         (0, -7)
     );
+}
+
+#[repr(C)]
+struct FenceRequest {
+    control: crate::abi::rptadv_radio_control_v1,
+    binding: crate::abi::UrpProgrammeFenceBinding,
+    tail: u64,
+}
+
+fn fence_request() -> FenceRequest {
+    // SAFETY: this ABI record contains only scalars and nullable pointers.
+    let mut value: FenceRequest = unsafe { std::mem::zeroed() };
+    value.control.struct_size = size_of_val(&value) as u32;
+    value.control.abi_version = 1;
+    value.control.operation = 9;
+    value.binding.struct_size = size_of_val(&value.binding) as u32;
+    value.binding.abi_version = 1;
+    value.tail = 0xabcdef;
+    value
+}
+
+#[test]
+fn programme_fence_staging_is_not_sdk_retention_acknowledgment() {
+    let radios = resolve_radio_nodes("[1000]\n[radio 1000]\n").unwrap();
+    let mut handle = RadioHandle {
+        reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+        active: None,
+        pending: None,
+        metadata: None,
+        feedback: None,
+        fence: None,
+    };
+    let mut request = fence_request();
+    let status = unsafe {
+        radio_control(
+            ptr::null_mut(),
+            ptr::from_mut(&mut handle).cast(),
+            &mut request.control,
+            None,
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(status, 1, "staging has a distinct non-ACK result");
+    assert_eq!(request.binding.accepted_abi_version, 0);
+    assert_eq!(request.tail, 0xabcdef);
+}
+
+thread_local! {
+    static FENCE_FAULT: Cell<u8> = const { Cell::new(0) };
+    static FENCE_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+unsafe extern "C" fn bind_fence(
+    _: *mut c_void,
+    binding: *mut crate::abi::UrpProgrammeFenceBinding,
+) -> i32 {
+    let binding = unsafe { &mut *binding };
+    assert_eq!(binding.accepted_abi_version, 0);
+    FENCE_CALLS.set(FENCE_CALLS.get() + 1);
+    binding.accepted_abi_version = 1;
+    match FENCE_FAULT.get() {
+        1 => return -9,
+        2 => binding.accepted_abi_version = 0,
+        3 => binding.accepted_abi_version = 2,
+        4 => binding.struct_size -= 1,
+        5 => binding.abi_version = 2,
+        6 => binding.context = ptr::dangling_mut::<u8>().cast(),
+        7 => binding.reserved = 1,
+        8 => return 1,
+        _ => {}
+    }
+    0
+}
+
+#[test]
+fn programme_fence_requires_confirmed_stop_and_exact_sdk_ack() {
+    let radios = resolve_radio_nodes("[1000]\n[radio 1000]\n").unwrap();
+    let mut api = crate::radio_activation::tests::remote_fixture_api();
+    api.native_programme_fence_bind = Some(bind_fence);
+    let mut handle = RadioHandle {
+        reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+        active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
+        pending: None,
+        metadata: None,
+        feedback: None,
+        fence: None,
+    };
+    let invoke = |handle: &mut RadioHandle, value: &mut FenceRequest| unsafe {
+        radio_control(
+            ptr::null_mut(),
+            ptr::from_mut(handle).cast(),
+            &mut value.control,
+            None,
+            ptr::null_mut(),
+        )
+    };
+    FENCE_CALLS.set(0);
+    assert_eq!(invoke(&mut handle, &mut fence_request()), -1);
+    assert_eq!(FENCE_CALLS.get(), 0);
+    assert_eq!(
+        unsafe { radio_quiesce(ptr::null_mut(), ptr::from_mut(&mut handle).cast()) },
+        0
+    );
+    for fault in 0..9 {
+        FENCE_FAULT.set(fault);
+        let mut request = fence_request();
+        assert_eq!(
+            invoke(&mut handle, &mut request),
+            if fault == 0 {
+                0
+            } else if fault == 1 {
+                -9
+            } else {
+                -7
+            }
+        );
+        assert_eq!(request.binding.accepted_abi_version, u32::from(fault == 0));
+        assert_eq!(
+            request.binding.struct_size as usize,
+            size_of_val(&request.binding)
+        );
+        assert_eq!(request.binding.abi_version, 1);
+        assert!(request.binding.context.is_null());
+        assert_eq!(request.binding.reserved, 0);
+        assert_eq!(request.tail, 0xabcdef);
+    }
+    FENCE_FAULT.set(0);
+}
+
+#[test]
+fn programme_fence_validates_complete_nested_extent_before_staging() {
+    let radios = resolve_radio_nodes("[1000]\n[radio 1000]\n").unwrap();
+    let mut handle = RadioHandle {
+        reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+        active: None,
+        pending: None,
+        metadata: None,
+        feedback: None,
+        fence: None,
+    };
+    for fault in 0..7 {
+        let mut request = fence_request();
+        match fault {
+            0 => request.control.struct_size = size_of_val(&request.control) as u32,
+            1 => request.control.abi_version = 2,
+            2 => request.binding.struct_size -= 1,
+            3 => request.binding.struct_size = u32::MAX,
+            4 => request.binding.abi_version = 2,
+            5 => request.binding.reserved = 1,
+            _ => request.binding.accepted_abi_version = 1,
+        }
+        assert_eq!(
+            unsafe {
+                radio_control(
+                    ptr::null_mut(),
+                    ptr::from_mut(&mut handle).cast(),
+                    &mut request.control,
+                    None,
+                    ptr::null_mut(),
+                )
+            },
+            -1
+        );
+    }
+}
+
+#[test]
+fn programme_fence_staged_request_is_copied_and_larger_tails_are_untouched() {
+    unsafe extern "C" fn permit(_: *mut c_void, _: u64, _: u32) -> u32 {
+        0
+    }
+    let radios = resolve_radio_nodes("[1000]\n[radio 1000]\n").unwrap();
+    let mut handle = RadioHandle {
+        reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+        active: None,
+        pending: None,
+        metadata: None,
+        feedback: None,
+        fence: None,
+    };
+    let mut context = Box::new(7_u64);
+    {
+        let mut value = fence_request();
+        value.binding.struct_size += 8;
+        value.binding.context = ptr::from_mut(&mut *context).cast();
+        value.binding.permit = Some(permit);
+        assert_eq!(
+            unsafe {
+                radio_control(
+                    ptr::null_mut(),
+                    ptr::from_mut(&mut handle).cast(),
+                    &mut value.control,
+                    None,
+                    ptr::null_mut(),
+                )
+            },
+            1
+        );
+        assert_eq!(value.binding.accepted_abi_version, 0);
+        assert_eq!(value.tail, 0xabcdef);
+        value.binding.context = ptr::null_mut();
+    }
+    let retained = handle.fence.unwrap();
+    assert_eq!(retained.context, ptr::from_mut(&mut *context).cast());
+    assert_eq!(retained.struct_size as usize, size_of_val(&retained));
+    assert_eq!(retained.accepted_abi_version, 0);
+    assert_eq!(
+        unsafe { retained.permit.unwrap()(retained.context, 73, 128) },
+        0
+    );
+    drop(handle);
+    drop(context);
 }

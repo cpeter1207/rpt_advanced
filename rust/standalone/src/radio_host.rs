@@ -179,6 +179,7 @@ struct RadioHandle {
     pending: Option<RadioReservation>,
     metadata: crate::abi::rptadv_radio_metadata_v1,
     feedback: Option<crate::abi::UrpRadioFeedbackPort>,
+    fence: Option<crate::abi::UrpProgrammeFenceBinding>,
 }
 
 /// Stage/acknowledge, commit, or roll back a native radio configuration on its
@@ -249,6 +250,9 @@ pub unsafe extern "C" fn radio_update(context: *mut c_void, radio: *mut c_void, 
 /// # Safety
 /// Handles and the initialized writable request remain live for this serialized
 /// call. The optional sink borrows returned text only until its callback returns.
+/// Operation 9 borrows callback code and stable context beyond this request:
+/// retain every possibly bound context through failed bind/start/stop until
+/// confirmed stopped replacement/unbind or synchronous quiescent destruction.
 pub unsafe extern "C" fn radio_control(
     context: *mut c_void,
     radio: *mut c_void,
@@ -272,6 +276,38 @@ pub unsafe extern "C" fn radio_control(
     let (Some(handle), Some(request)) = (handle, request) else {
         return -1;
     };
+    if request.operation == 9 {
+        let offset = std::mem::offset_of!(crate::abi::rptadv_radio_fence_control_v1, binding);
+        if (header[0] as usize) < std::mem::size_of::<crate::abi::rptadv_radio_fence_control_v1>() {
+            return -1;
+        }
+        // SAFETY: the full known extension is writable; unknown tails stay borrowed.
+        let binding =
+            unsafe { &mut (*pointer.cast::<crate::abi::rptadv_radio_fence_control_v1>()).binding };
+        if (binding.struct_size as usize) < std::mem::size_of_val(binding)
+            || binding.struct_size as usize > header[0] as usize - offset
+            || binding.abi_version != crate::abi::URP_PROGRAMME_FENCE_ABI_VERSION
+            || binding.accepted_abi_version != 0
+            || binding.reserved != 0
+        {
+            return -1;
+        }
+        let mut copied = *binding;
+        copied.struct_size = std::mem::size_of_val(&copied) as u32;
+        if let Some(active) = handle.active.as_mut() {
+            let status = active.bind_programme_fence(&mut copied);
+            if status != 0 {
+                return status;
+            }
+            binding.accepted_abi_version = copied.accepted_abi_version;
+            copied.accepted_abi_version = 0;
+            handle.fence = Some(copied);
+            return 0;
+        }
+        handle.fence = Some(copied);
+        // This reservation owns no SDK station yet. Never synthesize retention.
+        return 1;
+    }
     if request.operation == 8 {
         if (header[0] as usize)
             < std::mem::size_of::<crate::abi::rptadv_radio_programme_control_v1>()
@@ -484,6 +520,7 @@ pub unsafe extern "C" fn radio_open(
         pending: None,
         metadata: None,
         feedback: None,
+        fence: None,
     }))
     .cast();
     0
@@ -578,6 +615,7 @@ pub unsafe extern "C" fn radio_activate(
             transmit_context,
             metadata: handle.metadata,
             feedback: handle.feedback,
+            fence: handle.fence,
         },
     );
     finish_activation(handle, result)
@@ -726,6 +764,7 @@ mod tests {
             pending: None,
             metadata: None,
             feedback: None,
+            fence: None,
         };
         let radio = ptr::from_mut(&mut handle).cast();
         let mut context = 7_u64;
@@ -799,6 +838,7 @@ mod tests {
             pending: None,
             metadata: None,
             feedback: None,
+            fence: None,
         };
         // SAFETY: the request is a scalar-only ABI record initialized before use.
         let mut request: crate::abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
@@ -921,6 +961,7 @@ mod tests {
             pending: None,
             metadata: None,
             feedback: None,
+            fence: None,
         };
         let context = std::ptr::from_mut(&mut host).cast();
         let radio = std::ptr::from_mut(&mut handle).cast();
@@ -1029,6 +1070,7 @@ mod tests {
             pending: None,
             metadata: None,
             feedback: None,
+            fence: None,
         };
         // SAFETY: the request is a scalar-only ABI record initialized before dispatch.
         let mut request: crate::abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
@@ -1110,6 +1152,7 @@ mod tests {
             pending: None,
             metadata: None,
             feedback: None,
+            fence: None,
         };
         let binding: crate::abi::UrpAstSiteBinding = unsafe { std::mem::zeroed() };
         let request: crate::abi::UrpAstSiteRequest = unsafe { std::mem::zeroed() };
@@ -1610,6 +1653,7 @@ mod tests {
             pending: None,
             metadata: None,
             feedback: None,
+            fence: None,
         };
 
         assert_eq!(
@@ -1637,6 +1681,7 @@ mod tests {
             pending: None,
             metadata: None,
             feedback: None,
+            fence: None,
         };
         assert_eq!(
             finish_activation(
@@ -1670,6 +1715,7 @@ mod tests {
             pending: None,
             metadata: None,
             feedback: None,
+            fence: None,
         };
         let radio = ptr::from_mut(&mut handle).cast();
         let operation = native::remote_operation();
@@ -1856,6 +1902,7 @@ mod receive_policy_tests {
             pending: None,
             metadata: None,
             feedback: None,
+            fence: None,
         };
         // SAFETY: the record contains only integers and a fixed integer array.
         let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };

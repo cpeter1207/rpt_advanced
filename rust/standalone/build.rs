@@ -71,6 +71,7 @@ fn main() {
         .allowlist_var("RPTADV_SITE_.*")
         .allowlist_var("RPTADV_PHONE_(COMMAND_.*|DIAL|HANGUP)")
         .allowlist_var("URP_NATIVE_.*")
+        .allowlist_var("URP_PROGRAMME_FENCE_ABI_VERSION")
         .allowlist_var("URP_AST_.*")
         .allowlist_type("Urp.*")
         .allowlist_function("rptadv_product_descriptor_v1")

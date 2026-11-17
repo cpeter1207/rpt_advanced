@@ -2677,3 +2677,31 @@ media destination. Host admission validates both sides of the target policy,
 and a committed configuration replacement retires calls before publication.
 Detach or replacement invalidates the exact origin epoch, including a queued
 approval; a refused attachment replacement does not change the retained target.
+
+
+## Stopped programme-fence forwarding checkpoint — 2026-11-17
+
+The existing sized radio-control operation 9 carries the unchanged SDK
+UrpProgrammeFenceBinding prefix. Standalone reserves and copies the prefix:
+status 1 and accepted ABI zero means staging only. After native create and
+before start, actual SDK bind must return zero and accepted ABI 1 without
+changing binding identity. Asterisk RPPF uses the same actual-ACK requirement;
+unknown-option success and task enqueue alone cannot acknowledge retention.
+
+The product wrapper exposes Staged versus Retained and an explicit unsafe
+borrowed-context contract. Request storage is never the retained context owner.
+Callback code and stable storage remain caller-owned through failed bind,
+activation, stop, device replacement and rollback until confirmed stopped
+unbind/rebind or synchronous quiescent destruction. Both proposed and old
+contexts survive ambiguous failures. A successful quiesce is the only host
+state transition permitting stopped rebinding; a requested stop is insufficient.
+The existing host activation contract does not expose same-owner restart;
+released SDK restart behavior is not a new host operation.
+
+Host-services ABI 10, DirectCallbacks ABI 6, SDK ABI/SONAME 1 and provider
+floors remain unchanged. This is control/lifetime plumbing only: no production
+permit is installed, no telephone RF policy is activated, and ordinary unbound
+audio and independent signaling retain their existing behavior. Callback
+admission, retained-contributor retirement, same-render graph identity,
+qualified current time and finite downstream presentation bounds remain separate
+mandatory policy gates.

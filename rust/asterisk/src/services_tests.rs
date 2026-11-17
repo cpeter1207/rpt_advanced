@@ -367,6 +367,24 @@ unsafe extern "C" fn ast_channel_setoption(
     block: i32,
 ) -> i32 {
     assert_eq!(block, 0);
+    if option == 0x52505046 {
+        assert_eq!(length as usize, size_of::<ProgrammeFenceBinding>());
+        let binding = unsafe { &mut *data.cast::<ProgrammeFenceBinding>() };
+        assert_eq!(binding.accepted_abi_version, 0);
+        binding.accepted_abi_version = 1;
+        match PROGRAMME_FAULT.get() {
+            1 => return -9,
+            2 => binding.accepted_abi_version = 0,
+            3 => binding.accepted_abi_version = 2,
+            4 => binding.struct_size -= 1,
+            5 => binding.abi_version = 2,
+            6 => binding.context = ptr::dangling_mut::<u8>().cast(),
+            7 => binding.reserved = 1,
+            8 => return 1,
+            _ => {}
+        }
+        return 0;
+    }
     if option == 0x52505052 {
         assert_eq!(length as usize, size_of::<ProgrammeRetirement>());
         let request = unsafe { &mut *data.cast::<ProgrammeRetirement>() };
@@ -451,7 +469,13 @@ unsafe extern "C" fn ast_channel_setoption(
         request.accepted_abi_version = u32::from(failure != REMOTE_ACK_MISSING);
         return match request.operation {
             ffi::URP_AST_REMOTE_SERVICE => 0,
-            ffi::URP_AST_REMOTE_QUIESCE => i32::from(failure == REMOTE_PENDING),
+            ffi::URP_AST_REMOTE_QUIESCE => {
+                if failure == REMOTE_FAILED {
+                    -123
+                } else {
+                    i32::from(failure == REMOTE_PENDING)
+                }
+            }
             ffi::URP_AST_REMOTE_READY => {
                 if failure == REMOTE_FAILED {
                     -123
@@ -1113,4 +1137,183 @@ fn programme_retirement_rejects_malformed_or_unacknowledged_channel_requests() {
 fn outgoing_phone_factory_is_explicitly_unavailable_in_asterisk() {
     assert!(descriptor().peer_dial_phone.is_none());
     assert!(descriptor().peer_dial_phone_progress.is_none());
+}
+
+#[repr(C)]
+struct FenceRequest {
+    control: ffi::rptadv_radio_control_v1,
+    binding: ProgrammeFenceBinding,
+    tail: u64,
+}
+
+#[test]
+fn programme_fence_option_requires_actual_ack_and_preserves_request_identity() {
+    reset();
+    let null = ptr::null_mut();
+    let mut radio = null;
+    assert_eq!(
+        unsafe { radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio) },
+        0
+    );
+    for fault in 0..9 {
+        PROGRAMME_FAULT.set(fault);
+        let mut request: FenceRequest = unsafe { std::mem::zeroed() };
+        request.control.struct_size = size_of_val(&request) as u32;
+        request.control.abi_version = 1;
+        request.control.operation = 9;
+        request.binding.struct_size = size_of_val(&request.binding) as u32;
+        request.binding.abi_version = 1;
+        request.tail = 0xabcdef;
+        assert_eq!(
+            unsafe { radio_control(null, radio, &mut request.control, None, null) },
+            if fault == 0 {
+                0
+            } else if fault == 1 {
+                -9
+            } else {
+                -7
+            }
+        );
+        assert_eq!(request.binding.accepted_abi_version, u32::from(fault == 0));
+        assert_eq!(
+            request.binding.struct_size as usize,
+            size_of_val(&request.binding)
+        );
+        assert_eq!(request.binding.abi_version, 1);
+        assert!(request.binding.context.is_null());
+        assert_eq!(request.binding.reserved, 0);
+        assert_eq!(request.tail, 0xabcdef);
+    }
+    PROGRAMME_FAULT.set(0);
+    unsafe { radio_destroy(null, radio) };
+    host(|state| state.clean());
+}
+
+#[repr(C)]
+struct ProgrammeFenceBinding {
+    struct_size: u32,
+    abi_version: u32,
+    context: *mut c_void,
+    permit: Option<unsafe extern "C" fn(*mut c_void, u64, u32) -> u32>,
+    accepted_abi_version: u32,
+    reserved: u32,
+}
+
+fn fence_request() -> FenceRequest {
+    let mut request: FenceRequest = unsafe { std::mem::zeroed() };
+    request.control.struct_size = size_of_val(&request) as u32;
+    request.control.abi_version = 1;
+    request.control.operation = 9;
+    request.binding.struct_size = size_of_val(&request.binding) as u32;
+    request.binding.abi_version = 1;
+    request.tail = 0xabcdef;
+    request
+}
+
+#[test]
+fn programme_fence_channel_rebind_requires_confirmed_quiescence_and_complete_extent() {
+    reset();
+    PROGRAMME_FAULT.set(0);
+    let null = ptr::null_mut();
+    let mut radio = null;
+    assert_eq!(
+        unsafe { radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio) },
+        0
+    );
+    let invoke = |request: &mut FenceRequest| unsafe {
+        radio_control(null, radio, &mut request.control, None, null)
+    };
+    assert_eq!(
+        unsafe { radio_control(null, radio, ptr::null_mut(), None, null) },
+        -1
+    );
+    let mut short = [8_u32, 1];
+    assert_eq!(
+        unsafe { radio_control(null, radio, short.as_mut_ptr().cast(), None, null) },
+        -1
+    );
+    for fault in 0..7 {
+        let mut request = fence_request();
+        match fault {
+            0 => request.control.struct_size = size_of_val(&request.control) as u32,
+            1 => request.control.abi_version = 2,
+            2 => request.binding.struct_size -= 1,
+            3 => request.binding.struct_size = u32::MAX,
+            4 => request.binding.abi_version = 2,
+            5 => request.binding.reserved = 1,
+            _ => request.binding.accepted_abi_version = 1,
+        }
+        assert_eq!(invoke(&mut request), -1);
+    }
+    let mut extended = fence_request();
+    extended.binding.struct_size += 8;
+    assert_eq!(invoke(&mut extended), 0);
+    assert_eq!(extended.binding.accepted_abi_version, 1);
+    assert_eq!(
+        extended.binding.struct_size as usize,
+        size_of_val(&extended.binding) + 8
+    );
+    assert_eq!(extended.tail, 0xabcdef);
+    assert_eq!(
+        unsafe { radio_activate(null, radio, Some(receive), null, Some(transmit), null) },
+        0
+    );
+    assert_eq!(invoke(&mut fence_request()), -1);
+    for (failure, expected) in [
+        (REMOTE_PENDING, 1),
+        (REMOTE_FAILED, -123),
+        (REMOTE_ACK_MISSING, -7),
+    ] {
+        host(|state| state.failure = failure);
+        assert_eq!(unsafe { radio_quiesce(null, radio) }, expected);
+        assert_eq!(invoke(&mut fence_request()), -1);
+        assert_eq!(host(|state| state.channels), 1);
+    }
+    host(|state| state.failure = 0);
+    assert_eq!(unsafe { radio_quiesce(null, radio) }, 0);
+    assert_eq!(
+        invoke(&mut fence_request()),
+        0,
+        "null permit explicitly unbinds after real stop"
+    );
+    unsafe { radio_destroy(null, radio) };
+    host(|state| state.clean());
+}
+
+#[test]
+fn programme_fence_failed_retention_cannot_activate_the_channel() {
+    let null = ptr::null_mut();
+    for fault in [1, 2, 3, 8] {
+        reset();
+        PROGRAMME_FAULT.set(fault);
+        let mut radio = null;
+        assert_eq!(
+            unsafe { radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio) },
+            0
+        );
+        let mut request = fence_request();
+        assert_ne!(
+            unsafe { radio_control(null, radio, &mut request.control, None, null) },
+            0
+        );
+        assert_eq!(
+            unsafe { radio_activate(null, radio, Some(receive), null, Some(transmit), null) },
+            -1,
+            "a requested binding without SDK retention must prevent activation"
+        );
+        PROGRAMME_FAULT.set(0);
+        let mut unbind = fence_request();
+        assert_eq!(
+            unsafe { radio_control(null, radio, &mut unbind.control, None, null) },
+            0
+        );
+        assert_eq!(unbind.binding.accepted_abi_version, 1);
+        assert_eq!(
+            unsafe { radio_activate(null, radio, Some(receive), null, Some(transmit), null) },
+            0,
+            "a stopped acknowledged unbind permits ordinary unbound activation"
+        );
+        unsafe { radio_destroy(null, radio) };
+        host(|state| state.clean());
+    }
 }
