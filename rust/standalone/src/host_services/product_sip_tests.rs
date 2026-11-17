@@ -1031,3 +1031,6 @@ fn c5_ordinary_media(extent: Option<usize>, lifetime: bool) {
         "absent reader must publish absent capability; lifetime fixture must advertise its real reader"
     );
 }
+
+#[path = "c5_combined_lifecycle_tests.rs"]
+mod combined_lifecycle;

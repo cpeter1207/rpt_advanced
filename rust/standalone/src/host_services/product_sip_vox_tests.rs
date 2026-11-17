@@ -86,6 +86,9 @@ impl Remote {
         self.return_packets
     }
     pub fn pump(&mut self) {
+        self.pump_with_audio(|_| {});
+    }
+    pub(super) fn pump_with_audio(&mut self, mut observe: impl FnMut(&[f32])) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -137,6 +140,7 @@ impl Remote {
             for _ in 0..8 {
                 match peer.poll(&mut audio, &mut text).unwrap() {
                     IaxEvent::Audio(count) => {
+                        observe(&audio[..count]);
                         self.observation.voiced.fetch_add(
                             audio[..count]
                                 .iter()
