@@ -28,6 +28,32 @@ qualification are distinct from software implementation and passive node health.
 
 ## Entries
 
+### Remove legacy VOX in favor of VAD
+
+**Status: Planned; requested 2026-11-17.** Earshot VAD supersedes the legacy
+audio-level VOX receive detector. Remove VOX from the configuration schema and
+remove its implementation from the owning radio components and their consumers.
+
+**Requirements and decisions recorded**
+
+- Remove the VOX carrier-source choice, `vox_threshold`, `vox_hang_ms`, and
+  VOX-only detector state, processing, control/tuner options, and diagnostics.
+  Update affected parsers, examples, documentation, and tests together.
+- Retain the existing VAD Off/Kerchunk/On modes, VAD hang and receive-buffer
+  policy from ADR 0043. Preserve independent DSP/hardware carrier and
+  CTCSS/DCS qualification, duplex guards, and source/burst identity.
+- Preserve the separate activity detection used by AGC and other processing;
+  removing the legacy receive VOX detector does not remove those functions.
+- Handle retired VOX configuration through the existing unknown-option warning
+  and sensible-default policy. Do not retain compatibility-only VOX aliases or
+  silently reinterpret an old level threshold as a VAD setting.
+- Trace the shared radio, USBRadioPlus SDK, controller adapters and tuner before
+  changing interfaces; record any required ABI/package changes and verify the
+  affected standalone and Asterisk paths.
+
+The requirement is settled. This entry records future code work; the schema
+revision does not establish that VOX has been removed from the implementation.
+
 ### Listening and RF acceptance of released audio processing
 
 **Status: Software released and installed; station acceptance pending.** The
