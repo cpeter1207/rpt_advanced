@@ -443,3 +443,188 @@ fn source_reset_callback_overcredit_fails_closed() {
         Some(Error::InvalidFrame)
     );
 }
+
+#[test]
+fn reset_retry_keeps_exact_identity_across_reads() {
+    #[derive(Default)]
+    struct Provider {
+        turn: usize,
+        mode: u8,
+        callbacks: Vec<i32>,
+        credits: Vec<u32>,
+    }
+    unsafe extern "C" fn read(
+        context: *mut c_void,
+        _: *mut c_void,
+        _: u32,
+        sink: *const abi::rptadv_peer_source_sink_v1,
+        _: abi::rptadv_peer_source_text_v1,
+        _: *mut c_void,
+        _: *mut abi::rptadv_peer_source_result_v1,
+    ) -> i32 {
+        let state = unsafe { &mut *context.cast::<Provider>() };
+        let sink = unsafe { &*sink };
+        let Some(adaptation) = sink.source_adaptation else {
+            return 0;
+        };
+        let result = if (state.mode == 3 && state.turn == 0) || (state.mode == 2 && state.turn != 0)
+        {
+            unsafe { sink.source_discontinuity.unwrap()(sink.context) }
+        } else {
+            let start = if state.mode == 5 {
+                u64::MAX
+            } else if state.turn != 0 && state.mode == 1 {
+                11
+            } else {
+                10
+            };
+            let count = if state.mode == 4 {
+                0
+            } else if state.mode == 6 && state.turn != 0 {
+                159
+            } else {
+                160
+            };
+            unsafe { adaptation(sink.context, start, count) }
+        };
+        state.callbacks.push(result);
+        state
+            .credits
+            .push(unsafe { sink.gap.unwrap()(sink.context, 170, 5) });
+        state.turn += 1;
+        0
+    }
+    for mode in 0..=6 {
+        let mut provider = Provider {
+            mode,
+            callbacks: Vec::with_capacity(2),
+            credits: Vec::with_capacity(2),
+            ..Provider::default()
+        };
+        let (prepared, _) = crate::link::session::tests::source_peer();
+        let services = host_services(|table| {
+            *table = prepared.services.0;
+            table.context = ptr::from_mut(&mut provider).cast();
+            table.peer_info = Some(echo_info);
+            table.peer_read_source = Some(read);
+            table.peer_destroy = unsafe { (*crate::fixture::host_descriptor()).peer_destroy };
+        });
+        let mut peer = unsafe { services.peer(crate::fixture::peer()) }.unwrap();
+        let mut attempts = 0;
+        let mut consume = |input: SourceInput<'_>| match input {
+            SourceInput::Discontinuity => {
+                attempts += 1;
+                usize::from(attempts > 1)
+            }
+            SourceInput::Gap { count, .. } => count,
+            // Exhaustive public consumer remains unchanged by the private cause.
+            SourceInput::Audio { .. } | SourceInput::Digit(_) | SourceInput::Text { .. } => 0,
+        };
+        let (first, allocations, frees) = crate::fixture::heap_operations(|| {
+            peer.read_source(SourceCompletion::Pending, &mut consume)
+        });
+        assert_eq!(
+            (allocations, frees),
+            (0, 0),
+            "first cut has no heap operations"
+        );
+        if mode == 4 || mode == 5 {
+            assert_eq!(first.err(), Some(Error::InvalidFrame));
+            assert_eq!(provider.callbacks, [-1]);
+            assert_eq!(provider.credits, [0]);
+            continue;
+        }
+        first.unwrap();
+        assert_eq!(
+            provider.callbacks,
+            [1],
+            "a valid cause must be dispatched and retained"
+        );
+        let (second, allocations, frees) = crate::fixture::heap_operations(|| {
+            peer.read_source(SourceCompletion::Pending, &mut consume)
+        });
+        assert_eq!((allocations, frees), (0, 0), "retry has no heap operations");
+        if mode == 0 {
+            second.unwrap();
+            assert_eq!(provider.callbacks, [1, 0]);
+            assert_eq!(provider.credits, [0, 5]);
+            assert_eq!(attempts, 2);
+        } else {
+            assert_eq!(second.err(), Some(Error::InvalidFrame));
+            assert_eq!(provider.callbacks, [1, -1]);
+            assert_eq!(provider.credits, [0, 0]);
+            assert_eq!(attempts, 1, "a changed identity must never reach the owner");
+        }
+    }
+}
+
+#[test]
+fn private_causal_dispatch_keeps_exact_interval_without_public_enum_change() {
+    unsafe extern "C" fn read(
+        _: *mut c_void,
+        _: *mut c_void,
+        _: u32,
+        sink: *const abi::rptadv_peer_source_sink_v1,
+        _: abi::rptadv_peer_source_text_v1,
+        _: *mut c_void,
+        _: *mut abi::rptadv_peer_source_result_v1,
+    ) -> i32 {
+        let sink = unsafe { &*sink };
+        unsafe { sink.source_adaptation.unwrap()(sink.context, 123, 160) }
+    }
+    let (prepared, _) = crate::link::session::tests::source_peer();
+    let services = host_services(|table| {
+        *table = prepared.services.0;
+        table.peer_info = Some(echo_info);
+        table.peer_read_source = Some(read);
+        table.peer_destroy = unsafe { (*crate::fixture::host_descriptor()).peer_destroy };
+    });
+    let mut peer = unsafe { services.peer(crate::fixture::peer()) }.unwrap();
+    let mut cut = None;
+    let (result, allocations, frees) = crate::fixture::heap_operations(|| {
+        peer.read_source_causal_at(
+            SourceCompletion::Pending,
+            SourceTimeReference::default(),
+            |event| {
+                if let SourceDispatch::AdaptationCut { start, count } = event {
+                    cut = Some((start, count));
+                }
+                1
+            },
+        )
+    });
+    result.unwrap();
+    assert_eq!(cut, Some((123, 160)));
+    assert_eq!((allocations, frees), (0, 0));
+    eprintln!(
+        "SourceReset={} Option<SourceReset>={} PeerIo={}",
+        size_of::<SourceReset>(),
+        size_of::<Option<SourceReset>>(),
+        size_of::<PeerIo>()
+    );
+}
+
+#[test]
+fn source_cause_peerio_state_size() {
+    // Exact pre-change field layout, compiled by the same target/compiler.
+    #[allow(dead_code)]
+    struct BaselineLayout {
+        services: HostServices,
+        handle: NonNull<c_void>,
+        identity: PeerIdentity,
+        local: String,
+        callsign: String,
+        capabilities: u32,
+        account_generation: u64,
+        qso_generation: u64,
+        provider_account: Option<PhoneAccountId>,
+        source_reset_pending: bool,
+        source_digit_pending: Option<char>,
+    }
+    eprintln!(
+        "PeerIo baseline={} current={} delta={}",
+        size_of::<BaselineLayout>(),
+        size_of::<PeerIo>(),
+        size_of::<PeerIo>() as isize - size_of::<BaselineLayout>() as isize
+    );
+}

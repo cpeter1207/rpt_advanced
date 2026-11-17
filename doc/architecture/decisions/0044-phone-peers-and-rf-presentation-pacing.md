@@ -2588,3 +2588,35 @@ source reset, call/media retirement or cancellation still invalidates the old
 candidate; stale releases never revive it or substitute for a fresh preparation.
 There is no extra candidate, PCM buffer, command queue or early admission.
 Both command orders and cancellation while waiting are deterministic test cases.
+
+### Exact native adaptation cause prerequisite — 2026-11-17
+
+The sized ABI1 source sink appends an optional source_adaptation callback after
+the unchanged 72-byte private digit prefix (80-byte complete tail on supported
+64-bit targets). It carries a nonzero checked source interval and uses the
+existing complete/retry/terminal retirement contract. Old-sized or null-tail
+sinks receive generic discontinuity only. SIP and IAX copy checked readable
+prefixes before borrowing the enlarged Rust value; IAX never emits adaptation.
+There is no host-table, jitter ABI, SONAME, or required-capability change.
+
+One SIP witness is established only by a completed zero-prefix/zero-trim Packet
+followed by an exclusive native advance with a checked positive skipped_span
+delta and no other cumulative-counter change. It survives only Accepted puts
+and NotDue gets. Named cumulative counters must remain unsaturated and unchanged,
+except checked put-side late-drop cleanup of already skipped packets. Occupancy
+and delay gauges do not establish or invalidate cause. The exact successor
+Packet consumes the witness only with a known original receipt and an exact
+matching missing interval. Ambiguous input remains a generic hard cut.
+
+This bounded lifetime depends specifically on the pinned SpeexDSP 1.2.1 native
+contract: Packet clears lost_count, NotDue never enters native get, and the
+adapter's explicit update disables auto-adjustment. Consequently no >20-fetch
+put-side resynchronization can occur before witness invalidation. A provider
+change requires revalidation, not extrapolation from aggregate counters.
+
+PeerIo retains one exact refused reset identity across reads; changed cause or
+range fails closed and cannot credit later PCM. Public SourceInput and read APIs
+remain unchanged, mapping adaptation to generic discontinuity. A crate-private
+causal dispatch reaches the SAME private-phone hard-retirement handler.
+No owner recovery, new readiness, collector release, graph replacement, speech
+authority, or RF permission is introduced by this prerequisite.

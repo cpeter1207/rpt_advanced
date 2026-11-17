@@ -16,6 +16,9 @@ struct Sink {
     digits: Vec<u32>,
     discontinuities: usize,
     ranges: Vec<(u64, usize)>,
+    adaptations: Vec<(u64, u32, usize)>,
+    refuse_adaptation: bool,
+    refuse_discontinuity: bool,
 }
 unsafe extern "C" fn audio(
     context: *mut c_void,
@@ -56,10 +59,9 @@ unsafe extern "C" fn digit(context: *mut c_void, symbol: u32) -> i32 {
     0
 }
 unsafe extern "C" fn discontinuity(context: *mut c_void) -> i32 {
-    unsafe {
-        (*context.cast::<Sink>()).discontinuities += 1;
-    }
-    0
+    let sink = unsafe { &mut *context.cast::<Sink>() };
+    sink.discontinuities += 1;
+    i32::from(sink.refuse_discontinuity)
 }
 fn read(media: &mut Media, sink: &mut Sink, now: u64) -> u32 {
     try_read(media, sink, now).unwrap()
@@ -1424,4 +1426,563 @@ fn retained_mixed_map_slices_refusal_partial_boundary_and_cross_boundary_overlap
         spans.map(|s| (s.offset_frames, s.frame_count, s.origin)),
         before
     );
+}
+
+/// The pre-extension ABI allocation with exactly one appended optional callback.
+/// This layout deliberately works before production exposes the new field.
+#[repr(C)]
+struct CausalSink {
+    struct_size: u32,
+    abi_version: u32,
+    context: *mut c_void,
+    audio: abi::rptadv_peer_source_audio_v1,
+    gap: abi::rptadv_peer_source_gap_v1,
+    host_clock_epoch: u64,
+    reference_now_ns: u64,
+    audio_timed: abi::rptadv_peer_source_audio_timed_v1,
+    source_discontinuity: abi::rptadv_peer_source_discontinuity_v1,
+    digit: abi::rptadv_peer_source_digit_v1,
+    source_adaptation: Option<unsafe extern "C" fn(*mut c_void, u64, u32) -> i32>,
+}
+unsafe extern "C" fn adaptation(context: *mut c_void, start: u64, count: u32) -> i32 {
+    let sink = unsafe { &mut *context.cast::<Sink>() };
+    sink.adaptations.push((start, count, sink.ranges.len()));
+    i32::from(sink.refuse_adaptation)
+}
+fn causal_read(media: &mut Media, sink: &mut Sink, now: u64) -> u32 {
+    let input = CausalSink {
+        struct_size: size_of::<CausalSink>() as u32,
+        abi_version: 1,
+        context: ptr::from_mut(sink).cast(),
+        audio: None,
+        gap: Some(gap),
+        host_clock_epoch: 7,
+        reference_now_ns: now,
+        audio_timed: Some(audio),
+        source_discontinuity: Some(discontinuity),
+        digit: Some(digit),
+        source_adaptation: Some(adaptation),
+    };
+    let mut output = unsafe { std::mem::zeroed() };
+    unsafe { media.read(0, ptr::from_ref(&input).cast(), &mut output) }.unwrap();
+    output.progress
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn steady_cadence_media_adaptation_survives_real_put() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    let target = media.endpoint.local_addr().unwrap();
+    let mut sink = Sink {
+        credit: 160,
+        ..Sink::default()
+    };
+    let origin = (1u64 << 32) + 1000;
+    let base = 1_000_000_000;
+    for ms in (0..=900u64).step_by(10) {
+        if ms % 20 == 0 {
+            sender
+                .send_to(
+                    &packet((ms / 20) as u16, 1000 + ms as u32 * 8, 0, &[0xa5; 160]),
+                    target,
+                )
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        if ms == 900 {
+            let before = media.jitter.observe().unwrap();
+            assert_eq!(before.skipped_span, 160);
+            assert_eq!(media.source_end, Some(origin + 860 * 8));
+            sink.refuse_adaptation = true;
+            let ranges = sink.ranges.len();
+            assert_eq!(causal_read(&mut media, &mut sink, base + ms * 1_000_000), 2);
+            // Packet900 has entered via Media::poll before its get. The put may
+            // retire skipped packets; gauges are deliberately not authority.
+            let after = media.jitter.observe().unwrap();
+            assert!(after.late_drops >= before.late_drops);
+            assert_eq!(sink.adaptations, [(origin + 860 * 8, 160, ranges)]);
+            assert_eq!(
+                sink.ranges.len(),
+                ranges,
+                "refusal precedes all gap/PCM credit"
+            );
+            assert_eq!(causal_read(&mut media, &mut sink, base + ms * 1_000_000), 2);
+            assert_eq!(sink.adaptations[1], sink.adaptations[0]);
+            sink.refuse_adaptation = false;
+            assert_eq!(causal_read(&mut media, &mut sink, base + ms * 1_000_000), 1);
+            assert_eq!(sink.adaptations[2], sink.adaptations[0]);
+            assert_eq!(sink.gaps, [(origin + 860 * 8, 160)]);
+            assert_eq!(sink.discontinuities, 1, "startup alone is generic");
+            assert_eq!(causal_read(&mut media, &mut sink, base + ms * 1_000_000), 1);
+            assert_eq!(sink.adaptations.len(), 3, "completed cut is not repeated");
+            eprintln!(
+                "real Media gate cut={:?} before={before:?} after={after:?}",
+                sink.adaptations[0]
+            );
+        } else {
+            for _ in 0..8 {
+                if causal_read(&mut media, &mut sink, base + ms * 1_000_000) == 0 {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn old_layout_and_short_field_sinks_use_only_the_readable_sip_prefix() {
+    use std::alloc::{Layout, alloc, dealloc};
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    for size in [7, 15, 23, 31, 39, 47, 55, 63, 71, 72, 73, 79, 80] {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut media = fixture_media(&sender, jitter).await;
+        let mut sink = Sink::default();
+        let input = CausalSink {
+            struct_size: size as u32,
+            abi_version: 1,
+            context: ptr::from_mut(&mut sink).cast(),
+            audio: None,
+            gap: Some(gap),
+            host_clock_epoch: 7,
+            reference_now_ns: 1_000_000_000,
+            audio_timed: Some(audio),
+            source_discontinuity: Some(discontinuity),
+            digit: Some(digit),
+            source_adaptation: None,
+        };
+        let layout = Layout::from_size_align(size, std::mem::align_of::<CausalSink>()).unwrap();
+        let allocation = unsafe { alloc(layout) };
+        assert!(!allocation.is_null());
+        unsafe { ptr::copy_nonoverlapping(ptr::from_ref(&input).cast::<u8>(), allocation, size) };
+        let mut output = unsafe { std::mem::zeroed() };
+        let result = unsafe { media.read(0, allocation.cast(), &mut output) };
+        unsafe { dealloc(allocation, layout) };
+        assert_eq!(result.is_ok(), size >= 72, "actual allocation size {size}");
+        assert_eq!(sink.discontinuities, usize::from(size >= 72));
+        assert!(sink.adaptations.is_empty());
+    }
+}
+
+/// Run the same production UDP cadence only as far as its completed native cut.
+async fn real_native_cut(media: &mut Media, sender: &UdpSocket, sink: &mut Sink) {
+    real_native_cut_with_last(media, sender, sink, true).await;
+}
+async fn real_native_cut_with_last(
+    media: &mut Media,
+    sender: &UdpSocket,
+    sink: &mut Sink,
+    last: bool,
+) {
+    let target = media.endpoint.local_addr().unwrap();
+    for ms in (0..=880u64).step_by(10) {
+        if ms % 20 == 0 && (ms != 880 || last) {
+            sender
+                .send_to(
+                    &packet((ms / 20) as u16, 1000 + ms as u32 * 8, 0, &[0xa5; 160]),
+                    target,
+                )
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        for _ in 0..8 {
+            if causal_read(media, sink, 1_000_000_000 + ms * 1_000_000) == 0 {
+                break;
+            }
+        }
+    }
+    let witness = media.adaptation_witness.expect("completed native skip");
+    assert_eq!(
+        (witness.start, witness.count),
+        ((1u64 << 32) + 1000 + 860 * 8, 160)
+    );
+}
+#[tokio::test(flavor = "current_thread")]
+async fn proved_native_adaptation_is_ordered_before_exact_gap_credit() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    let mut sink = Sink {
+        credit: 160,
+        ..Sink::default()
+    };
+    real_native_cut(&mut media, &sender, &mut sink).await;
+    let cut = media.source_end.unwrap();
+    sink.credit = 0;
+    assert_eq!(causal_read(&mut media, &mut sink, 1_900_000_000), 2);
+    assert_eq!(sink.adaptations.len(), 1);
+    assert_eq!(sink.gaps, [(cut, 0)]);
+    let audio = sink.audio.len();
+    sink.credit = 40;
+    for offset in [0, 40, 80, 120] {
+        let progress = causal_read(&mut media, &mut sink, 1_900_000_000);
+        assert_eq!(progress, if offset == 120 { 1 } else { 2 });
+        assert_eq!(sink.gaps.last(), Some(&(cut + offset, 40)));
+        assert_eq!(sink.audio.len(), audio);
+    }
+    assert_eq!(
+        sink.adaptations.len(),
+        1,
+        "completed reset is never repeated with partial gap credit"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ambiguous_or_unknown_source_cut_never_claims_adaptation() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    for defect in 0..5 {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut media = fixture_media(&sender, jitter).await;
+        let mut sink = Sink {
+            credit: 160,
+            ..Sink::default()
+        };
+        real_native_cut(&mut media, &sender, &mut sink).await;
+        match defect {
+            0 => media.adaptation_witness = None, // Known positive prefix alone is not proof.
+            1 => media.births.fill(None),         // A real skip plus unknown receipt is generic.
+            2 => media.adaptation_witness.as_mut().unwrap().count += 1,
+            3 => media.source_end = media.source_end.map(|n| n - 1),
+            4 => {
+                // New generic/startup discontinuity dominates a simultaneous native witness.
+                media.discontinuity = true;
+            }
+            _ => unreachable!(),
+        }
+        for _ in 0..8 {
+            if causal_read(&mut media, &mut sink, 1_900_000_000) == 0 {
+                break;
+            }
+        }
+        assert!(sink.adaptations.is_empty(), "ambiguous case {defect}");
+        assert!(sink.discontinuities > 1);
+        assert!(!sink.gaps.is_empty());
+    }
+}
+
+type NativeObserve =
+    unsafe extern "C" fn(*const c_void, *mut abi::rptadv_jitter_observation_v1) -> i32;
+thread_local! {
+    static OBSERVATION_FAULT: std::cell::Cell<(Option<NativeObserve>, u8)> = const { std::cell::Cell::new((None, 0)) };
+}
+unsafe extern "C" fn fault_observe(
+    context: *const c_void,
+    output: *mut abi::rptadv_jitter_observation_v1,
+) -> i32 {
+    let (original, fault) = OBSERVATION_FAULT.get();
+    let result = unsafe { original.unwrap()(context, output) };
+    if result != 0 {
+        return result;
+    }
+    let output = unsafe { &mut *output };
+    match fault {
+        1 => return -1,
+        2 => output.struct_size -= 1,
+        3 => output.skipped_span -= 1,
+        4 => output.late_drops = u64::MAX,
+        5 => output.missing_span += 1,
+        6 => output.insertion_span += 1,
+        7 => output.limit_resets += 1,
+        8 => output.overload_span += 1,
+        9 => output.duplicate_drops += 1,
+        10 => output.full_drops += 1,
+        11 => output.overload_drops += 1,
+        12 => output.skipped_span = u64::MAX,
+        _ => {}
+    }
+    0
+}
+#[tokio::test(flavor = "current_thread")]
+async fn adaptation_witness_has_one_packet_lifetime() {
+    let providers = ProviderSet::load().unwrap();
+    let mut descriptor = *providers.jitter_descriptor().unwrap();
+    OBSERVATION_FAULT.set((descriptor.observe, 0));
+    descriptor.observe = Some(fault_observe);
+    let jitter = unsafe { &*ptr::from_ref(&descriptor) };
+    for fault in 0..=12 {
+        OBSERVATION_FAULT.set((OBSERVATION_FAULT.get().0, 0));
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut media = fixture_media(&sender, jitter).await;
+        let mut sink = Sink {
+            credit: 160,
+            ..Sink::default()
+        };
+        real_native_cut(&mut media, &sender, &mut sink).await;
+        // NotDue is an allowed operation; it must not destroy an intact witness.
+        assert_eq!(causal_read(&mut media, &mut sink, 1_890_000_000), 0);
+        assert!(media.adaptation_witness.is_some());
+        if fault == 0 {
+            // A duplicate received by production Media::poll invalidates authority.
+            sender
+                .send_to(
+                    &packet(80, 1000 + 880 * 8, 0, &[0xa5; 160]),
+                    media.endpoint.local_addr().unwrap(),
+                )
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        } else {
+            OBSERVATION_FAULT.set((OBSERVATION_FAULT.get().0, fault));
+        }
+        causal_read(&mut media, &mut sink, 1_900_000_000);
+        assert!(media.adaptation_witness.is_none(), "fault {fault}");
+        assert!(sink.adaptations.is_empty(), "fault {fault}");
+        assert_eq!(sink.discontinuities, 2);
+    }
+    OBSERVATION_FAULT.set((OBSERVATION_FAULT.get().0, 0));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_non_packet_then_put_resync_cannot_restore_witness() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    let mut sink = Sink {
+        credit: 160,
+        ..Sink::default()
+    };
+    real_native_cut_with_last(&mut media, &sender, &mut sink, false).await;
+    let skipped = media.observe().unwrap().jitter.skipped_span;
+    for ms in (900..=1500u64).step_by(20) {
+        for _ in 0..8 {
+            if causal_read(&mut media, &mut sink, 1_000_000_000 + ms * 1_000_000) == 0 {
+                break;
+            }
+        }
+        assert!(
+            media.adaptation_witness.is_none(),
+            "first non-Packet invalidates before later puts"
+        );
+    }
+    let before = media.observe().unwrap().jitter;
+    assert!(
+        before.missing_span >= 21 * 80,
+        "exercise >20 unsuccessful native fetches"
+    );
+    sender
+        .send_to(
+            &packet(100, 1000 + 1520 * 8, 0, &[0xa5; 160]),
+            media.endpoint.local_addr().unwrap(),
+        )
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    for ms in [1520, 1540, 1560] {
+        for _ in 0..8 {
+            if causal_read(&mut media, &mut sink, 1_000_000_000 + ms * 1_000_000) == 0 {
+                break;
+            }
+        }
+        assert!(media.adaptation_witness.is_none());
+    }
+    assert!(sink.adaptations.is_empty());
+    assert_eq!(media.observe().unwrap().jitter.skipped_span, skipped);
+    eprintln!(
+        "non-Packet resync before={before:?} after={:?}",
+        media.observe().unwrap().jitter
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn refused_legacy_cut_cannot_upgrade_to_adaptation() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    let mut sink = Sink {
+        credit: 160,
+        ..Sink::default()
+    };
+    real_native_cut(&mut media, &sender, &mut sink).await;
+    sink.refuse_discontinuity = true;
+    assert_eq!(read(&mut media, &mut sink, 1_900_000_000), 2);
+    let credits = sink.ranges.len();
+    assert_eq!(causal_read(&mut media, &mut sink, 1_900_000_000), 2);
+    assert!(
+        sink.adaptations.is_empty(),
+        "refused generic cause cannot upgrade on a later read"
+    );
+    assert_eq!(sink.ranges.len(), credits);
+    sink.refuse_discontinuity = false;
+    assert_eq!(causal_read(&mut media, &mut sink, 1_900_000_000), 1);
+    assert!(sink.adaptations.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn malformed_packet_invalidates_native_witness() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    let mut sink = Sink {
+        credit: 160,
+        ..Sink::default()
+    };
+    real_native_cut(&mut media, &sender, &mut sink).await;
+    sender
+        .send_to(&[0], media.endpoint.local_addr().unwrap())
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    causal_read(&mut media, &mut sink, 1_900_000_000);
+    assert!(
+        sink.adaptations.is_empty(),
+        "malformed input must invalidate native cause"
+    );
+    assert_eq!(sink.discontinuities, 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn refused_native_cut_cannot_downgrade_to_generic() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    let mut sink = Sink {
+        credit: 160,
+        ..Sink::default()
+    };
+    real_native_cut(&mut media, &sender, &mut sink).await;
+    sink.refuse_adaptation = true;
+    assert_eq!(causal_read(&mut media, &mut sink, 1_900_000_000), 2);
+    let credits = sink.ranges.len();
+    assert_eq!(
+        try_read(&mut media, &mut sink, 1_900_000_000),
+        Err(MediaError::SourceContract)
+    );
+    assert_eq!(sink.ranges.len(), credits);
+    assert_eq!(sink.discontinuities, 1);
+}
+
+#[test]
+fn source_cause_media_state_size() {
+    // Exact pre-change field layout, compiled by the same target/compiler.
+    #[allow(dead_code)]
+    struct BaselineLayout {
+        endpoint: RtpEndpoint,
+        codec: AudioCodec,
+        profile: AudioParameters,
+        jitter: Jitter,
+        decode_recovery_frames: u64,
+        native_plc_frames: u64,
+        fallback_frames: u64,
+        clock: Option<(u32, u64)>,
+        births: [Option<(u64, u64)>; 64],
+        birth_slot: usize,
+        pcm: Box<[f32]>,
+        packet: Box<[u8]>,
+        pending: Option<Pending>,
+        offset: usize,
+        loss: Option<Loss>,
+        // Original receipt history only; synthetic samples never refresh this lease.
+        last_birth: Option<u64>,
+        // End of source media actually credited by product, independent of jitter adaptation.
+        source_end: Option<u64>,
+        decision_pending: bool,
+        host_epoch: Option<u64>,
+        discontinuity: bool,
+        epoch: Option<u64>,
+        marker: bool,
+        answer: Vec<u8>,
+        pub(crate) digit_capabilities: u32,
+    }
+    eprintln!(
+        "Media baseline={} current={} delta={}",
+        size_of::<BaselineLayout>(),
+        size_of::<Media>(),
+        size_of::<Media>() as isize - size_of::<BaselineLayout>() as isize
+    );
+}
+
+thread_local! {
+    static OPERATION_FAULT: std::cell::Cell<(*const abi::rptadv_jitter_descriptor_v1, u8)> =
+        const { std::cell::Cell::new((ptr::null(), 0)) };
+}
+unsafe extern "C" fn fault_put(
+    context: *mut c_void,
+    packet: *const abi::rptadv_jitter_packet_v1,
+) -> i32 {
+    let (api, fault) = OPERATION_FAULT.get();
+    match fault {
+        1 => 3, // Full, even without useful observation change.
+        2 => -1,
+        3 => 2, // Late.
+        4 => 1, // Duplicate.
+        _ => unsafe { (*api).put.unwrap()(context, packet) },
+    }
+}
+unsafe extern "C" fn fault_get(
+    context: *mut c_void,
+    now: u64,
+    span: u32,
+    payload: *mut u8,
+    capacity: usize,
+    output: *mut abi::rptadv_jitter_result_v1,
+) -> i32 {
+    let (api, fault) = OPERATION_FAULT.get();
+    let result = unsafe { (*api).get.unwrap()(context, now, span, payload, capacity, output) };
+    if result == 0 {
+        let output = unsafe { &mut *output };
+        match fault {
+            5 => {
+                output.kind = 1;
+                output.length = 0;
+            } // Missing.
+            6 => {
+                output.kind = 2;
+                output.length = 0;
+            } // Insertion.
+            7 => output.start_offset = -40,
+            8 => output.timestamp += 1, // Not the exact known successor.
+            _ => {}
+        }
+    }
+    result
+}
+#[tokio::test(flavor = "current_thread")]
+async fn rejected_put_nonpacket_overlap_reset_and_second_advance_discard_witness() {
+    let providers = ProviderSet::load().unwrap();
+    let original = providers.jitter_descriptor().unwrap();
+    let mut descriptor = *original;
+    descriptor.put = Some(fault_put);
+    descriptor.get = Some(fault_get);
+    let jitter = unsafe { &*ptr::from_ref(&descriptor) };
+    for fault in 1..=10 {
+        OPERATION_FAULT.set((ptr::from_ref(original), 0));
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut media = fixture_media(&sender, jitter).await;
+        let mut sink = Sink {
+            credit: 160,
+            ..Sink::default()
+        };
+        real_native_cut(&mut media, &sender, &mut sink).await;
+        let end = media.source_end;
+        let gaps = sink.gaps.len();
+        OPERATION_FAULT.set((ptr::from_ref(original), fault));
+        if fault <= 4 {
+            let result = media.put_source((1u64 << 32) + 1000 + 900 * 8, 160, 1_900_000_000, 160);
+            assert!(result.is_err() || result.unwrap() != Admission::Accepted);
+            assert!(media.adaptation_witness.is_none());
+        } else if fault == 9 {
+            // No second native advance can carry the previous proof forward.
+            assert!(media.advance_source(1_890_000_000).is_err());
+            assert!(media.adaptation_witness.is_none());
+        } else if fault == 10 {
+            media.jitter.reset().unwrap();
+        }
+        causal_read(&mut media, &mut sink, 1_900_000_000);
+        assert!(media.adaptation_witness.is_none(), "fault {fault}");
+        assert!(sink.adaptations.is_empty(), "fault {fault}");
+        if fault == 6 {
+            assert_eq!(media.source_end, end);
+            assert_eq!(
+                sink.gaps.len(),
+                gaps,
+                "insertion must not manufacture source loss"
+            );
+        }
+    }
+    OPERATION_FAULT.set((ptr::null(), 0));
 }

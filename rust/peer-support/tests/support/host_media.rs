@@ -187,6 +187,7 @@ pub unsafe fn check(context: *mut c_void) {
             audio_timed: None,
             source_discontinuity: None,
             digit: None,
+            source_adaptation: None,
         };
         let mut output: abi::rptadv_peer_source_result_v1 = std::mem::zeroed();
         output.struct_size = size_of::<abi::rptadv_peer_source_result_v1>() as u32;
@@ -371,6 +372,7 @@ unsafe fn rejected_records(context: *mut c_void, handle: *mut c_void) {
             audio_timed: None,
             source_discontinuity: None,
             digit: None,
+            source_adaptation: None,
         };
         let (mut peer, mut out) = (handle, ptr::from_mut(&mut output));
         match field {

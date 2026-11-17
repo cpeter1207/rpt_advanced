@@ -27,6 +27,64 @@ enum Pending {
     Digit(u8),
 }
 
+/// Cumulative diagnostic projection; occupancy and delay are never cause authority.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Counters {
+    duplicate_drops: u64,
+    late_drops: u64,
+    full_drops: u64,
+    missing_span: u64,
+    insertion_span: u64,
+    skipped_span: u64,
+    limit_resets: u64,
+    overload_drops: u64,
+    overload_span: u64,
+}
+impl Counters {
+    fn read(jitter: &Jitter) -> Option<Self> {
+        let o = jitter.observe().ok()?;
+        let values = [
+            o.duplicate_drops,
+            o.late_drops,
+            o.full_drops,
+            o.missing_span,
+            o.insertion_span,
+            o.skipped_span,
+            o.limit_resets,
+            o.overload_drops,
+            o.overload_span,
+        ];
+        if values.contains(&u64::MAX) {
+            return None;
+        }
+        Some(Self {
+            duplicate_drops: o.duplicate_drops,
+            late_drops: o.late_drops,
+            full_drops: o.full_drops,
+            missing_span: o.missing_span,
+            insertion_span: o.insertion_span,
+            skipped_span: o.skipped_span,
+            limit_resets: o.limit_resets,
+            overload_drops: o.overload_drops,
+            overload_span: o.overload_span,
+        })
+    }
+}
+/// One completed Packet/advance proof, consumed by its exact successor only.
+#[derive(Clone, Copy)]
+struct AdaptationWitness {
+    start: u64,
+    count: u32,
+    counters: Counters,
+}
+
+/// The old digit tail remains readable without the optional adaptation field.
+const DIGIT_TAIL_SIZE: usize = std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, digit)
+    + size_of::<abi::rptadv_peer_source_digit_v1>();
+const ADAPTATION_TAIL_SIZE: usize =
+    std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, source_adaptation)
+        + size_of::<abi::rptadv_peer_source_adaptation_v1>();
+
 /// Slice only the current validated origin span; offsets never relabel retained PCM.
 fn retained_span(
     spans: &[DecodeSpan],
@@ -136,6 +194,10 @@ pub(crate) struct Media {
     // End of source media actually credited by product, independent of jitter adaptation.
     source_end: Option<u64>,
     decision_pending: bool,
+    completed_packet_end: Option<u64>,
+    adaptation_witness: Option<AdaptationWitness>,
+    adaptation_cut: Option<(u64, u32)>,
+    adaptation_offered: bool,
     host_epoch: Option<u64>,
     discontinuity: bool,
     epoch: Option<u64>,
@@ -204,6 +266,10 @@ impl Media {
             last_birth: None,
             source_end: None,
             decision_pending: false,
+            completed_packet_end: None,
+            adaptation_witness: None,
+            adaptation_cut: None,
+            adaptation_offered: false,
             host_epoch: None,
             discontinuity: true,
             epoch: None,
@@ -298,6 +364,67 @@ impl Media {
             .map(|ticks| ticks / u64::from(self.profile.rtp_clock_hz))
             .ok_or(MediaError::Retired)
     }
+    /// The exclusive advance is the only operation allowed to establish cause.
+    fn advance_source(&mut self, now: u64) -> Result<(), MediaError> {
+        self.adaptation_witness = None;
+        let end = self
+            .completed_packet_end
+            .take()
+            .filter(|end| Some(*end) == self.source_end);
+        let before = Counters::read(&self.jitter);
+        self.jitter
+            .advance(now, 0)
+            .map_err(|_| MediaError::Jitter)?;
+        if let (Some(start), Some(mut before), Some(after)) =
+            (end, before, Counters::read(&self.jitter))
+        {
+            let count = after
+                .skipped_span
+                .checked_sub(before.skipped_span)
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n != 0);
+            before.skipped_span = after.skipped_span;
+            if let Some(count) =
+                count.filter(|n| before == after && start.checked_add(u64::from(*n)).is_some())
+            {
+                self.adaptation_witness = Some(AdaptationWitness {
+                    start,
+                    count,
+                    counters: after,
+                });
+            }
+        }
+        Ok(())
+    }
+    /// Accepted puts may clean already-skipped slots, but cannot create a proof.
+    fn put_source(
+        &mut self,
+        timestamp: u64,
+        span: u32,
+        now: u64,
+        length: usize,
+    ) -> Result<Admission, MediaError> {
+        let witness = self.adaptation_witness.take();
+        let before = Counters::read(&self.jitter);
+        let admission = self
+            .jitter
+            .put(timestamp, span, now, &self.packet[..length])
+            .map_err(|_| MediaError::Jitter)?;
+        if let (Admission::Accepted, Some(mut witness), Some(before), Some(after)) =
+            (&admission, witness, before, Counters::read(&self.jitter))
+        {
+            let mut cleaned = before;
+            cleaned.late_drops = after.late_drops;
+            if witness.counters == before
+                && after.late_drops.checked_sub(before.late_drops).is_some()
+                && cleaned == after
+            {
+                witness.counters = after;
+                self.adaptation_witness = Some(witness);
+            }
+        }
+        Ok(admission)
+    }
     fn poll(&mut self, now: u64) -> Result<(), MediaError> {
         for _ in 0..8 {
             let codec = &self.codec;
@@ -321,12 +448,7 @@ impl Media {
                     receipt,
                 ))) => {
                     let timestamp = self.timestamp(timestamp)?;
-                    if self
-                        .jitter
-                        .put(timestamp, span, now, &self.packet[..length])
-                        .map_err(|_| MediaError::Jitter)?
-                        == Admission::Accepted
-                    {
+                    if self.put_source(timestamp, span, now, length)? == Admission::Accepted {
                         // The sink reference was captured before this elapsed
                         // observation, so subtraction is conservatively older.
                         // Missing/overflowed mapping takes the existing gap path.
@@ -338,19 +460,30 @@ impl Media {
                         self.birth_slot = (self.birth_slot + 1) % self.births.len();
                     }
                 }
-                Err(MediaError::InvalidPacket) => eprintln!("phone SIP: invalid RTP packet"),
+                Err(MediaError::InvalidPacket) => {
+                    self.adaptation_witness = None;
+                    eprintln!("phone SIP: invalid RTP packet");
+                }
                 Err(error) => return Err(error),
             }
         }
         if self.clock.is_none() {
             return Ok(());
         }
+        let witness = self.adaptation_witness.take();
+        let before = Counters::read(&self.jitter);
         let decision = self
             .jitter
             .get(now, self.profile.packet_frames, &mut self.packet)
             .map_err(|_| MediaError::Jitter)?;
+        let witness = witness
+            .filter(|w| before == Some(w.counters) && Counters::read(&self.jitter) == before);
+        self.completed_packet_end = None;
         match decision.kind {
-            Kind::NotDue => return Ok(()),
+            Kind::NotDue => {
+                self.adaptation_witness = witness;
+                return Ok(());
+            }
             Kind::Packet => {
                 // The neutral ABI returns the packet timestamp, not the requested
                 // cursor. Positive offsets are missing prefixes; negative ones
@@ -370,7 +503,7 @@ impl Media {
                 if skip >= span as u64 {
                     // An already credited gap may cover a packet returned later
                     // by native adaptation. Never publish that source range twice.
-                    return self.jitter.advance(now, 0).map_err(|_| MediaError::Jitter);
+                    return self.advance_source(now);
                 }
                 let skip = skip as usize;
                 let count = span - skip;
@@ -395,8 +528,21 @@ impl Media {
                 // An adaptation skip is not a proven lost packet. Neither it nor
                 // unknown receipt timing may acquire the timed-loss lease.
                 if born.is_none() || prefix > decision.start_offset.max(0) as u32 {
+                    self.adaptation_cut = witness
+                        .filter(|w| {
+                            !self.discontinuity
+                                && born.is_some()
+                                && skip == 0
+                                && prefix == w.count
+                                && self.source_end == Some(w.start)
+                                && w.start.checked_add(u64::from(w.count)) == Some(start)
+                        })
+                        .map(|w| (w.start, w.count));
                     self.discontinuity = true;
                     self.last_birth = None;
+                }
+                if prefix == 0 && skip == 0 && born.is_some() {
+                    self.completed_packet_end = start.checked_add(count as u64);
                 }
                 if let Some(born) = born {
                     self.pending = Some(Pending::Audio {
@@ -427,10 +573,11 @@ impl Media {
                 if start < decision.timestamp {
                     // The missing decision does not prove an earlier adaptation skip.
                     self.discontinuity = true;
+                    self.adaptation_cut = None;
                     self.last_birth = None;
                 }
                 if start >= end {
-                    return self.jitter.advance(now, 0).map_err(|_| MediaError::Jitter);
+                    return self.advance_source(now);
                 }
                 let count = u32::try_from(end - start).map_err(|_| MediaError::JitterShape)?;
                 self.pending = Some(Pending::Gap { start, count });
@@ -438,7 +585,7 @@ impl Media {
             Kind::Insertion => {
                 // Only playout time advances. The existing source/ring must not
                 // see fictitious missing media or have its source cursor moved.
-                return self.jitter.advance(now, 0).map_err(|_| MediaError::Jitter);
+                return self.advance_source(now);
             }
         }
         // Keep one provider decision leased until all exact source credit lands.
@@ -533,12 +680,29 @@ impl Media {
         if sink.is_null() {
             return Ok(());
         }
-        if unsafe { (*sink).struct_size } < size_of::<abi::rptadv_peer_source_sink_v1>() as u32
-            || unsafe { (*sink).abi_version } != 1
-        {
+        let size = unsafe { std::ptr::addr_of!((*sink).struct_size).read() } as usize;
+        if size < DIGIT_TAIL_SIZE {
             return Err(MediaError::SourceContract);
         }
-        let sink = unsafe { &*sink };
+        // Copy only a checked readable prefix, never borrow an enlarged object
+        // over an old allocation. A partial optional pointer is never copied.
+        let mut copied: abi::rptadv_peer_source_sink_v1 = unsafe { std::mem::zeroed() };
+        let readable = if size >= ADAPTATION_TAIL_SIZE {
+            ADAPTATION_TAIL_SIZE
+        } else {
+            DIGIT_TAIL_SIZE
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                sink.cast::<u8>(),
+                std::ptr::from_mut(&mut copied).cast::<u8>(),
+                readable,
+            )
+        };
+        let sink = &copied;
+        if sink.abi_version != 1 {
+            return Err(MediaError::SourceContract);
+        }
         if sink.host_clock_epoch == 0
             || sink.audio_timed.is_none()
             || sink.gap.is_none()
@@ -556,8 +720,25 @@ impl Media {
             self.poll(sink.reference_now_ns)?;
         }
         if self.discontinuity {
-            match unsafe { sink.source_discontinuity.unwrap()(sink.context) } {
-                0 => self.discontinuity = false,
+            let result = match (self.adaptation_cut, sink.source_adaptation) {
+                (Some((start, count)), Some(adaptation)) => {
+                    self.adaptation_offered = true;
+                    unsafe { adaptation(sink.context, start, count) }
+                }
+                (_, None) if self.adaptation_offered => return Err(MediaError::SourceContract),
+                _ => {
+                    // A legacy first offer establishes generic custody permanently;
+                    // adding a tail on a retry cannot upgrade its cause.
+                    self.adaptation_cut = None;
+                    unsafe { sink.source_discontinuity.unwrap()(sink.context) }
+                }
+            };
+            match result {
+                0 => {
+                    self.discontinuity = false;
+                    self.adaptation_cut = None;
+                    self.adaptation_offered = false;
+                }
                 1 => {
                     output.progress = 2;
                     return Ok(());
@@ -686,9 +867,7 @@ impl Media {
         output.progress = if accepted { 1 } else { 2 };
         if accepted {
             if self.decision_pending {
-                self.jitter
-                    .advance(sink.reference_now_ns, 0)
-                    .map_err(|_| MediaError::Jitter)?;
+                self.advance_source(sink.reference_now_ns)?;
                 self.decision_pending = false;
             }
             self.pending = None;

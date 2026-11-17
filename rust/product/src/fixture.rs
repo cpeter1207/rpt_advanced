@@ -15,6 +15,7 @@ use std::{
 
 thread_local! { static FAIL_ORDINAL: Cell<usize> = const { Cell::new(0) }; }
 thread_local! { static FAIL_BYTES: Cell<usize> = const { Cell::new(0) }; }
+thread_local! { static DEALLOCATION_COUNT: Cell<Option<usize>> = const { Cell::new(None) }; }
 thread_local! { static ALLOCATION_COUNT: Cell<Option<usize>> = const { Cell::new(None) }; }
 
 /// Count allocations on this test thread only; nested measurements are rejected.
@@ -35,6 +36,21 @@ pub(crate) fn allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
     let _reset = Reset;
     let result = operation();
     (result, ALLOCATION_COUNT.with(|count| count.get().unwrap()))
+}
+
+/// Count both heap directions across a bounded source callback.
+pub(crate) fn heap_operations<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DEALLOCATION_COUNT.set(None);
+        }
+    }
+    assert!(DEALLOCATION_COUNT.get().is_none());
+    DEALLOCATION_COUNT.set(Some(0));
+    let _reset = Reset;
+    let (result, allocations) = allocations(operation);
+    (result, allocations, DEALLOCATION_COUNT.get().unwrap())
 }
 
 fn count_allocation() {
@@ -91,6 +107,11 @@ unsafe impl GlobalAlloc for Allocator {
         }
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        let _ = DEALLOCATION_COUNT.try_with(|count| {
+            if let Some(previous) = count.get() {
+                count.set(Some(previous + 1));
+            }
+        });
         unsafe { System.dealloc(pointer, layout) };
     }
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, bytes: usize) -> *mut u8 {

@@ -534,6 +534,7 @@ fn callbacks(sink: &mut Sink, now: u64) -> abi::rptadv_peer_source_sink_v1 {
         audio_timed: Some(audio),
         source_discontinuity: Some(reset),
         digit: Some(digit),
+        source_adaptation: None,
     }
 }
 fn read_callbacks(
@@ -813,6 +814,7 @@ fn terminal_provider_error_remains_closed_without_repolling() {
         audio_timed: Some(audio),
         source_discontinuity: Some(reset),
         digit: Some(digit),
+        source_adaptation: None,
     };
     let mut output: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
     output.struct_size = size_of::<abi::rptadv_peer_source_result_v1>() as u32;
@@ -855,7 +857,12 @@ fn invalid_source_sinks_latch_closed_before_polling_the_provider() {
         let mut sink = Sink::default();
         let mut callbacks = callbacks(&mut sink, 10_000);
         match defect {
-            0 => callbacks.struct_size -= 1,
+            0 => {
+                callbacks.struct_size =
+                    (std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, digit)
+                        + size_of::<abi::rptadv_peer_source_digit_v1>()
+                        - 1) as u32
+            }
             1 => callbacks.abi_version = 2,
             2 => callbacks.host_clock_epoch = 0,
             3 => callbacks.audio_timed = None,
@@ -1338,4 +1345,49 @@ fn missing_provider_timed_send_or_retirement_cannot_admit_a_private_handle() {
         assert_eq!(outcome, Err(IaxError::IncompatibleAdapter));
     }
     PROVIDER.with_borrow(|state| assert_eq!(state.destroyed, 2));
+}
+
+#[test]
+fn old_layout_and_short_field_sinks_use_only_the_readable_iax_prefix() {
+    use std::alloc::{Layout, alloc, dealloc};
+    let owner = owner();
+    let account = account();
+    let old_size = std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, digit)
+        + size_of::<abi::rptadv_peer_source_digit_v1>();
+    // Every required field's one-byte-short end, old complete allocation,
+    // incomplete optional pointers, and the complete null optional callback.
+    for size in [7, 15, 23, 31, 39, 47, 55, 63, 71, 72, 73, 79, 80] {
+        let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+        PROVIDER.with_borrow_mut(|state| state.events = [Event::Reset(1)].into());
+        let mut sink = Sink::default();
+        let mut callbacks = callbacks(&mut sink, 10_000);
+        callbacks.struct_size = size as u32;
+        let layout = Layout::from_size_align(size, std::mem::align_of_val(&callbacks)).unwrap();
+        let allocation = unsafe { alloc(layout) };
+        assert!(!allocation.is_null());
+        unsafe {
+            ptr::copy_nonoverlapping(ptr::from_ref(&callbacks).cast::<u8>(), allocation, size)
+        };
+        let mut output: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
+        output.struct_size = std::mem::size_of_val(&output) as u32;
+        output.abi_version = 1;
+        let api = handle.owner.descriptor();
+        let status = unsafe {
+            api.peer_read_source.unwrap()(
+                api.context,
+                handle.raw,
+                0,
+                allocation.cast(),
+                None,
+                ptr::null_mut(),
+                &mut output,
+            )
+        };
+        unsafe { dealloc(allocation, layout) };
+        assert_eq!(
+            status,
+            if size >= old_size { 0 } else { -1 },
+            "actual allocation size {size}"
+        );
+    }
 }

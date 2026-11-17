@@ -166,6 +166,12 @@ typedef size_t (*rptadv_peer_source_audio_timed_v1)(void *context, uint64_t sour
 /** Request actual media retirement. Zero completes, one means retry pending,
  * negative is terminal. Retain the reset and offer no new PCM until complete. */
 typedef int32_t (*rptadv_peer_source_discontinuity_v1)(void *context);
+/** A proved native adaptive source cut, never permission to transmit.
+ * Nonzero count and nonoverflowing [source_start, source_start + count).
+ * Zero completes retirement, one retries the identical cause/range, negative
+ * is terminal. No later PCM or gap credit before completion. */
+typedef int32_t (*rptadv_peer_source_adaptation_v1)(void *context, uint64_t source_start,
+                                                    uint32_t count);
 /** One private telephone digit. Exactly one of 0123456789ABCD*# is valid.
  * Zero accepts it once, one retains it for retry before later source events,
  * and negative is terminal. Provider retries preserve the same symbol. */
@@ -186,10 +192,19 @@ struct rptadv_peer_source_sink_v1 {
      * and a nonnull callback before use. Source-capable phones use this one
      * ordered stream, never a second legacy peer_read for digits. */
     rptadv_peer_source_digit_v1 digit;
+    /** Optional exact native adaptation cause; absent/short uses generic reset. */
+    rptadv_peer_source_adaptation_v1 source_adaptation;
 };
 /** Complete original sink prefix, supported by legacy unqualified providers. */
 #define RPTADV_PEER_SOURCE_SINK_PREFIX_SIZE                                                        \
     offsetof(struct rptadv_peer_source_sink_v1, host_clock_epoch)
+/** Complete old private-digit tail; unchanged by optional later extensions. */
+#define RPTADV_PEER_SOURCE_SINK_DIGIT_SIZE                                                         \
+    (offsetof(struct rptadv_peer_source_sink_v1, digit) + sizeof(rptadv_peer_source_digit_v1))
+/** Minimum readable size for the optional native adaptation callback. */
+#define RPTADV_PEER_SOURCE_SINK_ADAPTATION_SIZE                                                    \
+    (offsetof(struct rptadv_peer_source_sink_v1, source_adaptation) +                              \
+     sizeof(rptadv_peer_source_adaptation_v1))
 /** Copied bounded source turn, not raw packet or heartbeat receive state. */
 struct rptadv_peer_source_result_v1 {
     uint32_t struct_size;    /**< Complete caller-provided size. */

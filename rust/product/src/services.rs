@@ -927,7 +927,8 @@ impl HostServices {
             account_generation: metadata.account_generation,
             qso_generation: metadata.qso_generation,
             provider_account: metadata.provider_account,
-            source_reset_pending: false,
+            source_reset_pending: None,
+            source_contract_failed: false,
             source_digit_pending: None,
         })
     }
@@ -1516,6 +1517,23 @@ impl PeerMetadata {
     }
 }
 
+/// Private causal source event; public consumers retain the original exhaustive enum.
+pub(crate) enum SourceDispatch<'a> {
+    Input(SourceInput<'a>),
+    AdaptationCut { start: u64, count: usize },
+}
+impl<'a> From<SourceInput<'a>> for SourceDispatch<'a> {
+    fn from(input: SourceInput<'a>) -> Self {
+        Self::Input(input)
+    }
+}
+/// One refused retirement identity, retained across provider reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceReset {
+    Generic,
+    Adaptation { start: u64, count: usize },
+}
+
 /// Unique peer media/control handle operated by one reader.
 pub struct PeerIo {
     services: HostServices,
@@ -1527,7 +1545,8 @@ pub struct PeerIo {
     account_generation: u64,
     qso_generation: u64,
     provider_account: Option<PhoneAccountId>,
-    source_reset_pending: bool,
+    source_reset_pending: Option<SourceReset>,
+    source_contract_failed: bool,
     source_digit_pending: Option<char>,
 }
 // SAFETY: the handle is uniquely moved to one owner thread.
@@ -1709,40 +1728,64 @@ impl PeerIo {
         &mut self,
         completion: SourceCompletion,
         reference: SourceTimeReference,
-        dispatch: F,
+        mut dispatch: F,
     ) -> Result<SourceRead, Error>
     where
         F: FnMut(SourceInput<'_>) -> usize,
     {
-        if !self.source_media() {
+        self.read_source_causal_at(completion, reference, |event| {
+            dispatch(match event {
+                SourceDispatch::Input(input) => input,
+                SourceDispatch::AdaptationCut { .. } => SourceInput::Discontinuity,
+            })
+        })
+    }
+
+    /// Read the same validated stream with a private, exact native-cut cause.
+    pub(crate) fn read_source_causal_at<F>(
+        &mut self,
+        completion: SourceCompletion,
+        reference: SourceTimeReference,
+        dispatch: F,
+    ) -> Result<SourceRead, Error>
+    where
+        F: FnMut(SourceDispatch<'_>) -> usize,
+    {
+        if !self.source_media() || self.source_contract_failed {
             return Err(Error::Operation);
         }
         struct State<F> {
             dispatch: F,
             failed: bool,
             completing: bool,
-            reset_pending: bool,
+            reset_pending: Option<SourceReset>,
             pending_digit: Option<char>,
             text: Option<(String, String)>,
             reference: SourceTimeReference,
         }
-        fn accept<F: FnMut(SourceInput<'_>) -> usize>(
+        fn accept<F: FnMut(SourceDispatch<'_>) -> usize>(
             state: &mut State<F>,
-            input: SourceInput<'_>,
+            input: SourceDispatch<'_>,
             maximum: usize,
         ) -> usize {
             // A prior burst's completion cannot acknowledge samples offered in
             // this same turn. The provider retains them for the next read.
             if state.failed
                 || (state.completing
-                    && !matches!(&input, SourceInput::Text { .. } | SourceInput::Digit(_)))
-                || (state.pending_digit.is_some() && !matches!(&input, SourceInput::Digit(_)))
-                || (state.reset_pending
                     && !matches!(
                         &input,
-                        SourceInput::Text { .. }
-                            | SourceInput::Digit(_)
-                            | SourceInput::Discontinuity
+                        SourceDispatch::Input(SourceInput::Text { .. } | SourceInput::Digit(_))
+                    ))
+                || (state.pending_digit.is_some()
+                    && !matches!(&input, SourceDispatch::Input(SourceInput::Digit(_))))
+                || (state.reset_pending.is_some()
+                    && !matches!(
+                        &input,
+                        SourceDispatch::Input(
+                            SourceInput::Text { .. }
+                                | SourceInput::Digit(_)
+                                | SourceInput::Discontinuity
+                        ) | SourceDispatch::AdaptationCut { .. }
                     ))
             {
                 return 0;
@@ -1755,7 +1798,7 @@ impl PeerIo {
                 }
             }
         }
-        unsafe extern "C" fn audio<F: FnMut(SourceInput<'_>) -> usize>(
+        unsafe extern "C" fn audio<F: FnMut(SourceDispatch<'_>) -> usize>(
             context: *mut c_void,
             start: u64,
             data: *const f32,
@@ -1764,7 +1807,7 @@ impl PeerIo {
         ) -> usize {
             unsafe { audio_timed::<F>(context, start, data, count, concealed, ptr::null()) }
         }
-        unsafe extern "C" fn audio_timed<F: FnMut(SourceInput<'_>) -> usize>(
+        unsafe extern "C" fn audio_timed<F: FnMut(SourceDispatch<'_>) -> usize>(
             context: *mut c_void,
             start: u64,
             data: *const f32,
@@ -1816,11 +1859,12 @@ impl PeerIo {
                     samples,
                     concealed: concealed == 1,
                     birth,
-                },
+                }
+                .into(),
                 count,
             )
         }
-        unsafe extern "C" fn digit<F: FnMut(SourceInput<'_>) -> usize>(
+        unsafe extern "C" fn digit<F: FnMut(SourceDispatch<'_>) -> usize>(
             context: *mut c_void,
             symbol: u32,
         ) -> i32 {
@@ -1835,7 +1879,7 @@ impl PeerIo {
                 state.failed = true;
                 return -1;
             }
-            let credit = accept(state, SourceInput::Digit(symbol), 1);
+            let credit = accept(state, SourceInput::Digit(symbol).into(), 1);
             if state.failed {
                 -1
             } else {
@@ -1843,19 +1887,62 @@ impl PeerIo {
                 i32::from(credit == 0)
             }
         }
-        unsafe extern "C" fn discontinuity<F: FnMut(SourceInput<'_>) -> usize>(
-            context: *mut c_void,
+        fn reset<F: FnMut(SourceDispatch<'_>) -> usize>(
+            state: &mut State<F>,
+            identity: SourceReset,
         ) -> i32 {
-            let state = unsafe { &mut *context.cast::<State<F>>() };
-            let complete = accept(state, SourceInput::Discontinuity, 1);
-            state.reset_pending = complete == 0;
+            if state
+                .reset_pending
+                .is_some_and(|pending| pending != identity)
+            {
+                state.failed = true;
+            }
+            if state.failed {
+                return -1;
+            }
+            // Establish custody before dispatch; refused attempts cannot replace it.
+            state.reset_pending = Some(identity);
+            let input = match identity {
+                SourceReset::Generic => SourceDispatch::Input(SourceInput::Discontinuity),
+                SourceReset::Adaptation { start, count } => {
+                    SourceDispatch::AdaptationCut { start, count }
+                }
+            };
+            let complete = accept(state, input, 1);
+            if complete != 0 {
+                state.reset_pending = None;
+            }
             if state.failed {
                 -1
             } else {
                 i32::from(complete == 0)
             }
         }
-        unsafe extern "C" fn gap<F: FnMut(SourceInput<'_>) -> usize>(
+        unsafe extern "C" fn discontinuity<F: FnMut(SourceDispatch<'_>) -> usize>(
+            context: *mut c_void,
+        ) -> i32 {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            reset(state, SourceReset::Generic)
+        }
+        unsafe extern "C" fn adaptation<F: FnMut(SourceDispatch<'_>) -> usize>(
+            context: *mut c_void,
+            start: u64,
+            count: u32,
+        ) -> i32 {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            if count == 0 || start.checked_add(u64::from(count)).is_none() {
+                state.failed = true;
+                return -1;
+            }
+            reset(
+                state,
+                SourceReset::Adaptation {
+                    start,
+                    count: count as usize,
+                },
+            )
+        }
+        unsafe extern "C" fn gap<F: FnMut(SourceDispatch<'_>) -> usize>(
             context: *mut c_void,
             start: u64,
             count: u32,
@@ -1870,11 +1957,12 @@ impl PeerIo {
                 SourceInput::Gap {
                     start,
                     count: count as usize,
-                },
+                }
+                .into(),
                 count as usize,
             ) as u32
         }
-        unsafe extern "C" fn text<F: FnMut(SourceInput<'_>) -> usize>(
+        unsafe extern "C" fn text<F: FnMut(SourceDispatch<'_>) -> usize>(
             context: *mut c_void,
             sender: abi::rptadv_peer_bytes_v1,
             body: abi::rptadv_peer_bytes_v1,
@@ -1918,6 +2006,7 @@ impl PeerIo {
             audio_timed: Some(audio_timed::<F>),
             source_discontinuity: Some(discontinuity::<F>),
             digit: (self.identity.protocol() == ProtocolId::Phone).then_some(digit::<F>),
+            source_adaptation: Some(adaptation::<F>),
         };
         let mut result: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
         result.struct_size = size_of_val(&result) as u32;
@@ -1933,6 +2022,7 @@ impl PeerIo {
                 &mut result,
             )
         };
+        self.source_contract_failed |= state.failed;
         self.source_reset_pending = state.reset_pending;
         self.source_digit_pending = state.pending_digit;
         if code != 0
@@ -1954,7 +2044,8 @@ impl PeerIo {
                     sender: &sender,
                     body: &body,
                     represented_node_number: result.represented_node_number,
-                },
+                }
+                .into(),
                 usize::MAX,
             );
         }

@@ -20,6 +20,13 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+/// Old digit ABI remains the mandatory readable prefix for private IAX.
+const DIGIT_TAIL_SIZE: usize = std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, digit)
+    + size_of::<abi::rptadv_peer_source_digit_v1>();
+const ADAPTATION_TAIL_SIZE: usize =
+    std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, source_adaptation)
+        + size_of::<abi::rptadv_peer_source_adaptation_v1>();
+
 /// Owned by the standalone host artifact, not by a separately linked support or
 /// provider DSO. Every native private-call creator in this host uses this one
 /// allocator. HostServicesOwner/listener replacement cannot reset its history.
@@ -248,13 +255,28 @@ impl Phone {
         if sink.is_null() {
             return Ok(());
         }
-        if unsafe { ptr::addr_of!((*sink).struct_size).read() }
-            < size_of::<abi::rptadv_peer_source_sink_v1>() as u32
-            || unsafe { ptr::addr_of!((*sink).abi_version).read() } != 1
-        {
+        let size = unsafe { ptr::addr_of!((*sink).struct_size).read() } as usize;
+        if size < DIGIT_TAIL_SIZE {
             return Err(IaxError::Operation);
         }
-        let sink = unsafe { &*sink };
+        // Never form an enlarged Rust reference over the old allocation.
+        let mut copied: abi::rptadv_peer_source_sink_v1 = unsafe { std::mem::zeroed() };
+        let readable = if size >= ADAPTATION_TAIL_SIZE {
+            ADAPTATION_TAIL_SIZE
+        } else {
+            DIGIT_TAIL_SIZE
+        };
+        unsafe {
+            ptr::copy_nonoverlapping(
+                sink.cast::<u8>(),
+                ptr::from_mut(&mut copied).cast::<u8>(),
+                readable,
+            )
+        };
+        let sink = &copied;
+        if sink.abi_version != 1 {
+            return Err(IaxError::Operation);
+        }
         if sink.host_clock_epoch == 0
             || sink.audio_timed.is_none()
             || sink.gap.is_none()

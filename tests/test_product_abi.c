@@ -16,8 +16,14 @@ _Static_assert(RPTADV_PEER_INFO_PHONE_SIZE == 96,
 _Static_assert(RPTADV_PEER_SOURCE_SINK_PREFIX_SIZE == 32, "preserve legacy source sink callbacks");
 _Static_assert(offsetof(struct rptadv_peer_source_sink_v1, digit) == 64,
                "preserve the complete source birth and retirement prefix");
-_Static_assert(sizeof(struct rptadv_peer_source_sink_v1) == 72,
-               "ordered private digits extend the source sink tail");
+_Static_assert(RPTADV_PEER_SOURCE_SINK_DIGIT_SIZE == 72,
+               "preserve the complete ordered private digit prefix");
+_Static_assert(offsetof(struct rptadv_peer_source_sink_v1, source_adaptation) == 72,
+               "append native cause without changing the old prefix");
+_Static_assert(RPTADV_PEER_SOURCE_SINK_ADAPTATION_SIZE == 80,
+               "only a complete optional cause callback is readable");
+_Static_assert(sizeof(struct rptadv_peer_source_sink_v1) == 80,
+               "native cause extends only the optional ABI1 tail");
 _Static_assert(sizeof(struct rptadv_source_birth_v1) == 24,
                "original source birth uses the host clock identity");
 _Static_assert(URP_AST_DIRECT_CALLBACKS_ABI_VERSION == 6,

@@ -434,7 +434,15 @@ impl PrivatePhoneSession {
         let mut retire_egress = false;
         let result = self
             .io
-            .read_source_at(self.source_completion, reference, |input| {
+            .read_source_causal_at(self.source_completion, reference, |event| {
+                // Task1 preserves hard retirement; cause grants no owner recovery.
+                let input = match event {
+                    crate::services::SourceDispatch::Input(input) => input,
+                    crate::services::SourceDispatch::AdaptationCut { start, count } => {
+                        debug_assert!(count != 0 && start.checked_add(count as u64).is_some());
+                        SourceInput::Discontinuity
+                    }
+                };
                 let credit = match input {
                     SourceInput::Digit(digit) => {
                         if mode == PhoneDigitMode::InBand {
