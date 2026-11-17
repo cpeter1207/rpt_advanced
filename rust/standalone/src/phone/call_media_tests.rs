@@ -1986,3 +1986,25 @@ async fn rejected_put_nonpacket_overlap_reset_and_second_advance_discard_witness
     }
     OPERATION_FAULT.set((ptr::null(), 0));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_source_read_error_discards_pending_native_proof() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut media = fixture_media(&sender, jitter).await;
+    let mut sink = Sink {
+        credit: 160,
+        ..Sink::default()
+    };
+    real_native_cut(&mut media, &sender, &mut sink).await;
+    let mut output = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { media.read(1, ptr::null(), &mut output) },
+        Err(MediaError::SourceContract)
+    );
+    assert!(
+        media.adaptation_witness.is_none(),
+        "even a terminal read must not retain a reusable proof"
+    );
+}

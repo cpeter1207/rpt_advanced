@@ -667,6 +667,23 @@ impl Media {
         sink: *const abi::rptadv_peer_source_sink_v1,
         output: &mut abi::rptadv_peer_source_result_v1,
     ) -> Result<(), MediaError> {
+        let result = unsafe { self.read_checked(completion, sink, output) };
+        if result.is_err() {
+            // Terminal source failures end the bounded native proof even if a
+            // caller retains this object before its ordinary retirement cleanup.
+            self.adaptation_witness = None;
+            self.completed_packet_end = None;
+        }
+        result
+    }
+
+    /// Validate and consume one source turn; the outer boundary revokes on error.
+    unsafe fn read_checked(
+        &mut self,
+        completion: u32,
+        sink: *const abi::rptadv_peer_source_sink_v1,
+        output: &mut abi::rptadv_peer_source_result_v1,
+    ) -> Result<(), MediaError> {
         output.progress = 0;
         output.activity = 0;
         output.finish_pending = 0;
