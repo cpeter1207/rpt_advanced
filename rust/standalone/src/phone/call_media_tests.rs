@@ -725,7 +725,7 @@ async fn variable_source_spans_keep_original_birth_across_refused_prefixes() {
             ]
         );
         assert_eq!(sink.pcm.len(), frames);
-        assert_eq!(media.source_end, Some(start + frames as u64));
+        assert_eq!(media.wire_end, Some(start + frames as u64));
         assert_eq!(media.pcm.as_ptr(), storage);
         assert!(sink.gaps.is_empty());
         assert_eq!(sink.discontinuities, 1);
@@ -800,7 +800,7 @@ async fn variable_packet_offsets_preserve_exact_gap_overlap_and_birth() {
         let mut expected = [0.0; 240];
         media.codec.decode(&[0xb5; 240], &mut expected).unwrap();
         assert_eq!(sink.pcm, expected[if offset < 0 { 40 } else { 0 }..]);
-        assert_eq!(media.source_end, Some(start + (80 + offset + 240) as u64));
+        assert_eq!(media.wire_end, Some(start + (80 + offset + 240) as u64));
         drop(media);
     }
 }
@@ -1200,7 +1200,7 @@ async fn native_loss_runs_once_and_fallback_is_not_stacked() {
             ..Default::default()
         };
         read(&mut media, &mut sink, born + 40_000_000);
-        assert_eq!(media.source_end, Some(start + frames as u64), "{profile:?}");
+        assert_eq!(media.wire_end, Some(start + frames as u64), "{profile:?}");
         sink.credit = 0;
         read(&mut media, &mut sink, born + 100_000_000);
         let observation = media.observe().unwrap();
@@ -1238,7 +1238,7 @@ async fn native_loss_runs_once_and_fallback_is_not_stacked() {
         while media.pending.is_some() {
             read(&mut media, &mut sink, born + 100_000_000);
         }
-        assert_eq!(media.source_end, Some(start + 2 * frames as u64));
+        assert_eq!(media.wire_end, Some(start + 2 * frames as u64));
         if observation.native_plc_frames > 0 {
             assert!(sink.flags[1..].iter().all(|flag| *flag == 1), "{profile:?}");
             assert!(sink.gaps.is_empty(), "native PLC must not stack fallback");
@@ -1266,7 +1266,7 @@ async fn native_loss_runs_once_and_fallback_is_not_stacked() {
         while media.pending.is_some() {
             read(&mut media, &mut sink, later + 40_000_000);
         }
-        assert_eq!(media.source_end, Some(next + frames as u64));
+        assert_eq!(media.wire_end, Some(next + frames as u64));
         assert_eq!(
             sink.flags.last(),
             Some(&0),
@@ -1314,7 +1314,7 @@ async fn ilbc_prefix_uses_bounded_scratch_before_decoding_retained_packet() {
             ..Default::default()
         };
         read(&mut media, &mut sink, 1_100_000_000);
-        assert_eq!(media.source_end, Some(1240));
+        assert_eq!(media.wire_end, Some(1240));
         media.offset = 0;
         media.pending = Some(Pending::Audio {
             start: 1240 + u64::from(prefix),
@@ -1355,7 +1355,7 @@ async fn ilbc_prefix_uses_bounded_scratch_before_decoding_retained_packet() {
             if prefix == 80 { 0 } else { u64::from(prefix) }
         );
         assert_eq!(after.fallback_frames, if prefix == 80 { 80 } else { 0 });
-        assert_eq!(media.source_end, Some(1480 + u64::from(prefix)));
+        assert_eq!(media.wire_end, Some(1480 + u64::from(prefix)));
         let mut reference = AudioCodec::load(AudioProfile::Ilbc30).unwrap();
         let mut expected = [0.0; 240];
         reference.decode(&encoded, &mut expected).unwrap();
@@ -1496,7 +1496,7 @@ async fn steady_cadence_media_adaptation_survives_real_put() {
         if ms == 900 {
             let before = media.jitter.observe().unwrap();
             assert_eq!(before.skipped_span, 160);
-            assert_eq!(media.source_end, Some(origin + 860 * 8));
+            assert_eq!(media.wire_end, Some(origin + 860 * 8));
             let packet900 = origin + 900 * 8;
             assert!(
                 media
@@ -1644,7 +1644,7 @@ async fn proved_native_adaptation_is_ordered_before_exact_gap_credit() {
         ..Sink::default()
     };
     real_native_cut(&mut media, &sender, &mut sink).await;
-    let cut = media.source_end.unwrap();
+    let cut = media.wire_end.unwrap();
     sink.credit = 0;
     assert_eq!(causal_read(&mut media, &mut sink, 1_900_000_000), 2);
     assert_eq!(sink.adaptations.len(), 1);
@@ -1680,7 +1680,7 @@ async fn ambiguous_or_unknown_source_cut_never_claims_adaptation() {
             0 => media.adaptation_witness = None, // Known positive prefix alone is not proof.
             1 => media.births.fill(None),         // A real skip plus unknown receipt is generic.
             2 => media.adaptation_witness.as_mut().unwrap().count += 1,
-            3 => media.source_end = media.source_end.map(|n| n - 1),
+            3 => media.wire_end = media.wire_end.map(|n| n - 1),
             4 => {
                 // New generic/startup discontinuity dominates a simultaneous native witness.
                 media.discontinuity = true;
@@ -1992,7 +1992,7 @@ async fn rejected_put_nonpacket_overlap_reset_and_second_advance_discard_witness
             ..Sink::default()
         };
         real_native_cut(&mut media, &sender, &mut sink).await;
-        let end = media.source_end;
+        let end = media.wire_end;
         let gaps = sink.gaps.len();
         OPERATION_FAULT.set((ptr::from_ref(original), fault));
         if fault <= 4 {
@@ -2010,7 +2010,7 @@ async fn rejected_put_nonpacket_overlap_reset_and_second_advance_discard_witness
         assert!(media.adaptation_witness.is_none(), "fault {fault}");
         assert!(sink.adaptations.is_empty(), "fault {fault}");
         if fault == 6 {
-            assert_eq!(media.source_end, end);
+            assert_eq!(media.wire_end, end);
             assert_eq!(
                 sink.gaps.len(),
                 gaps,
@@ -2116,4 +2116,364 @@ async fn terminal_source_read_error_discards_pending_native_proof() {
         assert!(media.adaptation_witness.is_none() && media.completed_packet_end.is_none());
         assert!(media.adaptation_cut.is_none() && !media.adaptation_offered);
     }
+}
+
+/// Pinned native cadence: a 10us/packet drift makes the first exclusive advance
+/// skip exactly half of the next 20ms packet, not a full packet or ordinary loss.
+const TRIM_BASE: u64 = 1_000_000_000;
+const TRIM_PERIOD: u64 = 20_010_000;
+async fn native_trim_fixture(
+    jitter: &'static abi::rptadv_jitter_descriptor_v1,
+) -> (UdpSocket, Media, Sink, [f32; 160], [f32; 160]) {
+    use super::super::media::AudioProfile;
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let profile = AudioProfile::Gsm;
+    let description = MediaDescription {
+        remote: sender.local_addr().unwrap(),
+        codec: profile,
+        receive_payload: 3,
+        send_payload: 3,
+        telephone_events: [Some(TelephoneEvent::symmetric(101, 8000)), None],
+    };
+    let endpoint = RtpEndpoint::bind("127.0.0.1:0".parse().unwrap(), description.clone(), 1, 0)
+        .await
+        .unwrap();
+    let target = endpoint.local_addr().unwrap();
+    let mut media = Media::from_endpoint(
+        endpoint,
+        description,
+        Vec::new(),
+        jitter,
+        &super::super::codec::load_catalog().unwrap(),
+    )
+    .unwrap();
+    let mut sink = Sink {
+        credit: 160,
+        allow_zero: true,
+        ..Sink::default()
+    };
+    let mut encoder = AudioCodec::load(profile).unwrap();
+    let mut reference = AudioCodec::load(profile).unwrap();
+    let mut full = Vec::new();
+    // Cross the 32-bit wire-clock wrap well before the actual trim.
+    let stamp = u32::MAX - 350;
+    for turn in 0..45u64 {
+        let mut encoded = [0; 33];
+        let input: [f32; 160] =
+            std::array::from_fn(|i| (((i as u64 + turn * 17) % 53) as f32 - 26.0) / 60.0);
+        encoder.encode(&input, &mut encoded).unwrap();
+        let mut decoded = [0.0; 160];
+        reference.decode(&encoded, &mut decoded).unwrap();
+        full.push(decoded);
+        sender
+            .send_to(
+                &packet(
+                    turn as u16,
+                    stamp.wrapping_add(turn as u32 * 160),
+                    3,
+                    &encoded,
+                ),
+                target,
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        for part in [0, TRIM_PERIOD / 2] {
+            for _ in 0..8 {
+                if causal_read(&mut media, &mut sink, TRIM_BASE + turn * TRIM_PERIOD + part) == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    let witness = media.adaptation_witness.expect("natural native trim");
+    assert_eq!(witness.count, 80);
+    let index = ((witness.start - ((1u64 << 32) + u64::from(stamp))) / 160) as usize;
+    assert_eq!(sink.pcm.len(), index * 160);
+    (sender, media, sink, full[index], full[index + 1])
+}
+#[tokio::test(flavor = "current_thread")]
+async fn native_in_packet_trim_emits_only_stateful_suffix_with_exact_credit() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let (_sender, mut media, mut sink, reference, next) = native_trim_fixture(jitter).await;
+    let now = TRIM_BASE + 45 * TRIM_PERIOD;
+    let start = media.adaptation_witness.unwrap().start;
+    let receipt = media
+        .births
+        .iter()
+        .flatten()
+        .find(|(stamp, _)| *stamp == start)
+        .unwrap()
+        .1;
+    let prior = media.last_birth;
+    let pcm = sink.pcm.len();
+    let audio = sink.audio.len();
+    for (credit, progress) in [(0, 2), (0, 2), (17, 2), (63, 1)] {
+        sink.credit = credit;
+        assert_eq!(causal_read(&mut media, &mut sink, now), progress);
+        assert_eq!(
+            sink.discontinuities, 1,
+            "benign adaptation must not cut the source"
+        );
+        assert!(sink.gaps.is_empty() && sink.adaptations.is_empty());
+        if credit == 0 {
+            assert_eq!(media.last_birth, prior);
+        }
+        assert_eq!(media.decision_pending, progress == 2);
+    }
+    assert_eq!(
+        &sink.audio[audio..],
+        &[
+            (start, 0, receipt),
+            (start, 0, receipt),
+            (start, 17, receipt),
+            (start + 17, 63, receipt)
+        ]
+    );
+    assert_eq!(&sink.pcm[pcm..], &reference[80..]);
+    let observed = media.observe().unwrap();
+    assert_eq!(
+        (
+            observed.native_plc_frames,
+            observed.fallback_frames,
+            observed.decode_recovery_frames
+        ),
+        (0, 0, 0)
+    );
+    sink.credit = 160;
+    assert_eq!(causal_read(&mut media, &mut sink, now + TRIM_PERIOD), 1);
+    assert_eq!(sink.audio.last().unwrap().0, start + 80);
+    assert_eq!(
+        &sink.pcm[pcm + 80..],
+        &next,
+        "stateful decoder advanced exactly once per packet"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn incomplete_trim_evidence_keeps_hard_cut_custody() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let now = TRIM_BASE + 45 * TRIM_PERIOD;
+    for defect in 0..5 {
+        let (_sender, mut media, mut sink, _, _) = native_trim_fixture(jitter).await;
+        match defect {
+            0 => media.last_birth = None,
+            1 => media.births.fill(None),
+            2 => media.adaptation_witness.as_mut().unwrap().count += 1,
+            3 => {
+                media
+                    .adaptation_witness
+                    .as_mut()
+                    .unwrap()
+                    .counters
+                    .missing_span += 1
+            }
+            _ => media.adaptation_witness = None,
+        }
+        let ranges = sink.ranges.len();
+        let origin = media.wire_end.unwrap();
+        sink.refuse_discontinuity = true;
+        for _ in 0..2 {
+            assert_eq!(causal_read(&mut media, &mut sink, now), 2);
+            assert_eq!(sink.ranges.len(), ranges, "no media before accepted cut");
+        }
+        sink.refuse_discontinuity = false;
+        assert_eq!(causal_read(&mut media, &mut sink, now), 1);
+        assert_eq!(sink.discontinuities, 4);
+        assert_eq!(
+            sink.gaps.last(),
+            Some(&(origin, if defect == 1 { 160 } else { 80 }))
+        );
+        assert!(sink.adaptations.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn partially_credited_trim_never_crosses_epoch_terminal_error_or_replacement() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let now = TRIM_BASE + 45 * TRIM_PERIOD;
+    for fault in 0..3 {
+        let (sender, mut media, mut sink, _, _) = native_trim_fixture(jitter).await;
+        sink.credit = 17;
+        assert_eq!(causal_read(&mut media, &mut sink, now), 2);
+        let ranges = sink.ranges.len();
+        let expected = match fault {
+            0 => {
+                // Change epoch while original suffix and its receipt are leased.
+                let mut input = causal_callbacks(&mut sink, now);
+                input.host_clock_epoch += 1;
+                let mut out = unsafe { std::mem::zeroed() };
+                unsafe { media.read(0, ptr::from_ref(&input).cast(), &mut out) }
+            }
+            1 => {
+                // An unrepresentable next range is terminal before sink credit.
+                media.emitted_end = Some(u64::MAX - 62);
+                try_read(&mut media, &mut sink, now).map(|_| ())
+            }
+            _ => {
+                // Call owner declares completion; a later old read cannot resume.
+                let input = causal_callbacks(&mut sink, now);
+                let mut out = unsafe { std::mem::zeroed() };
+                unsafe { media.read(1, ptr::from_ref(&input).cast(), &mut out) }
+            }
+        };
+        assert_eq!(expected, Err(MediaError::SourceContract));
+        assert_eq!(
+            try_read(&mut media, &mut sink, now),
+            Err(MediaError::SourceContract)
+        );
+        let mut replacement = fixture_media(&sender, jitter).await;
+        assert_eq!(read(&mut replacement, &mut sink, now), 0);
+        assert!(
+            replacement.last_birth.is_none()
+                && replacement.wire_end.is_none()
+                && replacement.emitted_end.is_none()
+        );
+        assert_eq!(
+            ranges,
+            sink.ranges.len(),
+            "no retained suffix donated or re-dated"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delayed_duplicate_digit_end_behind_retained_trim_credits_symbol_once() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let (sender, mut media, mut sink, _, _) = native_trim_fixture(jitter).await;
+    let now = TRIM_BASE + 45 * TRIM_PERIOD;
+    let emitted = media.wire_end.unwrap();
+    sink.credit = 17;
+    assert_eq!(causal_read(&mut media, &mut sink, now), 2);
+    for seq in [90, 91] {
+        sender
+            .send_to(
+                &packet(seq, 1000, 101, &[11, 0x8a, 0, 160]),
+                media.endpoint.local_addr().unwrap(),
+            )
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    sink.refuse_digit = true;
+    sink.credit = 160;
+    assert_eq!(causal_read(&mut media, &mut sink, now), 1);
+    let receipt = media.last_birth;
+    for _ in 0..2 {
+        assert_eq!(causal_read(&mut media, &mut sink, now), 2);
+    }
+    sink.refuse_digit = false;
+    assert_eq!(causal_read(&mut media, &mut sink, now), 1);
+    assert_eq!(media.last_birth, receipt);
+    assert_eq!(causal_read(&mut media, &mut sink, now + TRIM_PERIOD), 1);
+    assert_eq!(sink.audio.last().unwrap().0, emitted + 80);
+    assert_eq!(sink.digits, [u32::from(b'#')]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn later_native_full_skip_and_generic_cut_use_emitted_not_wire_ranges() {
+    use super::super::media::AudioProfile;
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    for typed in [true, false] {
+        let (_sender, mut media, mut sink, _, _) = native_trim_fixture(jitter).await;
+        let now = TRIM_BASE + 45 * TRIM_PERIOD;
+        for (credit, progress) in [(17, 2), (63, 1)] {
+            sink.credit = credit;
+            assert_eq!(causal_read(&mut media, &mut sink, now), progress);
+        }
+        sink.credit = 160;
+        assert_eq!(causal_read(&mut media, &mut sink, now + TRIM_PERIOD), 1);
+        // Isolate the pinned full-skip cadence from the first cadence's adaptive
+        // history; this is the same Media, codec and sink, not a new source origin.
+        media.jitter.reset().unwrap();
+        let wire = media.wire_end.unwrap();
+        let base = now + 2 * TRIM_PERIOD;
+        let mut encoder = AudioCodec::load(AudioProfile::Gsm).unwrap();
+        let mut encoded = [0; 33];
+        encoder.encode(&[0.25; 160], &mut encoded).unwrap();
+        for ms in (0..=880u64).step_by(10) {
+            let time = base + ms * 1_000_000;
+            if ms % 20 == 0 {
+                let stamp = wire + ms * 8;
+                media.packet[..33].copy_from_slice(&encoded);
+                assert_eq!(
+                    media.put_source(stamp, 160, time, 33).unwrap(),
+                    Admission::Accepted
+                );
+                media.births[media.birth_slot] = Some((stamp, time));
+                media.birth_slot = (media.birth_slot + 1) % media.births.len();
+            }
+            for _ in 0..8 {
+                if causal_read(&mut media, &mut sink, time) == 0 {
+                    break;
+                }
+            }
+        }
+        let witness = media
+            .adaptation_witness
+            .expect("second, full packet native skip");
+        assert_eq!(witness.count, 160);
+        let emitted = witness.start - 80;
+        assert_eq!(media.emitted_end, Some(emitted));
+        if !typed {
+            media.adaptation_witness = None;
+        }
+        sink.refuse_discontinuity = true;
+        sink.refuse_adaptation = true;
+        let ranges = sink.ranges.len();
+        let time = base + 900_000_000;
+        for _ in 0..2 {
+            assert_eq!(causal_read(&mut media, &mut sink, time), 2);
+            assert_eq!(sink.ranges.len(), ranges);
+            assert_eq!(media.wire_end, Some(witness.start));
+            assert_eq!(media.emitted_end, Some(emitted));
+        }
+        sink.refuse_discontinuity = false;
+        sink.refuse_adaptation = false;
+        assert_eq!(causal_read(&mut media, &mut sink, time), 1);
+        if typed {
+            assert_eq!(sink.adaptations, [(emitted, 160, ranges); 3]);
+        } else {
+            assert!(sink.adaptations.is_empty());
+            assert_eq!(sink.discontinuities, 4);
+        }
+        assert_eq!(sink.gaps.last(), Some(&(emitted, 160)));
+        assert_eq!(causal_read(&mut media, &mut sink, time), 1);
+        assert_eq!(sink.audio.last().unwrap().0, emitted + 160);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_loss_after_trim_counts_only_real_loss_and_inherits_last_receipt() {
+    let providers = ProviderSet::load().unwrap();
+    let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
+    let (_sender, mut media, mut sink, _, _) = native_trim_fixture(jitter).await;
+    let now = TRIM_BASE + 45 * TRIM_PERIOD;
+    let origin = media.wire_end.unwrap();
+    assert_eq!(causal_read(&mut media, &mut sink, now), 1);
+    assert_eq!(causal_read(&mut media, &mut sink, now + TRIM_PERIOD), 1);
+    let birth = media.last_birth.unwrap();
+    let host = origin + 80 + 160;
+    sink.credit = 17;
+    assert_eq!(causal_read(&mut media, &mut sink, now + 2 * TRIM_PERIOD), 2);
+    let observed = media.observe().unwrap();
+    assert_eq!(observed.jitter.missing_span, 160);
+    assert_eq!(observed.native_plc_frames + observed.fallback_frames, 160);
+    sink.credit = 160;
+    assert_eq!(causal_read(&mut media, &mut sink, now + 2 * TRIM_PERIOD), 1);
+    if observed.native_plc_frames > 0 {
+        assert_eq!(&sink.flags[sink.flags.len() - 2..], &[1, 1]);
+        assert_eq!(
+            &sink.audio[sink.audio.len() - 2..],
+            &[(host, 17, birth), (host + 17, 143, birth)]
+        );
+    } else {
+        assert_eq!(sink.gaps, [(host, 17), (host + 17, 143)]);
+    }
+    assert_eq!(media.last_birth, Some(birth));
+    assert_eq!(media.wire_end, Some(host + 160 + 80));
+    assert_eq!(media.emitted_end, Some(host + 160));
 }

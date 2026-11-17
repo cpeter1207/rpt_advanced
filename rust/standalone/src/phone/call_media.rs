@@ -107,6 +107,13 @@ fn retained_span(
         .ok_or(MediaError::Codec)
 }
 
+/// A single offered range, expressed on both clocks. Each accepted frame moves both.
+#[derive(Clone, Copy)]
+struct CreditRange {
+    wire: u64,
+    emitted: u64,
+}
+
 /// One bounded missing unit, prepared once and retained through exact sink credit.
 struct Loss {
     count: usize,
@@ -191,8 +198,10 @@ pub(crate) struct Media {
     loss: Option<Loss>,
     // Original receipt history only; synthetic samples never refresh this lease.
     last_birth: Option<u64>,
-    // End of source media actually credited by product, independent of jitter adaptation.
-    source_end: Option<u64>,
+    // Native release coordinate (includes any proven omitted packet prefix).
+    wire_end: Option<u64>,
+    // Next host coordinate: only actual source-sink credit moves this cursor.
+    emitted_end: Option<u64>,
     decision_pending: bool,
     completed_packet_end: Option<u64>,
     adaptation_witness: Option<AdaptationWitness>,
@@ -266,7 +275,8 @@ impl Media {
             offset: 0,
             loss: None,
             last_birth: None,
-            source_end: None,
+            wire_end: None,
+            emitted_end: None,
             decision_pending: false,
             completed_packet_end: None,
             adaptation_witness: None,
@@ -373,7 +383,7 @@ impl Media {
         let end = self
             .completed_packet_end
             .take()
-            .filter(|end| Some(*end) == self.source_end);
+            .filter(|end| Some(*end) == self.wire_end);
         let before = Counters::read(&self.jitter);
         self.jitter
             .advance(now, 0)
@@ -500,7 +510,7 @@ impl Media {
                     return Err(MediaError::JitterShape);
                 }
                 let skip = u64::from(decision.start_offset.saturating_neg().max(0) as u32).max(
-                    self.source_end
+                    self.wire_end
                         .map_or(0, |end| end.saturating_sub(decision.timestamp)),
                 );
                 if skip >= span as u64 {
@@ -514,10 +524,8 @@ impl Media {
                     .timestamp
                     .checked_add(skip as u64)
                     .ok_or(MediaError::JitterShape)?;
-                // Delay reduction may advance jitter's cursor before its next
-                // packet offset is calculated. Expose that skipped source span
-                // through the existing retained gap before offering any PCM.
-                let prefix = if let Some(end) = self.source_end {
+                // Native chronology can include an omitted interval before this suffix.
+                let mut prefix = if let Some(end) = self.wire_end {
                     u32::try_from(start - end).map_err(|_| MediaError::JitterShape)?
                 } else {
                     decision.start_offset.max(0) as u32
@@ -528,21 +536,34 @@ impl Media {
                     .flatten()
                     .find(|(timestamp, _)| *timestamp == decision.timestamp)
                     .map(|(_, born)| *born);
-                // An adaptation skip is not a proven lost packet. Neither it nor
-                // unknown receipt timing may acquire the timed-loss lease.
+                let proven = witness.filter(|w| {
+                    !self.discontinuity
+                        && born.is_some()
+                        && prefix == w.count
+                        && self.wire_end == Some(w.start)
+                        && w.start.checked_add(u64::from(w.count)) == Some(start)
+                });
                 if born.is_none() || prefix > decision.start_offset.max(0) as u32 {
-                    self.adaptation_cut = witness
-                        .filter(|w| {
-                            !self.discontinuity
-                                && born.is_some()
-                                && skip == 0
-                                && prefix == w.count
-                                && self.source_end == Some(w.start)
-                                && w.start.checked_add(u64::from(w.count)) == Some(start)
-                        })
-                        .map(|w| (w.start, w.count));
-                    self.discontinuity = true;
-                    self.last_birth = None;
+                    // Collapse only a fully witnessed in-packet trim with admitted
+                    // original history. Bind that decision into the retained packet:
+                    // no loss prefix, but decode the whole packet and keep its suffix.
+                    if proven.is_some_and(|w| {
+                        w.start == decision.timestamp
+                            && i64::from(decision.start_offset) == -i64::from(w.count)
+                    }) && self.last_birth.is_some()
+                        && self.codec.inspect(&self.packet[..decision.length]) == Ok(decision.span)
+                    {
+                        self.wire_end = Some(start);
+                        prefix = 0;
+                    } else {
+                        // Full skips retain the existing hard-cut authority, but
+                        // the callback and its counted gap live on the host axis.
+                        self.adaptation_cut = proven
+                            .filter(|_| skip == 0)
+                            .and_then(|w| self.emitted_end.map(|start| (start, w.count)));
+                        self.discontinuity = true;
+                        self.last_birth = None;
+                    }
                 }
                 if prefix == 0 && skip == 0 && born.is_some() {
                     self.completed_packet_end = start.checked_add(count as u64);
@@ -572,7 +593,7 @@ impl Media {
                     .timestamp
                     .checked_add(u64::from(decision.span))
                     .ok_or(MediaError::JitterShape)?;
-                let start = self.source_end.unwrap_or(decision.timestamp);
+                let start = self.wire_end.unwrap_or(decision.timestamp);
                 if start < decision.timestamp {
                     // The missing decision does not prove an earlier adaptation skip.
                     self.discontinuity = true;
@@ -596,6 +617,32 @@ impl Media {
         self.decision_pending = true;
         Ok(())
     }
+    /// Validate both complete ranges before offering a single frame. Only the
+    /// first range takes its host origin from the wire; no cut can rebase it.
+    fn credit_range(
+        &self,
+        start: u64,
+        offset: usize,
+        count: usize,
+    ) -> Result<CreditRange, MediaError> {
+        let wire = start
+            .checked_add(offset as u64)
+            .ok_or(MediaError::JitterShape)?;
+        let emitted = self.emitted_end.unwrap_or(wire);
+        wire.checked_add(count as u64)
+            .ok_or(MediaError::JitterShape)?;
+        emitted
+            .checked_add(count as u64)
+            .ok_or(MediaError::SourceContract)?;
+        Ok(CreditRange { wire, emitted })
+    }
+
+    /// Called only with exact sink credit within a previously checked range.
+    fn credit_range_prefix(&mut self, range: CreditRange, accepted: usize) {
+        self.wire_end = Some(range.wire + accepted as u64);
+        self.emitted_end = Some(range.emitted + accepted as u64);
+    }
+
     /// Consume one retained loss unit. No original history means a hard counted
     /// span, never native synthesis with a fabricated current-time receipt.
     fn read_loss(
@@ -790,13 +837,20 @@ impl Media {
         if let Some(Pending::Audio { start, prefix, .. }) = &self.pending {
             let (start, prefix) = (*start, *prefix);
             if prefix != 0 {
-                let accepted = self.read_loss(sink, start - u64::from(prefix), prefix as usize)?;
+                let range = self.credit_range(
+                    start
+                        .checked_sub(u64::from(prefix))
+                        .ok_or(MediaError::JitterShape)?,
+                    0,
+                    prefix as usize,
+                )?;
+                let accepted = self.read_loss(sink, range.emitted, prefix as usize)?;
                 let Some(Pending::Audio { prefix, .. }) = self.pending.as_mut() else {
                     unreachable!()
                 };
                 *prefix -= accepted as u32;
-                self.source_end = Some(start - u64::from(*prefix));
                 output.progress = if *prefix == 0 { 1 } else { 2 };
+                self.credit_range_prefix(range, accepted);
                 return Ok(());
             }
         }
@@ -856,6 +910,7 @@ impl Media {
                 let remaining = (count - self.offset).min(span_remaining);
                 // Recovered audio inherits admitted history, never this corrupt
                 // packet's receipt. No history means a hard counted gap.
+                let range = self.credit_range(start, self.offset, remaining)?;
                 let source_birth = if provenance == DecodeProvenance::Original {
                     Some(born)
                 } else {
@@ -871,7 +926,7 @@ impl Media {
                     unsafe {
                         sink.audio_timed.unwrap()(
                             sink.context,
-                            start + self.offset as u64,
+                            range.emitted,
                             self.pcm[pcm_offset..pcm_offset + remaining].as_ptr(),
                             remaining,
                             u32::from(provenance == DecodeProvenance::Concealed),
@@ -880,11 +935,7 @@ impl Media {
                     }
                 } else {
                     unsafe {
-                        sink.gap.unwrap()(
-                            sink.context,
-                            start + self.offset as u64,
-                            remaining as u32,
-                        ) as usize
+                        sink.gap.unwrap()(sink.context, range.emitted, remaining as u32) as usize
                     }
                 };
                 if accepted > remaining {
@@ -894,14 +945,15 @@ impl Media {
                     self.last_birth = Some(born);
                 }
                 self.offset += accepted;
-                self.source_end = Some(start + self.offset as u64);
+                self.credit_range_prefix(range, accepted);
                 self.offset == count
             }
             Pending::Gap { start, count } => {
                 let remaining = count as usize - self.offset;
-                let accepted = self.read_loss(sink, start + self.offset as u64, remaining)?;
+                let range = self.credit_range(start, self.offset, remaining)?;
+                let accepted = self.read_loss(sink, range.emitted, remaining)?;
                 self.offset += accepted;
-                self.source_end = Some(start + self.offset as u64);
+                self.credit_range_prefix(range, accepted);
                 self.offset == count as usize
             }
         };
