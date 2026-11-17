@@ -548,6 +548,7 @@ impl PrivatePhoneSession {
     ) -> Result<(bool, bool), Error> {
         let reference = self
             .source_clock
+            .as_ref()
             .map(SourceTimeClock::reference)
             .unwrap_or_default();
         // Reuse the actual last source-read reference at post-read adoption.
@@ -865,11 +866,21 @@ impl PrivatePhoneSession {
         Ok(())
     }
 
+    fn media_now(&self, now_ms: u64) -> Result<u64, Error> {
+        let Some(clock) = &self.source_clock else {
+            return Ok(now_ms.saturating_mul(1_000_000));
+        };
+        let reference = clock.reference();
+        (reference.host_clock_epoch != 0)
+            .then_some(reference.now_ns)
+            .ok_or(Error::Admission)
+    }
+
     fn step_inner(&mut self, now_ms: u64) -> Result<(), Error> {
         if self.stop.load(Ordering::Acquire) || self.reply.ended() {
             return Err(Error::Hangup);
         }
-        let now_ns = now_ms.saturating_mul(1_000_000);
+        let now_ns = self.media_now(now_ms)?;
         if self.current.is_none() {
             for _ in 0..16 {
                 if let Ok(PrivateCommand::TelephoneDigit(symbol)) = self.replies.peek() {
@@ -1049,16 +1060,16 @@ impl PrivatePhoneSession {
                             source_start: self.source_position,
                             stream: source.ingress(),
                             // This is newly rendered private prompt PCM, never provider receive PCM.
-                            born_ns: if self.io.source_media() {
-                                let reference =
-                                    self.source_clock.ok_or(Error::Admission)?.reference();
-                                if reference.host_clock_epoch == 0 {
-                                    return Err(Error::Admission);
+                            born_ns: Some(match &self.source_clock {
+                                Some(clock) => {
+                                    let reference = clock.reference();
+                                    if reference.host_clock_epoch == 0 {
+                                        return Err(Error::Admission);
+                                    }
+                                    reference.now_ns
                                 }
-                                Some(reference.now_ns)
-                            } else {
-                                Some(now_ms.saturating_mul(1_000_000))
-                            },
+                                None => now_ns,
+                            }),
                             phone_expires_ns: u64::MAX,
                         },
                         &self.pcm[..count],
@@ -1101,16 +1112,18 @@ impl PrivatePhoneSession {
         let deadline = self.outbound.step(&mut self.io, now_ms)?;
         let next_audio = (self.current.is_some() && self.outbound.ready_for_input())
             .then_some(self.next_audio_ns);
+        let media_now = self.media_now(now_ms)?;
         let next = deadline
             .into_iter()
-            .chain(next_audio)
-            .chain(Some(now_ns.saturating_add(10_000_000)))
+            .chain(
+                next_audio
+                    .map(|due| std::time::Duration::from_nanos(due.saturating_sub(media_now))),
+            )
+            .chain(Some(std::time::Duration::from_millis(10)))
             .min()
             .unwrap();
-        let elapsed = self.epoch.map_or(now_ns, |epoch| {
-            epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
-        });
-        self.io.set_deadline(next.saturating_sub(elapsed))
+        self.io
+            .set_deadline(next.as_nanos().min(u128::from(u64::MAX)) as u64)
     }
 }
 impl SerialSession for PrivatePhoneSession {
@@ -1156,9 +1169,10 @@ impl SerialSession for PrivatePhoneSession {
     }
     fn set_epoch(&mut self, epoch: Instant) {
         self.epoch = Some(epoch);
+        self.outbound.set_epoch(epoch);
     }
     fn set_source_clock(&mut self, clock: SourceTimeClock) {
-        if self.outbound.bind_timed_clock(clock).is_err() {
+        if self.outbound.bind_media_clock(clock.clone()).is_err() {
             self.stop();
             return;
         }

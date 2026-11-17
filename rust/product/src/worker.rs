@@ -365,10 +365,16 @@ impl<T> EndpointControl<T> {
 }
 
 impl RadioStatus {
-    pub(crate) fn with_epoch(epoch: Instant) -> Self {
+    pub(crate) fn with_clock(clock: crate::services::SourceTimeClock) -> Self {
         Self {
-            source_clock: Arc::new(crate::link::source_clock::SourceClock::new(epoch)),
-            ..Self::default()
+            source_clock: Arc::new(crate::link::source_clock::SourceClock::with_clock(clock)),
+            carrier: Default::default(),
+            dtmf: Default::default(),
+            transmit_keyed: Default::default(),
+            remote_controls: Default::default(),
+            handoff: Default::default(),
+            vad_delay_ms: Default::default(),
+            current_handoff: Default::default(),
         }
     }
     /// Current receive state and original transition time.

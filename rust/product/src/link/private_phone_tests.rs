@@ -603,7 +603,7 @@ fn private_source_owner_cancels_discarded_finite_media_and_ignores_public_text()
         .source_text
         .push_back((b"caller", b"*41000#*70", 1000));
     let clock = SourceTimeClock::new(Instant::now()).unwrap();
-    session.set_source_clock(clock);
+    session.set_source_clock(clock.clone());
     session.step(10).unwrap();
     assert_eq!(
         state.lock().unwrap().source_completions,
@@ -627,7 +627,7 @@ fn prepared_phone_media_uses_the_shared_ring_with_original_age_and_exact_retirem
     use rpt_advanced_core::link::PeerInput as _;
     let (mut session, mut control, state, reply) = source_session_with_auth(true);
     let clock = SourceTimeClock::new(Instant::now()).unwrap();
-    session.set_source_clock(clock);
+    session.set_source_clock(clock.clone());
     let mut input = control.prepare_media(None).unwrap();
     assert!(
         control.prepare_media(None).is_err(),
@@ -2242,7 +2242,7 @@ fn private_160_frame_packet_retains_oldest_birth_and_deadline_across_turns() {
     let origin = Instant::now();
     let clock = SourceTimeClock::new(origin).unwrap();
     session.set_epoch(origin);
-    session.set_source_clock(clock);
+    session.set_source_clock(clock.clone());
     {
         let mut state = state.lock().unwrap();
         state.encode_unit = Some(160);
@@ -2304,7 +2304,7 @@ fn private_finite_g711_tail_completes_with_zero_pcm_before_flush() {
     let origin = Instant::now();
     let clock = SourceTimeClock::new(origin).unwrap();
     session.set_epoch(origin);
-    session.set_source_clock(clock);
+    session.set_source_clock(clock.clone());
     {
         let mut state = state.lock().unwrap();
         state.encode_unit = Some(160);
@@ -2391,7 +2391,7 @@ fn private_partial_reader_waits_for_successful_empty_finish_before_padding() {
     let origin = Instant::now();
     let clock = SourceTimeClock::new(origin).unwrap();
     session.set_epoch(origin);
-    session.set_source_clock(clock);
+    session.set_source_clock(clock.clone());
     {
         let mut state = state.lock().unwrap();
         state.encode_unit = Some(160);
@@ -2445,7 +2445,7 @@ fn private_queued_only_expired_span_is_consumed_in_one_owner_turn() {
     let origin = Instant::now() - std::time::Duration::from_millis(300);
     let clock = SourceTimeClock::new(origin).unwrap();
     session.set_epoch(origin);
-    session.set_source_clock(clock);
+    session.set_source_clock(clock.clone());
     let source = reply.phone_source().unwrap();
     assert_eq!(
         session.output.write(
@@ -2595,7 +2595,7 @@ fn private_pending_reader_anchors_cadence_at_first_actual_samples() {
 fn prepared_phone_media_returns_programme_through_the_existing_timed_egress_owner() {
     let (mut session, mut control, state, reply) = source_session_with_auth(true);
     let clock = SourceTimeClock::new(Instant::now()).unwrap();
-    session.set_source_clock(clock);
+    session.set_source_clock(clock.clone());
     let mut input = control.prepare_media(None).unwrap();
     let mut programme = input.take_output().expect("one programme producer");
     assert!(
@@ -2673,7 +2673,7 @@ fn prepared_phone_programme_yields_to_private_prompt_then_resumes_without_new_en
         crate::phone::PhoneLogin::Authenticated,
     );
     let clock = SourceTimeClock::new(Instant::now()).unwrap();
-    session.set_source_clock(clock);
+    session.set_source_clock(clock.clone());
     let mut input = control.prepare_media(None).unwrap();
     let mut programme = input.take_output().unwrap();
     session.step(0).unwrap();
@@ -2744,7 +2744,7 @@ fn prepared_phone_programme_yields_to_private_prompt_then_resumes_without_new_en
 fn prepared_phone_programme_retirement_after_selection_cancels_the_pending_send() {
     let (mut session, mut control, state, reply) = source_session_with_auth(true);
     let clock = SourceTimeClock::new(Instant::now()).unwrap();
-    session.set_source_clock(clock);
+    session.set_source_clock(clock.clone());
     let mut input = control.prepare_media(None).unwrap();
     let mut output = input.take_output().unwrap();
     session.step(0).unwrap();
@@ -2779,7 +2779,7 @@ fn prepared_phone_programme_retirement_after_selection_cancels_the_pending_send(
 fn prepared_phone_programme_drains_a_short_final_packet_on_existing_idle_deadline() {
     let (mut session, mut control, state, reply) = source_session_with_auth(true);
     let clock = SourceTimeClock::new(Instant::now()).unwrap();
-    session.set_source_clock(clock);
+    session.set_source_clock(clock.clone());
     state.lock().unwrap().encode_unit = Some(160);
     let mut input = control.prepare_media(None).unwrap();
     let mut output = input.take_output().unwrap();
@@ -3447,4 +3447,51 @@ pub(crate) fn recovery_snapshot(control: &PrivatePhoneControl) -> Option<(u64, b
         control.recovery_request().is_some(),
         control.media_rearm_ready(),
     ))
+}
+
+#[test]
+fn stage_c_clock_deadline_axes_actual_private_prompt_paces_on_media_axis() {
+    use crate::services::clock_tests::{clock, set};
+    let origin = 1_000_000_000_000;
+    let (mut session, _control, state, reply) = source_session_with_auth(true);
+    let clock = clock(origin);
+    set(origin + 400_000_000);
+    session.set_source_clock(clock);
+    let prompt = crate::phone::tests::private_prompt(&reply, Box::new(Speech::new(1920)));
+    session.current = Some(prompt);
+    session.next_audio_ns = 410_000_000;
+    session.step(9000).unwrap();
+    assert_eq!(
+        session.source_position, 0,
+        "scheduler 9s cannot make media 410ms due"
+    );
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&10_000_000));
+    set(origin + 410_000_000);
+    session.step(9000).unwrap();
+    assert_eq!(session.source_position, 960);
+    assert_eq!(session.next_audio_ns, 430_000_000);
+    let first = state.lock().unwrap().timed_deadlines[0];
+    assert!(first <= 200, "new prompt retains its media birth");
+}
+
+#[test]
+fn stage_c_clock_deadline_axes_private_reduces_prompt_after_work() {
+    use crate::services::clock_tests::{clock, set};
+    let origin = 1_000_000_000_000;
+    let (mut session, _control, state, reply) = source_session_with_auth(true);
+    let clock = clock(origin);
+    set(origin + 400_000_000);
+    session.set_source_clock(clock);
+    session.current = Some(crate::phone::tests::private_prompt(
+        &reply,
+        Box::new(Speech::new(1920)),
+    ));
+    session.next_audio_ns = 410_000_000;
+    BEFORE_SEND.with_borrow_mut(|hook| *hook = Some(Box::new(move || set(origin + 430_000_000))));
+    session.step(9000).unwrap();
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&0));
+    assert_eq!(
+        session.source_position, 0,
+        "work cannot fabricate a fresh prompt birth"
+    );
 }

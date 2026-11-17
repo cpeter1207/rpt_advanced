@@ -2705,3 +2705,57 @@ audio and independent signaling retain their existing behavior. Callback
 admission, retained-contributor retirement, same-render graph identity,
 qualified current time and finite downstream presentation bounds remain separate
 mandatory policy gates.
+
+
+## Retained software media origin and deadline cut — 2026-11-17
+
+The product queries the optional ABI-10 host clock getter once off audio and
+retains immutable provider kind/reader/raw origin plus the existing non-reused
+media epoch. Each prepared serial source/I/O reader has its own regression
+history and shares one sticky qualification latch. Zero, regression, checked
+conversion failure or malformed getter output invalidates the selected axis;
+there is no live fallback or radio-only reset. Equality is valid. A missing
+getter keeps ordinary media on the original Instant axis, with no raw-clock
+join capability. Reload, including newly added radios, does not choose an
+independently offset origin.
+
+Dispatcher source observations and peer/source receipts use that same axis.
+Controller, Lease, protocol and synchronous PCM cadence retain their Instant
+scheduling axis. Ordinary prepared fanout, private egress, finite phone expiry
+and prompt birth/cadence use the selected media axis. Source-clock TX advance
+remains arithmetic/atomics only: owners are cloned during preparation, not
+audio. Original receipt/PLC birth, adopted cuts and retry packet/deadline
+identity are not renewed. Timed-send eligibility is the existing admitted
+private-phone source contract or the ordinary timed-G.711 capability, never
+the presence of a clock reader.
+
+Outbound returns a relative Duration reduced against its own fresh axis.
+Both callers independently reduce their protocol/prompt absolutes after the
+work they cover and combine only durations; the old whole-step subtraction
+is removed. Existing immediate work, no-deadline and 10-ms retry semantics
+remain. A scheduling hint is not admission or a physical-time bound.
+
+The product invalidates the epoch at terminal-stop entry before ticker/job
+joins can fail, and retains its existing source/I/O and provider owners through
+failed stop/retry and startup rollback. The shared epoch remains unavailable
+even if a radio or SDK restarts. Provider DSO release still requires full
+product/source/I/O/SDK quiescence under the existing standalone runtime owner.
+
+This is local software-clock plumbing with unchanged host/source/SDK ABIs,
+defaults and authorization/DTMF policy. C3 raw observations remain inputs to
+future policy, not an activated controller permit. Actual all-new DSO unload,
+callback cost/cohort qualification and full platform/release gates remain
+separate C5 work. Physical presentation remains Unknown: CLOCK_MONOTONIC
+excludes suspend and a read cannot bound later execution or device queues.
+
+
+The standalone constructor publishes that optional getter only after a retained
+reader lookup succeeds. A valid 192-byte old audio base, a valid base of at least
+200 bytes with an absent/incomplete optional reader field, or a complete null
+reader publishes no getter. This preserves new-host/old-adapter ordinary media
+on the original Instant axis. Malformed required size/name/ABI, missing required
+audio provider, or an advertised extent beyond retained storage fails host
+preparation instead of selecting Legacy. This narrow capability-publication
+correction does not duplicate SDK validation of mandatory audio function
+pointers, sample a clock in the host constructor, change getter statuses or ABI,
+or permit fallback after an advertised getter/read fails.

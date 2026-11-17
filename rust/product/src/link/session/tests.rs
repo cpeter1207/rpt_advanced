@@ -2151,6 +2151,7 @@ fn egress_host_contract_and_asterisk_pcm() {
         std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_timed_g711),
         std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_phone),
         std::mem::offset_of!(abi::rptadv_host_services_v10, peer_dial_phone_progress),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, media_clock_reader),
         std::mem::size_of_val(&table),
     ];
     for length in boundary..=std::mem::size_of_val(&table) {
@@ -3840,5 +3841,74 @@ fn isolation_redirect_retires_prepared_egress_before_exact_ack() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn stage_c_clock_deadline_axes_actual_session_combines_durations() {
+    use crate::services::clock_tests::{clock, set};
+    let origin = 1_000_000_000_000;
+    let (mut session, _control, state, mut output) = timed_session();
+    let clock = clock(origin);
+    set(origin + 400_000_000);
+    session.set_source_clock(clock);
+    session.radio_control = RadioControlState::Disabled;
+    session.peer.digit('1', 6005); // scheduling deadline 9005, not a media timestamp.
+    output.write(
+        rpt_advanced_core::audio::AudioSpan {
+            born_ns: Some(420_000_000),
+            ..Default::default()
+        },
+        &[0.25; 960],
+    );
+    session.step(9000).unwrap();
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&5_000_000));
+    session.peer.digit('#', 9000);
+    session.step(9000).unwrap();
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&20_000_000));
+    set(origin + 430_000_000);
+    session.peer.digit('1', 6005);
+    session.step(9030).unwrap();
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .deadlines
+            .last()
+            .is_some_and(|wait| *wait <= 20_000_000)
+    );
+}
+
+#[test]
+fn stage_c_clock_deadline_axes_actual_conversion_work_has_no_double_subtraction() {
+    use crate::services::clock_tests::{clock, set};
+    for dtmf in [false, true] {
+        let origin = 1_000_000_000_000;
+        let (mut session, _control, state, mut output) = timed_session();
+        let clock = clock(origin);
+        set(origin + 400_000_000);
+        session.set_source_clock(clock);
+        session.set_epoch(Instant::now() - std::time::Duration::from_secs(9));
+        session.radio_control = RadioControlState::Disabled;
+        if dtmf {
+            session.peer.digit('1', 6005);
+        }
+        output.write(
+            rpt_advanced_core::audio::AudioSpan {
+                born_ns: Some(if dtmf { 420_000_000 } else { 440_000_000 }),
+                ..Default::default()
+            },
+            &[0.25; 960],
+        );
+        crate::link::outbound::tests::after_clock_once(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            set(origin + 430_000_000);
+        });
+        session.step(9000).unwrap();
+        assert_eq!(
+            state.lock().unwrap().deadlines.last(),
+            Some(&if dtmf { 0 } else { 10_000_000 }),
+            "fresh relative media wait must not pay the same conversion interval twice"
+        );
     }
 }

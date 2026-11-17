@@ -11,9 +11,10 @@ use std::{
     mem::{offset_of, size_of, size_of_val},
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{self, NonNull},
-    sync::atomic::{AtomicU64, Ordering},
-    time::Instant,
 };
+
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 #[path = "services_remote.rs"]
 mod remote;
@@ -99,38 +100,11 @@ pub struct SourceTimeReference {
     pub now_ns: u64,
 }
 
-static NEXT_SOURCE_CLOCK: AtomicU64 = AtomicU64::new(1);
-
-/// One I/O owner's monotonic epoch, retained across configuration replacement.
-#[derive(Clone, Copy)]
-pub(crate) struct SourceTimeClock {
-    identity: u64,
-    origin: Instant,
-}
-
-impl SourceTimeClock {
-    pub(crate) fn new(origin: Instant) -> Option<Self> {
-        let identity = NEXT_SOURCE_CLOCK
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
-                next.checked_add(1)
-            })
-            .ok()?;
-        Some(Self { identity, origin })
-    }
-
-    pub(crate) fn reference(self) -> SourceTimeReference {
-        let Some(now_ns) = Instant::now()
-            .checked_duration_since(self.origin)
-            .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok())
-        else {
-            return SourceTimeReference::default();
-        };
-        SourceTimeReference {
-            host_clock_epoch: self.identity,
-            now_ns,
-        }
-    }
-}
+#[path = "services_clock.rs"]
+mod clock;
+pub(crate) use clock::SourceTimeClock;
+#[cfg(test)]
+pub(crate) use clock::tests as clock_tests;
 
 /// Exact disposition of the previously accepted product-ring prefix.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -2206,6 +2180,12 @@ impl PeerIo {
     /// Exact host guarantee for the restricted ordinary IAX timed-send profile.
     pub(crate) fn timed_g711_egress(&self) -> bool {
         self.capabilities & abi::RPTADV_PEER_TIMED_G711_EGRESS != 0
+    }
+    /// Timed send is guaranteed by either the restricted ordinary profile or
+    /// the admitted private-phone source contract, never by clock availability.
+    pub(crate) fn timed_egress(&self) -> bool {
+        self.timed_g711_egress()
+            || (self.source_media() && self.identity.protocol() == ProtocolId::Phone)
     }
     /// Protocol-owned finite PCM padding; packet duration remains in peer PCM units.
     pub(crate) fn finite_packet_egress(&self) -> bool {

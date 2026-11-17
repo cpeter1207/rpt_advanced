@@ -691,7 +691,7 @@ async fn g722_source_credit_uses_pcm_clock_and_keeps_receipt_birth_through_wrap(
 async fn variable_source_spans_keep_original_birth_across_refused_prefixes() {
     let providers = ProviderSet::load().unwrap();
     let jitter = unsafe { &*ptr::from_ref(providers.jitter_descriptor().unwrap()) };
-    for frames in [80_usize, 240] {
+    for (frames, born) in [(80_usize, 1_000_000_000), (240, 1_000_000_000_000)] {
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let mut media = fixture_media(&sender, jitter).await;
         let target = media.endpoint.local_addr().unwrap();
@@ -700,7 +700,6 @@ async fn variable_source_spans_keep_original_birth_across_refused_prefixes() {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(2)).await;
         let mut sink = Sink::default();
-        let born = 1_000_000_000;
         assert_eq!(read(&mut media, &mut sink, born), 0);
         let receipt = media
             .births

@@ -427,13 +427,25 @@ unsafe extern "C" fn retained_step<S: SerialSession>(context: *mut c_void) -> i3
 impl PeerIoWorker {
     /// Same prepared host origin used by source sinks and native source clocks.
     pub(crate) fn source_clock_epoch(&self) -> u64 {
-        self.source_clock.reference().host_clock_epoch
+        self.source_clock.identity()
     }
 
     /// Prepare the owner; a poll thread starts only for a synchronous host.
     pub fn start(epoch: Instant) -> std::io::Result<Self> {
         let source_clock = SourceTimeClock::new(epoch)
             .ok_or_else(|| std::io::Error::other("source clock identity exhausted"))?;
+        Self::with_clock(epoch, source_clock)
+    }
+    pub(crate) fn media_clock(&self) -> SourceTimeClock {
+        self.source_clock.clone()
+    }
+    pub(crate) fn invalidate_clock(&self) {
+        self.source_clock.invalidate();
+    }
+    pub(crate) fn with_clock(
+        epoch: Instant,
+        source_clock: SourceTimeClock,
+    ) -> std::io::Result<Self> {
         let (pending, incoming) =
             RingBuffer::<Box<dyn SerialSession>>::new(PENDING_ATTACH_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
@@ -516,7 +528,8 @@ impl PeerIoWorker {
         if self.stop.load(Ordering::Acquire) {
             return Err(session);
         }
-        session.set_source_clock(self.source_clock);
+        session.set_source_clock(self.source_clock.clone());
+        session.set_epoch(self.epoch);
         if let Some((services, peer)) = session.io().async_owner() {
             if self.async_peers.try_reserve(1).is_err() {
                 return Err(session);
@@ -524,7 +537,6 @@ impl PeerIoWorker {
             let stop = session.stop_flag();
             let reply = session.reply();
             let wake = session.wake();
-            session.set_epoch(self.epoch);
             // The host may invoke the callback before attach returns. Keep the
             // peer allocation raw and stable until detach has quiesced it.
             let context = Box::into_raw(session);
@@ -596,6 +608,7 @@ impl PeerIoWorker {
 
     /// Signal all owners, then wait off-callback before releasing peer handles.
     pub fn stop(&mut self) {
+        self.invalidate_clock();
         self.stop.store(true, Ordering::Release);
         for peer in &self.async_peers {
             peer.signal_stop();
@@ -847,6 +860,7 @@ impl PeerSession {
             let finishing = self.source_finish.is_some();
             let reference = self
                 .source_time_clock
+                .as_ref()
                 .map(SourceTimeClock::reference)
                 .unwrap_or_default();
             let result = self.io.read_source_at(completion, reference, |input| {
@@ -1194,8 +1208,14 @@ impl PeerSession {
             }
         }
         let deadline = self.outbound.step(&mut self.io, now_ms)?;
-        let now = now_ms.saturating_mul(1_000_000);
-        let mut after = deadline.map_or(u64::MAX, |deadline| deadline.saturating_sub(now));
+        let now = self
+            .async_epoch
+            .map_or(now_ms.saturating_mul(1_000_000), |epoch| {
+                epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+            });
+        let mut after = deadline.map_or(u64::MAX, |wait| {
+            wait.as_nanos().min(u128::from(u64::MAX)) as u64
+        });
         // Space can become available without an activity edge; retry only that
         // backpressure. The media dispatcher wakes ordinary activity changes.
         if self.pending_input.is_some() || source_wait || self.pending_remote_unkey.is_some() {
@@ -1205,17 +1225,10 @@ impl PeerSession {
             after = 0;
         }
         if let Some(deadline) = self.peer.deadline_ms() {
-            after = after.min(deadline.saturating_sub(now_ms).saturating_mul(1_000_000));
+            after = after.min(deadline.saturating_mul(1_000_000).saturating_sub(now));
         }
         if let RadioControlState::Negotiating(Some(deadline)) = self.radio_control {
-            after = after.min(deadline.saturating_sub(now_ms).saturating_mul(1_000_000));
-        }
-        // Conversion/control work may have consumed part of the wait already.
-        if let Some(epoch) = self.async_epoch {
-            let elapsed = epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-            if after != u64::MAX {
-                after = after.saturating_sub(elapsed.saturating_sub(now));
-            }
+            after = after.min(deadline.saturating_mul(1_000_000).saturating_sub(now));
         }
         self.io.set_deadline(after)?;
         Ok(())
@@ -1290,10 +1303,11 @@ impl SerialSession for PeerSession {
     }
     fn set_epoch(&mut self, epoch: Instant) {
         self.async_epoch = Some(epoch);
+        self.outbound.set_epoch(epoch);
     }
     fn set_source_clock(&mut self, clock: SourceTimeClock) {
-        self.source_time_clock = Some(clock);
-        if self.io.timed_g711_egress() && self.outbound.bind_timed_clock(clock).is_err() {
+        self.source_time_clock = Some(clock.clone());
+        if self.outbound.bind_media_clock(clock).is_err() {
             self.stop.store(true, Ordering::Release);
         }
     }

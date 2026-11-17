@@ -1110,8 +1110,12 @@ impl Engine {
         }
     }
     fn stop(self: &Arc<Self>) -> bool {
+        // Close admission first: a lookup holding the host may wait for this edge.
         self.accepting.store(false, Ordering::Release);
         self.revision.fetch_add(1, Ordering::AcqRel);
+        if let Some(host) = self.host.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            host.invalidate_media_clock();
+        }
         if let Some(ticker) = self.ticker.lock().unwrap_or_else(|e| e.into_inner()).take() {
             if ticker.join().is_err() {
                 return false;

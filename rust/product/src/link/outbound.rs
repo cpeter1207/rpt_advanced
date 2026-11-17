@@ -129,12 +129,13 @@ pub(super) struct Outbound {
     clock: Option<Arc<SourceClock>>,
     private: bool,
     private_finishing: bool,
-    timed_clock: Option<SourceTimeClock>,
+    media_clock: Option<SourceTimeClock>,
     programme_guard: Option<(PeerReply, bool)>,
     next_audio_ms: u64,
     unkey_ns: Option<u64>,
     idle_timestamp: u32,
     sent: bool,
+    scheduler_epoch: Option<std::time::Instant>,
 }
 fn source_ns(sample: u64) -> u128 {
     u128::from(sample) * 1_000_000_000 / 48_000
@@ -161,12 +162,13 @@ impl Outbound {
             clock: None,
             private: false,
             private_finishing: false,
-            timed_clock: None,
+            media_clock: None,
             programme_guard: None,
             next_audio_ms: 0,
             unkey_ns: None,
             idle_timestamp: 0,
             sent: false,
+            scheduler_epoch: None,
         })
     }
     /// Source phones retain the original worker clock; no PCM/untimed fallback.
@@ -184,16 +186,17 @@ impl Outbound {
                 || self.conversion.as_ref().is_some_and(|value| !value.drained)
                 || self.encoder.as_ref().is_some_and(|value| !value.drained));
     }
-    pub(super) fn bind_timed_clock(&mut self, clock: SourceTimeClock) -> Result<(), Error> {
+    pub(super) fn bind_media_clock(&mut self, clock: SourceTimeClock) -> Result<(), Error> {
         let epoch = clock.reference().host_clock_epoch;
         if epoch == 0
             || self
-                .timed_clock
+                .media_clock
+                .as_ref()
                 .is_some_and(|old| old.reference().host_clock_epoch != epoch)
         {
             return Err(Error::Admission);
         }
-        self.timed_clock = Some(clock);
+        self.media_clock = Some(clock);
         Ok(())
     }
     /// Drop staged media before serial retirement, including when no next PCM arrives.
@@ -266,23 +269,58 @@ impl Outbound {
         self.converter.reset().map_err(|_| Error::Translation)
     }
     fn current(&self, stream: u64) -> bool {
-        self.programme_guard
+        self.media_clock
             .as_ref()
-            .is_none_or(|(signals, _)| !signals.ended())
+            .is_none_or(SourceTimeClock::available)
+            && self
+                .programme_guard
+                .as_ref()
+                .is_none_or(|(signals, _)| !signals.ended())
             && self
                 .clock
                 .as_ref()
                 .is_none_or(|clock| clock.stream() == stream)
     }
-    /// Return an absolute source/expiry wake. Each call handles at most one media item.
-    pub(super) fn step(&mut self, io: &mut PeerIo, now_ms: u64) -> Result<Option<u64>, Error> {
-        if io.timed_g711_egress() && self.timed_clock.is_none() {
+    pub(super) fn set_epoch(&mut self, epoch: std::time::Instant) {
+        self.scheduler_epoch = Some(epoch);
+    }
+    fn scheduler_now(&self, now_ms: u64) -> u64 {
+        self.scheduler_epoch
+            .map_or(now_ms.saturating_mul(1_000_000), |epoch| {
+                epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+            })
+    }
+    fn media_now(&self, fallback: u64) -> Result<u64, Error> {
+        let Some(clock) = &self.media_clock else {
+            return Ok(fallback);
+        };
+        let reference = clock.reference();
+        (reference.host_clock_epoch != 0)
+            .then_some(reference.now_ns)
+            .ok_or(Error::Admission)
+    }
+    /// Return only a relative wait, reduced on the deadline's own fresh axis.
+    pub(super) fn step(
+        &mut self,
+        io: &mut PeerIo,
+        now_ms: u64,
+    ) -> Result<Option<std::time::Duration>, Error> {
+        if io.timed_g711_egress() && self.media_clock.is_none() {
             return Err(Error::Admission);
         }
         if !io.prepared_media() {
             self.pcm_step(io, now_ms)?;
-            return Ok(Some(self.next_audio_ms.saturating_mul(1_000_000)));
+            return Ok(Some(std::time::Duration::from_nanos(
+                self.next_audio_ms
+                    .saturating_mul(1_000_000)
+                    .saturating_sub(self.scheduler_now(now_ms)),
+            )));
         }
+        let deadline = self.prepared_step(io, now_ms)?;
+        let now = self.media_now(self.scheduler_now(now_ms))?;
+        Ok(deadline.map(|deadline| std::time::Duration::from_nanos(deadline.saturating_sub(now))))
+    }
+    fn prepared_step(&mut self, io: &mut PeerIo, now_ms: u64) -> Result<Option<u64>, Error> {
         if self.private
             && self.pending.is_none()
             && self.conversion.is_none()
@@ -290,15 +328,7 @@ impl Outbound {
         {
             return Ok(None);
         }
-        let mut now = if self.private {
-            let reference = self.timed_clock.ok_or(Error::Admission)?.reference();
-            if reference.host_clock_epoch == 0 {
-                return Err(Error::Admission);
-            }
-            reference.now_ns
-        } else {
-            now_ms.saturating_mul(1_000_000)
-        };
+        let mut now = self.media_now(now_ms.saturating_mul(1_000_000))?;
         #[cfg(test)]
         tests::after_clock();
         self.statistics.rejected.store(
@@ -389,12 +419,7 @@ impl Outbound {
                 // Recheck the same immutable, validated epoch, never its birth.
                 // An invalid/backwards reference cannot advance known time and
                 // therefore cannot admit the disputed future span.
-                now = now.max(
-                    self.timed_clock
-                        .expect("validated private clock")
-                        .reference()
-                        .now_ns,
-                );
+                now = self.media_now(now)?;
             }
             if read.span.born_ns.is_none_or(|born| {
                 now >= born.saturating_add(AGE_NS) || (self.private && born > now)
@@ -472,8 +497,7 @@ impl Outbound {
             // An idle marker is uncommitted media too: keep its source timestamp
             // while waiting for writable, but never retain it indefinitely.
             let expires = deadline.saturating_add(AGE_NS);
-            if !self.private
-                && self.timed_clock.is_none()
+            if !(self.private || self.media_clock.is_some() && io.timed_egress())
                 && self.sent
                 && now < expires
                 && !io.send_prepared(&[], 0, self.idle_timestamp)?
@@ -598,7 +622,8 @@ impl Outbound {
         // Released timed G.711 requires complete 160-frame packets. Complete
         // the retained finite tail with PCM silence before asking the codec to
         // flush; encoded-byte padding would not represent codec silence.
-        let padding = if self.timed_clock.is_some()
+        let padding = if self.media_clock.is_some()
+            && io.timed_egress()
             && self.rate == 8000
             && flush
             && !io.finite_packet_egress()
@@ -730,11 +755,15 @@ impl Outbound {
         let end_timestamp = anchor.call_ms.wrapping_add(
             (end_origin as i128 - anchor.source_ns as i128).div_euclid(1_000_000) as u32,
         );
-        let deadline = if self.timed_clock.is_some() {
+        let deadline = if self.media_clock.is_some() && io.timed_egress() {
             // The native floor MUST precede the original host clock reference.
             // Birth was stamped by this same retained worker clock at rendering.
             let elapsed = io.elapsed_ms();
-            let reference = self.timed_clock.ok_or(Error::Admission)?.reference();
+            let reference = self
+                .media_clock
+                .as_ref()
+                .ok_or(Error::Admission)?
+                .reference();
             let remaining = (reference.host_clock_epoch != 0)
                 .then(|| expires.checked_sub(reference.now_ns))
                 .flatten()
@@ -767,6 +796,7 @@ impl Outbound {
         Ok(())
     }
     fn send(&mut self, io: &mut PeerIo, now: u64) -> Result<(), Error> {
+        let now = self.media_now(now)?;
         if self
             .pending
             .as_ref()
@@ -821,7 +851,17 @@ impl Outbound {
         // Synchronous hosts keep their ordinary unclocked behavior. Qualified
         // phone spans share this converter, but stale/cancelled input cannot
         // enter it or leave retained history behind an ordinary prefix.
-        let now = now_ms.saturating_mul(1_000_000);
+        let now = self
+            .media_clock
+            .as_ref()
+            .map(SourceTimeClock::reference)
+            .filter(|reference| reference.host_clock_epoch != 0)
+            .map(|reference| reference.now_ns)
+            .or_else(|| {
+                self.media_clock
+                    .is_none()
+                    .then_some(now_ms.saturating_mul(1_000_000))
+            });
         while consumed < BLOCK {
             if self.queue.peek_span().is_none() {
                 break;
@@ -840,12 +880,13 @@ impl Outbound {
             };
             consumed += read.frames;
             if read.span.phone_expires_ns != u64::MAX
-                && (now >= read.span.phone_expires_ns
-                    || read
-                        .span
-                        .born_ns
-                        .is_none_or(|born| born > now || now >= born.saturating_add(AGE_NS))
-                    || !self.current(read.span.stream))
+                && (now.is_none_or(|now| {
+                    now >= read.span.phone_expires_ns
+                        || read
+                            .span
+                            .born_ns
+                            .is_none_or(|born| born > now || now >= born.saturating_add(AGE_NS))
+                }) || !self.current(read.span.stream))
             {
                 self.retired_rejections =
                     self.retired_rejections.saturating_add(read.frames as u64);
@@ -887,7 +928,7 @@ impl Outbound {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::link::session::tests::peer_with_egress;
     use rpt_advanced_core::audio::LinkAudioQueue;
@@ -897,6 +938,9 @@ mod tests {
             const { std::cell::RefCell::new(None) };
         static BEFORE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
+    }
+    pub(in crate::link) fn after_clock_once(hook: impl FnOnce() + 'static) {
+        AFTER_CLOCK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
     pub(super) fn after_clock() {
         let hook = AFTER_CLOCK.with(|slot| slot.borrow_mut().take());
@@ -912,6 +956,103 @@ mod tests {
     }
 
     #[test]
+    fn stage_c_clock_deadline_axes_fresh_media_reference_after_work() {
+        use crate::services::clock_tests::{clock, set};
+        for stall in [false, true] {
+            let origin = 1_000_000_000_000;
+            let clock = clock(origin);
+            set(origin + 400_000_000);
+            let (mut io, _) = peer_with_egress(48000, true, true);
+            let (mut writer, reader) = LinkAudioQueue::new(960, 1).unwrap().into_endpoints();
+            let mut outbound = Outbound::new(48000, reader).unwrap();
+            outbound.bind_media_clock(clock).unwrap();
+            writer.write(
+                AudioSpan {
+                    born_ns: Some(420_000_000),
+                    ..AudioSpan::default()
+                },
+                &[0.25; 960],
+            );
+            if stall {
+                AFTER_CLOCK.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || set(origin + 430_000_000)))
+                });
+            }
+            let wait = outbound.step(&mut io, 9000).unwrap().unwrap();
+            assert_eq!(
+                wait,
+                std::time::Duration::from_millis(if stall { 0 } else { 20 })
+            );
+            assert_eq!(
+                outbound.queue.peek_span().unwrap().span.born_ns,
+                Some(420_000_000)
+            );
+        }
+    }
+    #[test]
+    fn stage_c_clock_egress_axis_ordinary_prepared_and_sync_phone() {
+        for prepared in [false, true] {
+            let (mut io, state) = peer_with_egress(48000, prepared, prepared);
+            state.lock().unwrap().encode_unit = Some(960);
+            let clock = SourceTimeClock::new(
+                std::time::Instant::now() - std::time::Duration::from_millis(400),
+            )
+            .unwrap();
+            let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
+            let mut outbound = Outbound::new(48000, reader).unwrap();
+            outbound.bind_media_clock(clock).unwrap();
+            writer.write(
+                AudioSpan {
+                    born_ns: Some(390_000_000),
+                    phone_expires_ns: 500_000_000,
+                    ..AudioSpan::default()
+                },
+                &[0.25; 960],
+            );
+            outbound.step(&mut io, 9000).unwrap();
+            assert_eq!(
+                outbound.statistics.snapshot().expired_native_samples,
+                0,
+                "scheduler origin must not expire prepared media"
+            );
+            assert_eq!(
+                outbound.statistics.snapshot().rejected_native_samples,
+                0,
+                "finite synchronous phone expiry belongs to media axis"
+            );
+            assert!(
+                state.lock().unwrap().timed_deadlines.is_empty(),
+                "clock availability must not grant timed-send capability"
+            );
+            if prepared {
+                assert!(
+                    outbound.conversion.is_some(),
+                    "valid ordinary media must be admitted"
+                );
+            } else {
+                assert!(!state.lock().unwrap().audio.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn stage_c_clock_deadline_axes_outbound_returns_relative_wait() {
+        let (mut io, _) = peer_with_egress(48000, true, true);
+        let (mut writer, reader) = LinkAudioQueue::new(960, 1).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(48000, reader).unwrap();
+        writer.write(
+            AudioSpan {
+                born_ns: Some(420_000_000),
+                ..AudioSpan::default()
+            },
+            &[0.25; 960],
+        );
+        assert_eq!(
+            outbound.step(&mut io, 400).unwrap(),
+            Some(std::time::Duration::from_millis(20))
+        );
+    }
+    #[test]
     fn private_admission_uses_a_clock_not_older_than_the_acquired_span() {
         for future in [false, true] {
             let (mut io, state) = crate::link::session::tests::phone_source_peer();
@@ -922,7 +1063,7 @@ mod tests {
             .unwrap();
             let (mut writer, reader) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
             let mut outbound = Outbound::private(8000, reader).unwrap();
-            outbound.bind_timed_clock(clock).unwrap();
+            outbound.bind_media_clock(clock.clone()).unwrap();
             assert_eq!(
                 writer.write(
                     AudioSpan {
@@ -1004,7 +1145,7 @@ mod tests {
             let clock = SourceTimeClock::new(std::time::Instant::now()).unwrap();
             let (mut writer, reader) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
             let mut outbound = Outbound::private(8000, reader).unwrap();
-            outbound.bind_timed_clock(clock).unwrap();
+            outbound.bind_media_clock(clock.clone()).unwrap();
             let reply = owner.reply_target();
             assert_eq!(reply.phone_outgoing(), outgoing);
             // Production uses an ordinary ring-generation guard, independent
@@ -1042,7 +1183,7 @@ mod tests {
             );
             if outgoing {
                 assert!(
-                    wake.is_none_or(|next| next > clock.reference().now_ns),
+                    wake.is_none_or(|next| !next.is_zero()),
                     "continuous idle must not requeue an already expired wake"
                 );
                 assert!(!outbound.conversion.as_ref().unwrap().drained);
@@ -1108,7 +1249,7 @@ mod tests {
             state.lock().unwrap().encode_unit = Some(160);
             let (mut writer, reader) = LinkAudioQueue::new(BLOCK, 1).unwrap().into_endpoints();
             let mut outbound = Outbound::private(8000, reader).unwrap();
-            outbound.bind_timed_clock(clock).unwrap();
+            outbound.bind_media_clock(clock.clone()).unwrap();
             outbound.bind_clock(source_clock);
             let generation = rpt_advanced_core::link::PeerSignals::new();
             outbound.guard_programme(Some(generation.reply_target()), true);
@@ -1125,7 +1266,7 @@ mod tests {
                 Some(span),
                 "a real source-clock due time must wait, not discard or renew"
             );
-            assert_eq!(wake, Some(due));
+            assert!(wake.is_some_and(|wait| wait.as_nanos() <= u128::from(due) && !wait.is_zero()));
             assert_eq!(outbound.statistics.snapshot().expired_native_samples, 0);
             if retire {
                 generation.end();
@@ -1267,12 +1408,15 @@ mod tests {
                 );
                 assert!(state.writes.is_empty());
             }
-            assert_eq!(wake, Some(0));
+            assert_eq!(wake, Some(std::time::Duration::ZERO));
             assert!(outbound.pending.is_none());
             assert!(outbound.conversion.is_none());
             if future {
                 assert_eq!(outbound.queue.peek_span().unwrap().span, next);
-                assert_eq!(outbound.step(&mut io, 0).unwrap(), Some(20_000_000));
+                assert_eq!(
+                    outbound.step(&mut io, 0).unwrap(),
+                    Some(std::time::Duration::from_millis(20))
+                );
                 assert!(state.lock().unwrap().prepared.is_empty());
                 assert_eq!(outbound.queue.peek_span().unwrap().span, next);
                 outbound.step(&mut io, 20).unwrap();
@@ -1351,7 +1495,10 @@ mod tests {
             &[0.25],
         );
         outbound.step(&mut io, 0).unwrap();
-        assert_eq!(outbound.step(&mut io, 20).unwrap(), Some(BLOCK_NS));
+        assert_eq!(
+            outbound.step(&mut io, 20).unwrap(),
+            Some(std::time::Duration::ZERO)
+        );
         assert!(!outbound.conversion.as_ref().unwrap().drained);
 
         // A previously keyed PCM host can retain its idle marker across a
@@ -1422,7 +1569,7 @@ mod tests {
         let clock = SourceTimeClock::new(std::time::Instant::now()).unwrap();
         let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
         let mut outbound = Outbound::private(8000, reader).unwrap();
-        outbound.bind_timed_clock(clock).unwrap();
+        outbound.bind_media_clock(clock.clone()).unwrap();
         for index in 0..2 {
             let born = clock.reference().now_ns;
             writer.write(
@@ -1559,10 +1706,11 @@ mod tests {
             state.encode_unit = Some(160);
             state.prepared_result = 1;
         }
-        let clock = SourceTimeClock::new(std::time::Instant::now()).unwrap();
+        let origin = 1_000_000_000_000;
+        let clock = crate::services::clock_tests::clock(origin);
         let (mut writer, reader) = LinkAudioQueue::new(1920, 4).unwrap().into_endpoints();
         let mut outbound = Outbound::new(8000, reader).unwrap();
-        outbound.bind_timed_clock(clock).unwrap();
+        outbound.bind_media_clock(clock.clone()).unwrap();
         let born = clock.reference().now_ns;
         writer.write(
             AudioSpan {
@@ -1573,7 +1721,8 @@ mod tests {
             &[0.25; 1920],
         );
         for now in 0..5 {
-            outbound.step(&mut io, now * 20).unwrap();
+            crate::services::clock_tests::set(origin + now * 20_000_000);
+            outbound.step(&mut io, 9000 + now * 20).unwrap();
         }
         let deadline = *state
             .lock()
@@ -1581,7 +1730,8 @@ mod tests {
             .timed_deadlines
             .first()
             .expect("ordinary restricted peer uses the timed provider path");
-        outbound.step(&mut io, 101).unwrap();
+        crate::services::clock_tests::set(origin + 101_000_000);
+        outbound.step(&mut io, 9101).unwrap();
         assert!(
             state
                 .lock()
@@ -1624,7 +1774,7 @@ mod tests {
         let clock = SourceTimeClock::new(std::time::Instant::now()).unwrap();
         let (mut writer, reader) = LinkAudioQueue::new(960, 4).unwrap().into_endpoints();
         let mut outbound = Outbound::new(8000, reader).unwrap();
-        outbound.bind_timed_clock(clock).unwrap();
+        outbound.bind_media_clock(clock.clone()).unwrap();
         let born = clock.reference().now_ns;
         writer.write(
             AudioSpan {

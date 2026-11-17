@@ -39,7 +39,12 @@ fn stage_c_clock_provider_reads_only_complete_nonnull_optional_field() {
     assert!(api.monotonic_now_ns.is_some());
     for size in [16, 191, 192, 193, 199, 200, 208, 209, 215, 216, 224] {
         replace_audio(&mut providers, &api, size);
-        let reader = providers.media_clock_reader();
+        let result = providers.media_clock_reader();
+        if size != 192 && size < 200 {
+            assert!(result.is_err(), "invalid required base {size}");
+            continue;
+        }
+        let reader = result.unwrap();
         assert_eq!(reader.is_some(), size >= 216, "extent {size}");
         if let Some(reader) = reader {
             assert!(unsafe { reader() } > 0);
@@ -48,11 +53,11 @@ fn stage_c_clock_provider_reads_only_complete_nonnull_optional_field() {
     let mut absent = api;
     absent.monotonic_now_ns = None;
     replace_audio(&mut providers, &absent, 216);
-    assert!(providers.media_clock_reader().is_none());
+    assert!(providers.media_clock_reader().unwrap().is_none());
     let mut invalid = api;
     invalid.abi_version = 0;
     replace_audio(&mut providers, &invalid, 216);
-    assert!(providers.media_clock_reader().is_none());
+    assert!(providers.media_clock_reader().is_err());
     // Retained storage bounds win even when an advertised extent is larger.
     replace_audio(&mut providers, &api, 208);
     let loaded = providers
@@ -61,7 +66,21 @@ fn stage_c_clock_provider_reads_only_complete_nonnull_optional_field() {
         .find(|p| p.library == AUDIO)
         .unwrap();
     unsafe { loaded.descriptor.as_ptr().cast::<u32>().write(216) };
-    assert!(providers.media_clock_reader().is_none());
+    assert!(providers.media_clock_reader().is_err());
+    // Invalid retained extent cannot masquerade as absence even with a smaller advertisement.
+    replace_audio(&mut providers, &api, 216);
+    let loaded = providers
+        .descriptors
+        .iter_mut()
+        .find(|p| p.library == AUDIO)
+        .unwrap();
+    loaded.size = 191;
+    assert!(providers.media_clock_reader().is_err());
+    providers.descriptors.retain(|p| p.library != AUDIO);
+    assert!(matches!(
+        providers.media_clock_reader(),
+        Err(ProviderError::MissingDescriptor(AUDIO))
+    ));
 }
 
 /// Attach a test DSO to the actual ProviderSet; destructor records the unload boundary.

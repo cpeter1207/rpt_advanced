@@ -596,7 +596,10 @@ impl Host {
         let phone_calls = PhoneCalls::new(128, 16).map_err(|_| RuntimeError::Preparation)?;
         let mut text = TextExecutor::new(document.nodes().len().max(1), media.clone())
             .map_err(|_| RuntimeError::Preparation)?;
-        let peer_io = PeerIoWorker::start(epoch).map_err(|_| RuntimeError::Device)?;
+        let media_clock = crate::services::SourceTimeClock::prepare(services, epoch)
+            .ok_or(RuntimeError::Preparation)?;
+        let peer_io = PeerIoWorker::with_clock(epoch, media_clock.clone())
+            .map_err(|_| RuntimeError::Device)?;
         let mut leases = Vec::new();
         let mut media_workers = Vec::new();
         let runtime = Runtime::start(
@@ -620,7 +623,7 @@ impl Host {
                     owners: None,
                     worker: None,
                     epoch,
-                    status: crate::worker::RadioStatus::with_epoch(epoch),
+                    status: crate::worker::RadioStatus::with_clock(media_clock.clone()),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
                 Ok(Box::new(Device {
@@ -766,6 +769,7 @@ impl Host {
         let media_workers = &mut self.media_workers;
         let leases = &mut self.leases;
         let epoch = self.epoch;
+        let media_clock = self.peer_io.media_clock();
         let services = self.services;
         let result = self.runtime.prepare_reload(
             document,
@@ -803,7 +807,7 @@ impl Host {
                     owners: None,
                     worker: None,
                     epoch,
-                    status: crate::worker::RadioStatus::with_epoch(epoch),
+                    status: crate::worker::RadioStatus::with_clock(media_clock.clone()),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
                 Ok(Box::new(Device {
@@ -1986,8 +1990,14 @@ impl Host {
             .collect();
         self.status_post.configure(config);
     }
+    /// Revoke the retained media epoch before any terminal-stop step can fail.
+    pub(crate) fn invalidate_media_clock(&self) {
+        self.peer_io.invalidate_clock();
+    }
+
     /// Gate audio, stop media distribution, quiesce peers, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
+        self.invalidate_media_clock();
         Self::retire_phones(&mut self.runtime, &mut self.phone_calls);
         self.remote_pending.clear();
         if self.site_shutdown(now_ms) != Ok(true) {

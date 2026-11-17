@@ -791,3 +791,21 @@ idle markers), received samples, intentional congestion and host overload.
 Timing measurements are host-specific observations, not CI timing thresholds.
 
 See [the ADR index](decisions/README.md).
+
+
+The local Stage C clock slice selects one immutable product media origin before
+preparing audio. The optional standalone reader supplies current monotonic
+software time; absent old-host readers retain the existing Instant media axis.
+Source/I/O readers share sticky qualification and a non-reused epoch but keep
+serial regression histories independent. Reload and new radios retain this
+origin. Terminal stop invalidates it before potentially failing joins. Only
+relative waits cross media/protocol scheduling boundaries. This does not bind
+the future observed final-age policy or establish physical presentation; see
+the Stage C checkpoint in ADR 0044.
+
+
+Standalone capability publication distinguishes a valid absent optional reader
+from a malformed required audio descriptor: absence publishes a null host getter
+and preserves ordinary new-host/old-adapter behavior; malformed preparation
+fails. An advertised getter/read failure still never selects the legacy axis.
+SDK mandatory audio-function validation remains authoritative.

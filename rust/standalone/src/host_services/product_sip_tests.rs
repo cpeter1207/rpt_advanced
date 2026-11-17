@@ -774,3 +774,123 @@ fn literal_prompt_completion_accounts_for_the_last_source_packet() {
         "prompt advanced {advanced:?} of RTP but returned after {elapsed:?}"
     );
 }
+
+// Actual new product + standalone host, with each supported absent-clock table.
+// No SIP call: reuse only the existing ordinary IAX remote and simulated radio callbacks.
+#[test]
+fn stage_c_clock_old_adapter_new_host_preserves_ordinary_source_admission() {
+    const CHILD: &str = "RPTADV_TEST_C4_OLD_AUDIO";
+    if std::env::var_os(CHILD).is_none() {
+        for size in std::iter::once(192).chain(200..=216) {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "host_services::product_phone_tests::sip::stage_c_clock_old_adapter_new_host_preserves_ordinary_source_admission", "--nocapture"])
+                .env(CHILD, size.to_string()).output().unwrap();
+            assert!(
+                output.status.success(),
+                "absent-clock extent {size} child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            eprintln!(
+                "ordinary-source absent-clock extent {size}: admitted, fresh radio PCM delivered, stopped"
+            );
+        }
+        return;
+    }
+    let extent: usize = std::env::var(CHILD).unwrap().parse().unwrap();
+    let directory = std::env::temp_dir().join(format!("rpt-c4-old-audio-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    let mut remote = vox::Remote::new();
+    let path = directory.join("nodes.conf");
+    fs::write(
+        &path,
+        format!("[extnodes]\n2000=radio@{}/2000,127.0.0.1\n", remote.address),
+    )
+    .unwrap();
+    let configuration = format!(
+        "[general]\nnode_enabled=yes\n[1000]\nradio_channel=fixture\nduplex=full\nlink_lookup_method=file\nlink_static_directory_file={}\n",
+        path.display()
+    );
+    let mut providers = Box::new(ProviderSet::load().unwrap());
+    let mut audio = unsafe {
+        *providers
+            .descriptor(crate::providers::clock_tests::AUDIO)
+            .unwrap()
+            .as_ptr()
+            .cast::<abi::rptadv_audio_adapter_descriptor>()
+    };
+    if extent == 216 {
+        audio.monotonic_now_ns = None;
+    }
+    crate::providers::clock_tests::replace_audio(&mut providers, &audio, extent);
+    let provider_ref: &'static ProviderSet = unsafe { &*ptr::from_ref(providers.as_ref()) };
+    let descriptors = provider_ref.product_runtime_descriptors().unwrap();
+    let mut host = HostServicesOwner::new(
+        resolve_radio_nodes(&configuration).unwrap(),
+        Some(provider_ref),
+        SecretsFile::parse("").unwrap(),
+    )
+    .unwrap();
+    // Deliberately exercise traffic before asserting the advertisement, so RED proves
+    // the actual C4 consumer regression rather than only a descriptor mismatch.
+    let advertised = host.descriptor().media_clock_reader.is_some();
+    install_simulated_radio(&mut host);
+    let mut runtime = unsafe {
+        ProductRuntime::start(
+            &descriptors.product,
+            host,
+            descriptors.control,
+            descriptors.file,
+            descriptors.speech,
+            &configuration,
+        )
+    }
+    .unwrap();
+    runtime.enable_listener(&mut remote.server).unwrap();
+    let command = runtime.product_descriptor().link_command.unwrap();
+    let ordinary =
+        thread::spawn(move || unsafe { command(c"1000".as_ptr(), 4, c"2000".as_ptr(), 4, 1) });
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !ordinary.is_finished() && Instant::now() < deadline {
+        remote.pump();
+        thread::sleep(Duration::from_millis(1));
+    }
+    let admitted = ordinary.join().unwrap();
+    // Drain any connection notice before testing fresh physical-fixture input.
+    // Otherwise a notice could satisfy the remote nonzero-audio observation.
+    let mut quiet_since = Instant::now();
+    let mut previous = remote.voiced_samples();
+    while quiet_since.elapsed() < Duration::from_millis(750) {
+        remote.pump();
+        let current = remote.voiced_samples();
+        if current != previous {
+            quiet_since = Instant::now();
+            previous = current;
+        }
+        assert!(Instant::now() < deadline, "ordinary notices must drain");
+        thread::sleep(Duration::from_millis(1));
+    }
+    remote.clear_voice_observation();
+    let source_turns = LOCAL_RX_KEYED_TURNS.load(Ordering::Acquire);
+    LOCAL_INPUT.store(true, Ordering::Release);
+    while remote.voiced_samples() == 0 && Instant::now() < deadline {
+        remote.pump();
+        thread::sleep(Duration::from_millis(1));
+    }
+    LOCAL_INPUT.store(false, Ordering::Release);
+    let voiced = remote.voiced_samples();
+    runtime.stop().unwrap();
+    drop(remote);
+    drop(providers);
+    fs::remove_dir_all(directory).unwrap();
+    assert_eq!(admitted, 0, "old adapter ordinary admission");
+    assert!(LOCAL_RX_KEYED_TURNS.load(Ordering::Acquire) > source_turns);
+    assert!(
+        voiced > 0,
+        "actual source births must remain qualified and reach the ordinary peer"
+    );
+    assert!(
+        !advertised,
+        "absent reader must publish absent capability, not a failing getter"
+    );
+}

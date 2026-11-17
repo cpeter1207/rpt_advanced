@@ -3076,3 +3076,221 @@ fn source_retirement_skips_removed_nodes_awaiting_reclamation() {
     pump_until(&mut host, |host| host.runtime.status(40).is_empty());
     assert!(host.stop(40));
 }
+
+#[test]
+fn stage_c_clock_origin_and_fault_prepares_once_for_actual_host_sources() {
+    static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static RAW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_000_000_000_000);
+    unsafe extern "C" fn read() -> u64 {
+        READS.fetch_add(1, Ordering::Relaxed);
+        RAW.load(Ordering::Relaxed)
+    }
+    unsafe extern "C" fn getter(
+        _: *mut c_void,
+        out: *mut abi::rptadv_media_clock_reader_v1,
+    ) -> i32 {
+        let out = unsafe { &mut *out };
+        out.clock_kind = 1;
+        out.read_ns = Some(read);
+        0
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    READS.store(0, Ordering::Relaxed);
+    RAW.store(1_000_000_000_000, Ordering::Relaxed);
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.context = ptr::without_provenance_mut(1);
+    table.media_clock_reader = Some(getter);
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let mut host = Host::start(
+        document("usb", ""),
+        media(),
+        services,
+        Instant::now() - Duration::from_secs(9),
+        clock(),
+    )
+    .unwrap();
+    assert!(
+        READS.load(Ordering::Relaxed) > 0,
+        "actual host must prepare its provider origin"
+    );
+    let source = Arc::clone(&host.leases[0].1.lock().unwrap().status.source_clock);
+    source.restart();
+    source.advance(960);
+    RAW.store(1_000_400_000_000, Ordering::Relaxed);
+    source.observe();
+    assert_eq!(source.advance(960).born_ns, Some(420_000_000));
+    RAW.store(1_000_300_000_000, Ordering::Relaxed);
+    source.observe();
+    assert_eq!(source.advance(960).born_ns, None);
+    RAW.store(1_000_500_000_000, Ordering::Relaxed);
+    source.restart();
+    source.observe();
+    assert_eq!(
+        source.advance(960).born_ns,
+        None,
+        "restart cannot reopen faulted epoch"
+    );
+    assert!(host.stop(10));
+}
+
+pub(crate) fn retained_media_clock(host: &Host) -> crate::services::SourceTimeClock {
+    host.peer_io.media_clock()
+}
+pub(crate) mod clock_fixture {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    pub(crate) static LIVE: AtomicBool = AtomicBool::new(true);
+    pub(crate) static VIOLATION: AtomicBool = AtomicBool::new(false);
+    pub(crate) static GETS: AtomicUsize = AtomicUsize::new(0);
+    pub(crate) static READS: AtomicUsize = AtomicUsize::new(0);
+    pub(crate) static SOURCE: AtomicUsize = AtomicUsize::new(0);
+    pub(crate) static IO: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn read() -> u64 {
+        if !LIVE.load(Ordering::Acquire) {
+            VIOLATION.store(true, Ordering::Release);
+        }
+        READS.fetch_add(1, Ordering::Relaxed);
+        match std::thread::current().name() {
+            Some("rpt-media") => {
+                SOURCE.fetch_add(1, Ordering::Relaxed);
+            }
+            Some("rpt-peer-io") => {
+                IO.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        1_000_000_000_000
+    }
+    unsafe extern "C" fn getter(
+        _: *mut c_void,
+        out: *mut abi::rptadv_media_clock_reader_v1,
+    ) -> i32 {
+        GETS.fetch_add(1, Ordering::Relaxed);
+        let out = unsafe { &mut *out };
+        out.clock_kind = 1;
+        out.read_ns = Some(read);
+        0
+    }
+    pub(crate) fn table() -> abi::rptadv_host_services_v10 {
+        LIVE.store(true, Ordering::Release);
+        VIOLATION.store(false, Ordering::Release);
+        for counter in [&GETS, &READS, &SOURCE, &IO] {
+            counter.store(0, Ordering::Relaxed);
+        }
+        let mut table = unsafe { crate::fixture::host_descriptor().read() };
+        table.context = ptr::without_provenance_mut(1);
+        table.media_clock_reader = Some(getter);
+        table
+    }
+}
+#[test]
+fn stage_c_clock_origin_and_fault_actual_consumers_reload_and_rollback() {
+    use clock_fixture::*;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let table = Box::leak(Box::new(table()));
+    let services = unsafe { HostServices::open(table) }.unwrap();
+    crate::fixture::RADIO_ACTIVATE_RESULT.store(1, Ordering::Release);
+    assert!(
+        Host::start(
+            document("usb", ""),
+            media(),
+            services,
+            Instant::now(),
+            clock()
+        )
+        .is_err()
+    );
+    let after_rollback = READS.load(Ordering::Relaxed);
+    assert!(after_rollback > 0);
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(READS.load(Ordering::Relaxed), after_rollback);
+    let mut host = Host::start(
+        document("usb", ""),
+        media(),
+        services,
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let retained = retained_media_clock(&host);
+    let epoch = retained.identity();
+    let state = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    for _ in 0..200 {
+        if SOURCE.load(Ordering::Relaxed) > 0 && IO.load(Ordering::Relaxed) > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        SOURCE.load(Ordering::Relaxed) > 0,
+        "actual dispatcher SourceClock must read"
+    );
+    assert!(IO.load(Ordering::Relaxed) > 0, "actual peer I/O must read");
+    let getters = GETS.load(Ordering::Relaxed);
+    host.reload(
+        document("usb", "[2000]\nradio_channel=usb2\nduplex=full\n"),
+        clock(),
+    )
+    .unwrap();
+    assert_eq!(
+        GETS.load(Ordering::Relaxed),
+        getters,
+        "reload must not choose another origin"
+    );
+    assert_eq!(host.peer_io.source_clock_epoch(), epoch);
+    let new_source = Arc::clone(
+        &host
+            .leases
+            .iter()
+            .find(|(name, _)| name == "2000")
+            .unwrap()
+            .1
+            .lock()
+            .unwrap()
+            .status
+            .source_clock,
+    );
+    new_source.restart();
+    new_source.advance(960);
+    new_source.observe();
+    assert_eq!(new_source.advance(960).born_ns, Some(20_000_000));
+    assert!(host.stop(20));
+    assert_eq!(state.lock().unwrap().drops, 1);
+    drop(host);
+    LIVE.store(false, Ordering::Release);
+    let after = READS.load(Ordering::Relaxed);
+    assert_eq!(retained.reference().host_clock_epoch, 0);
+    new_source.observe();
+    assert_eq!(new_source.advance(960).born_ns, None);
+    assert_eq!(READS.load(Ordering::Relaxed), after);
+    assert!(!VIOLATION.load(Ordering::Acquire));
+}
+
+#[test]
+fn stage_c_clock_absent_getter_preserves_actual_host_source_birth() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.context = ptr::without_provenance_mut(1);
+    table.media_clock_reader = None;
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let epoch = Instant::now() - Duration::from_secs(9);
+    let mut host = Host::start(document("usb", ""), media(), services, epoch, clock()).unwrap();
+    let source = Arc::clone(&host.leases[0].1.lock().unwrap().status.source_clock);
+    source.restart();
+    source.advance(960);
+    source.observe();
+    let born = source
+        .advance(960)
+        .born_ns
+        .expect("legacy source birth stays qualified");
+    assert!(born >= 9_020_000_000);
+    assert!(born <= epoch.elapsed().as_nanos() as u64 + 20_000_000);
+    assert_ne!(host.peer_io.media_clock().reference().host_clock_epoch, 0);
+    assert!(host.stop(10));
+}

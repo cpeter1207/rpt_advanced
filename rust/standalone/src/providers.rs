@@ -621,35 +621,44 @@ impl ProviderSet {
         })
     }
 
-    /// Prepare the optional reader off audio from the same retained native audio descriptor.
-    /// Never forms a complete new-layout reference to older provider storage.
-    pub(crate) fn media_clock_reader(&self) -> Option<unsafe extern "C" fn() -> u64> {
+    /// Prepare the optional reader off audio from the retained native audio descriptor.
+    /// Absence is a capability choice; malformed required storage is a preparation error.
+    /// The SDK remains responsible for validating mandatory audio function pointers.
+    pub(crate) fn media_clock_reader(
+        &self,
+    ) -> Result<Option<unsafe extern "C" fn() -> u64>, ProviderError> {
         const AUDIO: &str = "librptadv_portaudio_alsa_adapter.so.2";
         type Reader = Option<unsafe extern "C" fn() -> u64>;
-        let pointer = self
-            .checked_descriptor::<NamedDescriptorHeader>(AUDIO)
-            .ok()?;
+        let pointer = self.checked_descriptor::<NamedDescriptorHeader>(AUDIO)?;
+        let loaded = self
+            .descriptors
+            .iter()
+            .find(|provider| provider.library == AUDIO)
+            .ok_or(ProviderError::MissingDescriptor(AUDIO))?;
+        let advertised = descriptor_size(pointer.as_ptr(), DescriptorLayout::Named);
+        // Exactly the old SDK base or a complete current base; never interpret a
+        // partial required field as an absent optional clock. No enlarged reference.
+        let valid_base = |size| size == 192 || size >= 200;
+        if !valid_base(loaded.size) || !valid_base(advertised) || advertised > loaded.size {
+            return Err(ProviderError::IncompleteDescriptor(AUDIO));
+        }
         let offset = std::mem::offset_of!(
             crate::abi::rptadv_audio_adapter_descriptor,
             monotonic_now_ns
         );
         let end = offset + std::mem::size_of::<Reader>();
-        let loaded = self
-            .descriptors
-            .iter()
-            .find(|provider| provider.library == AUDIO)?;
-        if loaded.size < end || descriptor_size(pointer.as_ptr(), DescriptorLayout::Named) < end {
-            return None;
+        if advertised < end {
+            return Ok(None);
         }
         // SAFETY: both retained extent and advertised size contain this entire optional field.
-        unsafe {
+        Ok(unsafe {
             pointer
                 .as_ptr()
                 .cast::<u8>()
                 .add(offset)
                 .cast::<Reader>()
                 .read_unaligned()
-        }
+        })
     }
 
     /// Borrow validated product lifecycle descriptors while retaining all provider libraries.

@@ -7,7 +7,7 @@ use std::{
 
 /// Stable per-device clock, retained across configuration changes and physical reopen.
 pub(crate) struct SourceClock {
-    epoch: Instant,
+    epoch: crate::services::SourceTimeClock,
     next: AtomicU64,
     stream: AtomicU64,
     published_stream: AtomicU64,
@@ -33,7 +33,11 @@ impl SourceClock {
     pub(crate) fn stream(&self) -> u64 {
         self.stream.load(Ordering::Acquire)
     }
+    #[cfg(test)]
     pub(crate) fn new(epoch: Instant) -> Self {
+        Self::with_clock(crate::services::SourceTimeClock::new(epoch).expect("test epoch"))
+    }
+    pub(crate) fn with_clock(epoch: crate::services::SourceTimeClock) -> Self {
         Self {
             epoch,
             next: AtomicU64::new(0),
@@ -54,7 +58,9 @@ impl SourceClock {
     pub(crate) fn advance(&self, count: usize) -> Stamp {
         let stream = self.stream();
         let sample = self.next.fetch_add(count as u64, Ordering::Relaxed);
-        let born_ns = (stream != 0 && self.mapped_stream.load(Ordering::Acquire) == stream)
+        let born_ns = (self.epoch.available()
+            && stream != 0
+            && self.mapped_stream.load(Ordering::Acquire) == stream)
             .then(|| sample_ns(sample) + i128::from(self.offset.load(Ordering::Relaxed)))
             .and_then(|time| u64::try_from(time).ok());
         self.published_start.store(sample, Ordering::Relaxed);
@@ -67,33 +73,45 @@ impl SourceClock {
     }
     /// Sole media owner observes real callback progress, never preparation or idle wall time.
     pub(crate) fn observe(&self) {
-        self.observe_at(self.epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+        let reference = self.epoch.reference();
+        if reference.host_clock_epoch == 0 {
+            self.mapped_stream.store(0, Ordering::Release);
+            return;
+        }
+        if !self.observe_at(reference.now_ns) {
+            self.epoch.invalidate();
+            self.mapped_stream.store(0, Ordering::Release);
+        }
     }
-    fn observe_at(&self, now_ns: u64) {
+    fn observe_at(&self, now_ns: u64) -> bool {
         let stream = self.stream.load(Ordering::Acquire);
         if stream == 0 || self.published_stream.load(Ordering::Acquire) != stream {
-            return;
+            return true;
         }
         let sample = self.published_start.load(Ordering::Relaxed);
         if self.observed_stream.load(Ordering::Relaxed) == stream
             && self.observed_start.load(Ordering::Relaxed) == sample
         {
-            return;
+            return true;
         }
         let Ok(offset) = i64::try_from(i128::from(now_ns) - sample_ns(sample)) else {
-            return;
+            return false;
         };
         self.offset.store(offset, Ordering::Relaxed);
         // An observation racing reopen retains its old serial, so new callbacks reject it.
         self.mapped_stream.store(stream, Ordering::Release);
         self.observed_start.store(sample, Ordering::Relaxed);
         self.observed_stream.store(stream, Ordering::Relaxed);
+        true
     }
 }
 
 impl Default for SourceClock {
     fn default() -> Self {
-        Self::new(Instant::now())
+        Self::with_clock(
+            crate::services::SourceTimeClock::new(Instant::now())
+                .expect("source clock epoch exhausted"),
+        )
     }
 }
 
@@ -101,6 +119,22 @@ impl Default for SourceClock {
 mod tests {
     use super::*;
 
+    #[test]
+    fn stage_c_clock_origin_and_fault_mapping_overflow_invalidates_before_next_stamp() {
+        use crate::services::clock_tests::{clock, set};
+        let origin = 1_000_000_000_000;
+        let clock = clock(origin);
+        let source = SourceClock::with_clock(clock.clone());
+        source.restart();
+        source.advance(960);
+        set(origin + 400_000_000);
+        source.observe();
+        assert_eq!(source.advance(960).born_ns, Some(420_000_000));
+        set(u64::MAX); // Valid raw scalar, but cannot represent this source mapping.
+        source.observe();
+        assert_eq!(source.advance(960).born_ns, None);
+        assert_eq!(clock.reference().host_clock_epoch, 0);
+    }
     #[test]
     fn egress_clock_ignores_unstarted_and_unrepresentable_observations() {
         let clock = SourceClock::default();

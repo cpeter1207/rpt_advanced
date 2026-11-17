@@ -77,6 +77,13 @@ impl HostServicesOwner {
                 })
             })
             .transpose()?;
+        // Publish capability from validated retained storage, without sampling the clock.
+        // Once advertised, any later getter/read failure is C4's sticky unavailable state.
+        let has_media_clock = providers
+            .map(crate::providers::ProviderSet::media_clock_reader)
+            .transpose()?
+            .flatten()
+            .is_some();
         let mut context = Box::new(StandaloneHostContext {
             radio: RadioHostContext::new(radios, providers),
             resolver,
@@ -141,7 +148,7 @@ impl HostServicesOwner {
             peer_dial_timed_g711: Some(peer_dial_timed_g711),
             peer_dial_phone: Some(sip_phone::dial),
             peer_dial_phone_progress: Some(sip_phone::dial_progress),
-            media_clock_reader: Some(media_clock_reader),
+            media_clock_reader: has_media_clock.then_some(media_clock_reader),
         });
         Ok(Self {
             context,
@@ -933,7 +940,7 @@ unsafe extern "C" fn media_clock_reader(
         out.read_ns = None;
         let reader = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
             .and_then(|context| context.radio.providers)
-            .and_then(crate::providers::ProviderSet::media_clock_reader);
+            .and_then(|providers| providers.media_clock_reader().ok().flatten());
         let Some(reader) = reader else {
             return -1;
         };
@@ -2242,14 +2249,27 @@ pub(crate) mod tests {
             api.struct_size, 448,
             "append a control-only clock getter to ABI 10"
         );
-        let getter = unsafe {
+        let advertised = unsafe {
             std::ptr::from_ref(api)
                 .cast::<u8>()
                 .add(440)
                 .cast::<Option<Getter>>()
                 .read()
-        }
-        .expect("standalone advertises the optional getter");
+        };
+        assert!(
+            advertised.is_none(),
+            "explicit no-provider fixture has no clock capability"
+        );
+        // The callback itself still rejects malformed requests and clears valid failure output.
+        let getter: Getter = unsafe {
+            std::mem::transmute(
+                super::media_clock_reader
+                    as unsafe extern "C" fn(
+                        *mut c_void,
+                        *mut abi::rptadv_media_clock_reader_v1,
+                    ) -> i32,
+            )
+        };
         assert_ne!(unsafe { getter(api.context, std::ptr::null_mut()) }, 0);
         for size in [0, 4, 8, 16, 23, 24, 32] {
             for version in [0, 1, 2] {
@@ -2275,6 +2295,63 @@ pub(crate) mod tests {
                 assert!(out.read.is_none());
             }
         }
+    }
+
+    #[test]
+    fn stage_c_clock_host_publication_distinguishes_absence_from_malformed_audio() {
+        use crate::providers::clock_tests::{AUDIO, replace_audio};
+        let mut providers = crate::providers::ProviderSet::load().unwrap();
+        let api = unsafe {
+            *providers
+                .descriptor(AUDIO)
+                .unwrap()
+                .as_ptr()
+                .cast::<abi::rptadv_audio_adapter_descriptor>()
+        };
+        for size in [16, 191, 192, 193, 199, 200, 208, 209, 215, 216, 224] {
+            replace_audio(&mut providers, &api, size);
+            let retained = unsafe { &*std::ptr::from_ref(&providers) };
+            let result =
+                HostServicesOwner::new(Vec::new(), Some(retained), SecretsFile::parse("").unwrap());
+            if size == 192 || size >= 200 {
+                let owner = result.unwrap();
+                assert_eq!(
+                    owner.descriptor().media_clock_reader.is_some(),
+                    size >= 216,
+                    "extent {size}"
+                );
+            } else {
+                assert!(
+                    result.is_err(),
+                    "malformed base extent {size} must not select Legacy"
+                );
+            }
+        }
+        let mut absent = api;
+        absent.monotonic_now_ns = None;
+        replace_audio(&mut providers, &absent, 216);
+        let retained = unsafe { &*std::ptr::from_ref(&providers) };
+        assert!(
+            HostServicesOwner::new(Vec::new(), Some(retained), SecretsFile::parse("").unwrap())
+                .unwrap()
+                .descriptor()
+                .media_clock_reader
+                .is_none()
+        );
+        let mut malformed = api;
+        malformed.abi_version = 0;
+        replace_audio(&mut providers, &malformed, 216);
+        assert!(
+            HostServicesOwner::new(Vec::new(), Some(retained), SecretsFile::parse("").unwrap())
+                .is_err()
+        );
+        malformed = api;
+        malformed.capability_name = c"wrong-audio".as_ptr();
+        replace_audio(&mut providers, &malformed, 216);
+        assert!(
+            HostServicesOwner::new(Vec::new(), Some(retained), SecretsFile::parse("").unwrap())
+                .is_err()
+        );
     }
 
     #[test]

@@ -2083,3 +2083,99 @@ fn ticker_route_and_peer_digits_drive_serialized_background_work() {
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
     crate::fixture::RADIO_READY.store(0, Ordering::Release);
 }
+
+#[test]
+fn stage_c_clock_origin_and_fault_actual_engine_failed_stop_invalidates_before_join() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    let table = crate::host::tests::clock_fixture::table();
+    let configuration = active_configuration("");
+    PANIC_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(
+        unsafe {
+            descriptor().start.unwrap()(
+                &table,
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                configuration.as_ptr().cast(),
+                configuration.len(),
+            )
+        },
+        0
+    );
+    let (engine, call) = selected().unwrap();
+    let retained =
+        crate::host::tests::retained_media_clock(engine.host.lock().unwrap().as_ref().unwrap());
+    drop(call);
+    assert_ne!(retained.identity(), 0);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, -1);
+    let qualified = retained.available();
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert!(
+        !qualified,
+        "the first failed stop must invalidate before ticker/job joins"
+    );
+    let before = crate::host::tests::clock_fixture::READS.load(Ordering::Relaxed);
+    crate::host::tests::clock_fixture::LIVE.store(false, Ordering::Release);
+    assert_eq!(retained.reference().host_clock_epoch, 0);
+    drop(engine);
+    assert_eq!(
+        crate::host::tests::clock_fixture::READS.load(Ordering::Relaxed),
+        before
+    );
+    assert!(!crate::host::tests::clock_fixture::VIOLATION.load(Ordering::Acquire));
+}
+
+#[test]
+fn stage_c_clock_origin_and_fault_startup_rollback_retains_failed_stop_owners() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    let table = crate::host::tests::clock_fixture::table();
+    let configuration = active_configuration("");
+    FAIL_TICKER_THREAD.store(true, Ordering::Release);
+    HOST_STOP_MODE.store(2, Ordering::Release);
+    assert_eq!(
+        unsafe {
+            descriptor().start.unwrap()(
+                &table,
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                configuration.as_ptr().cast(),
+                configuration.len(),
+            )
+        },
+        0,
+        "ambiguous rollback retains the real engine and host"
+    );
+    let engine = ENGINE.lock().unwrap().as_ref().unwrap().clone();
+    let retained = crate::host::tests::retained_media_clock(
+        engine
+            .host
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .unwrap(),
+    );
+    assert!(
+        !retained.available(),
+        "startup rollback invalidates before its failed stop"
+    );
+    assert!(crate::host::tests::clock_fixture::READS.load(Ordering::Relaxed) > 0);
+    assert!(crate::host::tests::clock_fixture::LIVE.load(Ordering::Acquire));
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    drop(engine);
+    let before = crate::host::tests::clock_fixture::READS.load(Ordering::Relaxed);
+    crate::host::tests::clock_fixture::LIVE.store(false, Ordering::Release);
+    assert_eq!(retained.reference().host_clock_epoch, 0);
+    assert_eq!(
+        crate::host::tests::clock_fixture::READS.load(Ordering::Relaxed),
+        before
+    );
+    assert!(!crate::host::tests::clock_fixture::VIOLATION.load(Ordering::Acquire));
+}

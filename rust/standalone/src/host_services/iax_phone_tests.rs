@@ -571,39 +571,41 @@ fn read(
 }
 #[test]
 fn timed_source_retains_refused_digit_then_exact_pcm_suffix_and_original_birth() {
-    let owner = owner();
-    let account = account();
-    let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
-    PROVIDER.with_borrow_mut(|state| {
-        state.events = [Event::Reset(1), Event::Digit(b'5'), Event::Audio].into()
-    });
-    read(&handle, None, 10_000);
-    PROVIDER.with_borrow(|state| assert_eq!(state.polls, 0));
-    let mut sink = Sink::default();
-    for turn in 0..12 {
-        read(&handle, Some(&mut sink), 10_000 + turn * 1000);
-        if sink.audio_offers.len() == 3 {
-            break;
+    for reference_origin in [10_000, 400_000_000] {
+        let owner = owner();
+        let account = account();
+        let handle = handle(&owner, &account, "127.0.0.1:4569".parse().unwrap());
+        PROVIDER.with_borrow_mut(|state| {
+            state.events = [Event::Reset(1), Event::Digit(b'5'), Event::Audio].into()
+        });
+        read(&handle, None, reference_origin);
+        PROVIDER.with_borrow(|state| assert_eq!(state.polls, 0));
+        let mut sink = Sink::default();
+        for turn in 0..12 {
+            read(&handle, Some(&mut sink), reference_origin + turn * 1000);
+            if sink.audio_offers.len() == 3 {
+                break;
+            }
+            if sink.digit_offers.len() == 1 {
+                assert!(sink.audio_offers.is_empty());
+                PROVIDER.with_borrow(|state| assert_eq!(state.polls, 2));
+            }
         }
-        if sink.digit_offers.len() == 1 {
-            assert!(sink.audio_offers.is_empty());
-            PROVIDER.with_borrow(|state| assert_eq!(state.polls, 2));
-        }
+        assert_eq!(sink.digit_offers, [b'5' as u32, b'5' as u32]);
+        assert_eq!(
+            sink.audio_offers,
+            [
+                (0, vec![0.25, 0.5, 0.75, 1.0], 9, 700),
+                (2, vec![0.75, 1.0], 9, 700),
+                (2, vec![0.75, 1.0], 9, 700),
+            ]
+        );
+        PROVIDER.with_borrow(|state| {
+            assert_eq!(state.legacy_reads, 0);
+            assert_eq!(state.polls, 3);
+            assert_eq!(state.acknowledgements, [0, 1, 1]);
+        });
     }
-    assert_eq!(sink.digit_offers, [b'5' as u32, b'5' as u32]);
-    assert_eq!(
-        sink.audio_offers,
-        [
-            (0, vec![0.25, 0.5, 0.75, 1.0], 9, 700),
-            (2, vec![0.75, 1.0], 9, 700),
-            (2, vec![0.75, 1.0], 9, 700),
-        ]
-    );
-    PROVIDER.with_borrow(|state| {
-        assert_eq!(state.legacy_reads, 0);
-        assert_eq!(state.polls, 3);
-        assert_eq!(state.acknowledgements, [0, 1, 1]);
-    });
 }
 #[test]
 fn provider_reset_is_acknowledged_only_after_exact_product_retirement() {
