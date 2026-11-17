@@ -22,6 +22,7 @@ const BUCKETS: usize = 64;
 const RETIRED: u8 = 0;
 const PREPARED: u8 = 1;
 const ACTIVE: u8 = 2;
+const DOWNLINK_ONLY: u8 = 3;
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
@@ -41,6 +42,7 @@ pub(super) struct Shared {
     origin: MediaOrigin,
     observer: InboundObserver,
     phase: AtomicU8,
+    destination: PeerSignals,
     generation: u64,
     width: u64,
     voiced: bool,
@@ -54,7 +56,7 @@ pub(super) struct Shared {
 }
 impl Shared {
     pub(super) fn occupied(&self) -> bool {
-        self.phase.load(Ordering::Acquire) != RETIRED
+        matches!(self.phase.load(Ordering::Acquire), PREPARED | ACTIVE)
             && self.origin.current()
             && self.reply.phone_media_authorized()
     }
@@ -63,9 +65,24 @@ impl Shared {
             && self.origin.current()
             && self.reply.phone_media_authorized()
     }
+    fn downlink_active(&self) -> bool {
+        matches!(self.phase.load(Ordering::Acquire), ACTIVE | DOWNLINK_ONLY)
+            && self.origin.current()
+            && self.origin.source.attached.load(Ordering::Acquire)
+            && self.reply.phone_media_authorized()
+            && !self.destination.ended()
+    }
+    /// Revoke source/RF history without reviving a prepared or retired destination.
+    fn retire_source(&self) {
+        let _ =
+            self.phase
+                .compare_exchange(ACTIVE, DOWNLINK_ONLY, Ordering::AcqRel, Ordering::Acquire);
+        self.observer.signals().end();
+    }
     pub(super) fn retire(&self) {
         self.phase.store(RETIRED, Ordering::Release);
         self.observer.signals().end();
+        self.destination.end();
     }
     fn slot(&self, index: u64) -> &Bucket {
         &self.buckets[(index % BUCKETS as u64) as usize]
@@ -311,7 +328,16 @@ impl Ingress {
         self.shared.active()
     }
     pub(super) fn guard(&self) -> PeerReply {
-        self.shared.observer.signals().reply_target()
+        self.shared.destination.reply_target()
+    }
+    pub(super) fn downlink_active(&self) -> bool {
+        self.shared.downlink_active()
+    }
+    pub(super) fn downlink_only(&self) -> bool {
+        self.shared.phase.load(Ordering::Acquire) == DOWNLINK_ONLY
+    }
+    pub(super) fn retire_source(&self) {
+        self.shared.retire_source();
     }
     pub(super) fn take_output(&mut self) -> Option<LinkAudioConsumer> {
         self.outbound.take()
@@ -526,6 +552,12 @@ impl PeerInput for TimedInput {
         // media consumer exists. Preserve the same authenticated call token.
         Some(&self.shared.reply)
     }
+    fn destination_signals(&self) -> &PeerSignals {
+        &self.shared.destination
+    }
+    fn destination_available(&self) -> bool {
+        self.shared.downlink_active()
+    }
     fn source_rate(&self) -> u32 {
         self.reader.source_rate()
     }
@@ -675,6 +707,12 @@ impl PeerInput for PhoneMediaInput {
     }
     fn phone_reply(&self) -> Option<&PeerReply> {
         Some(&self.shared.reply)
+    }
+    fn destination_signals(&self) -> &PeerSignals {
+        &self.shared.destination
+    }
+    fn destination_available(&self) -> bool {
+        self.shared.downlink_active()
     }
     fn source_rate(&self) -> u32 {
         self.input.source_rate()
@@ -856,6 +894,7 @@ fn prepare_with_speech(
         origin,
         observer: writer.observer(),
         phase: AtomicU8::new(PREPARED),
+        destination: PeerSignals::new(),
         generation,
         width: u64::from(rate) / 50,
         voiced: speech.is_some(),

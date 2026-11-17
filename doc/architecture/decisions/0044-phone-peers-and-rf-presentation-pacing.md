@@ -2777,3 +2777,21 @@ until confirmed stopped replacement/unbind or synchronous quiescent destruction.
 This checkpoint changes no host table, descriptor ABI, SONAME, callback scheduling,
 production permit, private admission, or Asterisk phone capability. It establishes
 forwarding only, not final-programme policy or physical presentation qualification.
+
+
+### Directional incoming-call destination retirement (2026-11-17)
+
+An already adopted, authenticated and attached incoming phone destination has a
+separate preparation-owned retirement fence from its caller-source generation.
+A generic receive discontinuity may atomically demote ACTIVE to DOWNLINK_ONLY:
+source ring, processing provenance, RF and courtesy fences still retire; no
+caller samples regain transmit authority. Ordinary node programme may continue
+to that exact destination under the original call, attachment and cancellation
+epoch. PREPARED and RETIRED generations cannot acquire this permission.
+
+DTMF/onset, command suppression, errors, explicit retirement, detach, replacement
+and call termination revoke both directions. A digit completed by reset also
+revokes the destination. Each cut still flushes staged output once. Same-call
+replacement retires the previous destination before exchanging queues. Private
+prompt priority and all existing age/expiry limits remain unchanged. Generic
+cuts do not qualify the separate, existing adaptation-only uplink recovery path.

@@ -70,6 +70,12 @@ impl PeerInput for Observed {
     fn phone_reply(&self) -> Option<&PeerReply> {
         self.inner.phone_reply()
     }
+    fn destination_signals(&self) -> &PeerSignals {
+        self.inner.destination_signals()
+    }
+    fn destination_available(&self) -> bool {
+        self.inner.destination_available()
+    }
     fn source_rate(&self) -> u32 {
         self.inner.source_rate()
     }

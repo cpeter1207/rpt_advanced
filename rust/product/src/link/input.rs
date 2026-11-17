@@ -34,6 +34,20 @@ impl PeerInput for AudioInput {
             Self::Phone(input) => input.phone_reply(),
         }
     }
+    fn destination_signals(&self) -> &PeerSignals {
+        match self {
+            Self::Peer(input) => input.destination_signals(),
+            Self::Retained(input) => input.signals(),
+            Self::Phone(input) => input.destination_signals(),
+        }
+    }
+    fn destination_available(&self) -> bool {
+        match self {
+            Self::Peer(input) => input.destination_available(),
+            Self::Retained(_) => false,
+            Self::Phone(input) => input.destination_available(),
+        }
+    }
     fn source_rate(&self) -> u32 {
         match self {
             Self::Peer(input) => input.source_rate(),

@@ -266,7 +266,11 @@ impl PrivatePhoneControl {
             }
             None => media::prepare(self.reply.clone(), self.rate, origin, processor),
         }?;
-        self.media = Some(shared);
+        // Successful preparation supersedes the old destination before its new
+        // box reaches the serial queue. Failed preparation above preserves it.
+        if let Some(previous) = self.media.replace(shared) {
+            previous.retire();
+        }
         Ok((PreparedPhoneMedia(ingress), input))
     }
     /// Return the same prepared endpoint when the bounded owner queue is full.
@@ -719,6 +723,16 @@ impl PrivatePhoneSession {
                     }
                     SourceInput::Discontinuity => {
                         retire_egress = true;
+                        let keep_downlink = adaptation.is_none()
+                            && !outgoing
+                            && authorized
+                            && ready.attached.load(Ordering::Acquire)
+                            && pending_release.is_none()
+                            && !source.muted()
+                            && media.as_ref().is_some_and(|media| {
+                                media.downlink_active()
+                                    && (media.downlink_only() || revision.0.get() == Some(settled))
+                            });
                         if !*cut_pending {
                             let origin_epoch = recovery
                                 .as_ref()
@@ -770,10 +784,14 @@ impl PrivatePhoneSession {
                         {
                             *recovery = None;
                         }
-                        // Revoke immediately, but leave DSP destruction to the
-                        // existing serial-owner replacement/cleanup path.
+                        // Source/RF retirement is unconditional. Only an already
+                        // authorized destination survives a cause-free receive cut.
                         if let Some(media) = media.as_ref() {
-                            media.retire();
+                            if keep_downlink {
+                                media.retire_source();
+                            } else {
+                                media.retire();
+                            }
                         }
                         if mode == PhoneDigitMode::InBand && digits.slots() == 0 {
                             return 0;
@@ -785,6 +803,9 @@ impl PrivatePhoneSession {
                         match source.reset(|digit| {
                             if mode == PhoneDigitMode::InBand {
                                 revision.emit(digits, digit, now_ms);
+                                if let Some(media) = media.as_ref() {
+                                    media.retire();
+                                }
                             }
                         }) {
                             Ok(()) => {
@@ -912,6 +933,9 @@ impl PrivatePhoneSession {
                             media.retire();
                         } else {
                             self.select_programme(false)?;
+                            if let Some(previous) = &self.media {
+                                previous.retire();
+                            }
                             self.spare_output = media.take_output().map(|queue| (queue, 0));
                             self.media = Some(media);
                         }
@@ -1044,7 +1068,11 @@ impl PrivatePhoneSession {
             // retires it immediately, so waiting cannot resurrect old custody.
         }
         self.select_programme(
-            self.current.is_none() && self.media.as_ref().is_some_and(|media| media.active()),
+            self.current.is_none()
+                && self
+                    .media
+                    .as_ref()
+                    .is_some_and(|media| media.downlink_active()),
         )?;
         if now_ns >= self.next_audio_ns && self.outbound.ready_for_input() {
             if let Some(reply) = &mut self.current {
@@ -1143,10 +1171,16 @@ impl SerialSession for PrivatePhoneSession {
     }
     fn stop(&self) {
         self.stop.store(true, Ordering::Release);
+        if let Some(media) = &self.media {
+            media.retire();
+        }
         self.reply.retire();
     }
     fn fail(&self, cause: &str, error: Error) {
         let first = !self.stop.swap(true, Ordering::AcqRel);
+        if let Some(media) = &self.media {
+            media.retire();
+        }
         self.reply.retire();
         if first {
             super::session::log_error(&format!(

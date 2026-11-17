@@ -2596,6 +2596,7 @@ fn prepared_phone_media_returns_programme_through_the_existing_timed_egress_owne
     let (mut session, mut control, state, reply) = source_session_with_auth(true);
     let clock = SourceTimeClock::new(Instant::now()).unwrap();
     session.set_source_clock(clock.clone());
+    control.set_attached(true);
     let mut input = control.prepare_media(None).unwrap();
     let mut programme = input.take_output().expect("one programme producer");
     assert!(
@@ -2674,6 +2675,7 @@ fn prepared_phone_programme_yields_to_private_prompt_then_resumes_without_new_en
     );
     let clock = SourceTimeClock::new(Instant::now()).unwrap();
     session.set_source_clock(clock.clone());
+    control.set_attached(true);
     let mut input = control.prepare_media(None).unwrap();
     let mut programme = input.take_output().unwrap();
     session.step(0).unwrap();
@@ -2745,6 +2747,7 @@ fn prepared_phone_programme_retirement_after_selection_cancels_the_pending_send(
     let (mut session, mut control, state, reply) = source_session_with_auth(true);
     let clock = SourceTimeClock::new(Instant::now()).unwrap();
     session.set_source_clock(clock.clone());
+    control.set_attached(true);
     let mut input = control.prepare_media(None).unwrap();
     let mut output = input.take_output().unwrap();
     session.step(0).unwrap();
@@ -2781,6 +2784,7 @@ fn prepared_phone_programme_drains_a_short_final_packet_on_existing_idle_deadlin
     let clock = SourceTimeClock::new(Instant::now()).unwrap();
     session.set_source_clock(clock.clone());
     state.lock().unwrap().encode_unit = Some(160);
+    control.set_attached(true);
     let mut input = control.prepare_media(None).unwrap();
     let mut output = input.take_output().unwrap();
     session.step(0).unwrap();
@@ -3494,4 +3498,117 @@ fn stage_c_clock_deadline_axes_private_reduces_prompt_after_work() {
         session.source_position, 0,
         "work cannot fabricate a fresh prompt birth"
     );
+}
+
+#[test]
+fn downlink_destination_generic_cut_never_reopens_uplink_or_revoked_destination() {
+    use rpt_advanced_core::link::PeerInput as _;
+    for cut in [
+        "generic",
+        "repeat",
+        "prepared",
+        "dtmf_before",
+        "dtmf_after",
+        "muted",
+        "detach",
+        "epoch",
+        "hangup",
+        "error",
+        "replacement",
+    ] {
+        let (mut session, mut control, state, reply) = source_session_with_protocol(
+            crate::link::session::tests::phone_source_peer_at_rate(8000),
+            true,
+            rpt_advanced_core::config::PhoneAccountProtocol::Sip,
+        );
+        session.set_source_clock(SourceTimeClock::new(Instant::now()).unwrap());
+        control.set_attached(true);
+        let mut input = control.prepare_media(None).unwrap();
+        let destination = input.destination_signals().reply_target();
+        assert!(
+            !input.destination_available(),
+            "PREPARED is not destination authority"
+        );
+        if cut != "prepared" {
+            session.step(0).unwrap();
+            assert!(input.active() && input.destination_available());
+        }
+        if cut == "dtmf_before" {
+            state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+            session.step(1).unwrap();
+        } else if cut == "muted" {
+            session.source.as_mut().unwrap().hold_command();
+        } else if cut == "detach" {
+            control.set_attached(false);
+            control.retire_media();
+        } else if cut == "epoch" {
+            control.source_ready.invalidate();
+        }
+        state.lock().unwrap().source_reset = true;
+        session.step(2).unwrap();
+        assert!(
+            !input.active() && input.signals().ended(),
+            "{cut}: source/RF remains retired"
+        );
+        if cut == "repeat" {
+            state.lock().unwrap().source_reset = true;
+            session.step(3).unwrap();
+        } else if cut == "dtmf_after" {
+            state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+            session.step(3).unwrap();
+        } else if cut == "hangup" {
+            reply.retire();
+            assert_eq!(session.step(3), Err(Error::Hangup));
+        } else if cut == "error" {
+            state.lock().unwrap().source_closed = true;
+            assert_eq!(session.step(3), Err(Error::Hangup));
+        } else if cut == "replacement" {
+            let invalid = control.prepare_pending_voiced_media(
+                None,
+                rpt_advanced_core::config::PhoneSpeechSettings {
+                    reserve_ms: 0,
+                    ..Default::default()
+                },
+            );
+            assert!(invalid.is_err(), "invalid preparation must fail");
+            assert!(
+                input.destination_available() && !destination.ended(),
+                "failed preparation preserves old destination"
+            );
+            let replacement = control.prepare_media(None).unwrap();
+            assert!(
+                destination.ended(),
+                "successful preparation must revoke old destination before serial adoption"
+            );
+            control.retire_media();
+            assert!(
+                !replacement.destination_available(),
+                "cancellation after preparation cannot leave either destination live"
+            );
+            session.step(3).unwrap();
+            assert!(
+                !replacement.destination_available(),
+                "an unsettled replacement cannot adopt"
+            );
+            assert!(
+                destination.ended(),
+                "old same-call destination must be revoked before replacement"
+            );
+        }
+        let preserved = matches!(cut, "generic" | "repeat");
+        assert_eq!(input.destination_available(), preserved, "{cut}");
+        assert!(
+            !input.active(),
+            "{cut}: receive-only never readmits caller programme"
+        );
+        let mut audio = [1.0; 960];
+        assert!(input.render_timed_block(&mut audio).is_none());
+        assert!(audio.iter().all(|sample| *sample == 0.0));
+        if !preserved {
+            assert!(
+                destination.ended(),
+                "{cut}: full cut must revoke captured destination fence"
+            );
+        }
+    }
 }

@@ -254,6 +254,12 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     fn phone_reply(&self) -> Option<&rpt_advanced_core::link::PeerReply> {
         self.input.phone_reply()
     }
+    fn destination_signals(&self) -> &rpt_advanced_core::link::PeerSignals {
+        self.input.destination_signals()
+    }
+    fn destination_available(&self) -> bool {
+        self.input.destination_available()
+    }
     fn phone_speech_state(&self) -> Option<rpt_advanced_core::link::PhoneSpeechState> {
         self.input.phone_speech_state()
     }

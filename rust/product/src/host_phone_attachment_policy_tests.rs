@@ -1222,3 +1222,246 @@ fn check_host_recovery_after_busy(attachment: &str) {
         await_private_drop(&state);
     }
 }
+
+/// Offline diagnostic: actual ordinary ring/fanout and private owner, with fixture transport.
+fn check_downlink_source_cut_diagnostic(cut: &str) {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut host, _) = policy_host(
+        "1000",
+        "protocol=sip\nattach_local_nodes=1000\n",
+        "phone_allow_accounts=provider\n",
+    );
+    let ordinary = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let (phone, state) = crate::link::session::tests::phone_source_peer_at_rate(8000);
+    state.lock().unwrap().continuous_async = true;
+    let id = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    let source = host.phone_source(id).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    finish_prompt(&mut host, &source, &reply);
+    host.authenticate_phone(&source, &reply, "100", "1234", clock())
+        .unwrap();
+    finish_prompt(&mut host, &source, &reply);
+    host.reconcile_private_collections(clock());
+    host.attach_phone(&source, &reply, "1000", clock()).unwrap();
+    pump_until(&mut host, |host| {
+        crate::phone::tests::recovery_snapshot(&host.phone_calls, &source)
+            .is_some_and(|(_, active, _, _)| active)
+            && host
+                .runtime
+                .node("1000")
+                .unwrap()
+                .status(10)
+                .retiring
+                .is_none()
+    });
+    let lease = Arc::clone(
+        &host
+            .leases
+            .iter()
+            .find(|(name, _)| name == "1000")
+            .unwrap()
+            .1,
+    );
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    let ordinary_reply = host.peers[0].control.reply_target();
+    let initial = crate::phone::tests::recovery_snapshot(&host.phone_calls, &source).unwrap();
+    let mut observations = Vec::new();
+    for phase in 0..if cut == "digit-cycle" { 4 } else { 2 } {
+        if cut == "digit-cycle" && phase == 2 {
+            state
+                .lock()
+                .unwrap()
+                .input
+                .push_back(crate::link::session::tests::Input::Digit(b'5'));
+            pump_until(&mut host, |_| state.lock().unwrap().input.is_empty());
+            pump_until(&mut host, |host| {
+                host.reconcile_private_collections(clock());
+                drop(owners.0.acquire());
+                drop(owners.1.acquire());
+                crate::phone::tests::recovery_snapshot(&host.phone_calls, &source)
+                    .is_some_and(|(_, active, _, _)| active)
+            });
+        } else if phase == 1 || phase == 3 {
+            match cut {
+                "generic" | "digit-cycle" => state.lock().unwrap().source_reset = true,
+                "adaptation" => state.lock().unwrap().source_adaptation = Some((1000, 160)),
+                "quiet" => {}
+                _ => panic!("unknown diagnostic case"),
+            }
+            pump_until(&mut host, |_| {
+                let state = state.lock().unwrap();
+                !state.source_reset && state.source_adaptation.is_none()
+            });
+            {
+                let mut state = state.lock().unwrap();
+                state.source_birth = Some(state.source_reference.unwrap().1);
+                state
+                    .input
+                    .push_back(crate::link::session::tests::Input::Audio(vec![0.0; 160]));
+            }
+            pump_until(&mut host, |_| state.lock().unwrap().input.is_empty());
+            if cut == "adaptation" {
+                pump_until(&mut host, |host| {
+                    crate::phone::tests::recovery_snapshot(&host.phone_calls, &source)
+                        .unwrap()
+                        .2
+                });
+                host.phone_calls
+                    .reconcile_collections(|local, source, reply| {
+                        host.runtime
+                            .node(local)?
+                            .links()
+                            .phone_collection_pending(source, reply)
+                    });
+                pump_until(&mut host, |host| {
+                    host.phone_calls.media_refresh_nodes() == ["1000"]
+                });
+                host.refresh_inputs("1000", clock(), true).unwrap();
+                pump_until(&mut host, |host| {
+                    drop(owners.0.acquire());
+                    drop(owners.1.acquire());
+                    crate::phone::tests::recovery_snapshot(&host.phone_calls, &source)
+                        .is_some_and(|(_, active, requested, _)| active && !requested)
+                });
+            } else {
+                // Run real reconciliation too: no fabricated digit or collector release.
+                for _ in 0..10 {
+                    host.reconcile_private_collections(clock());
+                    host.pump(clock()).unwrap();
+                    drop(owners.0.acquire());
+                    drop(owners.1.acquire());
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        state.lock().unwrap().prepared.clear();
+        ordinary
+            .lock()
+            .unwrap()
+            .input
+            .extend((0..14).map(|_| crate::link::session::tests::Input::Audio(vec![0.25; 960])));
+        pump_until(&mut host, |host| {
+            host.peers[0]
+                .control
+                .snapshot()
+                .unwrap()
+                .ring
+                .available_samples
+                >= 13440
+        });
+        let mut rendered_nonzero = 0;
+        for block in 0..22 {
+            let mut audio = [0.0; 960];
+            let mut current = owners.1.acquire().unwrap();
+            let generation = current.id();
+            let transmit = current.state();
+            transmit
+                .adapter
+                .process(
+                    &mut transmit.controller,
+                    false,
+                    &mut audio,
+                    rpt_advanced_core::link::SourcePosition {
+                        generation,
+                        sample: (phase * 22 + block) * 960,
+                        stream: 1,
+                        born_ns: Some(host.epoch.elapsed().as_nanos() as u64),
+                    },
+                )
+                .unwrap();
+            rendered_nonzero += audio.iter().filter(|sample| sample.abs() > 0.01).count();
+            drop(current);
+            host.pump(clock()).unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        for _ in 0..10 {
+            host.pump(clock()).unwrap();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let sent_nonzero = state
+            .lock()
+            .unwrap()
+            .prepared
+            .iter()
+            .flat_map(|(bytes, _)| bytes)
+            .filter(|byte| **byte != 0)
+            .count();
+        let snapshot = crate::phone::tests::recovery_snapshot(&host.phone_calls, &source).unwrap();
+        eprintln!(
+            "downlink-cut case={cut} phase={phase} ordinary_rendered={rendered_nonzero} phone_nonzero={sent_nonzero} media={snapshot:?} call_live={} attached={} ordinary_live={}",
+            !reply.ended(),
+            !host.phone_calls.attachments("1000").is_empty(),
+            !ordinary_reply.ended()
+        );
+        observations.push((rendered_nonzero, sent_nonzero, snapshot, !reply.ended()));
+    }
+    lease.lock().unwrap().owners = Some(owners);
+    assert!(host.stop(20));
+    await_private_drop(&state);
+    assert!(
+        observations
+            .iter()
+            .all(|(ordinary, _, _, live)| *ordinary > 160 && *live),
+        "ordinary programme and call control must remain alive: {observations:?}"
+    );
+    assert!(
+        observations[0].1 > 160,
+        "baseline downlink must be proven before the cut"
+    );
+    if cut == "digit-cycle" {
+        assert!(
+            observations[1].1 > 160,
+            "first generic reset preserves downlink"
+        );
+        assert!(
+            observations[2].1 > 160,
+            "one genuine fixture digit and actual collector release restore downlink"
+        );
+        assert_ne!(
+            observations[2].2.0, initial.0,
+            "digit release adopts a fresh generation"
+        );
+        assert!(
+            observations[3].1 > 160,
+            "repeated generic reset preserves downlink"
+        );
+        return;
+    }
+    if cut == "quiet" {
+        assert_eq!(
+            observations[1].2.0, initial.0,
+            "normal quiet keeps the same generation"
+        );
+    } else if cut == "adaptation" {
+        assert_ne!(
+            observations[1].2.0, initial.0,
+            "qualified recovery uses a fresh generation"
+        );
+    }
+    assert!(
+        observations[1].1 > 160,
+        "live authenticated call must still receive independent ordinary programme after {cut}; observed {observations:?}"
+    );
+}
+
+#[test]
+fn downlink_source_cut_diagnostic_quiet_control() {
+    check_downlink_source_cut_diagnostic("quiet");
+}
+#[test]
+fn downlink_source_cut_diagnostic_adaptation_control() {
+    check_downlink_source_cut_diagnostic("adaptation");
+}
+#[test]
+fn downlink_source_cut_diagnostic_generic_reset_continuity() {
+    check_downlink_source_cut_diagnostic("generic");
+}
+
+#[test]
+fn downlink_source_cut_diagnostic_single_digit_then_repeat_reset() {
+    check_downlink_source_cut_diagnostic("digit-cycle");
+}

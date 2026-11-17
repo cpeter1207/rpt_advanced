@@ -244,6 +244,15 @@ pub trait PeerInput: Send {
     fn phone_reply(&self) -> Option<&super::PeerReply> {
         None
     }
+    /// Destination lifetime may be independent of private caller source retirement.
+    /// Ordinary peers retain the existing connection fence unchanged.
+    fn destination_signals(&self) -> &PeerSignals {
+        self.signals()
+    }
+    /// Prepared private destinations stay unavailable until their exact adoption.
+    fn destination_available(&self) -> bool {
+        !self.destination_signals().ended()
+    }
     /// Decoded source sample rate.
     fn source_rate(&self) -> u32;
     /// Immutable priming policy prepared with this unique source consumer.
@@ -496,7 +505,7 @@ pub struct LinkDispatcher {
     incoming: Consumer<ProgramBlock>,
     recycle: Producer<ProgramBlock>,
     outbound: Vec<LinkAudioProducer>,
-    fences: Vec<(PeerReply, Option<PeerReply>)>,
+    fences: Vec<(PeerReply, Option<PeerReply>, PeerReply)>,
     retirement: RetirementDomain,
     checked_revision: Option<u64>,
     private_contributor: bool,
@@ -549,7 +558,7 @@ impl LinkDispatcher {
                 None => {
                     revision.is_some()
                         && block.routing.iter().zip(&self.fences).all(
-                            |(route, (generation, phone))| {
+                            |(route, (generation, phone, _))| {
                                 private_contributor |= route.contributes && phone.is_some();
                                 !route.contributes
                                     || (!generation.ended()
@@ -575,9 +584,9 @@ impl LinkDispatcher {
             let index = self.next_destination;
             let destination = block.routing[index];
             let mut notify = self.activity_edges[index] != destination.activity_edge;
-            let (generation, phone) = &self.fences[index];
+            let (_, phone, destination_fence) = &self.fences[index];
             let eligible = destination.eligible
-                && !generation.ended()
+                && !destination_fence.ended()
                 && phone.as_ref().is_none_or(PeerReply::phone_media_authorized);
             if eligible {
                 let offset = (index + 1) * self.scratch.len();
@@ -689,7 +698,9 @@ impl<P: PeerInput> LinkAudio<P> {
                 if let Some(phone) = &peer.phone {
                     phone.bind_retirement_domain(&retirement);
                 }
-                (generation, peer.phone.clone())
+                let destination = peer.input.destination_signals().reply_target();
+                destination.bind_retirement_domain(&retirement);
+                (generation, peer.phone.clone(), destination)
             })
             .collect();
         let phone_courtesy = peers
@@ -1212,7 +1223,11 @@ impl<P: PeerInput> LinkAudio<P> {
             });
             route.contributes = peer.active && peer.mode.forwards() && selected;
             let own_source = usize::from(route.contributes);
-            let ended = peer.ended();
+            let ended = !peer.input.destination_available()
+                || peer
+                    .phone
+                    .as_ref()
+                    .is_some_and(|reply| !reply.phone_media_authorized());
             route.target = if ended {
                 0
             } else {

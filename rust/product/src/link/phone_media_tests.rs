@@ -363,6 +363,7 @@ fn prepared_phone_media_publishes_typed_mixer_and_revokes_live_destination_contr
         assert!(signals.authenticate_phone());
         let call = signals.reply_target();
         let (mut ingress, input, shared) = prepare(call.clone(), 8000, None).unwrap();
+        shared.origin.source.attached.store(true, Ordering::Release);
         adopt(&mut ingress, 0, reference());
         for index in 0..12 {
             assert_eq!(
