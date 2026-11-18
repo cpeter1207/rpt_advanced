@@ -1195,6 +1195,45 @@ def verify_stage_policy() -> None:
             staged(root, stage, "test-linux-gnu", Path("/usr/lib/asterisk/modules"))
 
 
+def verify_sdk_include(root: Path) -> None:
+    """Check real Make recipes use the same SDK include override as Rust."""
+    for value in ("/candidate-sdk/include", ""):
+        environment = {**os.environ, "URP_PRODUCT_INCLUDE": value, "CPPFLAGS": ""}
+        result = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "-n",
+                "-o",
+                "rust-build",
+                "CC=true",
+                "static-analysis",
+                "build/app_rpt_advanced.so",
+            ],
+            cwd=root,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        include = "-I" + (value or "/usr/include")
+        recipes = [
+            line
+            for line in result.splitlines()
+            if "module/app_rpt_advanced_loader.c" in line
+            and line.startswith(("cppcheck ", "clang-tidy ", "true "))
+        ]
+        assert len(recipes) == 3, recipes
+        for recipe in recipes:
+            assert include in recipe.split(), f"SDK include missing: {recipe}"
+            codec_include = "-I" + environment.get(
+                "RPTADV_CODEC_INCLUDE", "/usr/include/rptadv-codec"
+            )
+            assert recipe.split().index(include) < recipe.split().index(
+                codec_include
+            ), f"SDK include shadowed by codec include: {recipe}"
+
+
 def main() -> None:
     """Self-test policy and validate the requested source or built product surface."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1211,6 +1250,7 @@ def main() -> None:
     verify_artifact_policy()
     verify_stage_policy()
     root = Path(__file__).resolve().parents[1]
+    verify_sdk_include(root)
     if args.artifacts:
         if args.asteriskmoddir is not None:
             assert args.libdir is not None, "configured artifacts require --libdir"
