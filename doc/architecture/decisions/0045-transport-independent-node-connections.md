@@ -33,10 +33,13 @@ ownership, authorization or lifecycle boundaries.
   privacy policy; shared mixing alone does not authorize removing them.
 
 The earlier [wishlist single-call checkpoint](../../../WISHLIST.md) and its
-external-conferencing suggestion do not prescribe a separate internal conference
-architecture. This decision establishes reuse for multiple calls; it does not
-claim that multi-call admission is implemented or enlarge the current manual-test
-milestone without an explicit scope decision.
+single-call/external-conferencing restriction are superseded by this shared-node
+architecture. Multi-call implementation and validation remain pending.
+
+The approved P13/P14 privacy requirements remain: outgoing calls suppress ordinary
+peer audio as specified, and incoming calls require explicit authorized `*3`
+attachment. Reusing the node mixer does not repeal these routing policies or
+per-call lifecycle isolation; any change requires explicit owner direction.
 
 ## Consequences and verification
 

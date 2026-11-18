@@ -3,6 +3,12 @@
 Status: Accepted by owner 2026-11-09; media prerequisites released. Macro and
 private-call foundations implemented; phone/RF integration pending.
 
+Amended 2026-11-18: [ADR 0045](0045-transport-independent-node-connections.md)
+clarifies shared node connections and conferencing and supersedes the earlier
+single-call/external-conferencing scope restriction. P13/P14 privacy, explicit
+incoming attachment and per-call lifecycle requirements remain unchanged.
+Implementation alignment and validation are still required.
+
 ## Context
 
 Autopatch/reverse patch must use the ordinary peer processing path while

@@ -641,11 +641,11 @@ remain planned. Local-file decoding does not imply network stream support.
 
 ### Telephony integration
 
-**Current scope/status — 2026-11-15:** Deliver the standalone SIP phone path for
-one call at a time, behaving like a softphone. Multiple simultaneous phone calls,
-IAX phone integration and Asterisk-host phone integration are stretch goals.
-Conferencing may be supplied by an external system such as Asterisk reached
-over SIP; do not build internal multi-call conferencing for the current merge.
+**Architecture updated 2026-11-18:** The earlier single-call/external-conference
+restriction is superseded by [ADR 0045](doc/architecture/decisions/0045-transport-independent-node-connections.md).
+SIP, IAX2 and EchoLink connections reuse existing node mixing, mix-minus and
+conferencing; do not build a separate SIP conferencing system. Implementation
+alignment and multi-call validation remain pending, not established by this decision.
 The owner accepts `**` as the literal escape and has confirmed outgoing calls
 work. This does not defer private local/remote control, manual admission,
 half-duplex receive opportunities, privacy/lifecycle behavior or release gates.
