@@ -77,7 +77,7 @@ Put the runtime packages from that release in an empty directory, then run:
 sudo apt-get install ./*.deb
 ```
 
-For standalone, include `rpt-advanced`, `librptadv-product2`, the file and speech
+For standalone, include `rpt-advanced`, `librptadv-product3`, the file and speech
 adapter packages, and the standalone control, resolver, and jitter adapter
 packages. Include `librptadv-iax2-client2` and the codec-provider runtime
 packages required by that release. Packages ending in `-dev` are not needed to run the node.
