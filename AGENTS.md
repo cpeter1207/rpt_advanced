@@ -93,6 +93,10 @@ Reread every applicable `AGENTS.md` before starting a new requirement, before
 the full quality gate or a deployment decision, and after a resumed or extended
 work period. Treat newly changed instructions as immediately controlling.
 
+Reuse the existing testing images and pipelines. Upgrade their dependencies as
+needed to test new code; these images exist for testing. This does not authorize
+unrequested publication or deployment.
+
 Never rely on a locally cached quality image. Before a local quality or
 container test, pull the required `:latest` image, record or inspect its
 manifest digest, and use that freshly pulled image for the run. When a quality
