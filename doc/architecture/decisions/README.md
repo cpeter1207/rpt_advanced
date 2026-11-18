@@ -60,3 +60,4 @@ completion does not imply hardware qualification, release, or deployment.
 | [0042](0042-activity-scoped-ctcss-encode.md) | Implemented | Activity-scoped CTCSS transmit control is returned independently from PTT by the native radio callback. |
 | [0043](0043-shared-loudness-and-receive-vad.md) | Implemented, released, and installed; listening/RF qualification remains separate | Shared LUFS gain control, fixed limiting/output metering, and local Earshot speech qualification retain existing owners. |
 | [0044](0044-phone-peers-and-rf-presentation-pacing.md) | Accepted; implementation pending | Private SIP/IAX phone peers, source-scoped macros/replies, and bounded RF presentation pacing retain the existing owners. |
+| [0045](0045-transport-independent-node-connections.md) | Accepted; implementation alignment and validation pending | SIP, IAX2 and EchoLink reuse node mixing, mix-minus, conferencing and common media policy. |
