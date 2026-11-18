@@ -211,6 +211,7 @@ not depend on production tests passing.
 
 Never deploy to a node or alter its configuration without explicit approval.
 Do not add features or requirements that the user has not requested.
+Do not invent edge cases that do not exist or cannot occur in real-world operation.
 
 Reuse existing code and dependencies whenever possible. Do not duplicate
 functionality or overcomplicate the implementation.
