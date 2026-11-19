@@ -1,0 +1,49 @@
+{
+  "_links": {
+    "self": {
+      "href": "/api/v1/configuration/ports/11111111-1111-4111-8111-111111111111/"
+    },
+    "up": {
+      "href": "/api/v1/configuration/ports/"
+    },
+    "profile": {
+      "href": "/api/v1/profiles/port/"
+    },
+    "rpt:rx-audio": {
+      "href": "/api/v1/configuration/ports/11111111-1111-4111-8111-111111111111/rx/audio/"
+    },
+    "rpt:allstarlink": {
+      "href": "/api/v1/configuration/ports/11111111-1111-4111-8111-111111111111/protocols/allstarlink/"
+    },
+    "rpt:echolink": {
+      "href": "/api/v1/configuration/ports/11111111-1111-4111-8111-111111111111/protocols/echolink/"
+    },
+    "rpt:phone-patch": {
+      "href": "/api/v1/configuration/ports/11111111-1111-4111-8111-111111111111/protocols/phone-patch/"
+    },
+    "rpt:events": {
+      "href": "/api/v1/configuration/ports/11111111-1111-4111-8111-111111111111/schedule/events/"
+    },
+    "rpt:macros": {
+      "href": "/api/v1/configuration/ports/11111111-1111-4111-8111-111111111111/command/macros/"
+    },
+    "curies": [
+      {
+        "name": "rpt",
+        "href": "/api/v1/rels/{rel}",
+        "templated": true
+      }
+    ]
+  },
+  "id": "11111111-1111-4111-8111-111111111111",
+  "key": "repeater_2m",
+  "meta": {
+    "configuration_revision": "r-42",
+    "resource_version": "v-1"
+  },
+  "configuration": {
+    "name": "2M repeater",
+    "inherit_from": "site",
+    "enabled": false
+  }
+}

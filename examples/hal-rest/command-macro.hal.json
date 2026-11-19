@@ -1,0 +1,57 @@
+{
+  "_links": {
+    "self": {
+      "href": "/api/v1/configuration/ports/11111111-1111-4111-8111-111111111111/command/macros/66666666-6666-4666-8666-666666666666/"
+    },
+    "up": {
+      "href": "/api/v1/configuration/ports/11111111-1111-4111-8111-111111111111/command/macros/"
+    },
+    "profile": {
+      "href": "/api/v1/profiles/command-macro/"
+    },
+    "rpt:effective": {
+      "href": "/api/v1/effective/ports/11111111-1111-4111-8111-111111111111/command/macros/66666666-6666-4666-8666-666666666666/"
+    },
+    "curies": [
+      {
+        "name": "rpt",
+        "href": "/api/v1/rels/{rel}",
+        "templated": true
+      }
+    ],
+    "rpt:messages": [
+      {
+        "href": "/api/v1/effective/ports/11111111-1111-4111-8111-111111111111/telemetry/messages/77777777-7777-4777-8777-777777777777/"
+      }
+    ]
+  },
+  "id": "66666666-6666-4666-8666-666666666666",
+  "key": "connect_net",
+  "meta": {
+    "configuration_revision": "r-42",
+    "resource_version": "v-1"
+  },
+  "configuration": {
+    "actions": [
+      {
+        "action": "connect",
+        "parameter": "2001"
+      },
+      {
+        "action": "pause",
+        "timing": {
+          "duration_ms": 2000
+        }
+      },
+      {
+        "action": "execute_dtmf",
+        "digits": "*70#"
+      },
+      {
+        "action": "message",
+        "destination": "peers",
+        "message": "{ status_message }"
+      }
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "operation": "set",
+  "site": {
+    "name": "Example repeater site",
+    "inherit_from": null,
+    "telemetry": {
+      "messages": {
+        "peer-identity": {
+          "locales": {
+            "en-US": {
+              "text": "{ $peer-node-number }, { $peer-callsign }",
+              "tts": "{ $peer-node-number }, { $peer-callsign }",
+              "morse": "{ $peer-node-number } { $peer-callsign }"
+            },
+            "es": {
+              "text": "{ $peer-node-number }, { $peer-callsign }"
+            }
+          },
+          "bindings": {
+            "peer-node-number": "event.peer.node_number",
+            "peer-callsign": "event.peer.callsign"
+          }
+        },
+        "connecting": {
+          "locales": {
+            "en-US": {
+              "text": "Connecting to node { peer-identity.text }.",
+              "tts": "Connecting to node { peer-identity.tts }.",
+              "morse": "CONNECTING { peer-identity.morse }"
+            },
+            "es": {
+              "text": "Conectando al nodo { peer-identity.text }."
+            }
+          }
+        }
+      }
+    },
+    "command": {
+      "macros": {
+        "announce_connection": {
+          "actions": [
+            {
+              "action": "message",
+              "message": "{ connecting }",
+              "destination": "local"
+            },
+            {
+              "action": "execute_dtmf",
+              "digits": "*70#"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

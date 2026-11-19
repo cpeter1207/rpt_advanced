@@ -1,0 +1,2774 @@
+{
+  "operation": "set",
+  "request_id": "site-and-node-configuration-example",
+  "site": {
+    "name": "Example repeater site",
+    "inherit_from": null,
+    "enabled": false,
+    "callsign": "N0CALL",
+    "language": "en-US",
+    "radio": {
+      "parrot": {
+        "enabled": false
+      },
+      "timing": {
+        "status_snapshot_interval_ms": 50,
+        "scan_slow_ms": 1000,
+        "scan_medium_ms": 500,
+        "scan_fast_ms": 250,
+        "tune_duration_ms": 1000
+      },
+      "control": {
+        "hamlib": {
+          "model": "RIG_MODEL_DUMMY",
+          "device": "/dev/ttyUSB1",
+          "options": {
+            "serial_speed": "9600"
+          }
+        },
+        "timing": {
+          "timeout_ms": 500,
+          "poll_interval_ms": 500
+        },
+        "retries": 2,
+        "timeout_retries": 0,
+        "access": "locked",
+        "enabled": false,
+        "backend": "hamlib"
+      },
+      "startup_memory": 1,
+      "limits": {
+        "modes": [
+          "FM",
+          "AM",
+          "USB",
+          "LSB",
+          "CW",
+          "CWR",
+          "RTTY",
+          "RTTYR",
+          "WFM",
+          "PKTFM",
+          "PKTUSB",
+          "PKTLSB"
+        ],
+        "rx_ranges_mhz": [
+          [
+            144,
+            148
+          ]
+        ],
+        "tx_ranges_mhz": [
+          [
+            144,
+            148
+          ]
+        ],
+        "rx_only_ranges_mhz": [
+          [
+            145.8,
+            146
+          ]
+        ]
+      },
+      "power": {
+        "max_w": 50,
+        "low_w": 5,
+        "medium_w": 25,
+        "high_w": 50
+      },
+      "memories": [
+        {
+          "frequency": 146.52,
+          "offset": {
+            "enabled": false,
+            "direction": "plus",
+            "frequency": 0
+          },
+          "tx_ctcss": {
+            "enabled": false,
+            "frequency": 100
+          },
+          "rx_ctcss": {
+            "enabled": false,
+            "frequency": 100
+          },
+          "mode": "FM"
+        },
+        {
+          "frequency": 146.94,
+          "offset": {
+            "enabled": true,
+            "direction": "minus",
+            "frequency": 0.6
+          },
+          "tx_ctcss": {
+            "enabled": true,
+            "frequency": 100
+          },
+          "rx_ctcss": {
+            "enabled": true,
+            "frequency": 100
+          },
+          "mode": "FM"
+        }
+      ],
+      "scan_lists": {
+        "local": {
+          "selector": 1,
+          "members": [
+            1,
+            2
+          ],
+          "priority": 1,
+          "timing": {
+            "dwell_ms": 500,
+            "resume_delay_ms": 2000,
+            "settle_ms": 100
+          }
+        }
+      },
+      "offset_magnitude_mhz": 0.6,
+      "duplex_mode": "half",
+      "rx": {
+        "audio": {
+          "input_gain_db": 0,
+          "output_gain_db": 0,
+          "deemphasis": {
+            "corner_hz": 300,
+            "enabled": true
+          },
+          "processing": {
+            "enabled": true,
+            "input_gain_db": 0,
+            "output_gain_db": -6.2,
+            "stage_order": [
+              "equalizer",
+              "expander",
+              "agc",
+              "deesser",
+              "compressor",
+              "multiband_limiter"
+            ],
+            "equalizer": {
+              "low": {
+                "gain_db": 2,
+                "frequency_hz": 500,
+                "slope": 0.7
+              },
+              "mid": {
+                "gain_db": -0.5,
+                "frequency_hz": 1000,
+                "width_octaves": 1
+              },
+              "high": {
+                "gain_db": -1,
+                "frequency_hz": 2000,
+                "slope": 0.7
+              },
+              "enabled": true
+            },
+            "agc": {
+              "target_lufs": -23,
+              "max_gain_db": 6,
+              "max_attenuation_db": 6,
+              "timing": {
+                "loudness_window_ms": 400,
+                "gain_increase_db_per_second": 2,
+                "gain_decrease_db_per_second": 6,
+                "hold_ms": 500
+              },
+              "activity_threshold_dbfs": -50,
+              "activity_hysteresis_db": 3,
+              "deadband_db": 1,
+              "enabled": false
+            },
+            "expander": {
+              "threshold_dbfs": -55,
+              "ratio": 1.5,
+              "max_attenuation_db": 9,
+              "timing": {
+                "attack_ms": 10,
+                "release_ms": 250
+              },
+              "sidechain": {
+                "highpass_hz": 800,
+                "lowpass_hz": 1500
+              },
+              "enabled": false
+            },
+            "deesser": {
+              "frequency_hz": 4000,
+              "width_octaves": 1,
+              "threshold_dbfs": -18,
+              "ratio": 3,
+              "max_reduction_db": 4,
+              "timing": {
+                "attack_ms": 2,
+                "release_ms": 60
+              },
+              "enabled": false
+            },
+            "compressor": {
+              "crossover": {
+                "low_hz": 500,
+                "high_hz": 2000
+              },
+              "sidechain": {
+                "highpass_hz": 800,
+                "lowpass_hz": 1500
+              },
+              "enabled": false,
+              "defaults": {
+                "threshold_dbfs": -6,
+                "ratio": 2,
+                "makeup_gain_db": 0,
+                "timing": {
+                  "attack_ms": 75,
+                  "release_ms": 300
+                }
+              },
+              "low": {
+                "threshold_dbfs": -6,
+                "ratio": 2,
+                "makeup_gain_db": 0,
+                "timing": {
+                  "attack_ms": 75,
+                  "release_ms": 300
+                },
+                "knee_db": 9
+              },
+              "mid": {
+                "threshold_dbfs": -6,
+                "ratio": 2,
+                "makeup_gain_db": 0,
+                "timing": {
+                  "attack_ms": 75,
+                  "release_ms": 300
+                },
+                "knee_db": 9
+              },
+              "high": {
+                "threshold_dbfs": -6,
+                "ratio": 2,
+                "makeup_gain_db": 0,
+                "timing": {
+                  "attack_ms": 75,
+                  "release_ms": 300
+                },
+                "knee_db": 9
+              }
+            },
+            "multiband_limiter": {
+              "crossover": {
+                "low_hz": 500,
+                "high_hz": 2000
+              },
+              "enabled": false,
+              "defaults": {
+                "threshold_dbfs": -1.5,
+                "ratio": 20,
+                "knee_db": 0,
+                "timing": {
+                  "attack_ms": 1,
+                  "release_ms": 50
+                }
+              },
+              "low": {
+                "threshold_dbfs": -1.5,
+                "ratio": 10,
+                "knee_db": 6,
+                "timing": {
+                  "attack_ms": 50,
+                  "release_ms": 250
+                }
+              },
+              "mid": {
+                "threshold_dbfs": -1.5,
+                "ratio": 10,
+                "knee_db": 6,
+                "timing": {
+                  "attack_ms": 10,
+                  "release_ms": 100
+                }
+              },
+              "high": {
+                "threshold_dbfs": -1.5,
+                "ratio": 20,
+                "knee_db": 6,
+                "timing": {
+                  "attack_ms": 0.5,
+                  "release_ms": 25
+                }
+              }
+            },
+            "peak_limiter": {
+              "ceiling_dbfs": -3,
+              "timing": {
+                "lookahead_ms": 5,
+                "attack_ms": 1,
+                "release_ms": 100
+              },
+              "enabled": false,
+              "oversample": 4
+            },
+            "rnnoise": {
+              "enabled": false
+            },
+            "bandpass": {
+              "enabled": true,
+              "highpass_hz": 20,
+              "lowpass_hz": 5000
+            },
+            "ctcss_filter": {
+              "mode": "highpass",
+              "notch_width_hz": 10,
+              "highpass_hz": 300
+            }
+          },
+          "enabled": true
+        },
+        "timing": {
+          "on_delay_ms": 0,
+          "squelch_delay_ms": 0,
+          "kerchunk_max_ms": 500
+        },
+        "signaling": {
+          "squelch": {
+            "source": "serial",
+            "level": 500,
+            "hysteresis": 3000,
+            "noise_filter": "standard",
+            "inverted": false,
+            "pin": [
+              "CTS"
+            ],
+            "enabled": true
+          },
+          "vad": {
+            "enabled": true,
+            "mode": "kerchunk",
+            "timing": {
+              "hang_ms": 1000
+            }
+          },
+          "ctcss": {
+            "source": "serial",
+            "tones_hz": [
+              100
+            ],
+            "gain_db": 0,
+            "relaxed": true,
+            "override": false,
+            "inverted": false,
+            "pin": [
+              "DSR"
+            ],
+            "enabled": true,
+            "frequency_hz": 100
+          },
+          "dcs": {
+            "code": "023N",
+            "enabled": false,
+            "source": "dsp"
+          }
+        }
+      },
+      "tx": {
+        "audio": {
+          "preemphasis": {
+            "enabled": false,
+            "corner_hz": 300
+          },
+          "output_a_assignment": "voice",
+          "output_b_assignment": "tone",
+          "processing": {
+            "enabled": true,
+            "input_gain_db": 6,
+            "output_gain_db": 0,
+            "stage_order": [
+              "equalizer",
+              "expander",
+              "agc",
+              "deesser",
+              "compressor",
+              "multiband_limiter"
+            ],
+            "equalizer": {
+              "low": {
+                "gain_db": 2,
+                "frequency_hz": 500,
+                "slope": 0.7
+              },
+              "mid": {
+                "gain_db": -0.5,
+                "frequency_hz": 1000,
+                "width_octaves": 1
+              },
+              "high": {
+                "gain_db": -1,
+                "frequency_hz": 2000,
+                "slope": 0.7
+              },
+              "enabled": true
+            },
+            "agc": {
+              "target_lufs": -23,
+              "max_gain_db": 6,
+              "max_attenuation_db": 6,
+              "timing": {
+                "loudness_window_ms": 400,
+                "gain_increase_db_per_second": 2,
+                "gain_decrease_db_per_second": 6,
+                "hold_ms": 500
+              },
+              "activity_threshold_dbfs": -50,
+              "activity_hysteresis_db": 3,
+              "deadband_db": 1,
+              "enabled": false
+            },
+            "expander": {
+              "threshold_dbfs": -55,
+              "ratio": 1.5,
+              "max_attenuation_db": 9,
+              "timing": {
+                "attack_ms": 10,
+                "release_ms": 250
+              },
+              "sidechain": {
+                "highpass_hz": 800,
+                "lowpass_hz": 1500
+              },
+              "enabled": false
+            },
+            "deesser": {
+              "frequency_hz": 4000,
+              "width_octaves": 1,
+              "threshold_dbfs": -18,
+              "ratio": 3,
+              "max_reduction_db": 4,
+              "timing": {
+                "attack_ms": 2,
+                "release_ms": 60
+              },
+              "enabled": false
+            },
+            "compressor": {
+              "crossover": {
+                "low_hz": 500,
+                "high_hz": 2000
+              },
+              "sidechain": {
+                "highpass_hz": 800,
+                "lowpass_hz": 1500
+              },
+              "enabled": false,
+              "defaults": {
+                "threshold_dbfs": -6,
+                "ratio": 2,
+                "makeup_gain_db": 0,
+                "timing": {
+                  "attack_ms": 75,
+                  "release_ms": 300
+                }
+              },
+              "low": {
+                "threshold_dbfs": -6,
+                "ratio": 2,
+                "makeup_gain_db": 0,
+                "timing": {
+                  "attack_ms": 75,
+                  "release_ms": 300
+                },
+                "knee_db": 9
+              },
+              "mid": {
+                "threshold_dbfs": -6,
+                "ratio": 2,
+                "makeup_gain_db": 0,
+                "timing": {
+                  "attack_ms": 75,
+                  "release_ms": 300
+                },
+                "knee_db": 9
+              },
+              "high": {
+                "threshold_dbfs": -6,
+                "ratio": 2,
+                "makeup_gain_db": 0,
+                "timing": {
+                  "attack_ms": 75,
+                  "release_ms": 300
+                },
+                "knee_db": 9
+              }
+            },
+            "multiband_limiter": {
+              "crossover": {
+                "low_hz": 500,
+                "high_hz": 2000
+              },
+              "enabled": false,
+              "defaults": {
+                "threshold_dbfs": -1.5,
+                "ratio": 20,
+                "knee_db": 0,
+                "timing": {
+                  "attack_ms": 1,
+                  "release_ms": 50
+                }
+              },
+              "low": {
+                "threshold_dbfs": -1.5,
+                "ratio": 10,
+                "knee_db": 6,
+                "timing": {
+                  "attack_ms": 50,
+                  "release_ms": 250
+                }
+              },
+              "mid": {
+                "threshold_dbfs": -1.5,
+                "ratio": 10,
+                "knee_db": 6,
+                "timing": {
+                  "attack_ms": 10,
+                  "release_ms": 100
+                }
+              },
+              "high": {
+                "threshold_dbfs": -1.5,
+                "ratio": 20,
+                "knee_db": 6,
+                "timing": {
+                  "attack_ms": 0.5,
+                  "release_ms": 25
+                }
+              }
+            },
+            "peak_limiter": {
+              "ceiling_dbfs": -3,
+              "timing": {
+                "lookahead_ms": 5,
+                "attack_ms": 1,
+                "release_ms": 100
+              },
+              "enabled": false,
+              "oversample": 4
+            },
+            "bandpass": {
+              "enabled": false,
+              "highpass_hz": 0,
+              "lowpass_hz": 8000
+            }
+          },
+          "enabled": true
+        },
+        "signaling": {
+          "ptt": {
+            "timing": {
+              "settle_ms": 500,
+              "off_delay_ms": 0,
+              "hang_ms": 1000,
+              "timeout_ms": 180000,
+              "rx_blanking_ms": 0
+            },
+            "source": "serial",
+            "inverted": false,
+            "pin": [
+              "RTS",
+              "DTR"
+            ]
+          },
+          "ctcss": {
+            "tones_hz": [
+              100
+            ],
+            "frequency_hz": 100,
+            "level_dbfs": -24,
+            "turnoff": {
+              "mode": "phase_shift",
+              "phase_shift_degrees": 120,
+              "timing": {
+                "duration_ms": 180
+              },
+              "tail_tone_hz": 55
+            },
+            "on_input": false,
+            "timing": {
+              "hang_ms": 250
+            },
+            "enabled": true,
+            "source": "dsp",
+            "output": {
+              "source": "sound_chip_gpio",
+              "pin": [
+                7
+              ],
+              "inverted": false
+            }
+          },
+          "dcs": {
+            "code": "023N",
+            "level_dbfs": -24,
+            "turnoff": {
+              "enabled": true,
+              "timing": {
+                "duration_ms": 180
+              }
+            },
+            "enabled": false,
+            "source": "dsp",
+            "output": {
+              "source": "sound_chip_gpio",
+              "pin": [
+                6
+              ],
+              "inverted": false
+            }
+          }
+        }
+      },
+      "interface": {
+        "audio": {
+          "device_selection": "exact",
+          "device_identifier": "example-radio-audio",
+          "usb_serial": "EXAMPLE-RADIO-1",
+          "input_device_channels": 1,
+          "output_device_channels": 2,
+          "timing": {
+            "input_extra_buffer_ms": 0,
+            "output_extra_buffer_ms": 0
+          },
+          "input_gain_db": 0,
+          "output_a_gain_db": 0,
+          "output_b_gain_db": 0,
+          "eeprom_enabled": false,
+          "backend": "sound_chip"
+        },
+        "tx": {},
+        "rx": {},
+        "parallel": {
+          "device": "/dev/parport0",
+          "base_address": 888,
+          "outputs": {
+            "2": "out0",
+            "3": "out0",
+            "4": "out0",
+            "5": "out0",
+            "6": "out0",
+            "7": "out0",
+            "8": "out0",
+            "9": "out0"
+          },
+          "inputs": {
+            "10": "cor",
+            "12": "ctcss",
+            "13": "in",
+            "15": "in"
+          }
+        },
+        "serial": {
+          "device": "/dev/ttyUSB0",
+          "baud_rate": 9600,
+          "data_bits": 8,
+          "parity": "none",
+          "stop_bits": 1,
+          "rtscts": false,
+          "dsrdtr": false,
+          "xonxoff": false
+        },
+        "gpio": {
+          "pins": {
+            "1": "in",
+            "2": "in",
+            "3": "out0",
+            "6": "out0",
+            "7": "out0",
+            "8": "out0"
+          },
+          "wiring_profile": "custom",
+          "clip_led_pin": 8
+        }
+      }
+    },
+    "phone_patch": {
+      "provider": {
+        "protocol": "sip",
+        "server": "sip.example.net",
+        "port": 5060,
+        "username": "example-user"
+      },
+      "playout_destination": "local",
+      "isolate_peers": true,
+      "timing": {
+        "target_latency_ms": 240,
+        "maximum_latency_ms": 500
+      },
+      "credentials": {
+        "password": "EXAMPLE-PHONE-PASSWORD"
+      },
+      "vad": {
+        "enabled": true,
+        "mode": "continuous",
+        "timing": {
+          "hang_ms": 1000
+        }
+      },
+      "jitter": {
+        "timing": {
+          "minimum_ms": 20,
+          "initial_ms": 40,
+          "maximum_ms": 100
+        }
+      }
+    },
+    "schedule": {
+      "events": {
+        "composed": {
+          "start": {
+            "at": "every weekday at 09:00",
+            "politeness_minutes": 0,
+            "macro": "run_composed_event",
+            "warnings": []
+          },
+          "restart_recovery": false
+        },
+        "clock": {
+          "start": {
+            "at": "every day at 12:00",
+            "politeness_minutes": 0,
+            "macro": "announce_clock",
+            "warnings": []
+          },
+          "restart_recovery": false
+        },
+        "spoken_notice": {
+          "start": {
+            "at": "every day at 18:00",
+            "politeness_minutes": 0,
+            "macro": "announce_scheduled_notice",
+            "warnings": []
+          },
+          "restart_recovery": false
+        },
+        "weekday_net": {
+          "replace_permanent": "home",
+          "start": {
+            "at": "every weekday at 19:00",
+            "politeness_minutes": 2,
+            "macro": "connect_window",
+            "warnings": [
+              {
+                "at": "every weekday at 18:55",
+                "macro": "warn_net_start_5_minutes"
+              },
+              {
+                "at": "every weekday at 18:59",
+                "macro": "warn_net_start_1_minute"
+              }
+            ]
+          },
+          "end": {
+            "at": "every weekday at 20:00",
+            "politeness_minutes": 2,
+            "macro": "disconnect_window",
+            "warnings": [
+              {
+                "at": "every weekday at 19:55",
+                "macro": "warn_net_end_5_minutes"
+              },
+              {
+                "at": "every weekday at 19:59",
+                "macro": "warn_net_end_1_minute"
+              }
+            ]
+          },
+          "restart_recovery": true,
+          "sequence_number": 10
+        },
+        "calendar_net": {
+          "replace_permanent": "home",
+          "start": {
+            "at": "on 2026-12-01 at 20:00",
+            "politeness_minutes": 2,
+            "macro": "connect_window",
+            "warnings": [
+              {
+                "at": "on 2026-12-01 at 19:55",
+                "macro": "warn_net_start_5_minutes"
+              },
+              {
+                "at": "on 2026-12-01 at 19:59",
+                "macro": "warn_net_start_1_minute"
+              }
+            ]
+          },
+          "end": {
+            "at": "on 2026-12-01 at 21:00",
+            "politeness_minutes": 2,
+            "macro": "disconnect_window",
+            "warnings": [
+              {
+                "at": "on 2026-12-01 at 20:55",
+                "macro": "warn_net_end_5_minutes"
+              },
+              {
+                "at": "on 2026-12-01 at 20:59",
+                "macro": "warn_net_end_1_minute"
+              }
+            ]
+          },
+          "restart_recovery": true,
+          "sequence_number": 20
+        },
+        "startup_links": {
+          "restart_recovery": false,
+          "sequence_number": 0,
+          "start": {
+            "at": "controller_start",
+            "politeness_minutes": 0,
+            "macro": "permanent_links",
+            "warnings": []
+          }
+        }
+      },
+      "permanent": {
+        "home": {
+          "remote_node": [
+            "2001"
+          ],
+          "group_name": "Home group"
+        }
+      }
+    },
+    "command": {
+      "terminator": "#",
+      "inactivity_timeout_ms": 3000,
+      "muting": true,
+      "admin": {
+        "unlock_hash": "",
+        "lock_hash": "",
+        "timing": {
+          "timeout_ms": 300000
+        }
+      },
+      "regeneration": {
+        "enabled": false,
+        "timing": {
+          "duration_ms": 200,
+          "gap_ms": 50
+        },
+        "level_dbfs": -12
+      },
+      "macro_limits": {
+        "timing": {
+          "pause_ms": 2000,
+          "max_duration_ms": 120000
+        },
+        "max_symbols": 4096,
+        "max_actions": 4096,
+        "max_depth": 8
+      },
+      "mappings": {
+        "disconnect": {
+          "command": "*1",
+          "protected": false,
+          "action": "disconnect"
+        },
+        "monitor": {
+          "command": "*2",
+          "protected": false,
+          "action": "connect",
+          "mode": "monitor"
+        },
+        "transceive": {
+          "command": "*3",
+          "protected": false,
+          "action": "connect",
+          "mode": "transceive"
+        },
+        "remote": {
+          "command": "*4",
+          "protected": false,
+          "action": "select_command_target"
+        },
+        "status": {
+          "command": "*70",
+          "protected": false,
+          "action": "link_status"
+        },
+        "disconnect_all": {
+          "command": "*806",
+          "protected": false,
+          "action": "pause_permanent_links"
+        },
+        "last_keyed": {
+          "command": "*72",
+          "protected": false,
+          "action": "last_keyed"
+        },
+        "local_monitor": {
+          "command": "*75",
+          "protected": false,
+          "action": "connect",
+          "mode": "local-monitor"
+        },
+        "disconnect_permanent": {
+          "command": "*811",
+          "protected": false,
+          "action": "disconnect_permanent"
+        },
+        "permanent_monitor": {
+          "command": "*812",
+          "protected": false,
+          "action": "connect_permanent",
+          "mode": "monitor"
+        },
+        "permanent_transceive": {
+          "command": "*813",
+          "protected": false,
+          "action": "connect_permanent",
+          "mode": "transceive"
+        },
+        "full_status": {
+          "command": "*73",
+          "protected": false,
+          "action": "network_status"
+        },
+        "reconnect_all": {
+          "command": "*816",
+          "protected": false,
+          "action": "resume_permanent_links"
+        },
+        "permanent_local_monitor": {
+          "command": "*818",
+          "protected": false,
+          "action": "connect_permanent",
+          "mode": "local-monitor"
+        },
+        "admin_unlock": {
+          "command": "*800",
+          "protected": false,
+          "action": "unlock_administration"
+        },
+        "admin_lock": {
+          "command": "*801",
+          "protected": false,
+          "action": "lock_administration"
+        },
+        "parrot_enable": {
+          "command": "*804",
+          "protected": true,
+          "action": "set_parrot",
+          "enabled": true
+        },
+        "parrot_disable": {
+          "command": "*805",
+          "protected": true,
+          "action": "set_parrot",
+          "enabled": false
+        },
+        "pad_test": {
+          "command": "*82",
+          "protected": false,
+          "action": "start_pad_test"
+        },
+        "message": {
+          "command": "*77",
+          "protected": false,
+          "action": "message"
+        },
+        "site_status": {
+          "command": "*76",
+          "protected": false,
+          "action": "site_status"
+        },
+        "cancel_message": {
+          "command": "*78",
+          "protected": false,
+          "action": "cancel_message"
+        },
+        "echo_telemetry": {
+          "command": "*79",
+          "protected": true,
+          "action": "set_echo_telemetry"
+        },
+        "radio": {
+          "command": "*6",
+          "protected": false,
+          "action": "radio"
+        },
+        "disconnect_nonpermanent_all": {
+          "command": "*10",
+          "protected": false,
+          "action": "disconnect_nonpermanent_all"
+        },
+        "time": {
+          "command": "*722",
+          "protected": false,
+          "action": "announce_time"
+        },
+        "macro_check_links": {
+          "command": "*900",
+          "protected": true,
+          "action": "call_macro",
+          "macro": "check_links"
+        },
+        "macro_reset_links": {
+          "command": "*901",
+          "protected": true,
+          "action": "call_macro",
+          "macro": "reset_links"
+        },
+        "macro_announce_status": {
+          "command": "*902",
+          "protected": true,
+          "action": "call_macro",
+          "macro": "announce_status"
+        },
+        "radio_recall_memory_0": {
+          "command": "*60",
+          "protected": false,
+          "action": "radio",
+          "operation": "recall_memory"
+        },
+        "radio_set_frequency_1": {
+          "command": "*61",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_frequency"
+        },
+        "radio_set_tone_2": {
+          "command": "*62",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_tone",
+          "direction": "rx"
+        },
+        "radio_set_tone_3": {
+          "command": "*63",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_tone",
+          "direction": "tx"
+        },
+        "radio_set_tone_enabled_40": {
+          "command": "*640",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_tone_enabled",
+          "direction": "rx",
+          "enabled": false
+        },
+        "radio_set_tone_enabled_41": {
+          "command": "*641",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_tone_enabled",
+          "direction": "rx",
+          "enabled": true
+        },
+        "radio_set_tone_enabled_42": {
+          "command": "*642",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_tone_enabled",
+          "direction": "tx",
+          "enabled": false
+        },
+        "radio_set_tone_enabled_43": {
+          "command": "*643",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_tone_enabled",
+          "direction": "tx",
+          "enabled": true
+        },
+        "radio_set_power_preset_44": {
+          "command": "*644",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_power_preset",
+          "preset": "low"
+        },
+        "radio_set_power_preset_45": {
+          "command": "*645",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_power_preset",
+          "preset": "medium"
+        },
+        "radio_set_power_preset_46": {
+          "command": "*646",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_power_preset",
+          "preset": "high"
+        },
+        "radio_status_51": {
+          "command": "*651",
+          "protected": false,
+          "action": "radio",
+          "operation": "status",
+          "detail": "long"
+        },
+        "radio_status_52": {
+          "command": "*652",
+          "protected": false,
+          "action": "radio",
+          "operation": "status",
+          "detail": "short"
+        },
+        "radio_mode_fm": {
+          "command": "*661",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_mode",
+          "selector": 1
+        },
+        "radio_mode_usb": {
+          "command": "*662",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_mode",
+          "selector": 3
+        },
+        "radio_mode_lsb": {
+          "command": "*663",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_mode",
+          "selector": 4
+        },
+        "radio_mode_am": {
+          "command": "*664",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_mode",
+          "selector": 2
+        },
+        "radio_step_711": {
+          "command": "*6711",
+          "protected": false,
+          "action": "radio",
+          "operation": "step",
+          "step_mhz": -0.00002
+        },
+        "radio_step_714": {
+          "command": "*6714",
+          "protected": false,
+          "action": "radio",
+          "operation": "step",
+          "step_mhz": -0.0001
+        },
+        "radio_step_717": {
+          "command": "*6717",
+          "protected": false,
+          "action": "radio",
+          "operation": "step",
+          "step_mhz": -0.0005
+        },
+        "radio_step_713": {
+          "command": "*6713",
+          "protected": false,
+          "action": "radio",
+          "operation": "step",
+          "step_mhz": 0.00002
+        },
+        "radio_step_716": {
+          "command": "*6716",
+          "protected": false,
+          "action": "radio",
+          "operation": "step",
+          "step_mhz": 0.0001
+        },
+        "radio_step_719": {
+          "command": "*6719",
+          "protected": false,
+          "action": "radio",
+          "operation": "step",
+          "step_mhz": 0.0005
+        },
+        "radio_scan_preset_721": {
+          "command": "*6721",
+          "protected": false,
+          "action": "radio",
+          "operation": "scan_preset",
+          "direction": "down",
+          "preset": "slow"
+        },
+        "radio_scan_preset_724": {
+          "command": "*6724",
+          "protected": false,
+          "action": "radio",
+          "operation": "scan_preset",
+          "direction": "down",
+          "preset": "medium"
+        },
+        "radio_scan_preset_727": {
+          "command": "*6727",
+          "protected": false,
+          "action": "radio",
+          "operation": "scan_preset",
+          "direction": "down",
+          "preset": "fast"
+        },
+        "radio_scan_preset_723": {
+          "command": "*6723",
+          "protected": false,
+          "action": "radio",
+          "operation": "scan_preset",
+          "direction": "up",
+          "preset": "slow"
+        },
+        "radio_scan_preset_726": {
+          "command": "*6726",
+          "protected": false,
+          "action": "radio",
+          "operation": "scan_preset",
+          "direction": "up",
+          "preset": "medium"
+        },
+        "radio_scan_preset_729": {
+          "command": "*6729",
+          "protected": false,
+          "action": "radio",
+          "operation": "scan_preset",
+          "direction": "up",
+          "preset": "fast"
+        },
+        "radio_tune_79": {
+          "command": "*679",
+          "protected": false,
+          "action": "radio",
+          "operation": "tune"
+        },
+        "radio_get_setting_90": {
+          "command": "*690",
+          "protected": false,
+          "action": "radio",
+          "operation": "get_setting"
+        },
+        "radio_set_setting_91": {
+          "command": "*691",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_setting"
+        },
+        "radio_start_scan_92": {
+          "command": "*692",
+          "protected": false,
+          "action": "radio",
+          "operation": "start_scan"
+        },
+        "radio_pause_scan_93": {
+          "command": "*693",
+          "protected": false,
+          "action": "radio",
+          "operation": "pause_scan"
+        },
+        "radio_resume_scan_94": {
+          "command": "*694",
+          "protected": false,
+          "action": "radio",
+          "operation": "resume_scan"
+        },
+        "radio_stop_scan_95": {
+          "command": "*695",
+          "protected": false,
+          "action": "radio",
+          "operation": "stop_scan"
+        },
+        "radio_set_scan_direction_960": {
+          "command": "*6960",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_scan_direction",
+          "direction": "down"
+        },
+        "radio_set_scan_direction_961": {
+          "command": "*6961",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_scan_direction",
+          "direction": "up"
+        },
+        "radio_skip_97": {
+          "command": "*697",
+          "protected": false,
+          "action": "radio",
+          "operation": "skip"
+        },
+        "radio_get_memory_98": {
+          "command": "*698",
+          "protected": false,
+          "action": "radio",
+          "operation": "get_memory"
+        },
+        "radio_catalog_990": {
+          "command": "*6990",
+          "protected": false,
+          "action": "radio",
+          "operation": "catalog",
+          "kind": "capabilities"
+        },
+        "radio_catalog_991": {
+          "command": "*6991",
+          "protected": false,
+          "action": "radio",
+          "operation": "catalog",
+          "kind": "memories"
+        },
+        "radio_catalog_992": {
+          "command": "*6992",
+          "protected": false,
+          "action": "radio",
+          "operation": "catalog",
+          "kind": "scan_lists"
+        },
+        "radio_scan_status_993": {
+          "command": "*6993",
+          "protected": false,
+          "action": "radio",
+          "operation": "scan_status"
+        },
+        "radio_set_inhibit_9940": {
+          "command": "*69940",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_inhibit",
+          "enabled": false
+        },
+        "radio_set_inhibit_9941": {
+          "command": "*69941",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_inhibit",
+          "enabled": true
+        },
+        "radio_set_scan_dwell_995": {
+          "command": "*6995",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_scan_dwell"
+        },
+        "radio_set_scan_resume_delay_996": {
+          "command": "*6996",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_scan_resume_delay"
+        },
+        "radio_set_scan_priority_997": {
+          "command": "*6997",
+          "protected": false,
+          "action": "radio",
+          "operation": "set_scan_priority"
+        },
+        "radio_current_status_998": {
+          "command": "*6998",
+          "protected": false,
+          "action": "radio",
+          "operation": "current_status"
+        },
+        "radio_invoke_999": {
+          "command": "*6999",
+          "protected": false,
+          "action": "radio",
+          "operation": "invoke"
+        },
+        "rx_mute_toggle": {
+          "command": "*99",
+          "protected": false,
+          "action": "rx_mute_toggle",
+          "target": "phone_patch"
+        }
+      },
+      "macros": {
+        "connect_net": {
+          "actions": [
+            {
+              "action": "connect",
+              "parameter": "2001"
+            },
+            {
+              "action": "pause",
+              "timing": {
+                "duration_ms": 2000
+              }
+            },
+            {
+              "action": "execute_dtmf",
+              "digits": "*70#"
+            },
+            {
+              "action": "message",
+              "destination": "peers",
+              "message": "{ status_message }"
+            }
+          ]
+        },
+        "check_links": {
+          "actions": [
+            {
+              "action": "execute_dtmf",
+              "digits": "*70#"
+            },
+            {
+              "action": "pause",
+              "timing": {
+                "duration_ms": 2000
+              }
+            },
+            {
+              "action": "execute_dtmf",
+              "digits": "*73#"
+            }
+          ]
+        },
+        "reset_links": {
+          "actions": [
+            {
+              "action": "disconnect",
+              "parameter": "2001"
+            },
+            {
+              "action": "disconnect_all"
+            },
+            {
+              "action": "reconnect_all"
+            }
+          ]
+        },
+        "announce_status": {
+          "actions": [
+            {
+              "action": "message",
+              "destination": "local",
+              "message": "{ status_message } { node_identity }"
+            },
+            {
+              "action": "message",
+              "destination": "peers",
+              "message": "{ status_message }"
+            }
+          ]
+        },
+        "announce_connection": {
+          "actions": [
+            {
+              "action": "message",
+              "message": "{ connecting }",
+              "destination": "local"
+            },
+            {
+              "action": "execute_dtmf",
+              "digits": "*70#"
+            }
+          ]
+        },
+        "connect_window": {
+          "actions": [
+            {
+              "action": "pause_permanent_links"
+            },
+            {
+              "action": "connect",
+              "parameter": "2002"
+            }
+          ]
+        },
+        "disconnect_window": {
+          "actions": [
+            {
+              "action": "disconnect",
+              "parameter": "2002"
+            },
+            {
+              "action": "call_macro",
+              "macro": "permanent_links"
+            }
+          ]
+        },
+        "warn_net_start_5_minutes": {
+          "actions": [
+            {
+              "action": "message",
+              "destination": "local",
+              "message": "{ scheduled-link-change }"
+            }
+          ]
+        },
+        "warn_net_start_1_minute": {
+          "actions": [
+            {
+              "action": "message",
+              "destination": "local",
+              "message": "{ scheduled-link-change }"
+            }
+          ]
+        },
+        "warn_net_end_5_minutes": {
+          "actions": [
+            {
+              "action": "message",
+              "destination": "local",
+              "message": "{ scheduled-link-change }"
+            }
+          ]
+        },
+        "warn_net_end_1_minute": {
+          "actions": [
+            {
+              "action": "message",
+              "destination": "local",
+              "message": "{ scheduled-link-change }"
+            }
+          ]
+        },
+        "run_composed_event": {
+          "actions": [
+            {
+              "action": "connect",
+              "parameter": "2001"
+            },
+            {
+              "action": "pause",
+              "timing": {
+                "duration_ms": 2000
+              }
+            },
+            {
+              "action": "execute_dtmf",
+              "digits": "*70#"
+            },
+            {
+              "action": "message",
+              "destination": "peers",
+              "message": "{ status_message }"
+            },
+            {
+              "action": "message",
+              "destination": "local",
+              "message": "{ scheduled_composed }"
+            }
+          ]
+        },
+        "announce_clock": {
+          "actions": [
+            {
+              "action": "message",
+              "destination": "local",
+              "message": "{ clock }"
+            }
+          ]
+        },
+        "announce_scheduled_notice": {
+          "actions": [
+            {
+              "action": "message",
+              "destination": "local",
+              "message": "{ scheduled_notice }"
+            }
+          ]
+        },
+        "permanent_links": {
+          "actions": [
+            {
+              "action": "resume_permanent_links"
+            },
+            {
+              "action": "connect_permanent",
+              "parameter": "2004"
+            }
+          ]
+        }
+      },
+      "maximum_digits": 128
+    },
+    "telemetry": {
+      "duck_db": -20,
+      "timing": {
+        "courtesy_delay_ms": 250,
+        "clock_format": 12
+      },
+      "identifiers": {
+        "station_id": {
+          "content": "{ station_id_file }{ station_id_speech }{ station_id_morse }",
+          "dtmf_id": "301",
+          "playback": {
+            "repeat": true,
+            "destination": "local"
+          },
+          "polite": {
+            "timing": {
+              "maximum_wait_ms": 60000
+            },
+            "expiry": "skip",
+            "busy": "skip",
+            "enabled": false
+          },
+          "timing": {
+            "interval_ms": 600000
+          },
+          "priority": 0,
+          "first_key_only": false,
+          "regardless_of_activity": false
+        }
+      },
+      "announcements": {
+        "welcome": {
+          "file": "/var/lib/rpt_advanced/example.wav",
+          "speech": {
+            "text": "Welcome to the example repeater.",
+            "model": "en_US-lessac-medium.onnx",
+            "timing": {
+              "speed_percent": 100
+            },
+            "level_db": 0
+          },
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          },
+          "timing": {
+            "interval_ms": 0
+          }
+        }
+      },
+      "tails": {
+        "release_tail": {
+          "content": "{ release_tail_file }{ release_tail_speech }{ release_tail_morse }{ release_tail_tone }",
+          "dtmf_id": "302",
+          "playback": {
+            "repeat": true,
+            "destination": "local"
+          },
+          "polite": {
+            "timing": {
+              "maximum_wait_ms": 60000
+            },
+            "expiry": "skip",
+            "busy": "skip"
+          },
+          "timing": {
+            "interval_ms": 0,
+            "delay_ms": 500
+          }
+        }
+      },
+      "messages": {
+        "status_message": {
+          "content": "{ status_message_file }{ status_message_speech }{ status_message_morse }{ status_message_tone }",
+          "dtmf_id": "303",
+          "playback": {
+            "repeat": true,
+            "destination": "local"
+          },
+          "polite": {
+            "timing": {
+              "maximum_wait_ms": 60000
+            },
+            "expiry": "skip",
+            "busy": "skip"
+          }
+        },
+        "composed_file": {
+          "file": "/var/lib/rpt_advanced/example.wav",
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "composed_speech": {
+          "speech": {
+            "text": "Example message.",
+            "model": "en_US-lessac-medium.onnx",
+            "timing": {
+              "speed_percent": 100
+            },
+            "level_db": 0
+          },
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "composed_morse": {
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "composed_tone": {
+          "tone": {
+            "sequence": "500Hz / 80ms",
+            "level_db": -20
+          }
+        },
+        "station_id_file": {
+          "file": "/var/lib/rpt_advanced/example.wav",
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "station_id_speech": {
+          "speech": {
+            "text": "This is N zero C A L L.",
+            "model": "en_US-lessac-medium.onnx",
+            "timing": {
+              "speed_percent": 100
+            },
+            "level_db": 0
+          },
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "station_id_morse": {
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "release_tail_file": {
+          "file": "/var/lib/rpt_advanced/example.wav",
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "release_tail_speech": {
+          "speech": {
+            "text": "Example message.",
+            "model": "en_US-lessac-medium.onnx",
+            "timing": {
+              "speed_percent": 100
+            },
+            "level_db": 0
+          },
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "release_tail_morse": {
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "release_tail_tone": {
+          "tone": {
+            "sequence": "500Hz / 80ms",
+            "level_db": -20
+          }
+        },
+        "status_message_file": {
+          "file": "/var/lib/rpt_advanced/example.wav",
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "status_message_speech": {
+          "speech": {
+            "text": "Example message.",
+            "model": "en_US-lessac-medium.onnx",
+            "timing": {
+              "speed_percent": 100
+            },
+            "level_db": 0
+          },
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "status_message_morse": {
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800,
+            "level_db": -6
+          }
+        },
+        "status_message_tone": {
+          "tone": {
+            "sequence": "500Hz / 80ms",
+            "level_db": -20
+          }
+        },
+        "clock": {
+          "locales": {
+            "en-US": {
+              "text": "The time is { $time }.",
+              "tts": "The time is { $time }.",
+              "morse": "TIME { $time }"
+            }
+          },
+          "bindings": {
+            "time": "time"
+          }
+        },
+        "scheduled_notice": {
+          "content": "Example scheduled notice."
+        },
+        "station_status": {
+          "locales": {
+            "en-US": {
+              "text": "Example station { $node-callsign }",
+              "tts": "Example station { $node-callsign }",
+              "morse": "STATION { $node-callsign }"
+            }
+          },
+          "bindings": {
+            "node-callsign": "node.callsign"
+          }
+        },
+        "node_identity": {
+          "locales": {
+            "en-US": {
+              "text": "Node { $allstarlink-node-number } { $node-callsign }",
+              "tts": "Node { $allstarlink-node-number } { $node-callsign }",
+              "morse": "NODE { $allstarlink-node-number } { $node-callsign }"
+            }
+          },
+          "bindings": {
+            "allstarlink-node-number": "allstarlink.node_number",
+            "node-callsign": "node.callsign"
+          }
+        },
+        "temperature_label": {
+          "locales": {
+            "en-US": {
+              "text": "Temperature",
+              "tts": "Temperature",
+              "morse": "TEMP"
+            }
+          }
+        },
+        "peer-identity": {
+          "locales": {
+            "en-US": {
+              "text": "{ $peer-node-number }, { $peer-callsign }",
+              "tts": "{ $peer-node-number }, { $peer-callsign }",
+              "morse": "{ $peer-node-number } { $peer-callsign }"
+            },
+            "es": {
+              "text": "{ $peer-node-number }, { $peer-callsign }"
+            }
+          },
+          "bindings": {
+            "peer-node-number": "event.peer.node_number",
+            "peer-callsign": "event.peer.callsign"
+          }
+        },
+        "connecting": {
+          "locales": {
+            "en-US": {
+              "text": "Connecting to node { peer-identity.text }.",
+              "tts": "Connecting to node { peer-identity.tts }.",
+              "morse": "CONNECTING { peer-identity.morse }"
+            },
+            "es": {
+              "text": "Conectando al nodo { peer-identity.text }."
+            }
+          }
+        },
+        "scheduled_composed": {
+          "content": "{ composed_file }{ composed_speech }{ composed_morse }{ composed_tone }",
+          "dtmf_id": "304",
+          "playback": {
+            "repeat": true,
+            "destination": "local"
+          },
+          "polite": {
+            "timing": {
+              "maximum_wait_ms": 60000
+            },
+            "expiry": "skip",
+            "busy": "skip"
+          }
+        }
+      },
+      "courtesies": {
+        "linked_peer": {
+          "file": "/var/lib/rpt_advanced/example.wav",
+          "speech": {
+            "text": "Example message.",
+            "model": "en_US-lessac-medium.onnx",
+            "timing": {
+              "speed_percent": 100
+            }
+          },
+          "morse": {
+            "text": "N0CALL",
+            "timing": {
+              "speed_wpm": 20
+            },
+            "frequency_hz": 800
+          },
+          "tone": {
+            "sequence": "1000Hz / 80ms"
+          },
+          "level_db": -20,
+          "input": "link",
+          "remote_node": "2001"
+        }
+      },
+      "morse": {
+        "frequency_hz": 800,
+        "timing": {
+          "speed_wpm": 20
+        },
+        "level_db": -6
+      },
+      "speech": {
+        "voice": "en_US-lessac-medium.onnx",
+        "timing": {
+          "speed_percent": 100
+        },
+        "level_db": 0
+      }
+    },
+    "sensors": {
+      "temperature": {
+        "enabled": false,
+        "unit": "celsius",
+        "precision": 1,
+        "timing": {
+          "poll_interval_ms": 1000,
+          "stale_after_ms": 5000,
+          "smoothing_ms": 0
+        },
+        "calibration": {
+          "mode": "two_point",
+          "input": {
+            "low": 0,
+            "high": 100
+          },
+          "value": {
+            "low": 0,
+            "high": 100
+          }
+        },
+        "dtmf_id": "201",
+        "source": {
+          "type": "hwmon",
+          "device": "/sys/class/hwmon/hwmon0",
+          "channel": "temp1_input"
+        },
+        "label": "{ temperature_label }"
+      },
+      "fan_rpm": {
+        "enabled": false,
+        "unit": "rpm",
+        "precision": 1,
+        "timing": {
+          "poll_interval_ms": 1000,
+          "stale_after_ms": 5000,
+          "smoothing_ms": 0
+        },
+        "calibration": {
+          "mode": "none",
+          "input": {
+            "low": 0,
+            "high": 6000
+          },
+          "value": {
+            "low": 0,
+            "high": 6000
+          }
+        },
+        "dtmf_id": "202",
+        "source": {
+          "type": "hwmon",
+          "device": "/sys/class/hwmon/hwmon0",
+          "channel": "fan1_input"
+        },
+        "label": ""
+      },
+      "gpio_state": {
+        "enabled": false,
+        "source": {
+          "type": "interface",
+          "node": "repeater_70cm",
+          "property": "/gpio/pins/1"
+        },
+        "unit": "state",
+        "precision": 0,
+        "timing": {
+          "poll_interval_ms": 1000,
+          "stale_after_ms": 5000,
+          "smoothing_ms": 0
+        },
+        "calibration": {
+          "mode": "none",
+          "input": {
+            "low": 0,
+            "high": 1
+          },
+          "value": {
+            "low": 0,
+            "high": 1
+          }
+        },
+        "dtmf_id": "204",
+        "label": ""
+      },
+      "parallel_state": {
+        "enabled": false,
+        "source": {
+          "type": "interface",
+          "node": "tmv71a",
+          "property": "/parallel/pins/10"
+        },
+        "unit": "state",
+        "precision": 0,
+        "timing": {
+          "poll_interval_ms": 1000,
+          "stale_after_ms": 5000,
+          "smoothing_ms": 0
+        },
+        "calibration": {
+          "mode": "none",
+          "input": {
+            "low": 0,
+            "high": 1
+          },
+          "value": {
+            "low": 0,
+            "high": 1
+          }
+        },
+        "dtmf_id": "205",
+        "label": ""
+      }
+    },
+    "inputs": {
+      "door": {
+        "enabled": false,
+        "active_level": "high",
+        "timing": {
+          "debounce_ms": 50
+        },
+        "dtmf_id": "203",
+        "on_active": [
+          "output:relay:on"
+        ],
+        "on_inactive": [
+          "output:relay:off"
+        ],
+        "source": {
+          "type": "gpiod",
+          "device": "/dev/gpiochip0",
+          "line": "4"
+        }
+      },
+      "gpio_alarm": {
+        "enabled": false,
+        "active_level": "high",
+        "source": {
+          "type": "interface",
+          "node": "repeater_70cm",
+          "property": "/gpio/pins/2"
+        },
+        "timing": {
+          "debounce_ms": 50
+        },
+        "dtmf_id": "206",
+        "on_active": [
+          "output:relay:pulse"
+        ],
+        "on_inactive": [
+          "output:relay:off"
+        ]
+      }
+    },
+    "outputs": {
+      "relay": {
+        "enabled": false,
+        "active_level": "high",
+        "startup_state": "off",
+        "safe_state": "off",
+        "timing": {
+          "pulse_ms": 500
+        },
+        "source": {
+          "type": "gpiod",
+          "device": "/dev/gpiochip0",
+          "line": "5"
+        }
+      },
+      "fan_pwm": {
+        "enabled": false,
+        "active_level": "high",
+        "startup_state": "off",
+        "safe_state": "off",
+        "timing": {
+          "pulse_ms": 500
+        },
+        "source": {
+          "type": "hwmon",
+          "device": "/sys/class/hwmon/hwmon0",
+          "channel": "pwm1"
+        }
+      },
+      "fan_switch": {
+        "enabled": false,
+        "active_level": "high",
+        "startup_state": "off",
+        "safe_state": "off",
+        "timing": {
+          "pulse_ms": 500
+        },
+        "source": {
+          "type": "gpiod",
+          "device": "/dev/gpiochip0",
+          "line": "6"
+        }
+      },
+      "gpio_relay": {
+        "enabled": false,
+        "active_level": "high",
+        "source": {
+          "type": "interface",
+          "node": "repeater_70cm",
+          "property": "/gpio/pins/AUX"
+        },
+        "startup_state": "off",
+        "safe_state": "off",
+        "timing": {
+          "pulse_ms": 500
+        }
+      }
+    },
+    "alarms": {
+      "over_temperature": {
+        "enabled": false,
+        "source": "temperature",
+        "condition": "above",
+        "trip_value": 70,
+        "clear_value": 60,
+        "reading": "current",
+        "timing": {
+          "trip_delay_ms": 5000,
+          "clear_delay_ms": 10000,
+          "repeat_interval_ms": 60000
+        },
+        "latched": false,
+        "trip_message": "{ status_message }",
+        "clear_message": "{ status_message }",
+        "repeat_message": "{ status_message }",
+        "on_trip": [
+          "inhibit:on",
+          "output:relay:on"
+        ],
+        "on_clear": [
+          "output:relay:off",
+          "inhibit:off"
+        ]
+      }
+    },
+    "fans": {
+      "cooling_pwm": {
+        "enabled": false,
+        "output": "fan_pwm",
+        "mode": "combined",
+        "ptt_nodes": [
+          "repeater_2m"
+        ],
+        "timing": {
+          "run_on_ms": 120000,
+          "spinup_ms": 1000
+        },
+        "temperature_sensor": "temperature",
+        "on_temperature": 50,
+        "off_temperature": 40,
+        "temperature_curve": [
+          {
+            "temperature": 35,
+            "duty": 0.25
+          },
+          {
+            "temperature": 50,
+            "duty": 0.5
+          },
+          {
+            "temperature": 65,
+            "duty": 1
+          }
+        ],
+        "rpm_sensor": "fan_rpm",
+        "minimum_rpm": 300
+      },
+      "cooling_switch": {
+        "enabled": false,
+        "output": "fan_switch",
+        "mode": "combined",
+        "ptt_nodes": [
+          "repeater_2m"
+        ],
+        "timing": {
+          "run_on_ms": 120000,
+          "spinup_ms": 1000
+        },
+        "temperature_sensor": "temperature",
+        "on_temperature": 50,
+        "off_temperature": 40,
+        "rpm_sensor": "fan_rpm",
+        "minimum_rpm": 300
+      }
+    },
+    "mailboxes": {
+      "1001": {
+        "first_name": "Example",
+        "callsign": "N0CALL",
+        "pin_hash": "$argon2id$v=19$m=19456,t=2,p=1$ZXhhbXBsZS1zYWx0LTEyMw$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    "allstarlink": {
+      "allow_nodes": [
+        "2001",
+        "2002"
+      ],
+      "deny_nodes": [
+        "2999"
+      ],
+      "static_directory_file": "/etc/rpt_advanced/static-nodes.conf",
+      "directory_file": "/var/lib/rpt_advanced/directory.txt",
+      "lookup_method": "both",
+      "iax": {
+        "registration_url": "https://register.allstarlink.org/",
+        "timing": {
+          "registration_interval_s": 60
+        },
+        "local_port": 4569
+      },
+      "status_post": {
+        "url": "https://example.net/node-status",
+        "timing": {
+          "interval_s": 60
+        }
+      },
+      "processing": {
+        "enabled": true,
+        "input_gain_db": 0,
+        "output_gain_db": -6.2,
+        "stage_order": [
+          "equalizer",
+          "expander",
+          "agc",
+          "deesser",
+          "compressor",
+          "multiband_limiter"
+        ],
+        "equalizer": {
+          "low": {
+            "gain_db": 2,
+            "frequency_hz": 500,
+            "slope": 0.7
+          },
+          "mid": {
+            "gain_db": -0.5,
+            "frequency_hz": 1000,
+            "width_octaves": 1
+          },
+          "high": {
+            "gain_db": -1,
+            "frequency_hz": 2000,
+            "slope": 0.7
+          },
+          "enabled": true
+        },
+        "agc": {
+          "target_lufs": -23,
+          "max_gain_db": 6,
+          "max_attenuation_db": 6,
+          "timing": {
+            "loudness_window_ms": 400,
+            "gain_increase_db_per_second": 2,
+            "gain_decrease_db_per_second": 6,
+            "hold_ms": 500
+          },
+          "activity_threshold_dbfs": -50,
+          "activity_hysteresis_db": 3,
+          "deadband_db": 1,
+          "enabled": false
+        },
+        "expander": {
+          "threshold_dbfs": -55,
+          "ratio": 1.5,
+          "max_attenuation_db": 9,
+          "timing": {
+            "attack_ms": 10,
+            "release_ms": 250
+          },
+          "sidechain": {
+            "highpass_hz": 800,
+            "lowpass_hz": 1500
+          },
+          "enabled": false
+        },
+        "deesser": {
+          "frequency_hz": 4000,
+          "width_octaves": 1,
+          "threshold_dbfs": -18,
+          "ratio": 3,
+          "max_reduction_db": 4,
+          "timing": {
+            "attack_ms": 2,
+            "release_ms": 60
+          },
+          "enabled": false
+        },
+        "compressor": {
+          "crossover": {
+            "low_hz": 500,
+            "high_hz": 2000
+          },
+          "sidechain": {
+            "highpass_hz": 800,
+            "lowpass_hz": 1500
+          },
+          "enabled": false,
+          "defaults": {
+            "threshold_dbfs": -6,
+            "ratio": 2,
+            "makeup_gain_db": 0,
+            "timing": {
+              "attack_ms": 75,
+              "release_ms": 300
+            }
+          },
+          "low": {
+            "threshold_dbfs": -6,
+            "ratio": 2,
+            "makeup_gain_db": 0,
+            "timing": {
+              "attack_ms": 75,
+              "release_ms": 300
+            },
+            "knee_db": 9
+          },
+          "mid": {
+            "threshold_dbfs": -6,
+            "ratio": 2,
+            "makeup_gain_db": 0,
+            "timing": {
+              "attack_ms": 75,
+              "release_ms": 300
+            },
+            "knee_db": 9
+          },
+          "high": {
+            "threshold_dbfs": -6,
+            "ratio": 2,
+            "makeup_gain_db": 0,
+            "timing": {
+              "attack_ms": 75,
+              "release_ms": 300
+            },
+            "knee_db": 9
+          }
+        },
+        "multiband_limiter": {
+          "crossover": {
+            "low_hz": 500,
+            "high_hz": 2000
+          },
+          "enabled": false,
+          "defaults": {
+            "threshold_dbfs": -1.5,
+            "ratio": 20,
+            "knee_db": 0,
+            "timing": {
+              "attack_ms": 1,
+              "release_ms": 50
+            }
+          },
+          "low": {
+            "threshold_dbfs": -1.5,
+            "ratio": 10,
+            "knee_db": 6,
+            "timing": {
+              "attack_ms": 50,
+              "release_ms": 250
+            }
+          },
+          "mid": {
+            "threshold_dbfs": -1.5,
+            "ratio": 10,
+            "knee_db": 6,
+            "timing": {
+              "attack_ms": 10,
+              "release_ms": 100
+            }
+          },
+          "high": {
+            "threshold_dbfs": -1.5,
+            "ratio": 20,
+            "knee_db": 6,
+            "timing": {
+              "attack_ms": 0.5,
+              "release_ms": 25
+            }
+          }
+        },
+        "peak_limiter": {
+          "ceiling_dbfs": -3,
+          "timing": {
+            "lookahead_ms": 5,
+            "attack_ms": 1,
+            "release_ms": 100
+          },
+          "enabled": false,
+          "oversample": 4
+        }
+      },
+      "echolink": {
+        "enabled": false,
+        "callsign": "N0CALL-L",
+        "node_number": 100001,
+        "name": "Example repeater",
+        "location": "Example City",
+        "email": "operator@example.net",
+        "status_message": "{ station_status }",
+        "latitude": 44.98,
+        "longitude": -93.27,
+        "frequency_mhz": 146.94,
+        "tone_hz": 100,
+        "power_w": 50,
+        "antenna_height_m": 20,
+        "antenna_gain_db": 3,
+        "antenna_direction_deg": 0,
+        "directory_servers": [
+          "servers.echolink.org",
+          "backup.echolink.org"
+        ],
+        "aprs_server": "aprs.echolink.org:5199",
+        "max_stations": 20,
+        "max_pending_handshakes": 20,
+        "timing": {
+          "heartbeat_interval_ms": 10000,
+          "heartbeat_timeout_ms": 100000,
+          "connect_timeout_ms": 30000,
+          "directory_timeout_ms": 10000,
+          "registration_refresh_ms": 300000,
+          "directory_refresh_ms": 240000,
+          "directory_retry_ms": 20000,
+          "directory_freshness_ms": 900000
+        },
+        "rx": {
+          "gain_db": -3
+        },
+        "tx": {
+          "gain_db": 3
+        },
+        "announcement": "node",
+        "telemetry": "demand",
+        "telemetry_dynamic": true,
+        "transport": "direct",
+        "bind_address": "0.0.0.0",
+        "audio_port": 5198,
+        "allow": [
+          "*"
+        ],
+        "deny": [
+          "BAD*"
+        ],
+        "credentials": {
+          "password": "EXAMPLE-ECHOLINK-PASSWORD"
+        },
+        "proxy": {
+          "host": "proxy.example.net",
+          "port": 8100,
+          "credentials": {
+            "password": "EXAMPLE-PROXY-PASSWORD"
+          }
+        },
+        "jitter": {
+          "timing": {
+            "minimum_ms": 20,
+            "initial_ms": 40,
+            "maximum_ms": 100
+          }
+        }
+      },
+      "callsign": "N0CALL",
+      "node_number": 524950,
+      "credentials": {
+        "password": "EXAMPLE-ALLSTARLINK-PASSWORD"
+      },
+      "jitter": {
+        "timing": {
+          "minimum_ms": 20,
+          "initial_ms": 40,
+          "maximum_ms": 100
+        }
+      }
+    }
+  },
+  "nodes": {
+    "repeater_2m": {
+      "name": "2M repeater",
+      "inherit_from": "site",
+      "callsign": "N0NODE",
+      "radio": {
+        "duplex_mode": "full",
+        "interface": {
+          "audio": {
+            "device_identifier": "example-radio-524950",
+            "usb_serial": "EXAMPLE-524950"
+          }
+        }
+      },
+      "mailboxes": {
+        "1001": {
+          "first_name": "Node Example",
+          "callsign": "N0NODE",
+          "pin_hash": "$argon2id$v=19$m=19456,t=2,p=1$ZXhhbXBsZS1zYWx0LTEyMw$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      },
+      "allstarlink": {
+        "callsign": "N0NODE",
+        "node_number": 524950,
+        "credentials": {
+          "password": "EXAMPLE-ALLSTARLINK-PASSWORD-524950"
+        }
+      }
+    },
+    "repeater_70cm": {
+      "name": "70CM repeater",
+      "inherit_from": "site",
+      "enabled": false,
+      "radio": {
+        "duplex_mode": "half",
+        "rx": {
+          "audio": {
+            "enabled": true
+          },
+          "signaling": {
+            "squelch": {
+              "source": "sound_chip_gpio",
+              "pin": [
+                1
+              ],
+              "inverted": false,
+              "enabled": true
+            },
+            "ctcss": {
+              "source": "sound_chip_gpio",
+              "pin": [
+                3
+              ],
+              "inverted": false
+            }
+          }
+        },
+        "tx": {
+          "audio": {
+            "enabled": true
+          },
+          "signaling": {
+            "ptt": {
+              "source": "sound_chip_gpio",
+              "pin": [
+                4
+              ],
+              "inverted": false
+            }
+          }
+        },
+        "interface": {
+          "audio": {
+            "device_identifier": "example-radio-524951",
+            "usb_serial": "EXAMPLE-524951"
+          },
+          "gpio": {
+            "pins": {
+              "3": "in",
+              "4": "out0",
+              "5": "out0",
+              "AUX": "out0"
+            }
+          }
+        }
+      },
+      "allstarlink": {
+        "callsign": "N0CALL",
+        "node_number": 524951,
+        "credentials": {
+          "password": "EXAMPLE-ALLSTARLINK-PASSWORD-524951"
+        }
+      }
+    },
+    "tmv71a": {
+      "name": "TMV71A remote base",
+      "inherit_from": "site",
+      "enabled": false,
+      "radio": {
+        "duplex_mode": "half",
+        "rx": {
+          "audio": {
+            "enabled": true
+          },
+          "signaling": {
+            "squelch": {
+              "source": "parallel",
+              "pin": [
+                10,
+                13
+              ],
+              "inverted": false,
+              "enabled": true
+            },
+            "ctcss": {
+              "source": "parallel",
+              "pin": [
+                12,
+                15
+              ],
+              "inverted": false
+            }
+          }
+        },
+        "tx": {
+          "audio": {
+            "enabled": true
+          },
+          "signaling": {
+            "ptt": {
+              "source": "parallel",
+              "pin": [
+                2,
+                3
+              ],
+              "inverted": false
+            }
+          }
+        },
+        "interface": {
+          "parallel": {
+            "device": "/dev/parport1",
+            "base_address": 632,
+            "outputs": {
+              "2": "ptt",
+              "3": "ptt"
+            }
+          },
+          "audio": {
+            "device_identifier": "example-radio-524952",
+            "usb_serial": "EXAMPLE-524952"
+          }
+        }
+      },
+      "allstarlink": {
+        "callsign": "N0CALL",
+        "node_number": 524952,
+        "credentials": {
+          "password": "EXAMPLE-ALLSTARLINK-PASSWORD-524952"
+        }
+      }
+    },
+    "keyboard_test": {
+      "name": "Keyboard controlled radio",
+      "inherit_from": "site",
+      "enabled": false,
+      "radio": {
+        "duplex_mode": "half",
+        "rx": {
+          "audio": {
+            "enabled": true
+          },
+          "signaling": {
+            "squelch": {
+              "source": "key_down",
+              "scancode": 42,
+              "inverted": false,
+              "enabled": true
+            }
+          }
+        },
+        "tx": {
+          "audio": {
+            "enabled": true
+          },
+          "signaling": {
+            "ptt": {
+              "source": "key_down",
+              "scancode": 57,
+              "inverted": false
+            }
+          }
+        },
+        "interface": {
+          "audio": {
+            "device_identifier": "example-radio-524953",
+            "usb_serial": "EXAMPLE-524953"
+          }
+        }
+      },
+      "allstarlink": {
+        "callsign": "N0CALL",
+        "node_number": 524953,
+        "credentials": {
+          "password": "EXAMPLE-ALLSTARLINK-PASSWORD-524953"
+        }
+      }
+    }
+  }
+}

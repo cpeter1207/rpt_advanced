@@ -6,6 +6,27 @@ not retain compatibility-only code or interfaces. Preserve required current
 behavior and external interoperability; update consumers and artifact-version
 checks together so incompatible combinations fail safely.
 
+## Approved JSON/REST implementation (2026-11-19)
+
+Follow `docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md`
+and its linked design. Update the checklist only after each step is verified.
+The controller's coordinated configuration cutover removes INI; USBRadioPlus
+retains its public INI format. Keep protocol connections live when possible and
+preserve local-repeat and phone audio across link changes. Normal jitter/PLC
+adjustment must not retire a connection.
+
+For JSON, log warnings and ignore unknown keys and unknown, invalid or
+unsupported setting values, using inherited/default values. Canonical schemas
+describe normalized output; they do not require rejecting recoverable input.
+Core resolution returns value-free diagnostics for host logging. Syntax errors,
+duplicate-member ambiguity and unsafe relationships fail only when no safe
+deterministic candidate can be constructed. Never log credentials or supplied
+values. Log recoverable failures as warnings and fatal connection/controller
+failures as errors. Reuse existing code and libraries; do not invent requirements
+or extra edge cases. Build/test at major milestones on node524950.local in a
+home-directory workspace; this does not authorize changing the installed
+service or its live configuration.
+
 ## Shared rpt_advanced project baseline
 
 This baseline applies to every production, shared-library, and workflow

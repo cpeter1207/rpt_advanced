@@ -1,0 +1,10 @@
+{
+  "configuration": {
+    "enabled": false,
+    "callsign": "N0CALL-L",
+    "node_number": 100001,
+    "credentials": {
+      "password": "EXAMPLE-PASSWORD"
+    }
+  }
+}

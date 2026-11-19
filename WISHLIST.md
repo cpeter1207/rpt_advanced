@@ -28,6 +28,19 @@ qualification are distinct from software implementation and passive node health.
 
 ## Entries
 
+### Modular JSON configuration and authenticated HAL management
+
+**Status: Implementation started 2026-11-19; runtime cutover pending.** Follow
+[ADR 0045](doc/architecture/decisions/0045-modular-json-and-hal-management.md), the
+[design](docs/superpowers/specs/2026-11-18-json-rest-configuration-design.md) and
+[updated checklist](docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md).
+The initial JSON model/inheritance work does not replace the running INI path.
+Remove controller INI during the coordinated store/provider cutover and retain
+USBRadioPlus INI. Keep remaining resource, storage, API, provider, scheduler,
+action, message and native milestone verification items unchecked until tested.
+Unknown JSON keys and unsupported values warn and fall back; do not add a
+strict unknown-field rejection policy.
+
 ### Remove legacy VOX in favor of VAD
 
 **Status: Planned; requested 2026-11-17.** Earshot VAD supersedes the legacy

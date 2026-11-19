@@ -1,0 +1,17 @@
+[
+  {
+    "op": "test",
+    "path": "/configuration/enabled",
+    "value": true
+  },
+  {
+    "op": "replace",
+    "path": "/configuration/enabled",
+    "value": false
+  },
+  {
+    "op": "replace",
+    "path": "/configuration/deemphasis/corner_hz",
+    "value": 250
+  }
+]
