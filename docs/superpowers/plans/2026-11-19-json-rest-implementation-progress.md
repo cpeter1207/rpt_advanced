@@ -445,8 +445,8 @@ Host commands, RED/GREEN, approved reviews, fixture provenance and formatting
 repair evidence remain under `.work/json-rest/milestone-6-*`.
 
 Milestone 6 is complete and execution pauses per the checklist. The loader's
-same-leaf parent-identity fixture and live systemd-delivery integration remain
-recorded follow-ups. Account payload/binding validation, encrypted object
+same-leaf parent-identity fixture was subsequently closed by milestone 7; live
+systemd-delivery integration remains a later verification step. Account payload/binding validation, encrypted object
 publication, private manifest adoption, accepted-state transactions, directory
 provisioning, full discovery/profiles, HTTP/HAL and the coordinated controller
 INI cutover remain pending. USBRadioPlus INI is preserved. Full production
@@ -456,7 +456,7 @@ before merge; this milestone does not claim that complete pull-request gate.
 
 ## Seventh milestone: typed encrypted private artifact I/O
 
-**Host implementation verified, 2026-11-20; native checkpoint pending.** Connected prepared sealed records to the guarded
+**Completed, 2026-11-20.** Connected prepared sealed records to the guarded
 immutable engine. Preparation owns one identity and exact encoded ciphertext;
 installation admits only that typed input, so retries never reseal. Private
 paths derive only from trusted record/version UUIDs. Public raw-byte target
@@ -495,3 +495,33 @@ Preparation preserves one ciphertext identity across no-replace/durability
 retries; readback verifies bounded ciphertext before env-only key lookup and
 returns authenticated opaque bytes. Payload/account validation remains separate.
 Evidence is retained under `.work/json-rest/milestone-7-*`.
+
+### Seventh-milestone native checkpoint
+
+Native Debian 13 arm64 verification passed **106 affected tests**, zero failures,
+at published source `15b631664294bc3a7e5d36470311d3dfddeeb031` with isolated
+Rust 1.88. The complete peer-support suite plus both product capture/manifest
+regressions passed. The controller service was active before and after; no
+installed package, binary, live configuration, actual credential or service
+state changed. Compilation and synthetic fixtures stay in the home workspace.
+
+Native logs and receipt remain under the node workspace's `.work/` directory.
+Log SHA-256:
+`c52b74ad7197486e52d67988a767234b81b86650810f0069174654de196afaef`.
+Host RED/GREEN, fixture mutation proof, approved review and gate commands remain
+under `.work/json-rest/milestone-7-*`.
+
+The original encryption/key-loading implementation steps are now checked after
+the typed persistence/readback path verified them end to end. Their account,
+private-graph and startup/rotation integration steps stay unchecked. The M6
+parent fixture gap is closed; live delivered-credential integration is still a
+future acceptance test.
+
+Milestone 7 is complete and execution pauses per the checklist. Trusted root/
+store context and preprovisioned private directories remain caller prerequisites.
+Authenticated opaque bytes are not validated account credentials. Account
+payloads/resolved profiles, private manifest adoption, accepted-state/journal
+transactions, provisioning/full discovery, HTTP/HAL and the coordinated
+controller INI cutover remain pending. USBRadioPlus INI is preserved. Full
+production coverage, Doxygen, packaging and staged-install checks are still
+required before merge; these component checks do not claim that complete gate.

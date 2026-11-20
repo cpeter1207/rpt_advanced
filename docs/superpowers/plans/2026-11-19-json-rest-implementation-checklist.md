@@ -35,6 +35,8 @@ Use test-driven development.
 
 [x] - Complete bounded sealed private-record crypto/codec and env-only systemd key loading with opaque zeroizing buffers, independent interoperability evidence and host/native checks. Account payloads, encrypted file publication and private graph adoption remain pending.
 
+[x] - Complete typed prepared encrypted-object installation and authenticated readback under the edit lock, including exact retry/durability behavior, bounded reads and native verification. Account binding, private manifest adoption and accepted-state selection remain pending.
+
 [] - Finalize recurring start/end pairing, overnight windows, overlapping occurrences/grace periods, calendar startup without recovery, missed checks and legacy permanent-route ownership before implementing scheduler transitions.
 
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.
@@ -129,9 +131,9 @@ Use test-driven development.
 
 [] - Implement omission-preserve, nonempty-replace and explicit clear/mask semantics; never reuse a secret after its account/endpoint binding changes.
 
-[] - Encrypt recoverable records with XChaCha20-Poly1305, a fresh 24-byte nonce/version and the documented format/purpose/store/credential/version bindings; exclude logical revision and desired/last-known-good slots.
+[x] - Encrypt recoverable records with XChaCha20-Poly1305, a fresh 24-byte nonce/version and the documented format/purpose/store/credential/version bindings; exclude logical revision and desired/last-known-good slots.
 
-[] - Read the separate 32-byte key only from `$CREDENTIALS_DIRECTORY/rpt-advanced.aead.<key_id>` with the documented validated key ID; keep it out of controller JSON, arguments, HTTP, logs and proxy/CLI credentials.
+[x] - Read the separate 32-byte key only from `$CREDENTIALS_DIRECTORY/rpt-advanced.aead.<key_id>` with the documented validated key ID; keep it out of controller JSON, arguments, HTTP, logs and proxy/CLI credentials.
 
 [] - Implement locked-store startup, stopped-writer key rotation and retained-key recovery without inventing replacement keys or false configured flags.
 

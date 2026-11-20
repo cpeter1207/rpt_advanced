@@ -34,14 +34,12 @@ qualification are distinct from software implementation and passive node health.
 [ADR 0045](doc/architecture/decisions/0045-modular-json-and-hal-management.md), the
 [design](docs/superpowers/specs/2026-11-18-json-rest-configuration-design.md) and
 [updated checklist](docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md).
-The decoder/metadata, registry/candidate, registered-file capture, immutable
-installation, public-manifest/readback and sealed-record/key-loader milestones
-are verified on the development host and native node. Account binding, encrypted
-object/private-graph publication, complete resource discovery, accepted-state
-transactions, full domain validation and runtime cutover remain pending. These
-control-plane foundations do not replace the running INI path. Typed encrypted
-private-object installation/readback is the current implementation slice;
-resolved account bindings and private manifest adoption remain pending.
+The decoder/metadata, registry/candidate, registered capture, immutable public
+storage, public manifest/readback, sealed-record/key-loader and typed private
+artifact I/O milestones are verified on the development host and native node.
+Resolved account bindings, private manifest adoption, complete discovery,
+accepted-state transactions, full domain validation and runtime cutover remain
+pending. These control-plane foundations do not replace the running INI path.
 Remove controller INI during the coordinated store/provider cutover and retain
 USBRadioPlus INI. Keep remaining resource, storage, API, provider, scheduler,
 action, message and native milestone verification items unchecked until tested.
