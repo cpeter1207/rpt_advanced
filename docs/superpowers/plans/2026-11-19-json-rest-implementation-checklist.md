@@ -33,6 +33,8 @@ Use test-driven development.
 
 [x] - Complete typed reference-only public manifests, protected hash-verified immutable graph readback and borrowed candidate assembly; pass host/native checks. Accepted-state selection, private graphs and activation remain pending.
 
+[x] - Complete bounded sealed private-record crypto/codec and env-only systemd key loading with opaque zeroizing buffers, independent interoperability evidence and host/native checks. Account payloads, encrypted file publication and private graph adoption remain pending.
+
 [] - Finalize recurring start/end pairing, overnight windows, overlapping occurrences/grace periods, calendar startup without recovery, missed checks and legacy permanent-route ownership before implementing scheduler transitions.
 
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.

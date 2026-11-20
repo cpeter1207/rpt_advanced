@@ -383,7 +383,7 @@ Doxygen, packaging and staged-install validation before merge.
 
 ## Sixth milestone: sealed private records and systemd keys
 
-**Host implementation verified, 2026-11-20; native checkpoint pending.** Added a bounded XChaCha20-Poly1305 envelope and an
+**Completed, 2026-11-20.** Added a bounded XChaCha20-Poly1305 envelope and an
 env-only systemd credential loader. The codec emits only version/key-ID/nonce/
 ciphertext, authenticates trusted store/record/generated-version context and
 key routing, and generates independent fresh nonce/version values. Keys and
@@ -427,3 +427,28 @@ zeroize buffer type's contents. No C ABI or installed runtime path changed.
 Exact commands, source/fixture/package evidence, approved reviews and log
 receipts remain under `.work/json-rest/milestone-6-*`. The final broad gate used
 the verified task-local launcher and freshly pulled `c3800ed0` image digest.
+
+### Sixth-milestone native checkpoint
+
+Native Debian 13 arm64 verification passed **934 tests**, zero failures, at
+published source `240cba5101040b8b5e518b50d38fcecd40f54cbc` using isolated
+Rust 1.88. This includes the complete core/shared-JSON/peer-support suites and
+both product capture/manifest suites. The independent crypto vector and all
+synthetic key-loader tests passed on the native architecture. The controller
+service was active before and after; no installed package, binary, live
+configuration, actual service credential or service state was changed.
+
+The native log/receipt remain in the node workspace's `.work/` directory.
+Log SHA-256:
+`bfd21c8703c20b64c8afc60eae07ec338e71cee6eadf0061436c30d4002f4451`.
+Host commands, RED/GREEN, approved reviews, fixture provenance and formatting
+repair evidence remain under `.work/json-rest/milestone-6-*`.
+
+Milestone 6 is complete and execution pauses per the checklist. The loader's
+same-leaf parent-identity fixture and live systemd-delivery integration remain
+recorded follow-ups. Account payload/binding validation, encrypted object
+publication, private manifest adoption, accepted-state transactions, directory
+provisioning, full discovery/profiles, HTTP/HAL and the coordinated controller
+INI cutover remain pending. USBRadioPlus INI is preserved. Full production
+coverage, Doxygen, packaging and staged-install validation remain required
+before merge; this milestone does not claim that complete pull-request gate.

@@ -40,7 +40,7 @@ selection, reads through the guarded host boundary and owns its verified bytes.
 It assembles the existing borrowed candidate on demand. Format/ownership/hash
 validation is separate from complete domain profiles and state selection.
 
-The next host private-record layer uses XChaCha20-Poly1305 with explicit format,
+The host private-record layer uses XChaCha20-Poly1305 with explicit format,
 purpose, store/record/version and key-ID authentication. Each seal creates an
 independent object-version UUID and nonce. Opaque zeroizing owners protect key
 and plaintext buffers. An env-only systemd loader reads exactly 32 raw bytes
