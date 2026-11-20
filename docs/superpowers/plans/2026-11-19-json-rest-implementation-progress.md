@@ -177,8 +177,47 @@ on Debian 13 arm64 using isolated Rust 1.88 at source commit
 before and after the build. Both source workspaces are clean; no installed
 binary, connection, DSP or live configuration has been changed.
 
-Milestone 2 is complete and execution pauses here per the checklist. Secure
+Milestone 2 is complete; execution resumed for milestone 3 at the user’s request. Secure
 filesystem capture, complete domain profiles, durable storage, credentials,
 HTTP/HAL and the coordinated controller INI cutover remain pending. USBRadioPlus
 INI remains supported. The complete native pull-request coverage/package gate
 has not been claimed by these scoped model checks.
+
+
+## Third milestone: guarded capture of registered working files
+
+**Host implementation verified, 2026-11-20; native checkpoint pending.** Added bounded read-only capture under a preprovisioned
+service-owned edit lock, with protected descriptor-relative no-follow access,
+owned byte snapshots and SHA-256 content fingerprints for guarded rechecks.
+The product adapter maps registry UUID/kind bindings to fixed paths and passes
+those same bytes to the existing candidate assembler. Local keys and names never
+become filesystem paths. No public serialization or native ABI is added.
+
+This selection is deliberately limited to registered metadata, ordinary sections
+and protocol defaults/instances. It does not discover new ports, named
+collections or scheduler events; the complete allowed inventory and working-tree
+reload remain later work. Reads do not create, repair, publish or activate files.
+Caller-supplied bounds introduce no new configuration settings or policy defaults.
+
+Native provider prerequisites were downloaded, checksum-verified and extracted
+under the node user's home workspace: USBRadioPlus alpha35 and manifest-matched
+IAX alpha9. Installed packages and the running service remain unchanged.
+
+### Third-milestone host verification
+
+Ten protected-filesystem tests and four real product-adapter tests failed
+against inert implementations, then passed after implementation. The final
+maintained constrained Debian 13 host gate passed **886 tests**, zero failures,
+Rustdoc with warnings denied and full fast formatting/lint/static analysis,
+including Cppcheck, Clang-Tidy and workspace Clippy. The freshly pulled image
+resolved the recorded `c3800ed0` digest and used the verified matched IAX overlay.
+
+Independent specification/code review approved the slice. A nonblocking
+fixture-only note is deferred: timestamp-only shared fixture names could collide
+in parallel tests; use a process-local counter when editing that fixture next.
+The serial host/native milestone runs do not depend on parallel construction.
+
+The Linux host-glue crate reuses locked ring 0.17.14 and adds rustix 1.1.6 for safe
+filesystem/locking APIs (transitive errno 0.3.15 and linux-raw-sys 0.12.1).
+Existing dependency versions are unchanged; core remains independent of host
+filesystem crates. Native verification and its final checkpoint remain pending.

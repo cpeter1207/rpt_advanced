@@ -215,6 +215,13 @@ impl ResourceRegistry {
         let id = *self.slots.get(&(scope, kind))?;
         Some(ResourceBinding { id, scope, kind })
     }
+
+    /// Iterate all registered bindings, including the site and port metadata.
+    pub fn bindings(&self) -> impl ExactSizeIterator<Item = ResourceBinding> + '_ {
+        self.slots
+            .iter()
+            .map(|(&(scope, kind), &id)| ResourceBinding { id, scope, kind })
+    }
 }
 
 impl fmt::Debug for ResourceRegistry {

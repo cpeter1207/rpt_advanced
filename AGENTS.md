@@ -33,6 +33,12 @@ separate from normalized public/effective views. All ordinary section kinds can
 have site defaults, including control, memories and scan lists. Site protocol
 defaults do not create port protocol instances; presence is explicit.
 
+Registered working-file capture is a read-only host/product boundary. Use the
+preprovisioned edit lock, descriptor-relative no-follow access and caller-supplied
+bounds; never create or repair inputs while reading. Fingerprints cover only the
+explicit registered selection, not undiscovered resources or a complete reload.
+Keep raw snapshot bytes and path diagnostics out of logs and public output.
+
 ## Shared rpt_advanced project baseline
 
 This baseline applies to every production, shared-library, and workflow

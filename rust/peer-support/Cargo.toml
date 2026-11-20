@@ -11,3 +11,7 @@ libloading = "0.8"
 
 [dev-dependencies]
 rptadv-control-standalone-adapter = { path = "../control-standalone-adapter" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ring = "0.17.14"
+rustix = { version = "1.1", features = ["fs", "process"] }

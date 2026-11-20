@@ -8,6 +8,8 @@ pub(crate) mod abi {
 }
 
 mod configuration;
+#[cfg(target_os = "linux")]
+pub mod configuration_capture;
 pub mod control;
 pub mod directory;
 pub mod host;

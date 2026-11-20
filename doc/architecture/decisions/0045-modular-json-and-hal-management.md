@@ -41,6 +41,14 @@ candidate is staging data until domain validation; raw bodies are not public
 HAL or accepted runtime settings. Filesystem capture and publication stay with
 the host/product control plane.
 
+The first filesystem slice captures only an authoritative registered selection.
+The existing host-glue crate owns safe bounded reads, a preprovisioned stable
+edit lock and content fingerprints; a thin product adapter owns the UUID/kind
+path mapping into the core candidate. Readers do not create or repair files.
+Rechecks open the current working directory again and preserve external edits.
+Fingerprints cover selected paths and absence markers, not an undiscovered tree;
+full reload requires a complete allowed-inventory/discovery integration later.
+
 Store accepted resources and private records as immutable objects selected by
 one durably committed manifest/state pointer. Keep editable working files
 separate and import them only on explicit reload. Validate, save and activate
