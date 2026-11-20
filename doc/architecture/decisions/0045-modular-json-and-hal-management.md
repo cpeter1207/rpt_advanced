@@ -148,6 +148,12 @@ directory-feed decoding and USBRadioPlus's public INI format. Reuse typed native
 fields and extend checked preparation inputs only where needed; never serialize
 controller JSON back through provider INI as a hidden compatibility layer.
 
+Typed action preparation shares the audited command inventory across macros
+and DTMF mappings. It preserves exact parameter text and fixed setting types,
+resolves the longest mapping before argument/grant checks, and rejects known
+macro cycles. Preparation grants no runtime authority: source, owner, generation
+and provider capability admission remain mandatory at execution.
+
 Reuse existing lifecycle/media owners. Preserve connections and local/phone
 audio across ordinary link changes; normal jitter/PLC adjustments do not tear
 down sessions. Configuration work, diagnostics, storage and HTTP remain outside

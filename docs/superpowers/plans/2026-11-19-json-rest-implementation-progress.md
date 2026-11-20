@@ -565,3 +565,15 @@ DSOs and the documented library environment were used for the affected host test
 
 Continue through accepted-state transactions, typed provider joins, authenticated HAL
 and runtime cutover. Intermediate milestone completion no longer pauses execution.
+
+## Continuous checkpoint: public accepted state and authenticated transport
+
+Source `3d4a0426e0acbb8a6e18efb7a6f8f7894911f8e1` integrates the reviewed public catalog/manifest/state/journal transaction and loopback HTTPS components. Both the constrained Debian 13 amd64 host and native arm64 home workspace passed 1,005 affected tests. Strict Rustdoc and the complete fast preflight passed. Native service health remained active; installed configuration and service files were unchanged.
+
+The HTTPS component includes real nginx/Apache fixtures, bounded nonblocking coordinator admission, current mTLS authorization/expiry and secret-safe response projection. HAL routing, complete private graphs and runtime adoption remain pending. Durable on-disk confirmation is historical evidence, not current runtime activation.
+
+Command preparation now covers the audited action inventory, all 78 default DTMF mappings, shared ordered macro actions, exact raw parameters/fixed values, source/owner/grant constraints and known static cycles. Two review rounds closed all ten findings. Final host verification passed 791 core tests and 88 integration tests, documentation, formatting, Clippy and full fast checks. Runtime collectors, macro execution and RX mute remain separate pending joins.
+
+The hron schedule provider source `238811360fc34908a8ea9d4174bfe49d874d2a0e` passed its full required Debian 13 amd64/arm64 PR gate, including production line/branch coverage. USBRadioPlus typed preparation source `a771f76cdb144d6d245e625020844d55e970feb0` includes independent peer DSP without physical selection; targeted host/native tests passed. Its full PR gate identified missing getter return documentation; correction is in progress before platform/coverage verification. Both provider PRs remain drafts; no release or installation is implied.
+
+Continuous execution proceeds through typed radio settings, private account graph adoption and hron event scheduling. The authorized stopping point remains implementation/runtime cutover, before any separately authorized deployment.

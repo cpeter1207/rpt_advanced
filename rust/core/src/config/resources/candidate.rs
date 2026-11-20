@@ -547,6 +547,12 @@ impl<'registry> ModularCandidate<'registry> {
         self.staged.get(&binding.id)
     }
 
+    pub(super) fn staged_member(&self, binding: ResourceBinding) -> Option<&StagedResource> {
+        self.staged
+            .get(&binding.id)
+            .filter(|r| r.binding == binding)
+    }
+
     /// Iterate the port's explicitly present protocols, regardless of its enabled setting.
     pub fn port_protocols(&self, port: ResourceId) -> impl Iterator<Item = ResourceBinding> + '_ {
         ResourceKind::PROTOCOLS.into_iter().filter_map(move |kind| {

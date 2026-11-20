@@ -38,7 +38,7 @@ The decoder/metadata, registry/candidate, registered capture, immutable public
 storage, public manifest/readback, sealed-record/key-loader and typed private
 artifact I/O milestones are verified on the development host and native node.
 Public accepted-state/journal transactions and bounded mTLS/HTTPS transport
-passed integrated host checks; their native checkpoint is next. Private account
+passed 1,005 integrated tests on both the development host and native node. Private account
 bindings, private manifest adoption, HAL/runtime joins and full domain validation
 remain pending. Typed modular protocol profiles and resource-local JSON Patch staging passed
 focused, core and affected-host checks plus their native home-workspace checkpoint.
