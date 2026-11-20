@@ -1,6 +1,6 @@
 //! Check sparse bodies and resolve field-specific inheritance off the audio path.
 
-use super::{CandidateWarning, NormalizedProtocolResource, ResourceBinding, ResourceScope};
+use super::{CandidateWarning, NormalizedProfileResource, ResourceBinding, ResourceScope};
 use crate::config::resources::ResourceWarning;
 use serde_json::{Map, Value};
 
@@ -11,6 +11,7 @@ pub(super) type Path = &'static [&'static str];
 pub(super) enum Rule {
     Object(Fields),
     Bool,
+    Number(f64, f64),
     Unsigned(u64, u64),
     Choice(&'static [&'static str]),
     Value(fn(&Value) -> Option<Value>),
@@ -19,6 +20,16 @@ pub(super) enum Rule {
 pub(super) fn normalize(
     binding: ResourceBinding,
     fields: &Map<String, Value>,
+    schema: Fields,
+    warnings: &mut Vec<CandidateWarning>,
+) -> Map<String, Value> {
+    normalize_fields(binding, fields.iter(), schema, warnings)
+}
+
+/// Normalize the fields owned by one decoder of a shared configuration section.
+pub(super) fn normalize_fields<'a>(
+    binding: ResourceBinding,
+    fields: impl Iterator<Item = (&'a String, &'a Value)>,
     schema: Fields,
     warnings: &mut Vec<CandidateWarning>,
 ) -> Map<String, Value> {
@@ -35,6 +46,10 @@ pub(super) fn normalize(
             Rule::Object(children) => value
                 .as_object()
                 .map(|body| Value::Object(normalize(binding, body, children, warnings))),
+            Rule::Number(min, max) => value
+                .as_f64()
+                .filter(|n| (*min..=*max).contains(n))
+                .map(|_| value.clone()),
             Rule::Bool => value.as_bool().map(Value::Bool),
             Rule::Unsigned(min, max) => value
                 .as_u64()
@@ -69,8 +84,8 @@ pub(super) fn warn(
 /// Look up normalized leaves in local, site, then built-in order. A normalized
 /// object supplies only its present children, while an array is one leaf.
 pub(super) struct Layers<'a> {
-    pub(super) local: &'a NormalizedProtocolResource,
-    pub(super) site: Option<&'a NormalizedProtocolResource>,
+    pub(super) local: &'a NormalizedProfileResource,
+    pub(super) site: Option<&'a NormalizedProfileResource>,
 }
 
 impl Layers<'_> {

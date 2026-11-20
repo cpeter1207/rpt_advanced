@@ -552,6 +552,15 @@ impl NodeLinkControl {
             self.group_member(&remote),
         )
     }
+    pub(super) fn apply_event_groups(
+        &mut self,
+        local: &str,
+        events: &super::scheduler::EventScheduler,
+    ) -> bool {
+        self.schedule
+            .as_mut()
+            .is_some_and(|links| events.apply_group_holds(local, links))
+    }
     pub(super) fn schedule(&self) -> Option<&LinkScheduler> {
         self.schedule.as_ref()
     }

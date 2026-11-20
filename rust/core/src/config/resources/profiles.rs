@@ -1,12 +1,17 @@
 //! Typed, public modular protocol settings resolved from identified local bodies.
 
 mod allstarlink;
+/// Public DTMF administration, muting and regeneration settings.
+pub mod command_policy;
 /// Final public ownership and account projections for private records.
 pub mod credentials;
 mod echolink;
 mod jitter;
+/// Public identities keyed by their real mailbox number and declaring resource.
+pub mod mailbox;
 mod normalize;
 mod phone;
+pub mod radio;
 
 pub use allstarlink::{AllStarLinkAccountIdentity, AllStarLinkProfileSettings};
 pub use echolink::{EchoLinkDirectoryIdentity, EchoLinkProxyIdentity};
@@ -31,12 +36,15 @@ use std::{collections::BTreeMap, fmt};
 
 /// Recognized local authoring fields of one bound resource.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NormalizedProtocolResource {
+pub struct NormalizedProfileResource {
     /// Registry-owned resource binding.
     pub binding: ResourceBinding,
     /// Recognized sparse settings before descendant-specific relationship checks.
     pub configuration: Map<String, Value>,
 }
+
+/// Recognized sparse fields of a protocol resource.
+pub type NormalizedProtocolResource = NormalizedProfileResource;
 
 /// Explicit protocol with typed settings and independent playout policy.
 #[derive(Clone, Debug, PartialEq)]
@@ -169,7 +177,7 @@ impl std::error::Error for ProtocolProfileError {}
 #[derive(Debug, Default)]
 pub struct ResolvedProtocolProfiles {
     site: ResolvedProtocolAccounts,
-    local: BTreeMap<ResourceId, NormalizedProtocolResource>,
+    local: BTreeMap<ResourceId, NormalizedProfileResource>,
     ports: BTreeMap<ResourceId, ResolvedProtocolPort>,
     warnings: Vec<CandidateWarning>,
 }
@@ -181,12 +189,12 @@ impl ResolvedProtocolProfiles {
     }
 
     /// Find the normalized local body by registered protocol resource ID.
-    pub fn local(&self, id: ResourceId) -> Option<&NormalizedProtocolResource> {
+    pub fn local(&self, id: ResourceId) -> Option<&NormalizedProfileResource> {
         self.local.get(&id)
     }
 
     /// Iterate normalized local bodies for captured defaults and explicit instances.
-    pub fn locals(&self) -> impl Iterator<Item = &NormalizedProtocolResource> {
+    pub fn locals(&self) -> impl Iterator<Item = &NormalizedProfileResource> {
         self.local.values()
     }
 
@@ -230,7 +238,7 @@ impl ModularCandidate<'_> {
                     normalize(binding, resource.fields(), schema, &mut result.warnings);
                 result.local.insert(
                     binding.id,
-                    NormalizedProtocolResource {
+                    NormalizedProfileResource {
                         binding,
                         configuration,
                     },
@@ -385,3 +393,6 @@ fn validate_ownership<'a>(
 #[cfg(test)]
 #[path = "profiles_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod public_policy_tests;

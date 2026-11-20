@@ -3,15 +3,15 @@
 #[cfg(test)]
 mod tests;
 
+use super::mailbox::PublicMailbox;
 use super::{
     AllStarLinkProfileSettings, EchoLinkProxyIdentity, PhonePatchProfileSettings, PhoneProtocol,
     ProtocolProfile,
 };
+use crate::config::EchoLinkSettings;
 use crate::config::resources::candidate::{
     ModularCandidate, ResourceBinding, ResourceId, ResourceKind, ResourceScope,
 };
-use crate::config::{EchoLinkSettings, phone_mailboxes};
-use crate::link::MailboxId;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fmt};
 
@@ -182,20 +182,14 @@ impl ModularCandidate<'_> {
             let fields = self
                 .member_fields(binding.id)
                 .ok_or(InvalidCredentialOwner)?;
-            MailboxId::new(number.as_str()).map_err(|_| InvalidCredentialOwner)?;
-            for key in ["first_name", "callsign"] {
-                fields
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .filter(|s| phone_mailboxes::value_valid(key, s))
-                    .ok_or(InvalidCredentialOwner)?;
-            }
+            let mailbox =
+                PublicMailbox::decode(*binding, number, fields).ok_or(InvalidCredentialOwner)?;
             owners.insert(
                 (binding.id, Pin),
                 CredentialOwner {
                     binding: *binding,
                     parent: None,
-                    affinity: Some(json!([number.as_str()])),
+                    affinity: Some(json!([mailbox.number.as_str()])),
                 },
             );
         }

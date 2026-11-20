@@ -702,6 +702,10 @@ impl NodeController {
             self.telemetry.held_status = true;
         }
         let idle = self.now.saturating_sub(self.last_activity);
+        // Include every qualified peer, even when group priority selects another for TX.
+        if receive || source_activity {
+            self.activity.publish(self.now);
+        }
         if receive {
             self.ctcss_hang_until = self
                 .now
@@ -712,7 +716,6 @@ impl NodeController {
                 self.suppress_release = false;
             }
             self.last_activity = self.now;
-            self.activity.publish(self.now);
             self.identifiers.activity();
         }
         if receiving && !self.receiver {

@@ -19,6 +19,11 @@ fn pkg_config(args: &[&str]) -> String {
 
 fn main() {
     pkg_config(&["--atleast-version=0.1.0~alpha2", "rptadvdtmf"]);
+    assert_eq!(
+        pkg_config(&["--variable=recurrence_abi_version", "rptadvschedule"]),
+        "1",
+        "rptadvschedule recurrence development ABI"
+    );
     for provider in [
         "rptadvtone",
         "rptadvmorse",

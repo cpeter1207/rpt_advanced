@@ -16,6 +16,9 @@ pub mod configuration_manifest;
 /// Account-bound encrypted credentials selected by the configuration transaction.
 pub mod configuration_private;
 #[cfg(target_os = "linux")]
+#[path = "configuration_radio/typed.rs"]
+pub mod configuration_radio;
+#[cfg(target_os = "linux")]
 pub mod configuration_transaction;
 pub mod control;
 pub mod directory;
@@ -26,6 +29,7 @@ pub mod media;
 pub mod phone;
 mod radio_control;
 mod remote_reply;
+pub mod schedule_zone;
 mod scheduler_health;
 pub mod services;
 pub mod site;

@@ -66,7 +66,7 @@ fn queue_status_media(
 }
 
 /// One externally captured tick; core never reads host clocks or time-zone services.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeClock {
     /// Monotonic milliseconds.
     pub now_ms: u64,
@@ -175,6 +175,22 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     echo_telemetry: crate::link::EchoTelemetryPolicy,
 }
 impl<A: Send, C: Send> RuntimeNode<A, C> {
+    /// Reconcile event group holds before reserving any route operation. Verify this node's
+    /// exact registered port key and link generation at the existing route owner.
+    pub fn apply_event_groups(&mut self, events: &EventScheduler) -> bool {
+        self.links.apply_event_groups(&self.name, events)
+    }
+    /// Continuous receive activity for calendar politeness in the same runtime monotonic epoch.
+    pub fn event_activity(&self) -> super::scheduler::ReceiveActivity {
+        super::scheduler::ReceiveActivity {
+            active: self.control.activity.is_active(),
+            last_active_ms: Some(
+                self.control
+                    .activity_ms()
+                    .unwrap_or(self.control.started_ms),
+            ),
+        }
+    }
     /// Station-owned site policy; callers deliver observations/effects off audio.
     pub fn site(&mut self) -> &mut crate::site::SiteController {
         &mut self.site

@@ -87,6 +87,19 @@ pub(crate) struct ResolvedRadio {
 }
 
 impl ResolvedRadio {
+    /// Adopt a uniquely owned result from the matching preparation capability.
+    pub(crate) unsafe fn from_prepared(
+        owner: NonNull<c_void>,
+        descriptor: *const abi::UrpAstDescriptor,
+    ) -> Result<Self, String> {
+        // SAFETY: the caller retains the matching product DSO for this object's entire lifetime.
+        let api = unsafe { Api::from_descriptor(descriptor) }?;
+        Ok(Self { owner, api })
+    }
+    pub(crate) fn raw(&self) -> NonNull<c_void> {
+        self.owner
+    }
+
     /// Copy canonical DTMF policy without acquiring or opening a device.
     pub(crate) fn remote_commands(
         &self,
@@ -159,7 +172,7 @@ impl ResolvedRadio {
         })
     }
 
-    pub(super) fn visit<F: FnMut(*const abi::UrpNativeStationConfig) -> Result<(), String>>(
+    pub(crate) fn visit<F: FnMut(*const abi::UrpNativeStationConfig) -> Result<(), String>>(
         &self,
         callback: F,
     ) -> Result<(), String> {

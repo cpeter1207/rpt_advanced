@@ -3,6 +3,7 @@
 pub mod candidate;
 pub mod catalog;
 pub mod commands;
+pub mod events;
 pub mod manifest;
 /// Typed public protocol resolution.
 pub mod profiles;
