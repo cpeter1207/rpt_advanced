@@ -281,8 +281,8 @@ remain under `.work/json-rest/milestone-4-*`.
 Independent specification/code review approved the implementation. Two minor
 test follow-ups are recorded: the socket fixture approaches the native pathname
 limit under long TMPDIRs, and the scratch-abort case does not directly exercise
-the existing inode-identity cleanup safeguard. They remain test-only coverage
-work; full production coverage is still a pre-merge requirement.
+the existing inode-identity cleanup safeguard. They were resolved by milestone 5. Full production coverage remains a
+pre-merge requirement.
 
 The only dependency change adds an edge to the already locked uuid parser,
 with default features disabled. No new package version, native ABI, core model
@@ -301,8 +301,8 @@ The native log and receipt are under the node workspace's `.work/` directory.
 Log SHA-256:
 `b2b278b45df0093d658f8dea3be80253d76f83c854d3b218e704ff9a1a0ec105`.
 Host RED/GREEN, full affected checks and the approved review remain under
-`.work/json-rest/milestone-4-*`. Two minor test follow-ups remain recorded in
-this document and the execution ledger for the required pre-merge coverage work.
+`.work/json-rest/milestone-4-*`. The two minor test follow-ups recorded in
+this document and the execution ledger were subsequently resolved by milestone 5.
 
 Milestone 4 is complete and execution pauses per the checklist. Protected
 object/manifest parents must be provisioned before installation; the later
@@ -316,7 +316,7 @@ staged-install validation remain part of the required pull-request gate.
 
 ## Fifth milestone: public manifest and verified readback
 
-**Host implementation verified, 2026-11-20; native checkpoint pending.** Added a typed reference-only public manifest and
+**Completed, 2026-11-20.** Added a typed reference-only public manifest and
 protected, bounded readback of explicitly selected immutable artifacts. Freeze
 format-1 fields as format_version/id/revision/site_uuid/port_keys/resources,
 with complete version/object/sha256 reference triplets. Required metadata and
@@ -355,3 +355,27 @@ there is no obsolete InstallLimits compatibility alias.
 Reports, exact commands, RED/GREEN evidence and approved reviews remain under
 `.work/json-rest/milestone-5-*`. Required profile validation, accepted state and
 runtime activation are still separate from this reference/integrity validation.
+
+### Fifth-milestone native checkpoint
+
+Native Debian 13 arm64 verification passed **910 tests**, zero failures, at
+published source `85a18357804d1924eb99a73cf8546eccd4af9416` using isolated
+Rust 1.88. This includes the complete core/shared-JSON/peer-support suites and
+both product capture/manifest suites. The controller service was active before
+and after; no installed package, binary, live configuration or service state
+was changed. All fixtures and compilation remain in the home workspace.
+
+The native log and receipt are retained in the node workspace's `.work/`.
+Log SHA-256:
+`1281f60363f47dc66776a7495b1f579ac49b8f2eefb503338a0846891b12d97c`.
+Host reports, approved scoped reviews and exact commands remain under
+`.work/json-rest/milestone-5-*`.
+
+Milestone 5 is complete and execution pauses per the checklist. Public manifest
+selection still requires trusted ID/revision/digest input from its future owner.
+The owned graph is staging data until profile/capability and private-state
+validation. Full discovery/profiles, directory provisioning, private records,
+journal/state-pointer transactions, working publication, HTTP/HAL and the
+coordinated controller INI cutover remain pending. USBRadioPlus INI is preserved.
+The complete native pull-request gate still requires production coverage,
+Doxygen, packaging and staged-install validation before merge.

@@ -31,6 +31,8 @@ Use test-driven development.
 
 [x] - Complete guarded immutable public-object/manifest installation with file and directory sync, no-replace publication, exact-byte retries and native node verification. Accepted-state/journal publication remains pending.
 
+[x] - Complete typed reference-only public manifests, protected hash-verified immutable graph readback and borrowed candidate assembly; pass host/native checks. Accepted-state selection, private graphs and activation remain pending.
+
 [] - Finalize recurring start/end pairing, overnight windows, overlapping occurrences/grace periods, calendar startup without recovery, missed checks and legacy permanent-route ownership before implementing scheduler transitions.
 
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.
