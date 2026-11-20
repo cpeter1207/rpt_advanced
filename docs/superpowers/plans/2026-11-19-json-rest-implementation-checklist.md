@@ -10,7 +10,7 @@ Make sure normal jitter adjustments and packet loss concealment do not take down
 Review and update the agent rules, wishlist, and architecture documentation as you implement.
 Update this checklist each time an item is complete.
 Commit and push regularly.
-Pause at major milestones to build and test on node524950.local before continuing.
+Build and test major milestones on node524950.local before continuing. Per the 2026-11-20 instruction, execute milestones continuously until the implementation/runtime cutover is complete, then pause; do not change the installed service without explicit deployment authorization.
 Do not invent requirements or edge cases.
 Consolidate as many error conditions as you can to avoid unnecessary branching.
 Log warnings or errors when errors occur. Log warnings when an error isn't fatal. Log errors when something fatal occurs that takes down a connection or the entire controller.
@@ -37,7 +37,7 @@ Use test-driven development.
 
 [x] - Complete typed prepared encrypted-object installation and authenticated readback under the edit lock, including exact retry/durability behavior, bounded reads and native verification. Account binding, private manifest adoption and accepted-state selection remain pending.
 
-[] - Finalize recurring start/end pairing, overnight windows, overlapping occurrences/grace periods, calendar startup without recovery, missed checks and legacy permanent-route ownership before implementing scheduler transitions.
+[x] - Record approved scheduler policies: pair a start with its next end and skip overlapping starts; ignore the in-progress occurrence when restart_recovery is false; skip missed calendar work while forcing pending monotonic deadlines; cancel without either boundary macro if nominal end arrives before start execution. Preserve existing permanent-route ownership and hold fences.
 
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.
 

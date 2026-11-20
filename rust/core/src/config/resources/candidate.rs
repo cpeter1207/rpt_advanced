@@ -373,6 +373,10 @@ impl StagedResource {
         self.binding
     }
 
+    pub(super) fn fields(&self) -> &Map<String, Value> {
+        &self.fields
+    }
+
     /// Whether this resource has an empty local body.
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
@@ -458,6 +462,10 @@ impl<'registry> ModularCandidate<'registry> {
             staged,
             warnings,
         })
+    }
+
+    pub(super) fn registry(&self) -> &ResourceRegistry {
+        self.registry
     }
 
     /// The site's sparse and effective typed metadata.

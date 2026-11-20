@@ -525,3 +525,35 @@ transactions, provisioning/full discovery, HTTP/HAL and the coordinated
 controller INI cutover remain pending. USBRadioPlus INI is preserved. Full
 production coverage, Doxygen, packaging and staged-install checks are still
 required before merge; these component checks do not claim that complete gate.
+
+
+## Milestone 8: protocol profiles and JSON Patch
+
+Typed modular profiles now resolve independent AllStarLink, EchoLink and phone-patch
+settings from sparse site/port bodies. They preserve explicit attachment, metadata-only
+ports, shared jitter source histories and stable configured account identities. Peer audio
+has its own binding. Provider capability checks, private adoption and runtime activation
+remain separate work.
+
+The resource-local RFC 6901/6902 stage applies all six operations atomically to a sparse
+authoring projection. Exact decimal tests avoid floating-point conversion. Neutral
+write-only slots and opaque zeroizing companion edits preserve credential omission,
+clear/mask and sequential path semantics without reading saved credentials. The shared
+borrowed JSON decoder rejects duplicates and validates Unicode escapes.
+
+Review closed an EchoLink canonical-host delimiter/length defect with typed directory
+members and direct regression cases, plus direct Unicode-surrogate tests. Host evidence
+covers 771 core unit tests, 88 core integration tests, one JSON test, five product wire
+reply tests, 29 speech tests and 215 standalone tests (1,109 unique affected tests).
+Strict Rustdoc and the complete push preflight passed, including formatting, Ruff,
+Cppcheck, Clang-Tidy and workspace Clippy. Native node checkpoint is pending for this
+source revision; installed services/configuration have not changed.
+
+The optional broader full-product run reached the existing 2,000-peer stress test and
+hit the constrained runner's 1,536 MiB memory limit, confirmed by Docker's OOM event.
+This is recorded as an incomplete full-product stress gate, not a passing full suite;
+the required larger pull-request/platform gate remains pending. Current development
+DSOs and the documented library environment were used for the affected host tests.
+
+Continue through accepted-state transactions, typed provider joins, authenticated HAL
+and runtime cutover. Intermediate milestone completion no longer pauses execution.

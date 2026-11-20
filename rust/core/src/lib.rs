@@ -14,6 +14,7 @@ pub mod control;
 pub mod controller;
 pub mod dtmf_macro;
 pub mod link;
+pub mod management;
 pub mod media;
 pub mod messages;
 pub mod phone_dtmf;

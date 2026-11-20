@@ -10,6 +10,10 @@ checks together so incompatible combinations fail safely.
 
 Follow `docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md`
 and its linked design. Update the checklist only after each step is verified.
+The 2026-11-20 instruction supersedes intermediate user-facing milestone pauses:
+continue across verified milestones until the JSON/REST runtime cutover, then
+pause. Retain native node build/test checkpoints; they do not authorize altering
+the installed service. Reuse the current worktree and completed Task 1-20 work.
 The controller's coordinated configuration cutover removes INI; USBRadioPlus
 retains its public INI format. Keep protocol connections live when possible and
 preserve local-repeat and phone audio across link changes. Normal jitter/PLC
@@ -32,6 +36,18 @@ Captured payloads cannot reassign those bindings. Keep unvalidated section data
 separate from normalized public/effective views. All ordinary section kinds can
 have site defaults, including control, memories and scan lists. Site protocol
 defaults do not create port protocol instances; presence is explicit.
+
+Protocol profiles resolve each descendant from recognized sparse public fields,
+with value-free source warnings and field-specific inherited fallback. Preserve
+independent protocol presence and final account identities; local names are not
+network node numbers. Validate canonical hostnames after normalization and keep
+directory members typed instead of joining and reparsing a delimited list.
+
+JSON Patch operates on one bounded sparse authoring projection, then resolves
+inheritance and validates the final candidate. Seed write-only slots from public
+ownership rather than hidden credential existence; reject secret/ancestor reads
+and indirect writes. Extract explicit private edits into zeroizing ownership,
+with no actual stored secret in the public stage. HTTP owns wiping request bytes.
 
 Registered working-file capture is a read-only host/product boundary. Use the
 preprovisioned edit lock, descriptor-relative no-follow access and caller-supplied

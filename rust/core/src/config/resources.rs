@@ -2,6 +2,8 @@
 
 pub mod candidate;
 pub mod manifest;
+/// Typed public protocol resolution.
+pub mod profiles;
 
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;

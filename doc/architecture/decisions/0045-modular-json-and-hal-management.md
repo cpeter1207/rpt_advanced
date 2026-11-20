@@ -41,6 +41,24 @@ candidate is staging data until domain validation; raw bodies are not public
 HAL or accepted runtime settings. Filesystem capture and publication stay with
 the host/product control plane.
 
+Typed protocol profiles normalize sparse public AllStarLink, EchoLink and phone
+settings, resolve each port independently and retain value-free source fallback
+diagnostics. Shared jitter preserves source histories for later provider limits.
+Network accounts remain separate from local port keys/UUIDs; final public
+identity projections are inputs to private adoption, not evidence that a stored
+credential is usable. Canonical endpoint validation occurs after normalization;
+directory arrays enter shared typed settings without delimiter serialization.
+
+The resource-local management patch stage uses maintained RFC 6901/6902
+primitives and exact recursive decimal tests. It applies all operations to a
+bounded disposable sparse authoring body before inheritance/normalization.
+Credential owners receive neutral slots independently of saved private state.
+Secret and ancestor reads, and indirect secret destinations, are forbidden;
+explicit writes become opaque zeroizing companion edits. Stored credentials
+never enter this stage. Shared borrowed JSON validation protects raw private
+scalars and decoded member names until the credential handler resolves them.
+The host still owns original request buffers, final policy and durable commit.
+
 The first filesystem slice captures only an authoritative registered selection.
 The existing host-glue crate owns safe bounded reads, a preprovisioned stable
 edit lock and content fingerprints; a thin product adapter owns the UUID/kind

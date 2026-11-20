@@ -20,6 +20,20 @@ The core model now adds UUID-backed resource identities and explicit
 scope/kind ownership to in-memory candidates. Typed metadata is resolved
 separately from opaque unvalidated section bodies. Site defaults apply to all
 ordinary sections; protocol presence is established only by port documents.
+Protocol profile resolution now produces owned sparse public and typed effective
+AllStarLink, EchoLink and phone-patch settings independently. Shared jitter
+retains per-field source candidates for later provider-capability fallback.
+Checked account projections carry stable configured identity only; encrypted
+payload adoption and actual runtime preparation are subsequent boundaries.
+The separate peer-audio binding does not require an AllStarLink instance.
+
+The pure management patch stage uses RFC 6901 pointers and RFC 6902 operations
+on one disposable sparse authoring view. Exact decimal comparisons preserve
+numeric test semantics. A shared borrowed JSON traversal rejects duplicates
+without owning credential scalar values; neutral write-only slots and opaque
+zeroizing explicit edits avoid exposing hidden-record presence. Route policy,
+final resource validation and persistence remain coordinator responsibilities.
+
 The host layer, `rptadv_peer_support::working_files`, captures an explicit
 registered path selection under the preprovisioned `edit.lock`. Protected,
 no-follow descriptor access and caller-supplied limits produce owned bytes plus
