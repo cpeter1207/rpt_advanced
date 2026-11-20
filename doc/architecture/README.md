@@ -9,7 +9,9 @@ and the affected configuration and test documentation in the same change.
 [ADR 0045](decisions/0045-modular-json-and-hal-management.md) records the approved
 JSON-only controller store and mTLS loopback HAL API. Implementation follows the
 [updated checklist](../../docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md).
-The initial resource-model slice is control-plane only; the deployed INI path
+The initial resource-model slice is control-plane only. The pure internal
+`rptadv-json` decoder is shared by configuration and existing wire consumers to
+preserve JSON types; the deployed INI path
 described below is removed at the coordinated store/provider cutover.
 USBRadioPlus retains its own public INI loader. Unknown JSON keys and unusable
 setting values warn and fall back through inheritance/defaults.

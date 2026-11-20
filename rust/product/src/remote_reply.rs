@@ -169,7 +169,7 @@ fn scan_status(parts: &mut Vec<RemoteReplyPart>, value: &Value) -> Result<(), Ru
 /// Decode the SDK's versioned copied result. No packet selects message IDs;
 /// each supported kind maps to shipped localizable fragments on control.
 pub(crate) fn parse(source: &str, request: RemoteCommand) -> Result<Completion, RuntimeError> {
-    let result: Value = serde_json::from_str(source).map_err(|_| invalid())?;
+    let result = rptadv_json::decode_value(source.as_bytes()).map_err(|_| invalid())?;
     if result["version"] != 1 {
         return Err(invalid());
     }
@@ -238,6 +238,30 @@ pub(crate) fn failure(code: i32) -> Completion {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_reply_preserves_numeric_version_and_literal_json_object_keys() {
+        use super::*;
+        for source in [
+            r#"{"version":1,"kind":"applied"}"#,
+            r#"{"$serde_json::private::Number":"literal","version":1,"kind":"applied"}"#,
+        ] {
+            assert!(
+                parse(source, RemoteCommand::CurrentStatus)
+                    .unwrap()
+                    .successful
+            );
+        }
+        for source in [
+            r#"{"version":{"$serde_json::private::Number":"1"},"kind":"applied"}"#,
+            r#"{"version":{"$serde_json::private::RawValue":"1"},"kind":"applied"}"#,
+        ] {
+            assert!(matches!(
+                parse(source, RemoteCommand::CurrentStatus),
+                Err(RuntimeError::Preparation)
+            ));
+        }
+    }
+
     #[test]
     fn remote_reply_formats_fractional_levels_signaling_and_short_status() {
         use super::*;

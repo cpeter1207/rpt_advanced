@@ -555,7 +555,9 @@ version = "0.1.0-alpha24"
 dependencies = [
  "argon2",
  "fluent-bundle",
+ "rptadv-json",
  "rtrb",
+ "serde_json",
  "unic-langid",
  "url",
 ]
@@ -569,6 +571,7 @@ dependencies = [
  "libc",
  "libloading",
  "rptadv-control-standalone-adapter",
+ "rptadv-json",
  "rptadv-peer-support",
  "serde_json",
  "ureq",
@@ -632,6 +635,14 @@ name = "rptadv-jitter-client"
 version = "0.1.0-alpha24"
 
 [[package]]
+name = "rptadv-json"
+version = "0.1.0-alpha24"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rptadv-peer-support"
 version = "0.1.0-alpha24"
 dependencies = [
@@ -652,6 +663,7 @@ dependencies = [
  "rpt-advanced-standalone",
  "rptadv-control-standalone-adapter",
  "rptadv-file-adapter",
+ "rptadv-json",
  "rptadv-peer-support",
  "rptadv-speech-adapter",
  "rtrb",
@@ -673,7 +685,7 @@ version = "0.1.0-alpha24"
 dependencies = [
  "libc",
  "rpt-advanced-core",
- "serde_json",
+ "rptadv-json",
 ]
 
 [[package]]

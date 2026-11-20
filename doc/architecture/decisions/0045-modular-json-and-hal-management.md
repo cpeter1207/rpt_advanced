@@ -26,6 +26,13 @@ lifecycle relationships remain errors when no safe deterministic state exists.
 Core returns value-free diagnostics; the host/control owner logs warnings for
 recoverable failures and errors for fatal connection/controller failures.
 
+The internal `rptadv-json` foundation owns token-aware JSON syntax decoding,
+shared by core configuration and existing host/product input boundaries. It has
+no controller policy, native descriptor or host dependency. Preserve actual JSON
+wire types when enabling shared Serde features; objects must not become numbers
+or strings through library-internal token names. Scope metadata and inheritance
+remain in core. No new external ABI or independently deployed provider is added.
+
 Store accepted resources and private records as immutable objects selected by
 one durably committed manifest/state pointer. Keep editable working files
 separate and import them only on explicit reload. Validate, save and activate
@@ -55,7 +62,7 @@ altering its installed service or live configuration.
 
 The linked design and checklist contain the complete scheduler, action, DTMF,
 message, radio and secret-store contract. The first implementation milestone is
-an inactive JSON resource-model foundation; it is not a runtime cutover.
+a JSON resource-model foundation plus shared wire decoding; it does not cut over configuration storage or management transport.
 Provider extensions, API/storage activation and native amd64/arm64 verification
 remain tracked implementation work. No obsolete alpha compatibility shim or
 new feature is implied by this staging.

@@ -6,6 +6,7 @@ mod echolink;
 mod messages;
 mod parse;
 mod phone_mailboxes;
+pub mod resources;
 mod schema;
 mod scope;
 mod settings;
@@ -21,6 +22,8 @@ pub use tails::ResolvedTailSettings;
 mod document_tests;
 #[cfg(test)]
 mod parse_tests;
+#[cfg(test)]
+mod resources_tests;
 #[cfg(test)]
 mod schema_tests;
 #[cfg(test)]

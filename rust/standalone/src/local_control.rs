@@ -121,7 +121,7 @@ impl Session {
             self.reply(Err("invalid local control frame length".into()));
             self.closing = true;
         } else if self.input.len() >= length + 4 {
-            let request = serde_json::from_slice::<Value>(&self.input[4..4 + length]);
+            let request = rptadv_json::decode_value(&self.input[4..4 + length]);
             self.input.drain(..4 + length);
             let result = request
                 .map_err(|_| "invalid local control JSON".to_owned())

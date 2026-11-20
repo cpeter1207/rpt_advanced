@@ -55,6 +55,7 @@ The DTMF preflight compared all 78 schema defaults with the published inventory:
 
 | Responsibility | Existing implementation owners |
 | --- | --- |
+| Shared JSON syntax | `rust/json/src/lib.rs`; used by core configuration, product replies, standalone control/registration and speech model input |
 | Configuration and effective settings | `rust/core/src/config/{document,parse,scope,schema,settings}.rs` and domain files `site.rs`, `echolink.rs`, `phone_mailboxes.rs`, `dtmf_macros.rs`, `messages.rs`, `tails.rs` |
 | Shared lifecycle and inspection | `rust/product/src/{lifecycle,configuration,configuration_radio,host}.rs` |
 | Standalone startup and radio preparation | `rust/standalone/src/{foreground,configuration,native_configuration,radio_activation,radio_host,providers}.rs` |
@@ -81,3 +82,35 @@ rpt-advanced-core --lib config::` in the maintained image.
 Implementation and milestone verification are in progress. Unfinished checklist
 items remain unchecked. Node milestones build/test in a home-directory
 workspace without changing installed binaries or live configuration.
+
+## Resource-foundation implementation evidence
+
+The source now includes a pure internal JSON decoder, sparse local/effective
+site and port metadata, exact port keys, recursive object/array inheritance and
+whole-record mailbox shadowing. Unknown keys and invalid optional metadata
+values produce value-free warning records and fall through to inherited/default
+settings. Host logging for the new configuration path remains part of the later
+store/startup cutover.
+
+Existing active JSON wire readers use the same decoder so Serde feature
+unification cannot reinterpret literal object members as numbers or strings.
+Speech model types and encoded registration details have real-consumer
+regressions. No radio/device, jitter, PLC, connection or installed configuration
+owner was changed.
+
+Development-host verification passed: **846 tests** across the complete core
+and shared-JSON suites plus selected product, standalone and speech suites;
+repository formatting, lint and static analysis (including Cppcheck,
+Clang-Tidy and workspace Clippy) passed. All three review follow-ups are
+addressed. This is not the complete native pull-request coverage/package gate.
+
+The original DTMF integration fixture forbade a rate the released alpha4
+provider supports; untouched-base reproduction confirmed the mismatch. Its
+negative fixture now uses zero, rejected by both provider versions. The test
+image's newer IAX header was aligned inside the disposable container to the
+manifest's source-equivalent official alpha9 packages, with verified checksums.
+
+Native node configuration build/tests are the next milestone check. The Rust
+1.88 compiler is isolated under the node user's build directory; the installed
+service and its live configuration are unchanged. Storage, resource profiles,
+HTTP/HAL, credential activation and controller INI removal remain unchecked.

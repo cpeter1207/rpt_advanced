@@ -52,5 +52,6 @@ fn source_rate_spans_keep_qualifying_audio_across_partitions() {
         assert_eq!(detect(rate, 37), expected);
         assert_eq!(detect(rate, 1), expected);
     }
-    assert!(DtmfDetector::at_rate(true, 16_000).is_err());
+    // Zero stays invalid when a provider adds another supported source rate.
+    assert!(DtmfDetector::at_rate(true, 0).is_err());
 }

@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 libc = "0.2.189"
-serde_json = "1.0"
+rptadv-json = { path = "../json" }
 
 [dev-dependencies]
 rpt-advanced-core = { path = "../core" }

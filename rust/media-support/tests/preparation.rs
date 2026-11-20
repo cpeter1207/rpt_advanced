@@ -127,9 +127,25 @@ fn synthesizes_literal_text_with_speed_and_speech_only_gain() {
         assert!((audio.samples()[1102] - 0.0030517578).abs() < 0.000000001);
         remove_model_config(&model);
     }
+    let model = directory.join("001.000000.onnx");
+    write_model_config(&model);
+    fs::write(
+        model.with_extension("onnx.json"),
+        br#"{"audio":{"sample_rate":{"$serde_json::private::Number":"22050"}}}"#,
+    )
+    .unwrap();
+    let result = adapter.prepare_speech(&SpeechRequest {
+        text: "Identifier; $(not a command)\n",
+        model: &model,
+        speed_percent: 100,
+        level_db: -20,
+        cancellation: &Cancellation::default(),
+    });
+    remove_model_config(&model);
     fs::remove_file(program).unwrap();
     assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
     fs::remove_dir(directory).unwrap();
+    assert!(matches!(result, Err(MediaError::InvalidOutput)));
 }
 
 #[test]

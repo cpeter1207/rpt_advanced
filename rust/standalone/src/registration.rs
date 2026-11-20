@@ -232,14 +232,15 @@ fn request_body(target: &RegistrationTarget) -> Vec<u8> {
 }
 
 fn response_refresh(body: &[u8], fallback_seconds: u64) -> Result<Duration, RegistrationError> {
-    let response: serde_json::Value =
-        serde_json::from_slice(body).map_err(|_| RegistrationError::InvalidResponse)?;
+    let response =
+        rptadv_json::decode_value(body).map_err(|_| RegistrationError::InvalidResponse)?;
     let data = response
         .get("data")
         .ok_or(RegistrationError::InvalidResponse)?;
     let detail = match data {
-        serde_json::Value::String(value) => {
-            serde_json::from_str(value).unwrap_or_else(|_| data.clone())
+        serde_json::Value::String(value) if value.trim_start().starts_with(['{', '[', '"']) => {
+            rptadv_json::decode_value(value.as_bytes())
+                .map_err(|_| RegistrationError::InvalidResponse)?
         }
         value => value.clone(),
     };
@@ -338,6 +339,31 @@ mod tests {
     }
 
     #[test]
+    fn response_preserves_literal_json_member_names_in_encoded_detail() {
+        assert_eq!(
+            response_refresh(
+                br#"{"refresh":45,"data":"{\"$serde_json::private::Number\":\"1\",\"result\":\"successfully regi\\u0073tered\"}"}"#,
+                60,
+            ),
+            Ok(Duration::from_secs(45))
+        );
+    }
+
+    #[test]
+    fn response_rejects_malformed_encoded_details_with_success_text() {
+        for body in [
+            br#"{"data":" \t{\"result\":\"successfully registered\",\"result\":\"denied\"}"}"#
+                .as_slice(),
+            br#"{"data":"[\"successfully registered\""}"#,
+        ] {
+            assert_eq!(
+                response_refresh(body, 60),
+                Err(RegistrationError::InvalidResponse)
+            );
+        }
+    }
+
+    #[test]
     fn malformed_or_unbounded_server_refresh_is_rejected() {
         assert_eq!(
             response_refresh(b"not json", 60),
@@ -355,6 +381,7 @@ mod tests {
             br#"{"data":{"result":"successfully registered"}}"#.as_slice(),
             br#"{"refresh":0,"data":"successfully registered"}"#,
             br#"{"refresh":"45","data":"successfully registered"}"#,
+            br#"{"refresh":{"$serde_json::private::Number":"45"},"data":"successfully registered"}"#,
         ] {
             assert_eq!(response_refresh(body, 60), Ok(Duration::from_secs(60)));
         }
