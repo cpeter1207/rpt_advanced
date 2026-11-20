@@ -379,3 +379,51 @@ journal/state-pointer transactions, working publication, HTTP/HAL and the
 coordinated controller INI cutover remain pending. USBRadioPlus INI is preserved.
 The complete native pull-request gate still requires production coverage,
 Doxygen, packaging and staged-install validation before merge.
+
+
+## Sixth milestone: sealed private records and systemd keys
+
+**Host implementation verified, 2026-11-20; native checkpoint pending.** Added a bounded XChaCha20-Poly1305 envelope and an
+env-only systemd credential loader. The codec emits only version/key-ID/nonce/
+ciphertext, authenticates trusted store/record/generated-version context and
+key routing, and generates independent fresh nonce/version values. Keys and
+plaintext have opaque zeroizing owners; no raw key construction is public.
+
+Systemd's manager-owned named-ACL delivery differs from legacy password files.
+The loader follows the documented credential namespace, bounded raw length and
+pinned descriptor checks without requiring its files to be service-owned 0600.
+Missing/invalid material is unavailable, never a replacement key or empty secret.
+
+An independent libsodium reference fixture and generator/provenance are retained
+under `.work/json-rest/milestone-6-reference-fixture*`. Only synthetic fixture
+data and existing installed reference tooling were used. This stage does not
+parse account payloads, publish private files, adopt private manifests, select
+state or activate credentials. All live service/configuration paths stay unchanged.
+
+### Sixth-milestone host verification
+
+Fourteen crypto groups and ten synthetic loader groups failed against inert
+scaffolding, then passed after implementation. The broader maintained host
+run passed **934 tests**, zero failures, and affected Rustdoc with warnings
+denied. Its lint stage caught only a Rustfmt assertion wrap after a test-only
+redaction improvement. The owner applied that cosmetic formatting and checked
+the workspace; the final complete fast gate then passed formatting, lint,
+Cppcheck, Clang-Tidy and workspace Clippy. No behavior changed after the suite.
+
+Both scoped specification/code reviews approved the implementation. Crypto had
+no findings. One minor loader-test follow-up remains: directory replacement
+also replaces the leaf inode; prepare a same-leaf replacement directory to
+independently exercise the existing parent-identity guard before full coverage.
+Live systemd delivery is outside these synthetic fixtures and remains a later
+integration/deployment check.
+
+RustCrypto chacha20poly1305 0.11.0 uses explicit alloc/zeroize features. Thirteen
+package versions were added, all with declared Rust 1.85 support and compiled
+on Rust 1.88. Existing package versions were preserved. The independent
+libsodium fixture is embedded in tests; ignored generator/provenance files are
+not runtime test dependencies. Opaque wrappers prevent printing the existing
+zeroize buffer type's contents. No C ABI or installed runtime path changed.
+
+Exact commands, source/fixture/package evidence, approved reviews and log
+receipts remain under `.work/json-rest/milestone-6-*`. The final broad gate used
+the verified task-local launcher and freshly pulled `c3800ed0` image digest.

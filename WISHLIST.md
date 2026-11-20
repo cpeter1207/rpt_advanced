@@ -39,7 +39,8 @@ installation and public-manifest/readback milestones are verified on the
 development host and native node. Complete resource discovery, private records,
 accepted-state/journal publication, full domain validation and runtime cutover
 remain pending. These control-plane foundations do not replace the running INI
-path.
+path. Sealed-record encryption and read-only systemd key loading are the current
+implementation slice; account binding and private graph adoption remain pending.
 Remove controller INI during the coordinated store/provider cutover and retain
 USBRadioPlus INI. Keep remaining resource, storage, API, provider, scheduler,
 action, message and native milestone verification items unchecked until tested.

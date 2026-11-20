@@ -333,7 +333,7 @@ struct CapturedFile {
 
 /// Observable file identity and version, excluding read-induced access time.
 #[derive(PartialEq, Eq)]
-struct FileVersion {
+pub(crate) struct FileVersion {
     identity: (u64, u64),
     mode: u32,
     uid: u32,
@@ -385,7 +385,7 @@ fn on_recheck(error: CaptureError) -> CaptureError {
 }
 
 /// Open a directory descriptor without following its basename.
-fn directory_handle(parent: impl AsFd, name: &Path) -> Result<File, CaptureError> {
+pub(crate) fn directory_handle(parent: impl AsFd, name: &Path) -> Result<File, CaptureError> {
     fs::openat(parent, name, PATH_FLAGS | OFlags::DIRECTORY, Mode::empty())
         .map(File::from)
         .map_err(open_error)
@@ -407,9 +407,16 @@ fn protected_directory(parent: &File, name: &Path, uid: u32) -> Result<File, Cap
     Ok(directory)
 }
 
+/// Open a leaf for inspection without following it or opening it for I/O.
+pub(crate) fn path_handle(parent: &File, name: &Path) -> Result<File, CaptureError> {
+    fs::openat(parent, name, PATH_FLAGS, Mode::empty())
+        .map(File::from)
+        .map_err(open_error)
+}
+
 /// Identify a protected regular leaf without opening it for I/O.
 fn file_handle(parent: &File, name: &Path, uid: u32) -> Result<(File, Metadata), CaptureError> {
-    let file = File::from(fs::openat(parent, name, PATH_FLAGS, Mode::empty()).map_err(open_error)?);
+    let file = path_handle(parent, name)?;
     let metadata = checked_metadata(&file, uid, 0o600)?;
     if !metadata.is_file() {
         return Err(CaptureError::UnsafeFile);
@@ -418,7 +425,7 @@ fn file_handle(parent: &File, name: &Path, uid: u32) -> Result<(File, Metadata),
 }
 
 /// Reopen the pinned regular inode for reading through Linux procfs.
-fn reopen_regular(handle: &File, version: &FileVersion) -> Result<File, CaptureError> {
+pub(crate) fn reopen_regular(handle: &File, version: &FileVersion) -> Result<File, CaptureError> {
     let file = File::open(format!("/proc/self/fd/{}", handle.as_raw_fd()))
         .map_err(|_| CaptureError::Io)?;
     check_version(&file, version)?;
@@ -426,7 +433,7 @@ fn reopen_regular(handle: &File, version: &FileVersion) -> Result<File, CaptureE
 }
 
 /// Check that two open descriptors refer to the same inode.
-fn check_inode(original: &File, current: &File) -> Result<(), CaptureError> {
+pub(crate) fn check_inode(original: &File, current: &File) -> Result<(), CaptureError> {
     let original = original.metadata().map_err(|_| CaptureError::Io)?;
     let current = current.metadata().map_err(|_| CaptureError::Io)?;
     if (original.dev(), original.ino()) != (current.dev(), current.ino()) {
@@ -436,7 +443,7 @@ fn check_inode(original: &File, current: &File) -> Result<(), CaptureError> {
 }
 
 /// Detect an observed inode replacement, metadata change, or concurrent write.
-fn check_version(file: &File, expected: &FileVersion) -> Result<(), CaptureError> {
+pub(crate) fn check_version(file: &File, expected: &FileVersion) -> Result<(), CaptureError> {
     let current = file.metadata().map_err(|_| CaptureError::Io)?;
     if &FileVersion::from(&current) != expected {
         return Err(CaptureError::Changed);

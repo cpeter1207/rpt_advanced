@@ -40,6 +40,13 @@ selection, reads through the guarded host boundary and owns its verified bytes.
 It assembles the existing borrowed candidate on demand. Format/ownership/hash
 validation is separate from complete domain profiles and state selection.
 
+The next host private-record layer uses XChaCha20-Poly1305 with explicit format,
+purpose, store/record/version and key-ID authentication. Each seal creates an
+independent object-version UUID and nonce. Opaque zeroizing owners protect key
+and plaintext buffers. An env-only systemd loader reads exactly 32 raw bytes
+through pinned no-follow descriptors and accepts the real credential ACL mask.
+This does not yet implement the account payload schema or private state graph.
+
 ## System boundary
 
 [ADR 0044](decisions/0044-phone-peers-and-rf-presentation-pacing.md) records the

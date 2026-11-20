@@ -389,9 +389,27 @@ Garbage collection removes only objects unreachable from desired, last-known-goo
 
 Keep protocol passwords, account bindings, inheritance masks and mailbox/admin hashes in separate encrypted records. Hashes remain hashed inside encryption. Public files never contain private records or configured flags.
 
-Use a maintained authenticated-encryption implementation. The proposed format is XChaCha20-Poly1305 with a random 32-byte key and fresh random 24-byte nonce for every encryption. [Construction documentation](https://doc.libsodium.org/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction)
+Use a maintained authenticated-encryption implementation. The sealed primitive uses XChaCha20-Poly1305 with a separately supplied random 32-byte key and a fresh random 24-byte nonce for every encryption. [Construction documentation](https://doc.libsodium.org/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction)
 
 Bind associated data to storage/sealed-format versions, a fixed private-record purpose, immutable store UUID, credential-record UUID and immutable sealed-object version. Account, scope and protocol-instance bindings are inside the encrypted payload. Do not bind ciphertext to the global configuration revision or desired/last-known-good slot. This allows unrelated configuration changes and manifest promotion to reuse unchanged encrypted objects. Any actual encryption gets a new version/nonce.
+
+The initial sealed envelope emits only format_version=1, key_id, nonce and
+ciphertext. Nonce and ciphertext use canonical standard base64 without padding;
+ciphertext includes the 16-byte authentication tag. Trusted store/credential/
+immutable-version UUIDs are supplied externally to decoding. Sealing generates
+the immutable version as a fresh UUID v4 independently of the nonce; callers
+cannot choose a reused sealing version.
+
+The exact AAD frame starts with ASCII rpt-advanced.private-record followed by
+one NUL byte, then big-endian u32 storage-format 1 and sealed-format 1, then the
+three raw 16-byte store/credential/version UUIDs, then a u8 key-ID byte length
+and its ASCII bytes. This additionally authenticates key routing metadata.
+Unknown extra envelope members warn/ignore; invalid required integrity fields
+or failed authentication cannot safely default. The primitive treats plaintext
+as opaque zeroizing bytes. A later private-payload owner must validate account,
+scope, protocol and record type before use; authenticated bytes alone do not
+establish those application bindings. This stage does not adopt private graph
+references or publish encrypted files.
 
 Per D6, read keys only from `$CREDENTIALS_DIRECTORY/rpt-advanced.aead.<key_id>`. IDs match `[A-Za-z0-9_-]{1,64}`; each credential contains exactly 32 raw bytes. Use this on the hosting unit:
 
@@ -403,6 +421,16 @@ ImportCredential=rpt-advanced.aead.*
 The separately provisioned credential may come from `/etc/credstore/rpt-advanced.aead.service-key-1`, root-owned `0600`. The application reads its systemd-delivered copy. Missing imports must allow locked management startup; do not make an absent absolute source prevent ExecStart. Apply the directive to the standalone unit or `asterisk.service` as appropriate. [Systemd 257 credential settings](https://www.freedesktop.org/software/systemd/man/257/systemd.exec.html#ImportCredential=GLOB)
 
 Never place key bytes in JSON, unit literals, environment variables, arguments, HTTP or logs. Keep decrypted buffers non-printable and off audio callbacks. There is no automatic replacement-key or empty-store fallback for a store that cannot authenticate.
+
+The loader reads only the env-provided credential directory and fixed validated
+basename, with no caller filesystem path or legacy key/password fallback. It
+opens no-follow descriptors, verifies regular file/bindings, and consumes exactly
+32 raw bytes plus a bounded one-byte EOF probe. It never trims a newline,
+changes permissions or prints a key digest. Systemd 257 may deliver root-owned
+0440 files/0550 directories through a named service-user ACL, or service-owned
+0400/0500 without ACLs; the legacy 0600/effective-UID password rule is unsuitable.
+Kernel access checks enforce delivered ACLs. Opaque wrappers remain necessary:
+zeroizing buffer types are not automatically safe to print.
 
 A missing/wrong key, unsupported sealed format or authentication failure preserves the store, inhibits affected TX and blocks configuration mutation/import/apply/restore with a sanitized unavailable result. Public fields may remain readable; omit unknown configured flags and report `secrets_state: "locked"` or `"error"` rather than fabricating false.
 

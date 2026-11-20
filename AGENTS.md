@@ -54,6 +54,15 @@ keys independently of paths. Unknown extra fields warn; unsafe identity,
 integrity or unsupported private graphs cannot default. Readback must not select
 state or imply domain validation/activation.
 
+Sealed private-record primitives use opaque zeroizing key/plaintext owners and
+fixed versioned authenticated context. Generate a new sealed version and nonce
+per encryption; missing systemd key material never creates a replacement key.
+Read keys only from the delivered credential namespace, accepting systemd's
+root/service-owned ACL-backed modes rather than the legacy password-file mode.
+Authentication is not account-binding validation; private graph adoption and
+payload semantics stay with the later credential owner. No secret Debug/Serialize
+or implicit plaintext logging, and no private-record work in audio callbacks.
+
 ## Shared rpt_advanced project baseline
 
 This baseline applies to every production, shared-library, and workflow

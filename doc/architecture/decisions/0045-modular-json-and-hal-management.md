@@ -73,6 +73,15 @@ Private graphs remain explicitly unsupported until their codec exists; unknown
 extra members retain the warning policy. Candidate assembly borrows the owned
 manifest registry without making raw section bodies runtime-ready.
 
+The first sealed-record primitive uses a four-member format-1 envelope
+(format_version/key_id/nonce/ciphertext) and binary, versioned authenticated
+context. Store/credential/version UUIDs remain trusted external selection, and
+key ID is authenticated routing metadata. Nonce and object version are fresh
+per seal. Decryption returns opaque zeroizing bytes, not a validated account.
+The systemd key loader has no path/key fallback and accommodates manager-owned
+named-ACL delivery. Private graph/payload integration and encrypted file
+publication remain separate before credentials can be used at runtime.
+
 Replace the Unix maintenance socket with loopback HTTPS/HAL. Require authorized
 mTLS on every backend route, with separate proxy and CLI identities. Expose
 GET everywhere, PUT/PATCH on writable resources, and POST/DELETE on creatable
