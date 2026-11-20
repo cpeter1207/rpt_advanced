@@ -23,6 +23,8 @@ Use test-driven development.
 
 [x] - Map changes to the existing core configuration/runtime, product lifecycle, standalone host, Asterisk host, provider adapters, CLI, tuner, packaging and documentation owners.
 
+[x] - Complete the initial shared JSON decoder and sparse site/port metadata/inheritance foundation, preserve existing wire input types, and pass development-host checks plus native node524950 configuration tests.
+
 [] - Finalize recurring start/end pairing, overnight windows, overlapping occurrences/grace periods, calendar startup without recovery, missed checks and legacy permanent-route ownership before implementing scheduler transitions.
 
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.

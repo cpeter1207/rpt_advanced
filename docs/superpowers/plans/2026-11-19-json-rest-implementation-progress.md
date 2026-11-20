@@ -79,7 +79,7 @@ Baseline verified on the development host: **112 existing configuration tests
 passed**, with no production edits, using `cargo test --locked -p
 rpt-advanced-core --lib config::` in the maintained image.
 
-Implementation and milestone verification are in progress. Unfinished checklist
+The first resource-foundation milestone is verified; the remaining implementation is pending. Unfinished checklist
 items remain unchecked. Node milestones build/test in a home-directory
 workspace without changing installed binaries or live configuration.
 
@@ -110,7 +110,15 @@ negative fixture now uses zero, rejected by both provider versions. The test
 image's newer IAX header was aligned inside the disposable container to the
 manifest's source-equivalent official alpha9 packages, with verified checksums.
 
-Native node configuration build/tests are the next milestone check. The Rust
-1.88 compiler is isolated under the node user's build directory; the installed
-service and its live configuration are unchanged. Storage, resource profiles,
-HTTP/HAL, credential activation and controller INI removal remain unchecked.
+Native node verification passed: **124 configuration tests**, zero failures,
+on Debian 13 arm64 at source commit
+`229209b3e3cb7e93967b2512b09e60b6ca39e2be`. The Rust 1.88 compiler is isolated
+under `/home/asl3/rpt-development/toolchains/rust-1.88.0`; source and test
+artifacts remain in the node user's home workspace. The existing standalone
+controller was active during and after the build; no installed binary or live
+configuration was changed.
+
+The first milestone is complete and execution pauses here per the checklist.
+Storage, full resource profiles, HTTP/HAL, credentials, runtime activation and
+controller INI removal remain unchecked. USBRadioPlus INI is preserved. The
+complete native pull-request coverage/package gate remains pending.
