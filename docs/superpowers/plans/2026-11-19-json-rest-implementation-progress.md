@@ -125,7 +125,7 @@ complete native pull-request coverage/package gate remains pending.
 
 ## Second milestone: resource identity and ownership
 
-**In progress, 2026-11-19.** Assemble an in-memory modular candidate from
+**Completed, 2026-11-19.** Assembled an in-memory modular candidate from
 identified captured JSON bytes. The expected registry owns UUIDs, exact port
 keys, resource kinds and scope/owner bindings. Metadata remains typed; other
 section bodies are explicitly unvalidated staging inputs, not public HAL output
@@ -171,5 +171,14 @@ Review approved specification and production quality. One nonblocking test-only
 readability note is deferred: two malformed-JSON table rows contain coordinates
 that their variant/redaction assertions intentionally ignore.
 
-Native node build/tests and the milestone checkpoint are next. No installed
-service, connection, DSP or live configuration has been changed.
+Native node verification passed: **130 configuration tests**, zero failures,
+on Debian 13 arm64 using isolated Rust 1.88 at source commit
+`ef4aa261a2587581d30e29cfe3f01661d9dc5fd9`. The controller service was active
+before and after the build. Both source workspaces are clean; no installed
+binary, connection, DSP or live configuration has been changed.
+
+Milestone 2 is complete and execution pauses here per the checklist. Secure
+filesystem capture, complete domain profiles, durable storage, credentials,
+HTTP/HAL and the coordinated controller INI cutover remain pending. USBRadioPlus
+INI remains supported. The complete native pull-request coverage/package gate
+has not been claimed by these scoped model checks.

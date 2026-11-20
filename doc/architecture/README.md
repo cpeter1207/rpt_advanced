@@ -16,7 +16,7 @@ described below is removed at the coordinated store/provider cutover.
 USBRadioPlus retains its own public INI loader. Unknown JSON keys and unusable
 setting values warn and fall back through inheritance/defaults.
 
-The next model milestone adds UUID-backed resource identities and explicit
+The core model now adds UUID-backed resource identities and explicit
 scope/kind ownership to in-memory candidates. Typed metadata is resolved
 separately from opaque unvalidated section bodies. Site defaults apply to all
 ordinary sections; protocol presence is established only by port documents.

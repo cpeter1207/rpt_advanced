@@ -25,6 +25,8 @@ Use test-driven development.
 
 [x] - Complete the initial shared JSON decoder and sparse site/port metadata/inheritance foundation, preserve existing wire input types, and pass development-host checks plus native node524950 configuration tests.
 
+[x] - Complete the UUID/key/owner registry and modular candidate assembly milestone, including explicit protocol presence, empty ordinary overrides and native node verification.
+
 [] - Finalize recurring start/end pairing, overnight windows, overlapping occurrences/grace periods, calendar startup without recovery, missed checks and legacy permanent-route ownership before implementing scheduler transitions.
 
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.
