@@ -357,7 +357,10 @@ object bodies are separate files.
 }
 ```
 
-The small state file points at desired and last-known-good manifests and activation/publication bookkeeping:
+The format-1 state pointer requires all of the following members. Digests use
+64 lowercase hexadecimal digits over the exact stored bytes. The desired and
+last-known-good selectors each contain `manifest`, `revision` and `sha256`.
+Initial provisioning permits a null last-known-good selector.
 
 ```json
 {
@@ -365,19 +368,57 @@ The small state file points at desired and last-known-good manifests and activat
   "store_uuid": "31c6bf12-7e60-4b4b-86be-71a3c065dc95",
   "desired": {
     "revision": "r-42",
-    "manifest": "manifest-42"
+    "manifest": "manifest-42",
+    "sha256": "63781307a48e20674a88b12a8d81821db30dcff3fa867bf0ebeea67ae87b75f5"
   },
-  "last_known_good": {
-    "revision": "r-41",
-    "manifest": "manifest-41"
+  "last_known_good": null,
+  "activation": {"target_revision": "r-42", "state": "pending"},
+  "publication_journal": {
+    "id": "11231232-0055-4675-a3c2-4e843b5192ef",
+    "sha256": "3952b26dbd72bef6606a9ab1409ee3280cbf147c2aa681af414df137288d4093"
   },
-  "activation": {
-    "target_revision": "r-42",
-    "state": "pending"
-  },
-  "publication_journal": "transaction-42"
+  "clean_working_sha256": null
 }
 ```
+
+Activation states are `pending`, `confirmed`, `failed` and `recovery_required`.
+The target revision equals desired. Confirmation requires equal desired and
+last-known-good references. A selected journal requires pending activation
+and a null clean fingerprint. Clean publication removes the journal reference
+and sets the complete working fingerprint. Runtime adoption is a separate
+observation supplied by the active process.
+
+A journal at `journals/<uuid>.json` requires `format_version`, `id`,
+`store_uuid`, `prior_state_sha256`, `desired`, `source_working_sha256`,
+`target_working_sha256`, ordered `changes`, and `prune_directories`. Each row has a unique
+catalog-relative `path`, nullable `source_sha256`, and nullable `target`.
+A target selects `resource_uuid`, `version` and `sha256` from the desired
+manifest. Null represents absence, including an absent source distinct from
+a present zero-length file. Only explicit empty-store provisioning admits a
+null prior selector digest. The prior digest is compared at the pointer switch.
+The journal records empty directories of retiring ports in child-before-parent
+order. Reconciliation removes recorded files and directories before installing
+replacements. A new file in a retiring directory blocks pruning. Planning counts
+the peak source and target layouts after those explicit retirements.
+
+Explicit provisioning takes the expected store UUID. In an empty protected
+root it first creates and syncs an empty `.bootstrap-<store-uuid>` directory.
+With the same UUID, an interrupted layout or pre-pointer initialization can
+resume under the fixed lock. The first durable selector consumes the marker
+and syncs the root before success. An established store which loses its selector
+has no bootstrap authority.
+
+Before recovery publishes any working bytes or confirms an already-clean
+selector, it verifies the exact selector, synchronizes it and the store root,
+then rechecks the binding. A clean switch synchronizes every captured regular
+file and all surviving working directories bottom-up, including the working
+root, so editor additions, replacements and removals enter the durable baseline.
+A save checks every reachable bookkeeping pointer against the encoded size
+limit and proves omitted immutable objects durable before selecting them.
+An explicit restore may supersede a selected journal with an exact observed
+pointer and working fingerprint. Its prepared graph must match the selected
+desired or last-known-good manifest being restored. It uses a fresh revision,
+immutable journal and pointer switch before issuing any recovery writes.
 
 Replacing and syncing `state.json` is the sole atomic cross-resource commit point. A transaction can modify several resource files and encrypted credential records together without writing a monolithic JSON snapshot. Unchanged immutable objects are shared by reference.
 
@@ -1465,6 +1506,39 @@ Only authoring configuration and permitted local-name metadata for newly created
 The helper captures the accepted configuration revision plus a bounded tree fingerprint of sorted allowed paths and file-byte hashes. The server accepts no arbitrary path argument.
 
 Under the coordinator/edit locks, securely capture the full allowed tree and check the fingerprint. Infer one candidate from the file set. Existing UUIDs retain identities; new `new-<token>` directories/files can request new radios or named definitions, which receive canonical IDs. Local-key renaming is explicit delete/create, not credential rebinding.
+
+Format-1 import tokens use `new-[A-Za-z0-9_-]{1,64}`. They occupy a port
+directory or the basename before `.json` in a named collection. Existing
+dynamic path components use lowercase hyphenated UUIDs from the selected
+registry. Every present resource has its exact catalog kind. Existing
+envelopes retain the registered ID; a supplied port key must match. Named
+members always carry their exact key. New port metadata and named definitions
+carry `key` and omit `id`. Newly populated fixed slots also omit `id` when
+the registry has no binding yet. The importer assigns fresh UUIDs, including
+the metadata UUID for a new port, before the domain resolver sees a candidate.
+Ordinary and macro files use `configuration`; events keep their flat body.
+
+The manifest's `port_order` is a permutation of the UUIDs in `port_keys`. It
+is required for two or more ports and may be omitted for the unique zero/one
+ordering. The exact-key registry and collection order are independent.
+A reload retains the order of surviving ports, then appends new ports by
+bytewise import path. A missing site protocol-default file retains its
+registered slot; missing port instances retire.
+
+The manifest's optional `members` array contains ordered pairs
+`[resource_uuid, exact_key]`. Every named resource row has one pair and a
+verified object. Filtering the array by registered owner and kind gives that
+collection's order. Reload retains surviving IDs and order, then appends new
+members in bytewise working-path order. Product validates the resulting
+identity graph before passing staged bodies to profile/relationship owners.
+Canonical files and removal of import-token files share the same journal.
+The writer prunes recorded empty import and retired canonical port directories under the stable lock.
+
+The fingerprint uses the existing v1 frame over sorted present file paths
+and exact SHA-256s. Directory entries also count toward the discovery bound.
+Unknown entries and unsafe parents block publication; no local key is a
+filename. Removal and shrinking precede additions so partial working trees
+can be recaptured under the same per-file, total-byte and path-count limits.
 
 Adding/removing protocol, event or macro files invokes the same creation/deletion validation as their REST resources. Missing optional-protocol files mean absent instances. Missing ordinary override sections mean empty overrides. Surviving account credentials follow omission/binding rules; a new authenticated identity still requires valid credentials.
 

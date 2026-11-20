@@ -23,6 +23,8 @@ use std::{
 };
 
 pub mod immutable;
+pub mod inventory;
+pub mod transaction;
 
 const EDIT_LOCK: &str = "edit.lock";
 const WORKING: &str = "working";
@@ -32,6 +34,8 @@ const PATH_FLAGS: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CL
 pub struct WorkingFiles {
     root: File,
     uid: u32,
+    bootstrap: Option<uuid::Uuid>,
+    bookkeeping_fault: std::sync::atomic::AtomicBool,
 }
 
 /// Exclusive cooperative edit lock released when the guard drops.
@@ -70,6 +74,7 @@ pub struct CaptureLimits {
 
 /// Owned bytes and fingerprint for the captured selection.
 pub struct WorkingSnapshot {
+    directories: Option<Vec<PathBuf>>,
     entries: Vec<Entry>,
     limits: CaptureLimits,
     fingerprint: Fingerprint,
@@ -168,7 +173,12 @@ impl WorkingFiles {
         }
         let uid = geteuid().as_raw();
         checked_metadata(&root, uid, 0o700)?;
-        Ok(Self { root, uid })
+        Ok(Self {
+            root,
+            uid,
+            bootstrap: None,
+            bookkeeping_fault: false.into(),
+        })
     }
 
     /// Lock the existing regular edit file exclusively without waiting.
@@ -259,6 +269,7 @@ impl EditGuard<'_> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let snapshot = WorkingSnapshot {
+            directories: None,
             fingerprint: fingerprint(&entries),
             entries,
             limits,
@@ -519,17 +530,34 @@ fn read_pinned_regular(
 
 /// Frame the sorted selection using path lengths, presence tags, and SHA-256.
 fn fingerprint(entries: &[Entry]) -> Fingerprint {
+    fingerprint_rows(
+        entries.len(),
+        entries.iter().map(|entry| {
+            (
+                path_bytes(entry.path.relative()),
+                entry
+                    .data
+                    .as_ref()
+                    .map(|data| immutable::artifact_sha256(&data.bytes)),
+            )
+        }),
+    )
+}
+
+fn fingerprint_rows<'a>(
+    count: usize,
+    rows: impl Iterator<Item = (&'a [u8], Option<[u8; 32]>)>,
+) -> Fingerprint {
     let mut digest = digest::Context::new(&digest::SHA256);
     digest.update(b"rptadv-working-files\0v1\0");
-    digest.update(&(entries.len() as u64).to_be_bytes());
-    for entry in entries {
-        let path = path_bytes(entry.path.relative());
+    digest.update(&(count as u64).to_be_bytes());
+    for (path, hash) in rows {
         digest.update(&(path.len() as u64).to_be_bytes());
         digest.update(path);
-        match &entry.data {
-            Some(data) => {
+        match hash {
+            Some(hash) => {
                 digest.update(&[1]);
-                digest.update(digest::digest(&digest::SHA256, &data.bytes).as_ref());
+                digest.update(&hash);
             }
             None => digest.update(&[0]),
         }

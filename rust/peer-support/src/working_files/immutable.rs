@@ -46,6 +46,10 @@ impl ImmutableTarget {
         Self::new("manifests", None, manifest_id)
     }
 
+    pub(super) fn journal(id: Uuid) -> Result<Self, InstallError> {
+        Self::new("journals", None, &id.to_string())
+    }
+
     /// Append the fixed extension to a single validated component.
     fn new(
         namespace: &'static str,
@@ -97,6 +101,7 @@ pub struct ArtifactLimits {
 
 /// Owned exact bytes and verified SHA-256 of a protected immutable artifact.
 pub struct ImmutableArtifact {
+    pub(super) public_object: bool,
     bytes: Vec<u8>,
     sha256: [u8; 32],
 }
@@ -256,6 +261,7 @@ impl EditGuard<'_> {
         before_confirm();
         self.confirm_binding(target, &parent, &captured.version)?;
         Ok(ImmutableArtifact {
+            public_object: target.namespace == "objects",
             bytes: captured.bytes,
             sha256,
         })
@@ -421,23 +427,23 @@ impl EditGuard<'_> {
 }
 
 /// Compute the SHA-256 digest of exact artifact bytes.
-fn artifact_sha256(bytes: &[u8]) -> [u8; 32] {
+pub fn artifact_sha256(bytes: &[u8]) -> [u8; 32] {
     let mut sha256 = [0; 32];
     sha256.copy_from_slice(digest::digest(&digest::SHA256, bytes).as_ref());
     sha256
 }
 
 /// Exclusively created private entry, cleaned on abort until rename consumes it.
-struct Scratch<'a> {
+pub(super) struct Scratch<'a> {
     parent: &'a File,
-    name: String,
-    file: File,
-    published: bool,
+    pub(super) name: String,
+    pub(super) file: File,
+    pub(super) published: bool,
 }
 
 impl<'a> Scratch<'a> {
     /// Create an unpredictable staging name and enforce exact mode on its fd.
-    fn create(parent: &'a File) -> Result<Self, InstallError> {
+    pub(super) fn create(parent: &'a File) -> Result<Self, InstallError> {
         let mut entropy = [0; 16];
         SystemRandom::new()
             .fill(&mut entropy)
@@ -464,7 +470,7 @@ impl<'a> Scratch<'a> {
     }
 
     /// Confirm that the scratch basename still identifies our created inode.
-    fn check_name(&self) -> Result<(), CaptureError> {
+    pub(super) fn check_name(&self) -> Result<(), CaptureError> {
         let current = File::from(
             fs::openat(self.parent, self.name.as_str(), PATH_FLAGS, Mode::empty())
                 .map_err(open_error)?,

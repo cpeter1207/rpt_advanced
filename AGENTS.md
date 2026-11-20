@@ -87,6 +87,14 @@ sealed limits before key loading, and authenticate before exposing opaque
 plaintext. Account binding/private manifest adoption still require resolved
 profiles; successful decryption is not configured-state evidence.
 
+Accepted state selects verified manifests and publication journals by exact digest.
+Only explicit provisioning initializes an empty store; a protected matching UUID marker supports interrupted bootstrap. Keep full-inventory
+capture and final rechecks under the stable guard. Reconcile only recorded
+source or target bytes, preserve third-party edits, and retain the journal
+until complete readback. Prove the visible pointer durable before replay, and sync the full working baseline before recording clean. Historical activation outcomes do not establish a
+current process generation. New-token imports receive fresh IDs; exact local
+keys never become path components.
+
 ## Shared rpt_advanced project baseline
 
 This baseline applies to every production, shared-library, and workflow
@@ -252,6 +260,11 @@ checks have resolved every recorded component-level issue.
 Keep workflow implementations in rpt_advanced-workflows; this repository may
 contain only the thin callers needed to invoke them. Workflow maintenance must
 not depend on production tests passing.
+
+The loopback HTTPS worker authenticates queued requests before coordinator
+claim. Preserve its bounded nonblocking handoff and consume its coalesced
+listener diagnostics in each host; never perform WebPKI or network work on
+the serialized runtime owner or an audio callback.
 
 Never deploy to a node or alter its configuration without explicit approval.
 Do not add features or requirements that the user has not requested.

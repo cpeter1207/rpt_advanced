@@ -1,9 +1,11 @@
 //! Owned JSON resource decoding and site-to-port inheritance.
 
 pub mod candidate;
+pub mod catalog;
 pub mod manifest;
 /// Typed public protocol resolution.
 pub mod profiles;
+pub mod state;
 
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;

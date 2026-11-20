@@ -5,13 +5,20 @@ use super::{
     ScopeParent, SiteMetadata, decode_object, into_string,
 };
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::{fmt, str::FromStr};
 use uuid::Uuid;
 
 /// Stable resource identity assigned by the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResourceId(Uuid);
+
+impl ResourceId {
+    /// Typed UUID for descriptor-relative immutable and journal operations.
+    pub fn uuid(self) -> Uuid {
+        self.0
+    }
+}
 
 impl FromStr for ResourceId {
     type Err = InvalidResourceId;
@@ -96,6 +103,36 @@ pub enum ResourceKind {
     Echolink,
     /// Phone-patch defaults or an explicit instance.
     PhonePatch,
+    /// command resource.
+    Command,
+    /// limits resource.
+    Limits,
+    /// power resource.
+    Power,
+    /// event resource.
+    Event,
+    /// macro resource.
+    Macro,
+    /// message resource.
+    Message,
+    /// telemetry resource.
+    Telemetry,
+    /// sensor resource.
+    Sensor,
+    /// input resource.
+    Input,
+    /// output resource.
+    Output,
+    /// alarm resource.
+    Alarm,
+    /// fan resource.
+    Fan,
+    /// mailbox resource.
+    Mailbox,
+    /// permanent-group resource.
+    PermanentGroup,
+    /// echolink-proxy resource.
+    EcholinkProxy,
 }
 
 impl ResourceKind {
@@ -104,46 +141,6 @@ impl ResourceKind {
     /// Identify protocol defaults and instances using the candidate's presence rules.
     pub(super) fn is_protocol(self) -> bool {
         Self::PROTOCOLS.contains(&self)
-    }
-
-    /// Parse an exact supported envelope kind.
-    pub(super) fn from_wire(text: &str) -> Option<Self> {
-        [
-            Self::Metadata,
-            Self::Radio,
-            Self::RxAudio,
-            Self::RxSignaling,
-            Self::TxAudio,
-            Self::TxSignaling,
-            Self::Interface,
-            Self::PeerAudio,
-            Self::Control,
-            Self::Memories,
-            Self::ScanLists,
-        ]
-        .into_iter()
-        .chain(Self::PROTOCOLS)
-        .find(|kind| kind.as_str() == text)
-    }
-
-    /// Canonical JSON envelope kind.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Metadata => "metadata",
-            Self::Radio => "radio",
-            Self::RxAudio => "rx-audio",
-            Self::RxSignaling => "rx-signaling",
-            Self::TxAudio => "tx-audio",
-            Self::TxSignaling => "tx-signaling",
-            Self::Interface => "interface",
-            Self::PeerAudio => "peer-audio",
-            Self::Control => "control",
-            Self::Memories => "memories",
-            Self::ScanLists => "scan-lists",
-            Self::Allstarlink => "allstarlink",
-            Self::Echolink => "echolink",
-            Self::PhonePatch => "phone-patch",
-        }
     }
 }
 
@@ -175,10 +172,15 @@ impl fmt::Debug for ResourceBinding {
 }
 
 /// Exact port-key lookup and unique resource slots for one site.
+#[derive(PartialEq, Eq)]
 pub struct ResourceRegistry {
+    pub(super) port_order: Vec<(ResourceId, PortKey)>,
     site: ResourceId,
     ports: BTreeMap<PortKey, ResourceId>,
     slots: BTreeMap<(ResourceScope, ResourceKind), ResourceId>,
+    by_id: BTreeMap<ResourceId, ResourceBinding>,
+    named_keys: BTreeMap<(ResourceScope, ResourceKind, PortKey), ResourceId>,
+    members: Vec<(ResourceBinding, PortKey)>,
 }
 
 impl ResourceRegistry {
@@ -190,16 +192,29 @@ impl ResourceRegistry {
         ports: &[(ResourceId, PortKey)],
         bindings: &[ResourceBinding],
     ) -> Result<Self, CandidateError> {
+        Self::with_members(site, ports, bindings, &[])
+    }
+
+    /// Register repeatable members in collection order, independently of exact key spelling.
+    pub fn with_members(
+        site: ResourceId,
+        ports: &[(ResourceId, PortKey)],
+        bindings: &[ResourceBinding],
+        members: &[(ResourceBinding, PortKey)],
+    ) -> Result<Self, CandidateError> {
         let site_binding = ResourceScope::Site(site).metadata_binding();
-        let mut ids = BTreeSet::from([site]);
         let mut registry = Self {
             site,
             ports: BTreeMap::new(),
+            port_order: ports.to_vec(),
+            by_id: BTreeMap::from([(site, site_binding)]),
+            named_keys: BTreeMap::new(),
+            members: Vec::new(),
             slots: BTreeMap::from([((site_binding.scope, site_binding.kind), site_binding.id)]),
         };
         for (id, key) in ports {
             let binding = ResourceScope::Port(*id).metadata_binding();
-            registry.insert(binding, &mut ids)?;
+            registry.insert(binding)?;
             if registry.ports.insert(key.clone(), *id).is_some() {
                 return Err(binding.error(CandidateProblem::DuplicatePortKey));
             }
@@ -211,17 +226,46 @@ impl ResourceRegistry {
             {
                 return Err(binding.error(CandidateProblem::InvalidOwner));
             }
-            registry.insert(binding, &mut ids)?;
+            if binding.kind.is_named() {
+                return Err(binding.error(CandidateProblem::UnexpectedBinding));
+            }
+            registry.insert(binding)?;
+        }
+        for binding in bindings.iter().filter(|b| {
+            b.kind == ResourceKind::EcholinkProxy && matches!(b.scope, ResourceScope::Port(_))
+        }) {
+            if registry
+                .binding(binding.scope, ResourceKind::Echolink)
+                .is_none()
+            {
+                return Err(binding.error(CandidateProblem::InvalidOwner));
+            }
+        }
+        for (binding, key) in members {
+            if !binding.kind.is_named()
+                || registry
+                    .binding(binding.scope, ResourceKind::Metadata)
+                    .is_none()
+            {
+                return Err(binding.error(CandidateProblem::InvalidOwner));
+            }
+            if registry.by_id.insert(binding.id, *binding).is_some() {
+                return Err(binding.error(CandidateProblem::DuplicateId));
+            }
+            if registry
+                .named_keys
+                .insert((binding.scope, binding.kind, key.clone()), binding.id)
+                .is_some()
+            {
+                return Err(binding.error(CandidateProblem::DuplicateSlot));
+            }
+            registry.members.push((*binding, key.clone()));
         }
         Ok(registry)
     }
 
-    fn insert(
-        &mut self,
-        binding: ResourceBinding,
-        ids: &mut BTreeSet<ResourceId>,
-    ) -> Result<(), CandidateError> {
-        if !ids.insert(binding.id) {
+    fn insert(&mut self, binding: ResourceBinding) -> Result<(), CandidateError> {
+        if self.by_id.insert(binding.id, binding).is_some() {
             return Err(binding.error(CandidateProblem::DuplicateId));
         }
         if self
@@ -239,9 +283,9 @@ impl ResourceRegistry {
         self.site
     }
 
-    /// Iterate the exact registered port keys and their scope UUIDs.
+    /// Iterate exact keys and UUIDs in the persisted port collection order.
     pub fn port_keys(&self) -> impl Iterator<Item = (&PortKey, ResourceId)> + '_ {
-        self.ports.iter().map(|(key, &id)| (key, id))
+        self.port_order.iter().map(|(id, key)| (key, *id))
     }
 
     /// Find a port by the exact registered key.
@@ -257,9 +301,27 @@ impl ResourceRegistry {
 
     /// Iterate all registered bindings, including the site and port metadata.
     pub fn bindings(&self) -> impl ExactSizeIterator<Item = ResourceBinding> + '_ {
-        self.slots
-            .iter()
-            .map(|(&(scope, kind), &id)| ResourceBinding { id, scope, kind })
+        self.by_id.values().copied()
+    }
+
+    /// Find any registered ID, including a named member.
+    pub fn by_id(&self, id: ResourceId) -> Option<ResourceBinding> {
+        self.by_id.get(&id).copied()
+    }
+
+    /// Find a repeatable member by its exact owner, kind and key.
+    pub fn named_binding(
+        &self,
+        scope: ResourceScope,
+        kind: ResourceKind,
+        key: &PortKey,
+    ) -> Option<ResourceBinding> {
+        self.by_id(*self.named_keys.get(&(scope, kind, key.clone()))?)
+    }
+
+    /// Ordered named bindings and exact local keys.
+    pub fn members(&self) -> &[(ResourceBinding, PortKey)] {
+        &self.members
     }
 }
 
@@ -414,7 +476,7 @@ impl<'registry> ModularCandidate<'registry> {
         let mut warnings = Vec::new();
         for &capture in captures {
             let binding = capture.binding;
-            if registry.binding(binding.scope, binding.kind) != Some(binding) {
+            if registry.by_id(binding.id) != Some(binding) {
                 return Err(binding.error(CandidateProblem::UnexpectedBinding));
             }
             let Entry::Vacant(slot) = captured.entry(binding.id) else {
@@ -438,13 +500,14 @@ impl<'registry> ModularCandidate<'registry> {
         }
 
         let mut staged = BTreeMap::new();
-        for (&(scope, kind), &id) in &registry.slots {
+        for binding in registry.bindings() {
+            let ResourceBinding { scope, kind, id } = binding;
             if kind == ResourceKind::Metadata {
                 continue;
             }
             let fields = captured
                 .remove(&id)
-                .or_else(|| (!kind.is_protocol()).then(Map::new));
+                .or_else(|| (!kind.has_optional_presence()).then(Map::new));
             if let Some(fields) = fields {
                 staged.insert(
                     id,
@@ -525,7 +588,19 @@ fn decode_envelope(
     if envelope.remove("kind").as_ref().and_then(Value::as_str) != Some(binding.kind.as_str()) {
         return Err(invalid("kind"));
     }
-    if let Some(key) = envelope.remove("key")
+    if binding.kind.is_named() {
+        let key = envelope
+            .remove("key")
+            .and_then(into_string)
+            .ok_or_else(|| invalid("key"))?;
+        if registry.named_binding(binding.scope, binding.kind, &PortKey::new(key)) != Some(binding)
+        {
+            return Err(invalid("key"));
+        }
+        if binding.kind == ResourceKind::Event {
+            return Ok(envelope);
+        }
+    } else if let Some(key) = envelope.remove("key")
         && !(matches!(binding.scope, ResourceScope::Port(_))
             && binding.kind == ResourceKind::Metadata
             && into_string(key).and_then(|key| registry.port_id(&PortKey::new(key)))

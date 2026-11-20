@@ -139,7 +139,7 @@ impl FromStr for ContentHash {
 }
 
 impl ContentHash {
-    fn hex(&self) -> String {
+    pub(super) fn hex(&self) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         self.0
             .iter()
@@ -204,11 +204,24 @@ impl PublicManifest {
         ports: &[(ResourceId, PortKey)],
         rows: impl IntoIterator<Item = (ResourceBinding, Option<ObjectReference>)>,
     ) -> Result<Self, ManifestError> {
+        Self::with_members(id, revision, site, ports, rows, &[])
+    }
+
+    /// Construct a reference-only graph with ordered named members.
+    pub fn with_members(
+        id: ManifestId,
+        revision: LogicalRevision,
+        site: ResourceId,
+        ports: &[(ResourceId, PortKey)],
+        rows: impl IntoIterator<Item = (ResourceBinding, Option<ObjectReference>)>,
+        members: &[(ResourceId, PortKey)],
+    ) -> Result<Self, ManifestError> {
         let mut unique_rows = BTreeMap::new();
         for (binding, reference) in rows {
             if reference.is_none()
                 && (binding.kind == ResourceKind::Metadata
-                    || binding.kind.is_protocol()
+                    || binding.kind.is_named()
+                    || binding.kind.has_optional_presence()
                         && matches!(binding.scope, ResourceScope::Port(_)))
             {
                 return Err(ManifestError::MissingReference);
@@ -224,16 +237,25 @@ impl PublicManifest {
         let additional: Vec<_> = unique_rows
             .values()
             .map(|&(binding, _)| binding)
-            .filter(|binding| binding.kind != ResourceKind::Metadata)
+            .filter(|binding| binding.kind != ResourceKind::Metadata && !binding.kind.is_named())
             .collect();
-        let registry =
-            ResourceRegistry::new(site, ports, &additional).map_err(ManifestError::Registry)?;
+        let named = members
+            .iter()
+            .map(|(id, key)| {
+                let (binding, _) = unique_rows
+                    .get(id)
+                    .ok_or(ManifestError::InvalidField("members"))?;
+                Ok((*binding, key.clone()))
+            })
+            .collect::<Result<Vec<_>, ManifestError>>()?;
+        let registry = ResourceRegistry::with_members(site, ports, &additional, &named)
+            .map_err(ManifestError::Registry)?;
         // The registry already includes a metadata slot for every scope. All
         // explicit rows must match their slots and account for those metadata IDs.
         if unique_rows.len() != registry.bindings().len()
             || unique_rows
                 .values()
-                .any(|&(binding, _)| registry.binding(binding.scope, binding.kind) != Some(binding))
+                .any(|&(binding, _)| registry.by_id(binding.id) != Some(binding))
         {
             return Err(ManifestError::InvalidMetadata);
         }
@@ -270,13 +292,51 @@ impl PublicManifest {
             .into_iter()
             .map(|(key, value)| Ok((parse_field(Some(value), "port_keys")?, PortKey::new(key))))
             .collect::<Result<Vec<_>, ManifestError>>()?;
+        let order = root.remove("port_order");
         let resources = required_object(root.remove("resources"), "resources")?;
+        let members = match root.remove("members") {
+            None => Vec::new(),
+            Some(Value::Array(members)) => members
+                .into_iter()
+                .map(|row| {
+                    let Value::Array(pair) = row else {
+                        return Err(ManifestError::InvalidField("members"));
+                    };
+                    let [id, Value::String(key)]: [Value; 2] = pair
+                        .try_into()
+                        .map_err(|_| ManifestError::InvalidField("members"))?
+                    else {
+                        return Err(ManifestError::InvalidField("members"));
+                    };
+                    Ok((parse_field(Some(id), "members")?, PortKey::new(key)))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => return Err(ManifestError::InvalidField("members")),
+        };
         let mut warnings = vec![ResourceWarning::UnknownField; root.len()];
         let rows = resources
             .into_iter()
             .map(|(id, value)| decode_row(&id, value, site, &mut warnings))
             .collect::<Result<Vec<_>, ManifestError>>()?;
-        let value = Self::new(id, revision, site, &ports, rows)?;
+        let mut value = Self::with_members(id, revision, site, &ports, rows, &members)?;
+        // A zero/one-member collection has only one possible ordering.
+        if order.is_some() || ports.len() > 1 {
+            let invalid = ManifestError::InvalidField("port_order");
+            let Some(Value::Array(ids)) = order else {
+                return Err(invalid);
+            };
+            if ids.len() != ports.len() {
+                return Err(invalid);
+            }
+            let mut known: BTreeMap<_, _> = ports.into_iter().collect();
+            value.registry.port_order = ids
+                .into_iter()
+                .map(|v| {
+                    let id: ResourceId = parse_field(Some(v), "port_order")?;
+                    Ok((id, known.remove(&id).ok_or(invalid)?))
+                })
+                .collect::<Result<Vec<_>, ManifestError>>()?;
+        }
         Ok(ResourceResolution { value, warnings })
     }
 
@@ -314,16 +374,38 @@ impl PublicManifest {
                 (binding.id.to_string(), Value::Object(row))
             })
             .collect::<Map<_, _>>();
-        json!({
+        let mut encoded = json!({
             "format_version": FORMAT_VERSION,
             "id": self.id.as_str(),
             "revision": self.revision.as_str(),
             "site_uuid": self.registry.site_id().to_string(),
             "port_keys": port_keys,
             "resources": resources,
-        })
-        .to_string()
-        .into_bytes()
+        });
+        if self.registry.port_order.len() > 1 {
+            encoded["port_order"] = json!(
+                self.registry
+                    .port_order
+                    .iter()
+                    .map(|(id, _)| id.to_string())
+                    .collect::<Vec<_>>()
+            );
+        }
+        if !self.registry.members().is_empty() {
+            encoded["members"] = Value::Array(
+                self.registry
+                    .members()
+                    .iter()
+                    .map(|(binding, key)| json!([binding.id.to_string(), key.as_str()]))
+                    .collect(),
+            );
+        }
+        encoded.to_string().into_bytes()
+    }
+
+    /// Compare the complete retained configuration independently of manifest ID and logical revision.
+    pub fn same_configuration(&self, other: &Self) -> bool {
+        self.registry == other.registry && self.references == other.references
     }
 
     /// Return the immutable manifest identifier.

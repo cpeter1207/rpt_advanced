@@ -2,7 +2,7 @@
 
 use rpt_advanced_core::config::resources::candidate::{
     CandidateError, CapturedResource, ModularCandidate, ResourceBinding, ResourceKind,
-    ResourceRegistry, ResourceScope,
+    ResourceRegistry,
 };
 use rptadv_peer_support::working_files::{
     CaptureError, CaptureLimits, CapturePath, EditGuard, FileRequirement, Fingerprint,
@@ -110,29 +110,7 @@ pub fn capture_registered<'registry>(
 
 /// Derive the working filename from the scope UUID and fixed kind layout.
 fn relative_path(binding: ResourceBinding) -> PathBuf {
-    let (scope, protocols) = match binding.scope {
-        ResourceScope::Site(_) => (PathBuf::from("site"), "protocol-defaults"),
-        ResourceScope::Port(id) => (PathBuf::from(format!("ports/{id}")), "protocols"),
-    };
-    let file = match binding.kind {
-        ResourceKind::Metadata => "metadata.json",
-        ResourceKind::Radio => "radio.json",
-        ResourceKind::RxAudio => "rx/audio.json",
-        ResourceKind::RxSignaling => "rx/signaling.json",
-        ResourceKind::TxAudio => "tx/audio.json",
-        ResourceKind::TxSignaling => "tx/signaling.json",
-        ResourceKind::Interface => "interface.json",
-        ResourceKind::PeerAudio => "peer-audio.json",
-        ResourceKind::Control => "control.json",
-        ResourceKind::Memories => "memories.json",
-        ResourceKind::ScanLists => "scan-lists.json",
-        ResourceKind::Allstarlink | ResourceKind::Echolink | ResourceKind::PhonePatch => {
-            return scope
-                .join(protocols)
-                .join(format!("{}.json", binding.kind.as_str()));
-        }
-    };
-    scope.join(file)
+    rpt_advanced_core::config::resources::catalog::relative_path(binding).into()
 }
 
 #[cfg(test)]

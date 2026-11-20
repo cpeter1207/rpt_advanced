@@ -65,6 +65,34 @@ impl LoadedPublicManifest {
         &self.manifest.warnings
     }
 
+    /// Borrow exact verified immutable bytes for confirming previously unselected references.
+    pub(crate) fn verified_objects(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            rpt_advanced_core::config::resources::candidate::ResourceId,
+            &[u8],
+        ),
+    > + '_ {
+        self.objects
+            .iter()
+            .map(|(b, artifact)| (b.id, artifact.bytes()))
+    }
+
+    /// Exact verified public object sizes, for bounded working publication planning.
+    pub(crate) fn object_sizes(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            rpt_advanced_core::config::resources::candidate::ResourceId,
+            usize,
+        ),
+    > + '_ {
+        self.objects
+            .iter()
+            .map(|(binding, artifact)| (binding.id, artifact.bytes().len()))
+    }
+
     /// Check resource identities and envelopes, resolve local metadata, and stage
     /// opaque section bodies for later domain validation.
     pub fn assemble_candidate(&self) -> Result<ModularCandidate<'_>, CandidateError> {

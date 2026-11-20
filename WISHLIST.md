@@ -37,9 +37,10 @@ qualification are distinct from software implementation and passive node health.
 The decoder/metadata, registry/candidate, registered capture, immutable public
 storage, public manifest/readback, sealed-record/key-loader and typed private
 artifact I/O milestones are verified on the development host and native node.
-Resolved account bindings, private manifest adoption, complete discovery,
-accepted-state transactions, full domain validation and runtime cutover remain
-pending. Typed modular protocol profiles and resource-local JSON Patch staging passed
+Public accepted-state/journal transactions and bounded mTLS/HTTPS transport
+passed integrated host checks; their native checkpoint is next. Private account
+bindings, private manifest adoption, HAL/runtime joins and full domain validation
+remain pending. Typed modular protocol profiles and resource-local JSON Patch staging passed
 focused, core and affected-host checks plus their native home-workspace checkpoint.
 Subsequent private/store/runtime joins remain tracked. These control-plane foundations do not replace the running INI path.
 Remove controller INI during the coordinated store/provider cutover and retain

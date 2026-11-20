@@ -9,3 +9,6 @@ pub mod sealed_records;
 
 #[cfg(target_os = "linux")]
 pub mod working_files;
+
+#[cfg(target_os = "linux")]
+pub mod https;

@@ -82,6 +82,39 @@ fn no_key_lookup(_: &KeyId) -> Result<SecretKey, KeyLoadError> {
 }
 
 #[test]
+fn explicit_provision_keeps_prepared_private_artifacts_separate_from_the_pointer() {
+    let fixture = Fixture::new();
+    let root = fixture.root.join("new");
+    directory(&root);
+    let store = crate::working_files::WorkingFiles::provision(&root, scope().store_uuid()).unwrap();
+    let guard = store.try_edit().unwrap();
+    let encrypted = prepared(PAYLOAD, SEALED).unwrap();
+    assert!(
+        guard
+            .prepare_private_parent(OTHER_UUID.parse().unwrap(), &encrypted)
+            .is_err()
+    );
+    guard
+        .prepare_private_parent(scope().store_uuid(), &encrypted)
+        .unwrap();
+    let receipt = guard.install_private_record(&encrypted, ARTIFACT).unwrap();
+    assert!(guard.read_state(100).unwrap().is_none());
+    guard
+        .replace_state(None, b"independent selector", 100)
+        .unwrap();
+    let opened = guard
+        .open_private_record_with(
+            receipt.identity(),
+            receipt.sha256(),
+            ARTIFACT,
+            SEALED,
+            load_test_key,
+        )
+        .unwrap();
+    assert_eq!(opened.plaintext().expose_bytes(), PAYLOAD);
+}
+
+#[test]
 fn round_trips_binary_and_empty_plaintext_in_protected_private_files() {
     let fixture = protected_fixture();
     for parent in ["objects", "manifests"] {

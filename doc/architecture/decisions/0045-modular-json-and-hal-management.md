@@ -109,12 +109,38 @@ key and authenticates before returning opaque bytes. Missing keys, corruption
 and authentication failures preserve input. This does not establish account
 bindings or make a private manifest acceptable to the public-only loader.
 
+The host can explicitly provision a protected empty store and atomically
+compare/replace its state selector under the existing edit guard. Product
+installs the prepared public objects, verifies the selected graph, stages its
+immutable journal and rechecks the complete catalog inventory before switching.
+It replays only hash-matched changes and records a clean fingerprint after
+full readback. Recovery first proves the visible selector durable before working writes.
+Explicit bootstrap can resume only with its expected protected UUID marker.
+Baseline publication syncs edited regular files and working directories before
+declaring clean. Restore can deliberately replace an interrupted journal with
+a verified retained graph and an exact observed working fingerprint. Port
+order and named membership survive reload, and bounded directory retirement
+frees capacity for new ports.
+A confirmed on-disk result is historical and never marks a running owner active.
+Private shards may be provisioned only for typed prepared records. Private
+graph acceptance still requires the account-binding owner.
+
+Format-1 state and journal fields, import grammar and manifest member order
+are specified in the linked storage design. Core owns those durable identity
+and path rules. A helper and receiver use identical full-inventory capture.
+A startup with interrupted activation stays management-only until recovery.
+
 Replace the Unix maintenance socket with loopback HTTPS/HAL. Require authorized
 mTLS on every backend route, with separate proxy and CLI identities. Expose
 GET everywhere, PUT/PATCH on writable resources, and POST/DELETE on creatable
 collections. Use RFC 6901/6902 resource-local updates, conditional writes and
 write-only encrypted protocol credentials supplied through a separate systemd
 credential. ADRs 0006/0016 frontend OIDC policy does not bypass backend mTLS.
+
+The transport component owns bounded TLS/HTTP work and an opaque secret-safe
+request body. Its coordinator claim is nonblocking and rechecks current
+identity authorization and expiry. Hosts consume coalesced listener faults.
+This component is staged independently of HAL routing and runtime adoption.
 
 Remove controller INI at the coordinated cutover, including reconstructed
 processing text, private-secret and static-node INI readers. Preserve external

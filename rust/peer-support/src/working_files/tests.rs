@@ -529,3 +529,23 @@ fn verify_current_reopens_selected_files_and_working_directory() {
     assert_eq!(guard.verify_current(&snapshot), Err(CaptureError::Changed));
     assert!(!file.exists());
 }
+
+#[test]
+fn explicit_provisioning_and_guarded_pointer_replace_preserve_unexpected_data() {
+    let fixture = Fixture::new();
+    assert!(WorkingFiles::provision(&fixture.root, uuid::Uuid::nil()).is_err());
+    let empty = fixture.parent.join("empty");
+    directory(&empty);
+    let store = WorkingFiles::provision(&empty, uuid::Uuid::nil()).unwrap();
+    let guard = store.try_edit().unwrap();
+    assert_eq!(guard.read_state(32).unwrap(), None);
+    guard.replace_state(None, b"first", 32).unwrap();
+    assert!(guard.replace_state(None, b"stale", 32).is_err());
+    assert_eq!(
+        guard.read_state(32).unwrap().as_deref(),
+        Some(b"first".as_slice())
+    );
+    write(&empty.join("state.json"), b"external");
+    assert!(guard.replace_state(Some(&[1; 32]), b"lost", 32).is_err());
+    assert_eq!(fs::read(empty.join("state.json")).unwrap(), b"external");
+}

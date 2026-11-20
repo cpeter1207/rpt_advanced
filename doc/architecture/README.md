@@ -45,8 +45,13 @@ under the same edit guard. Typed targets, exclusive private staging, file sync,
 no-replace rename and parent sync protect existing artifacts. Equal retries
 verify bytes and confirm durability; a post-rename sync failure remains an
 explicit uncertain outcome. Protected parent directories are preprovisioned.
-Installing an artifact does not accept a configuration. State-pointer/journal
-publication, full profiles and runtime activation remain pending.
+Installing an artifact does not accept a configuration. The full working catalog now has
+a separate bounded discovery/import path. Product's accepted-state transaction
+checks the complete inventory, installs verified objects and journal, and
+compares and replaces the desired-state pointer. Reconciliation verifies each
+working change and the final inventory. Late owner-bookkeeping failures retain
+the observed outcome and inhibit further saves until a successful explicit
+bookkeeping retry. Domain preparation and runtime adoption remain separate.
 
 The public-manifest layer stores only IDs, exact key bindings and immutable
 object references/hashes. The product loader takes an explicit trusted manifest
