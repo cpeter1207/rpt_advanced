@@ -15,7 +15,7 @@ use std::{
     },
     panic::catch_unwind,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 const LIMITS: CaptureLimits = CaptureLimits {
@@ -33,13 +33,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        // Leave room for the Unix-domain socket under the native test TMPDIR.
         let parent = env::temp_dir().join(format!(
-            "rptadv-working-{}-{}",
+            "rw-{:x}-{:x}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         directory(&parent);
         let root = parent.join("store");
