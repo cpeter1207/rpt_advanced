@@ -530,7 +530,7 @@ Give each response `self` and appropriate `up`, `profile`, child, effective, sta
 
 Include the CURIE declaration in each document using `rpt:` relations; do not assume declarations from a previous HTTP response are inherited.
 
-HAL does not define write forms or HTTP methods. Publish request schemas, `Allow`, `Accept-Patch` and code-derived OpenAPI. Schema/docs endpoints support GET using their appropriate schema/document media types and are discoverable from HAL links.
+HAL does not define write forms or HTTP methods. Publish request schemas, `Allow`, `Accept-Patch` and code-derived OpenAPI. Generate OpenAPI 3.1 from the Rust route/schema inventory and serve an offline interactive Swagger UI at `/api/v1/docs`; both documentation routes require the same backend mTLS authorization as every other endpoint. Schema/docs endpoints support GET using their appropriate schema/document media types and are discoverable from HAL links.
 
 Example API entry point:
 

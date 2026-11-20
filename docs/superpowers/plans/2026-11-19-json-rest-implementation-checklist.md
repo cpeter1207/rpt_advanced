@@ -41,6 +41,8 @@ Use test-driven development.
 
 [x] - Complete the public accepted-state/journal transaction and authenticated loopback HTTPS components, including interruption recovery, bounded mTLS admission, real proxy fixtures and integrated host/native checks. Private graph and runtime/HAL joins remain pending.
 
+[x] - Complete account-bound encrypted public/private manifest adoption, canonical proxy ownership, reserved public credential guards, key consistency and zeroizing JSON scratch; pass 1,035 affected host/native tests. Runtime adoption, API writes, rotation, backup and garbage collection remain pending.
+
 [x] - Complete unified typed action, macro and DTMF configuration preparation with the full command inventory and 78 default mappings, exact parameter handling, permission/source admission and static reference checks. Runtime collectors/execution/mute joins remain pending.
 
 [x] - Record approved scheduler policies: pair a start with its next end and skip overlapping starts; ignore the in-progress occurrence when restart_recovery is false; skip missed calendar work while forcing pending monotonic deadlines; cancel without either boundary macro if nominal end arrives before start execution. Preserve existing permanent-route ownership and hold fences.

@@ -13,9 +13,12 @@ responses.
 
 Generate an OpenAPI 3.1 contract from the Rust REST route and schema code.
 Serve the generated contract at `/api/v1/openapi.json` and an interactive
-Swagger UI at `/api/v1/docs`. Both are available without OIDC authentication,
-matching read-only status access. The existing loopback-only listener and
-nginx/Apache reverse-proxy policy continue to control external exposure.
+Swagger UI at `/api/v1/docs`. Every backend route, including documentation and
+read-only status, requires TLS client authentication and an explicitly authorized
+proxy or CLI identity under ADR 0045. The backend does not manage OIDC sessions.
+nginx/Apache may authenticate browser users with OIDC and apply path/method policy
+before using their separate backend client certificates. Serve the Swagger UI
+assets locally so documentation does not depend on a third-party CDN.
 
 Use a maintained Rust code-first OpenAPI generator and schema annotations.
 Tests fail when a routed REST endpoint lacks a documented operation. The
