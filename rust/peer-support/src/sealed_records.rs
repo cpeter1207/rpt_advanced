@@ -84,6 +84,12 @@ impl SecretKey {
         Self { key_id, material }
     }
 
+    /// Construct a key from synthetic material for crate-local tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(key_id: KeyId, material: [u8; 32]) -> Self {
+        Self::from_material(key_id, Zeroizing::new(material))
+    }
+
     /// The key identifier associated with this systemd credential.
     pub fn key_id(&self) -> &KeyId {
         &self.key_id

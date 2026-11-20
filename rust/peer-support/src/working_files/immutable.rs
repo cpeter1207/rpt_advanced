@@ -1,4 +1,4 @@
-//! Protected readback and durable installation of public objects and manifests on Linux.
+//! Protected readback and durable installation of immutable artifacts on Linux.
 //!
 //! Writers coordinate through the held edit lock. Revalidation can detect
 //! changes that are observed before it finishes, with a final race against
@@ -25,7 +25,9 @@ use std::{
 };
 use uuid::Uuid;
 
-/// Validated location for one public object or manifest.
+pub mod private_records;
+
+/// Validated immutable artifact location.
 pub struct ImmutableTarget {
     namespace: &'static str,
     resource: Option<String>,

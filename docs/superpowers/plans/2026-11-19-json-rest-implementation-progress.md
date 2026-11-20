@@ -452,3 +452,46 @@ provisioning, full discovery/profiles, HTTP/HAL and the coordinated controller
 INI cutover remain pending. USBRadioPlus INI is preserved. Full production
 coverage, Doxygen, packaging and staged-install validation remain required
 before merge; this milestone does not claim that complete pull-request gate.
+
+
+## Seventh milestone: typed encrypted private artifact I/O
+
+**Host implementation verified, 2026-11-20; native checkpoint pending.** Connected prepared sealed records to the guarded
+immutable engine. Preparation owns one identity and exact encoded ciphertext;
+installation admits only that typed input, so retries never reseal. Private
+paths derive only from trusted record/version UUIDs. Public raw-byte target
+constructors cannot select private storage.
+
+Readback intersects artifact/sealed caps, verifies ciphertext hash and shape
+before systemd key lookup, then authenticates before exposing opaque plaintext.
+Key, digest, authentication and durability outcomes stay distinct and value-free.
+The existing loader's parent-identity fixture is isolated using a precreated
+same-leaf replacement directory as part of this dependency validation.
+
+Resolved account profiles are not available in current opaque section bodies;
+this step deliberately avoids inventing an ASL-only payload contract or silently
+adopting a partial private graph. Account payload validation, private manifest
+references and accepted-state transactions remain prerequisites before use.
+No installed service or actual credential path is changed or inspected.
+
+### Seventh-milestone host verification
+
+Seven bridge groups failed against the inert implementation and then passed.
+The full peer-support suite and product capture/manifest regressions passed
+**106 affected tests**, zero failures. Affected Rustdoc with warnings denied
+and the complete fast formatting/lint/static gate passed, including Cppcheck,
+Clang-Tidy and workspace Clippy. Maintained constrained runs freshly pulled the
+recorded `c3800ed0` image digest. No dependency/package/C ABI changes were needed.
+
+Independent specification/code review approved Tasks 18/19 without findings.
+The prior loader parent-identity fixture now preserves leaf identity/version;
+it passed normally and failed in an isolated copy with only the parent guard
+ignored, proving the test's sensitivity. Early test-harness TMPDIR/in-flight
+scaffold setup failures were corrected before measured validation; their exact
+scope and successful reruns are recorded in the component reports.
+
+The bridge has no public raw private-target or decoded-envelope constructor.
+Preparation preserves one ciphertext identity across no-replace/durability
+retries; readback verifies bounded ciphertext before env-only key lookup and
+returns authenticated opaque bytes. Payload/account validation remains separate.
+Evidence is retained under `.work/json-rest/milestone-7-*`.

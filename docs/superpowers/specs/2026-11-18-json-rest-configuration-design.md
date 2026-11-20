@@ -408,8 +408,26 @@ Unknown extra envelope members warn/ignore; invalid required integrity fields
 or failed authentication cannot safely default. The primitive treats plaintext
 as opaque zeroizing bytes. A later private-payload owner must validate account,
 scope, protocol and record type before use; authenticated bytes alone do not
-establish those application bindings. This stage does not adopt private graph
-references or publish encrypted files.
+establish those application bindings. The crypto primitive alone does not
+adopt private graph references or publish files.
+
+A typed prepared-private-record bridge now connects sealing to protected
+immutable storage. Preparation seals and encodes once. Its private fields cannot
+be populated from raw bytes or a decoded envelope. Installation derives only
+private/<record-UUID>/<version-UUID>.sealed.json and reuses the shared exclusive
+staging, file sync, no-replace publication and directory sync. Protected parent
+directories must already exist. Exact-byte retries use the same prepared
+identity/nonce/version, including after an uncertain synchronization outcome.
+
+Private readback takes trusted identity and ciphertext hash, verifies protected
+bounded bytes, decodes the envelope, loads the selected delivered key and
+authenticates before returning zeroizing plaintext and value-free warnings.
+The file-size cap is intersected with the sealed-document cap before reading;
+hash/shape failures precede key lookup. Missing keys/authentication failures do
+not repair, regenerate or rewrite files. The trusted selecting owner associates
+the root with the context's store UUID; that identity is never inferred from
+ciphertext. Raw public object/manifest target constructors cannot select private
+paths. Account validation and private manifest adoption remain later work.
 
 Per D6, read keys only from `$CREDENTIALS_DIRECTORY/rpt-advanced.aead.<key_id>`. IDs match `[A-Za-z0-9_-]{1,64}`; each credential contains exactly 32 raw bytes. Use this on the hosting unit:
 

@@ -82,6 +82,15 @@ The systemd key loader has no path/key fallback and accommodates manager-owned
 named-ACL delivery. Private graph/payload integration and encrypted file
 publication remain separate before credentials can be used at runtime.
 
+The typed private-artifact bridge admits writes only from its encryption
+preparation method. It privately derives record/version UUID paths and reuses
+the existing immutable engine. A retry borrows the same prepared envelope,
+including its original nonce/version. Readback intersects limits, verifies the
+ciphertext digest, decodes with trusted external context, loads only the systemd
+key and authenticates before returning opaque bytes. Missing keys, corruption
+and authentication failures preserve input. This does not establish account
+bindings or make a private manifest acceptable to the public-only loader.
+
 Replace the Unix maintenance socket with loopback HTTPS/HAL. Require authorized
 mTLS on every backend route, with separate proxy and CLI identities. Expose
 GET everywhere, PUT/PATCH on writable resources, and POST/DELETE on creatable

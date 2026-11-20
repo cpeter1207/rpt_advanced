@@ -255,18 +255,28 @@ fn rejects_a_replaced_leaf_or_credentials_directory_after_reading() {
         let fixture = Fixture::new();
         write(&fixture.leaf, MATERIAL);
         let displaced = fixture.root.join("displaced");
+        let replacement = fixture.root.join("replacement");
+        let original_version = if replace_directory {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&replacement)
+                .unwrap();
+            // Link before loading so the directory swap preserves the leaf's version.
+            fs::hard_link(&fixture.leaf, replacement.join(BASENAME)).unwrap();
+            Some(FileVersion::from(&fs::metadata(&fixture.leaf).unwrap()))
+        } else {
+            None
+        };
+
         let loaded = load_key_with(Some(&fixture.credentials), &key_id(), |file| {
             let material = read_material(file)?;
             if replace_directory {
                 fs::rename(&fixture.credentials, &displaced).unwrap();
-                fs::DirBuilder::new()
-                    .mode(0o700)
-                    .create(&fixture.credentials)
-                    .unwrap();
+                fs::rename(&replacement, &fixture.credentials).unwrap();
             } else {
                 fs::rename(&fixture.leaf, &displaced).unwrap();
+                write(&fixture.leaf, MATERIAL);
             }
-            write(&fixture.leaf, MATERIAL);
             Ok(material)
         });
         assert_eq!(loaded.unwrap_err(), KeyLoadError::Invalid);
@@ -275,7 +285,11 @@ fn rejects_a_replaced_leaf_or_credentials_directory_after_reading() {
         } else {
             displaced
         };
-        assert!(fs::read(original).unwrap().as_slice() == MATERIAL);
-        assert!(fs::read(&fixture.leaf).unwrap().as_slice() == MATERIAL);
+        for path in [&original, &fixture.leaf] {
+            assert!(fs::read(path).unwrap().as_slice() == MATERIAL);
+            if let Some(expected) = &original_version {
+                assert!(&FileVersion::from(&fs::metadata(path).unwrap()) == expected);
+            }
+        }
     }
 }

@@ -39,9 +39,10 @@ bounds; never create or repair inputs while reading. Fingerprints cover only the
 explicit registered selection, not undiscovered resources or a complete reload.
 Keep raw snapshot bytes and path diagnostics out of logs and public output.
 
-Immutable installation is separate from configuration acceptance. Only public
-objects/manifests use that installer, under the stable edit guard and protected
-preprovisioned parents. Never overwrite conflicting immutable bytes or treat a
+Immutable installation is separate from configuration acceptance. The raw-byte
+installer exposes public object/manifest targets only; prepared encrypted
+private artifacts use their typed bridge over the same guarded primitives.
+Keep stable edit locking and protected preprovisioned parents. Never overwrite conflicting immutable bytes or treat a
 post-rename synchronization failure as unchanged state. Exact-byte retries may
 confirm durability. State-pointer, journal, private-record and working-file
 publication use their own coordinated protocols; opaque candidates are not
@@ -62,6 +63,13 @@ root/service-owned ACL-backed modes rather than the legacy password-file mode.
 Authentication is not account-binding validation; private graph adoption and
 payload semantics stay with the later credential owner. No secret Debug/Serialize
 or implicit plaintext logging, and no private-record work in audio callbacks.
+
+Private object writes accept only a prepared envelope created by seal, not raw
+bytes, decoded envelopes or arbitrary paths. Retries reuse the same identity
+and encoded bytes. Read back by trusted identity/hash, enforce ciphertext and
+sealed limits before key loading, and authenticate before exposing opaque
+plaintext. Account binding/private manifest adoption still require resolved
+profiles; successful decryption is not configured-state evidence.
 
 ## Shared rpt_advanced project baseline
 

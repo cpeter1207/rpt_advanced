@@ -45,7 +45,12 @@ purpose, store/record/version and key-ID authentication. Each seal creates an
 independent object-version UUID and nonce. Opaque zeroizing owners protect key
 and plaintext buffers. An env-only systemd loader reads exactly 32 raw bytes
 through pinned no-follow descriptors and accepts the real credential ACL mask.
-This does not yet implement the account payload schema or private state graph.
+The next typed private-artifact bridge prepares ciphertext once, then reuses
+the shared no-replace/durability machinery under private UUID paths. Readback
+verifies exact ciphertext bytes, decodes, loads the delivered key and authenticates
+before returning zeroizing plaintext. Raw-byte callers cannot construct private
+targets. This does not yet implement the account payload schema or private state
+graph.
 
 ## System boundary
 

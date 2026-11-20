@@ -39,7 +39,9 @@ installation, public-manifest/readback and sealed-record/key-loader milestones
 are verified on the development host and native node. Account binding, encrypted
 object/private-graph publication, complete resource discovery, accepted-state
 transactions, full domain validation and runtime cutover remain pending. These
-control-plane foundations do not replace the running INI path.
+control-plane foundations do not replace the running INI path. Typed encrypted
+private-object installation/readback is the current implementation slice;
+resolved account bindings and private manifest adoption remain pending.
 Remove controller INI during the coordinated store/provider cutover and retain
 USBRadioPlus INI. Keep remaining resource, storage, API, provider, scheduler,
 action, message and native milestone verification items unchecked until tested.
