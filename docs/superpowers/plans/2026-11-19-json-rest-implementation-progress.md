@@ -246,3 +246,44 @@ state/publication, credentials, HTTP/HAL and the coordinated controller INI
 cutover remain pending. USBRadioPlus INI is preserved. The complete native
 pull-request coverage, Doxygen, packaging and staged-install gate is still
 required before merge and has not been claimed by this milestone.
+
+
+## Fourth milestone: durable immutable artifact installation
+
+**Host implementation verified, 2026-11-20; native checkpoint pending.** Extended the protected host storage boundary with
+bounded installation of immutable public objects and manifests. Typed targets
+select only those namespaces. Reuse the existing guard, no-follow descriptor
+checks and locked libraries. Protected object/manifest parent directories must
+already exist; bootstrap and resource creation will provision/sync them later.
+
+Write an independent exclusive staging file, sync it, publish its final name
+without replacement and sync the parent directory. An exact-byte retry confirms
+durability; conflicting bytes are preserved. A failure after publication reports
+uncertain durability, and no final artifact is deleted to pretend nothing
+happened. Returned receipts and diagnostics remain value-free by default.
+
+This milestone does not choose a manifest/state wire format, install private
+records, write a journal/state pointer, publish working files, accept an opaque
+candidate or activate runtime settings. Complete inventory/discovery and the
+transaction protocol remain pending. Installed unreferenced artifacts do not
+constitute accepted configuration.
+
+### Fourth-milestone host verification
+
+All seven installer behavioral groups failed against inert scaffolding before
+implementation and passed after it. The complete affected peer-support suite
+and product capture regressions then passed **64 tests**, zero failures.
+Rustdoc with warnings denied and the full fast formatting/lint/static gate
+passed, including Cppcheck, Clang-Tidy and workspace Clippy. The maintained
+constrained runner freshly pulled digest `c3800ed0`; exact commands and evidence
+remain under `.work/json-rest/milestone-4-*`.
+
+Independent specification/code review approved the implementation. Two minor
+test follow-ups are recorded: the socket fixture approaches the native pathname
+limit under long TMPDIRs, and the scratch-abort case does not directly exercise
+the existing inode-identity cleanup safeguard. They remain test-only coverage
+work; full production coverage is still a pre-merge requirement.
+
+The only dependency change adds an edge to the already locked uuid parser,
+with default features disabled. No new package version, native ABI, core model
+or product caller is introduced. Existing working-file capture stays read-only.

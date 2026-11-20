@@ -55,6 +55,15 @@ separate and import them only on explicit reload. Validate, save and activate
 writes automatically while retaining desired/active/last-known-good distinctions
 and inhibited-transmitter management recovery.
 
+The initial immutable installer writes only public object/manifest artifacts in
+preprovisioned protected directories, under the existing edit guard. It stages
+independent bytes, syncs the file, publishes without replacement and syncs the
+parent. Conflicting immutable bytes are preserved; equal retries verify content
+and synchronize it. A post-rename durability failure is explicit, not a claim
+that storage is unchanged. This primitive does not validate or select accepted
+configuration and cannot write state, private, journal or working namespaces.
+Directory provisioning and the complete transaction protocol remain separate.
+
 Replace the Unix maintenance socket with loopback HTTPS/HAL. Require authorized
 mTLS on every backend route, with separate proxy and CLI identities. Expose
 GET everywhere, PUT/PATCH on writable resources, and POST/DELETE on creatable

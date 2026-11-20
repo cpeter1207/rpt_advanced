@@ -668,6 +668,7 @@ dependencies = [
  "ring",
  "rptadv-control-standalone-adapter",
  "rustix",
+ "uuid",
 ]
 
 [[package]]

@@ -39,6 +39,14 @@ bounds; never create or repair inputs while reading. Fingerprints cover only the
 explicit registered selection, not undiscovered resources or a complete reload.
 Keep raw snapshot bytes and path diagnostics out of logs and public output.
 
+Immutable installation is separate from configuration acceptance. Only public
+objects/manifests use that installer, under the stable edit guard and protected
+preprovisioned parents. Never overwrite conflicting immutable bytes or treat a
+post-rename synchronization failure as unchanged state. Exact-byte retries may
+confirm durability. State-pointer, journal, private-record and working-file
+publication use their own coordinated protocols; opaque candidates are not
+validated public settings.
+
 ## Shared rpt_advanced project baseline
 
 This baseline applies to every production, shared-library, and workflow

@@ -26,13 +26,13 @@ const LIMITS: CaptureLimits = CaptureLimits {
 };
 
 /// Temporary parent and provisioned store, removed on unwind as well.
-struct Fixture {
+pub(super) struct Fixture {
     parent: PathBuf,
-    root: PathBuf,
+    pub(super) root: PathBuf,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // Leave room for the Unix-domain socket under the native test TMPDIR.
         let parent = env::temp_dir().join(format!(
@@ -48,7 +48,7 @@ impl Fixture {
         Self { parent, root }
     }
 
-    fn open(&self) -> WorkingFiles {
+    pub(super) fn open(&self) -> WorkingFiles {
         WorkingFiles::open(&self.root).unwrap()
     }
 
@@ -63,16 +63,16 @@ impl Drop for Fixture {
     }
 }
 
-fn directory(path: &Path) {
+pub(super) fn directory(path: &Path) {
     fs::DirBuilder::new().mode(0o700).create(path).unwrap();
     mode(path, 0o700);
 }
 
-fn mode(path: &Path, permissions: u32) {
+pub(super) fn mode(path: &Path, permissions: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(permissions)).unwrap();
 }
 
-fn write(path: &Path, bytes: &[u8]) {
+pub(super) fn write(path: &Path, bytes: &[u8]) {
     fs::OpenOptions::new()
         .write(true)
         .create(true)

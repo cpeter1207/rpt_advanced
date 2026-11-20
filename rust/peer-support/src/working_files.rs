@@ -22,6 +22,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+pub mod immutable;
+
 const EDIT_LOCK: &str = "edit.lock";
 const WORKING: &str = "working";
 const PATH_FLAGS: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
@@ -201,7 +203,7 @@ impl CapturePath {
         let relative = relative.as_ref();
         if path_bytes(relative)
             .split(|byte| *byte == b'/')
-            .any(|part| matches!(part, b"" | b"." | b"..") || part.contains(&0))
+            .any(|part| !valid_component(part))
         {
             return Err(CaptureError::UnsafePath);
         }
@@ -356,6 +358,11 @@ impl From<&Metadata> for FileVersion {
 /// Raw Linux path bytes preserve exact spelling and non-UTF-8 names.
 fn path_bytes(path: &Path) -> &[u8] {
     path.as_os_str().as_bytes()
+}
+
+/// Check one byte-exact POSIX basename without allowing traversal.
+fn valid_component(part: &[u8]) -> bool {
+    !matches!(part, b"" | b"." | b"..") && !part.contains(&0) && !part.contains(&b'/')
 }
 
 /// Interpret absence only from an actual missing path component.

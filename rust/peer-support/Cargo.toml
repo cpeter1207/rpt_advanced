@@ -15,3 +15,4 @@ rptadv-control-standalone-adapter = { path = "../control-standalone-adapter" }
 [target.'cfg(target_os = "linux")'.dependencies]
 ring = "0.17.14"
 rustix = { version = "1.1", features = ["fs", "process"] }
+uuid = { version = "1", default-features = false }
