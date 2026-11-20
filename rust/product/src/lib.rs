@@ -13,6 +13,9 @@ pub mod configuration_capture;
 #[cfg(target_os = "linux")]
 pub mod configuration_manifest;
 #[cfg(target_os = "linux")]
+/// Account-bound encrypted credentials selected by the configuration transaction.
+pub mod configuration_private;
+#[cfg(target_os = "linux")]
 pub mod configuration_transaction;
 pub mod control;
 pub mod directory;

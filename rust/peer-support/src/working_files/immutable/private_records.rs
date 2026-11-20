@@ -36,6 +36,11 @@ impl PreparedPrivateRecord {
         })
     }
 
+    /// Number of sealed bytes charged before installation.
+    pub fn encoded_len(&self) -> usize {
+        self.encoded.len()
+    }
+
     /// The identity authenticated by the envelope.
     pub fn identity(&self) -> RecordIdentity {
         self.identity
@@ -81,6 +86,8 @@ impl fmt::Debug for InstalledPrivateRecord {
 pub struct OpenedPrivateRecord {
     identity: RecordIdentity,
     plaintext: SecretBytes,
+    key_id: KeyId,
+    encoded_len: usize,
     warnings: Vec<SealedWarning>,
 }
 
@@ -93,6 +100,16 @@ impl OpenedPrivateRecord {
     /// Borrow the zeroizing owner of the authenticated plaintext.
     pub fn plaintext(&self) -> &SecretBytes {
         &self.plaintext
+    }
+
+    /// Identifier of the key used to authenticate the record.
+    pub fn key_id(&self) -> &KeyId {
+        &self.key_id
+    }
+
+    /// Exact encrypted size charged to the aggregate read budget.
+    pub fn encoded_len(&self) -> usize {
+        self.encoded_len
     }
 
     /// Value-free warnings from decoding the sealed envelope.
@@ -209,6 +226,8 @@ impl EditGuard<'_> {
         Ok(OpenedPrivateRecord {
             identity,
             plaintext,
+            key_id: decoded.record.key_id().clone(),
+            encoded_len: artifact.bytes().len(),
             warnings: decoded.warnings,
         })
     }

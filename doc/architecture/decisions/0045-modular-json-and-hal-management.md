@@ -122,8 +122,12 @@ a verified retained graph and an exact observed working fingerprint. Port
 order and named membership survive reload, and bounded directory retirement
 frees capacity for new ports.
 A confirmed on-disk result is historical and never marks a running owner active.
-Private shards may be provisioned only for typed prepared records. Private
-graph acceptance still requires the account-binding owner.
+Private shards may be provisioned only for typed prepared records. The
+account-binding owner validates the reference-only encrypted index and leaves
+against final protocol/mailbox/command identities. Public and private changes
+select through one manifest/state pointer. Every production host supplies its
+external write-key policy; locked graphs retain public reads and block writes
+and activation. Runtime credential handoff remains a separate join.
 
 Format-1 state and journal fields, import grammar and manifest member order
 are specified in the linked storage design. Core owns those durable identity

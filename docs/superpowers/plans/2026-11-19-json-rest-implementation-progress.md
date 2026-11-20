@@ -577,3 +577,9 @@ Command preparation now covers the audited action inventory, all 78 default DTMF
 The hron schedule provider source `238811360fc34908a8ea9d4174bfe49d874d2a0e` passed its full required Debian 13 amd64/arm64 PR gate, including production line/branch coverage. USBRadioPlus typed preparation source `a771f76cdb144d6d245e625020844d55e970feb0` includes independent peer DSP without physical selection; targeted host/native tests passed. Its full PR gate identified missing getter return documentation; correction is in progress before platform/coverage verification. Both provider PRs remain drafts; no release or installation is implied.
 
 Continuous execution proceeds through typed radio settings, private account graph adoption and hron event scheduling. The authorized stopping point remains implementation/runtime cutover, before any separately authorized deployment.
+
+## Continuous checkpoint: account-bound private graphs
+
+The reviewed EchoLink proxy/site-account slice and encrypted account graph now integrate on the command checkpoint. Public configuration and encrypted credential edits use the same accepted manifest/journal/state pointer. The index validates scope/instance/slot/account ownership, omission/masks, complete mailbox identity and key policy. Unknown configured state is omitted when locked; production hosts must supply their separate systemd write-key policy.
+
+Independent review closed reserved public credential-container leakage, mixed-key leaf acceptance and escaped-password scratch allocation. The integrated constrained Debian 13 amd64 run passed 1,035 affected tests, strict Rustdoc and complete fast checks. Native verification follows on the published source. Runtime credential adoption, HAL routing, stopped-writer rotation, backup and garbage collection remain pending; no installed service changed.

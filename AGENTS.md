@@ -261,6 +261,12 @@ Keep workflow implementations in rpt_advanced-workflows; this repository may
 contain only the thin callers needed to invoke them. Workflow maintenance must
 not depend on production tests passing.
 
+All production configuration transactions must supply the externally selected
+write-key ID, including empty/public-only stores. Never use the keyless fixture
+constructor as a host policy. Validate every public envelope and reserved secret
+container before immutable installation; keep private decoding in zeroizing
+storage and require one selected key across each encrypted index and leaves.
+
 The loopback HTTPS worker authenticates queued requests before coordinator
 claim. Preserve its bounded nonblocking handoff and consume its coalesced
 listener diagnostics in each host; never perform WebPKI or network work on

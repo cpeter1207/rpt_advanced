@@ -22,6 +22,8 @@ pub enum PublicLoadError {
     ManifestIdMismatch,
     /// The verified manifest declares a different logical revision.
     RevisionMismatch,
+    /// An object declares an incorrect identity or contains reserved private fields.
+    InvalidEnvelope,
     /// The host rejected a derived immutable target.
     InvalidTarget,
 }
@@ -36,6 +38,7 @@ impl fmt::Display for PublicLoadError {
                 formatter.write_str("selected public manifest revision mismatch")
             }
             Self::InvalidTarget => formatter.write_str("invalid derived public artifact target"),
+            Self::InvalidEnvelope => formatter.write_str("invalid public object envelope"),
         }
     }
 }
@@ -125,12 +128,56 @@ pub fn load_public_manifest(
     expected_sha256: &ContentHash,
     limits: CaptureLimits,
 ) -> Result<LoadedPublicManifest, PublicLoadError> {
+    let target = ImmutableTarget::manifest(manifest_id.as_str())
+        .map_err(|_| PublicLoadError::InvalidTarget)?;
+    let raw_manifest = guard
+        .read_immutable(
+            &target,
+            expected_sha256.as_bytes(),
+            ArtifactLimits {
+                max_file_bytes: limits.max_file_bytes.min(limits.max_total_bytes),
+                max_path_bytes: limits.max_path_bytes,
+            },
+        )
+        .map_err(PublicLoadError::Read)?;
+    let manifest =
+        PublicManifest::decode(raw_manifest.bytes()).map_err(PublicLoadError::Manifest)?;
+    if manifest.value.id() != manifest_id {
+        return Err(PublicLoadError::ManifestIdMismatch);
+    }
+    if manifest.value.revision() != revision {
+        return Err(PublicLoadError::RevisionMismatch);
+    }
+
+    let objects = load_public_objects(
+        guard,
+        &manifest.value,
+        limits,
+        raw_manifest.bytes().len() as u64,
+    )?;
+    Ok(LoadedPublicManifest {
+        manifest,
+        raw_manifest,
+        objects,
+    })
+}
+
+/// Verify the objects of an in-memory candidate before its encrypted index is selected.
+pub(crate) fn load_public_objects(
+    guard: &EditGuard<'_>,
+    manifest: &PublicManifest,
+    limits: CaptureLimits,
+    used: u64,
+) -> Result<Vec<(ResourceBinding, ImmutableArtifact)>, PublicLoadError> {
     let path_count_limit = PublicLoadError::Read(CaptureError::Limits.into());
     if limits.max_paths == 0 {
         return Err(path_count_limit);
     }
 
-    let mut remaining = limits.max_total_bytes;
+    let mut remaining = limits
+        .max_total_bytes
+        .checked_sub(used)
+        .ok_or(path_count_limit)?;
     let mut read = |target: &ImmutableTarget,
                     sha256: &ContentHash|
      -> Result<ImmutableArtifact, PublicLoadError> {
@@ -148,39 +195,27 @@ pub fn load_public_manifest(
         Ok(artifact)
     };
 
-    let target = ImmutableTarget::manifest(manifest_id.as_str())
-        .map_err(|_| PublicLoadError::InvalidTarget)?;
-    let raw_manifest = read(&target, expected_sha256)?;
-    let manifest =
-        PublicManifest::decode(raw_manifest.bytes()).map_err(PublicLoadError::Manifest)?;
-    if manifest.value.id() != manifest_id {
-        return Err(PublicLoadError::ManifestIdMismatch);
-    }
-    if manifest.value.revision() != revision {
-        return Err(PublicLoadError::RevisionMismatch);
-    }
-
-    let bindings = manifest.value.registry().bindings();
+    let bindings = manifest.registry().bindings();
     if bindings.len() >= limits.max_paths {
         return Err(path_count_limit);
     }
     let mut objects = Vec::new();
     for binding in bindings {
-        if let Some(reference) = manifest.value.reference(binding.id) {
+        if let Some(reference) = manifest.reference(binding.id) {
             let target = ImmutableTarget::public_object(
                 &binding.id.to_string(),
                 reference.version().as_str(),
             )
             .map_err(|_| PublicLoadError::InvalidTarget)?;
-            objects.push((binding, read(&target, reference.sha256())?));
+            let artifact = read(&target, reference.sha256())?;
+            if !crate::configuration_private::public_envelope(binding, artifact.bytes()) {
+                return Err(PublicLoadError::InvalidEnvelope);
+            }
+            objects.push((binding, artifact));
         }
     }
 
-    Ok(LoadedPublicManifest {
-        manifest,
-        raw_manifest,
-        objects,
-    })
+    Ok(objects)
 }
 
 #[cfg(test)]

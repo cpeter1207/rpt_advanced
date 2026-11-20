@@ -1,4 +1,5 @@
 //! Real store crash/retry sequence; accepted and observed runtime state remain separate.
+mod private;
 mod review;
 use super::*;
 use rpt_advanced_core::config::resources::{

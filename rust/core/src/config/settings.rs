@@ -1528,10 +1528,14 @@ fn default_command(key: &str) -> String {
     .to_owned()
 }
 
+/// Existing DTMF administrator PHC policy, independent of mailbox PIN cost limits.
+pub fn valid_admin_hash(value: &str) -> bool {
+    argon2::password_hash::PasswordHash::new(value)
+        .is_ok_and(|hash| hash.algorithm.as_str() == "argon2id")
+}
+
 fn valid_argon2id(value: &str) -> Option<String> {
-    use argon2::password_hash::PasswordHash;
-    let hash = PasswordHash::new(value).ok()?;
-    (hash.algorithm.as_str() == "argon2id").then(|| value.to_owned())
+    valid_admin_hash(value).then(|| value.to_owned())
 }
 
 pub(super) fn command_action(key: &str) -> Option<LinkAction> {

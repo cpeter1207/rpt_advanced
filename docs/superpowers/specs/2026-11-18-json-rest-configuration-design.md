@@ -318,7 +318,7 @@ bytes, and object must be the path derived from the row UUID and version.
 Metadata requires an object; an empty ordinary/site-default row retains its
 identity. A port protocol row requires an object, and absent protocols have no
 row. The supported staging codec does not require the complete future resource
-catalog and explicitly rejects a supplied private graph until that codec exists.
+catalog. Its optional private reference selects the authenticated account index described below.
 Unknown extra members warn and are ignored; unsafe identities, integrity fields,
 unsupported kinds and format versions cannot safely default.
 
@@ -468,7 +468,32 @@ hash/shape failures precede key lookup. Missing keys/authentication failures do
 not repair, regenerate or rewrite files. The trusted selecting owner associates
 the root with the context's store UUID; that identity is never inferred from
 ciphertext. Raw public object/manifest target constructors cannot select private
-paths. Account validation and private manifest adoption remain later work.
+paths. The account-bound index and transaction owner validate private adoption as described below.
+
+### Account-bound encrypted graph
+
+A public format-1 manifest may contain `private: {record, version, sha256}`. Record and version are canonical UUIDs; the digest covers the exact sealed envelope at the derived `private/<record>/<version>.sealed.json` path. The reference contains no account value, configured flag or credential hash. Omission selects no private graph.
+
+The encrypted index plaintext is JSON: `{format_version: 1, records: [[owner, reference], ...]}`. An owner is `[scope_role, scope_uuid, resource_uuid, slot_tag, parent_uuid_or_null]`; only an EchoLink proxy child has a parent UUID. Rows are canonical, nonempty and unique. The index contains references only. Each sealed leaf plaintext is `{format_version: 1, owner, account, value}`. A nonempty string is bound to the final effective account; a mask has null account and value. A retained mailbox cannot mask its PIN and become permissive.
+
+| Private slot | Exact account affinity |
+| --- | --- |
+| `allstarlink-password` | Network node number and effective registration URL |
+| `echolink-password` | Canonical callsign, network node number and ordered canonical directory hosts |
+| `proxy-password` | Parent callsign/node number and canonical proxy host/TCP port |
+| `phone-password` | SIP or IAX2, canonical server, port and exact username |
+| `admin-unlock`, `admin-lock` | Site/port command-resource UUID; no additional account value |
+| `mailbox-pin` | Registered mailbox number, with a complete local first-name/callsign identity |
+
+Scope, instance, slot and proxy-parent bindings are checked against the full public registry. Duplicate record IDs, self-reference, missing owners and invalid bindings fail closed. Every leaf must authenticate under the selected index key ID. Index and leaf envelope bytes and paths share the public transaction's aggregate limits. Restore compares the private reference as well as public membership and objects.
+
+Omission reuses the same-scope encrypted record; explicit empty/removal masks inheritance. A changed account without replacement becomes an unusable mask, so returning to the old account cannot resurrect the password. Deletion retires desired reachability; recreating the same logical key has a fresh resource UUID. A local mailbox shadows the complete site identity and its private PIN. Mailbox hashes use the existing bounded Argon2id policy; administration hashes retain their existing, separately validated Argon2id contract.
+
+The private codec keeps JSON tokens and decoded strings in zeroizing storage. Its pinned JSON slice reader uses caller-owned zeroizing scratch for escapes. Before creating any immutable public shard, validate the whole supplied batch's sizes, hashes, declared IDs/kinds and reserved secret namespaces. Readback applies the same public-envelope guard. Authoring normalization handles invalid private settings with value-free warnings; unsanitized private containers cannot enter public storage.
+
+Every production host supplies an explicit, externally selected write-key ID when constructing the transaction owner, even for an empty/public-only store. Missing, unauthentic or incompatible keys preserve public management reads, omit unknown configured flags, and block writes, replay and activation. Normal saves do not rotate keys. Keyless low-level public fixtures are not the production host policy. Stop-writer rotation, retained-key backup and reachability garbage collection remain separate maintenance work.
+
+The accepted public manifest selects the encrypted graph through the same journal/state-pointer commit. This storage checkpoint does not itself activate a runtime owner or expose an HTTP credential endpoint.
 
 Per D6, read keys only from `$CREDENTIALS_DIRECTORY/rpt-advanced.aead.<key_id>`. IDs match `[A-Za-z0-9_-]{1,64}`; each credential contains exactly 32 raw bytes. Use this on the hosting unit:
 

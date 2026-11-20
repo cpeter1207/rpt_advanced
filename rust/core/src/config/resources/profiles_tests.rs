@@ -187,7 +187,6 @@ fn echolink_reuses_public_semantics_then_checks_final_transport() {
             "callsign": "n0call-l",
             "node_number": 424242,
             "transport": "proxy",
-            "proxy": {"host": "Proxy.Example.NET", "port": 8101},
             "bind_address": "127.0.0.1",
             "audio_port": 65534,
             "latitude": 90.1,
@@ -201,7 +200,13 @@ fn echolink_reuses_public_semantics_then_checks_final_transport() {
     let direct_id = direct.0.id;
     let proxy_id = proxy.0.id;
     let site_binding = defaults.0;
-    let profiles = resolve(&[defaults, direct, proxy]).unwrap();
+    let child = section(
+        4,
+        port(FIRST),
+        ResourceKind::EcholinkProxy,
+        json!({"host": "Proxy.Example.NET", "port": 8101}),
+    );
+    let profiles = resolve(&[defaults, direct, proxy, child]).unwrap();
     let first = profiles.port(id(FIRST)).unwrap();
     let effective = &first.echolink.as_ref().unwrap().settings;
     let second = profiles.port(id(SECOND)).unwrap();
@@ -459,10 +464,11 @@ fn account_identity_uses_public_endpoints_and_ignores_processing_and_display() {
                     "node_number": 100501,
                     "transport": "proxy",
                     "directory_servers": ["Directory.Example.NET"],
-                    "proxy": {"host": proxy_server, "port": 8102, "credentials":{"password":"hidden"}},
                     "credentials":{"password":"hidden"}
                 }),
             ),
+            section(3, port(FIRST), ResourceKind::EcholinkProxy,
+                json!({"host": proxy_server, "port": 8102, "credentials":{"password":"hidden"}})),
         ])
         .unwrap()
     };
@@ -531,9 +537,12 @@ fn account_identity_uses_public_endpoints_and_ignores_processing_and_display() {
     assert_eq!(directory.node_number, 100501);
     assert_eq!(directory.directory_servers, ["directory.example.net"]);
     assert_eq!(echo.directory_identity(), other.directory_identity());
-    assert_eq!(echo.proxy_identity().unwrap().host, "proxy-a.example.net");
-    assert_eq!(other.proxy_identity().unwrap().host, "proxy-b.example.net");
-    assert_ne!(echo.proxy_identity(), other.proxy_identity());
+    assert_eq!(first.proxy_identity().unwrap().host, "proxy-a.example.net");
+    assert_eq!(
+        changed.proxy_identity().unwrap().host,
+        "proxy-b.example.net"
+    );
+    assert_ne!(first.proxy_identity(), changed.proxy_identity());
     assert!(!format!("{first:?} {changed:?}").contains("hidden"));
 }
 
@@ -569,7 +578,7 @@ fn incomplete_echo_proxy_stays_selected_but_safely_disabled() {
     assert_eq!(echo.settings.max_stations, 7);
     assert_eq!(echo.settings.max_pending_handshakes, 21);
     assert!(echo.directory_identity().is_some());
-    assert!(echo.proxy_identity().is_none());
+    assert!(port.proxy_identity().is_none());
     assert_eq!(
         port.warnings,
         [
@@ -637,19 +646,36 @@ fn ownership_allows_shared_iax_port_but_rejects_ambiguous_active_bindings() {
     resolve(&[first, separate]).unwrap();
 }
 
-fn inherited_echo_hosts(authored: Value) -> (ResourceBinding, ResolvedProtocolProfiles) {
+fn inherited_echo_resources(
+    authored: Value,
+    proxy: Value,
+) -> (ResourceBinding, ResourceBinding, ResolvedProtocolProfiles) {
     let site = section(
         1,
         site(),
         ResourceKind::Echolink,
         json!({
-            "directory_servers": ["primary.example.net", "backup.example.net"],
-            "proxy": {"host": "proxy.example.net", "port": 8100}
+            "directory_servers": ["primary.example.net", "backup.example.net"]
         }),
     );
-    let port = section(2, port(FIRST), ResourceKind::Echolink, authored);
-    let binding = port.0;
-    (binding, resolve(&[site, port]).unwrap())
+    let account = section(2, port(FIRST), ResourceKind::Echolink, authored);
+    let defaults = section(
+        3,
+        site.0.scope,
+        ResourceKind::EcholinkProxy,
+        json!({"host": "proxy.example.net", "port":8100}),
+    );
+    let child = section(4, port(FIRST), ResourceKind::EcholinkProxy, proxy);
+    (
+        account.0,
+        child.0,
+        resolve(&[site, account, defaults, child]).unwrap(),
+    )
+}
+
+fn inherited_echo_hosts(authored: Value) -> (ResourceBinding, ResolvedProtocolProfiles) {
+    let (account, _, profiles) = inherited_echo_resources(authored, json!({}));
+    (account, profiles)
 }
 
 fn assert_echo_host_fallback(
@@ -724,10 +750,10 @@ fn echo_directory_rejects_host_whose_canonical_form_exceeds_limit() {
 
 #[test]
 fn echo_proxy_rejects_host_whose_canonical_form_exceeds_limit() {
-    let (binding, profiles) = inherited_echo_hosts(json!({
-        "transport": "proxy",
-        "proxy": {"host": overlong_canonical_host(), "port": 8101}
-    }));
+    let (_, binding, profiles) = inherited_echo_resources(
+        json!({"transport": "proxy"}),
+        json!({"host": overlong_canonical_host(), "port":8101}),
+    );
     let echo = &profiles
         .port(id(FIRST))
         .unwrap()
@@ -739,35 +765,28 @@ fn echo_proxy_rejects_host_whose_canonical_form_exceeds_limit() {
     assert_eq!(echo.proxy_port, 8101);
     assert_eq!(
         json!(profiles.local(binding.id).unwrap().configuration),
-        json!({"transport": "proxy", "proxy": {"port":8101}})
+        json!({"port":8101})
     );
     assert_echo_host_fallback(binding, &profiles, "host");
 }
 
 #[test]
 fn echo_canonical_proxy_and_ordered_directory_pool_survive_local_readback() {
-    let (_, source) = inherited_echo_hosts(json!({
-        "transport": "proxy",
-        "directory_servers": ["bücher.Example.NET", "Second.Example.ORG"],
-        "proxy": {"host": "Bücher.Example.ORG", "port": 8101}
-    }));
-    let normalized = source
-        .port(id(FIRST))
-        .unwrap()
-        .echolink
-        .as_ref()
-        .unwrap()
-        .binding;
-    let body = json!(source.local(normalized.id).unwrap().configuration);
-    assert_eq!(
-        body,
-        json!({
-            "directory_servers": ["xn--bcher-kva.example.net", "second.example.org"],
-            "transport": "proxy",
-            "proxy": {"host": "xn--bcher-kva.example.org", "port":8101}
-        })
+    let (account, child, source) = inherited_echo_resources(
+        json!({"transport":"proxy","directory_servers":["bücher.Example.NET","Second.Example.ORG"]}),
+        json!({"host":"Bücher.Example.ORG", "port":8101}),
     );
-    let (_, readback) = inherited_echo_hosts(body);
+    let parent = json!(source.local(account.id).unwrap().configuration);
+    let endpoint = json!(source.local(child.id).unwrap().configuration);
+    assert_eq!(
+        parent,
+        json!({"transport":"proxy","directory_servers":["xn--bcher-kva.example.net","second.example.org"]})
+    );
+    assert_eq!(
+        endpoint,
+        json!({"host":"xn--bcher-kva.example.org","port":8101})
+    );
+    let (_, _, readback) = inherited_echo_resources(parent, endpoint);
     let projection = |profiles: &ResolvedProtocolProfiles| {
         profiles
             .port(id(FIRST))
@@ -780,4 +799,95 @@ fn echo_canonical_proxy_and_ordered_directory_pool_survive_local_readback() {
     };
     assert_eq!(projection(&readback), projection(&source));
     assert!(readback.warnings().is_empty());
+}
+
+#[test]
+fn proxy_child_owns_its_endpoint_even_while_direct_transport_is_selected() {
+    let account = section(
+        1,
+        port(FIRST),
+        ResourceKind::Echolink,
+        json!({
+            "callsign": "n0call-l", "node_number": 424242, "transport": "direct",
+            "proxy": {"host": "wrong.example.org"}
+        }),
+    );
+    let defaults = section(
+        2,
+        site(),
+        ResourceKind::EcholinkProxy,
+        json!({"host": "Site.Example.Net", "port": 8101}),
+    );
+    let child = section(
+        3,
+        port(FIRST),
+        ResourceKind::EcholinkProxy,
+        json!({"host": "Bücher.Example.ORG"}),
+    );
+    let child_id = child.0.id;
+    let profiles = resolve(&[account, defaults, child]).unwrap();
+    let port = profiles.port(id(FIRST)).unwrap();
+    assert_eq!(
+        profiles.local(child_id).unwrap().configuration["host"],
+        "xn--bcher-kva.example.org"
+    );
+    let identity = port.proxy_identity().unwrap();
+    assert_eq!(identity.binding.id, child_id);
+    assert_eq!(
+        (identity.host, identity.port),
+        ("xn--bcher-kva.example.org", 8101)
+    );
+    assert!(profiles.port(id(SECOND)).unwrap().echolink.is_none());
+    assert_eq!(profiles.warnings().len(), 1);
+}
+
+#[test]
+fn site_profiles_bind_credentials_even_without_a_port_instance() {
+    let echo = section(
+        1,
+        site(),
+        ResourceKind::Echolink,
+        json!({"callsign":"N0TEST-R","node_number":42,"transport":"direct"}),
+    );
+    let proxy = section(
+        2,
+        site(),
+        ResourceKind::EcholinkProxy,
+        json!({"host":"example.org","port":8101}),
+    );
+    let phone = section(3, site(), ResourceKind::PhonePatch, json!({}));
+    let asl = section(
+        4,
+        site(),
+        ResourceKind::Allstarlink,
+        json!({"node_number":524950}),
+    );
+    let child = proxy.0;
+    let profiles = resolve(&[echo, proxy, phone, asl]).unwrap();
+    let defaults = profiles.site_accounts();
+    assert_eq!(
+        defaults
+            .echolink
+            .as_ref()
+            .unwrap()
+            .directory_identity()
+            .unwrap()
+            .callsign,
+        "N0TEST-R"
+    );
+    assert_eq!(defaults.proxy_identity().unwrap().binding, child);
+    assert_eq!(
+        defaults
+            .allstarlink
+            .as_ref()
+            .unwrap()
+            .settings
+            .node_number
+            .unwrap()
+            .get(),
+        524950
+    );
+    assert!(defaults.phone_patch.is_some());
+    let port = profiles.port(id(FIRST)).unwrap();
+    assert!(port.echolink.is_none() && port.proxy_identity().is_none());
 }

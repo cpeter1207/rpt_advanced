@@ -115,6 +115,16 @@ impl SecretBytes {
         Self(Zeroizing::new(bytes))
     }
 
+    /// Fill preallocated zeroizing storage, including on a producer error.
+    pub fn try_fill<E>(
+        capacity: usize,
+        fill: impl FnOnce(&mut Vec<u8>) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let mut value = Self::new(Vec::with_capacity(capacity));
+        fill(&mut value.0)?;
+        Ok(value)
+    }
+
     /// Borrow plaintext for internal use by the payload owner.
     pub fn expose_bytes(&self) -> &[u8] {
         &self.0

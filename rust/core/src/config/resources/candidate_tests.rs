@@ -157,6 +157,14 @@ fn missing_ordinary_documents_keep_their_bound_empty_overrides() {
     let missing_rx = missing.staged(first(), ResourceKind::RxAudio).unwrap();
     assert_eq!(missing_rx.binding(), rx);
     assert!(missing_rx.is_empty());
+    assert!(!missing_rx.was_captured());
+    let empty =
+        br#"{"id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","kind":"rx-audio","configuration":{}}"#;
+    let mut with_empty = captures.to_vec();
+    with_empty.push(capture(rx, empty));
+    let candidate = ModularCandidate::assemble(&registry, &with_empty).unwrap();
+    let local = candidate.staged(first(), ResourceKind::RxAudio).unwrap();
+    assert!(local.is_empty() && local.was_captured());
     let missing_control = missing.staged(site(), ResourceKind::Control).unwrap();
     assert_eq!(missing_control.binding(), site_control);
     assert!(missing_control.is_empty());

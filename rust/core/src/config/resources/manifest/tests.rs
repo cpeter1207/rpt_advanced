@@ -46,6 +46,28 @@ fn fixture() -> Value {
 }
 
 #[test]
+fn encrypted_index_reference_round_trips_and_participates_in_restore_equivalence() {
+    let mut wire = fixture();
+    let empty = PublicManifest::decode(&bytes(&wire)).unwrap().value;
+    let reference = json!({"record":EXTRA,"version":RADIO,"sha256":SHA256});
+    wire["private"] = reference.clone();
+    let graph = PublicManifest::decode(&bytes(&wire)).unwrap().value;
+    assert_eq!(graph.private().unwrap().record.to_string(), EXTRA);
+    assert!(!empty.same_configuration(&graph));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&graph.encode()).unwrap()["private"],
+        reference
+    );
+    wire["private"]["unknown"] = json!("ignored");
+    assert_eq!(
+        PublicManifest::decode(&bytes(&wire)).unwrap().warnings,
+        vec![ResourceWarning::UnknownField]
+    );
+    wire["private"]["version"] = json!(RADIO.replace('-', ""));
+    assert!(PublicManifest::decode(&bytes(&wire)).is_err());
+}
+
+#[test]
 fn round_trip_preserves_exact_keys_empty_slots_and_explicit_protocol_presence() {
     let expected = fixture();
     let mut wire = expected.clone();
@@ -202,15 +224,11 @@ fn structural_fields_cannot_fall_back() {
             Value::Null,
             ManifestError::InvalidField("reference"),
         ),
-        (
-            &["private"][..],
-            Value::Null,
-            ManifestError::UnsupportedPrivate,
-        ),
+        (&["private"][..], Value::Null, ManifestError::InvalidPrivate),
         (
             &["private"][..],
             json!({ "secret": "secret" }),
-            ManifestError::UnsupportedPrivate,
+            ManifestError::InvalidPrivate,
         ),
     ];
     let actual: Vec<_> = cases

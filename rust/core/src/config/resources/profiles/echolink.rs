@@ -69,14 +69,12 @@ pub(super) const FIELDS: Fields = &[
     field!("audio_port", number),
     field!("allow", list),
     field!("deny", list),
-    (
-        "proxy",
-        Rule::Object(&[
-            field!("host", "proxy_host", text),
-            field!("port", "proxy_port", number),
-        ]),
-    ),
     ("jitter", Rule::Object(jitter::FIELDS)),
+];
+
+pub(super) const PROXY_FIELDS: Fields = &[
+    field!("host", "proxy_host", text),
+    field!("port", "proxy_port", number),
 ];
 
 fn text(field: &str, value: &Value) -> Option<Value> {
@@ -140,6 +138,8 @@ pub struct EchoLinkDirectoryIdentity<'a> {
 /// Identity of the distinct EchoLink Proxy credential.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EchoLinkProxyIdentity<'a> {
+    /// Independent port proxy resource to which this identity belongs.
+    pub binding: super::ResourceBinding,
     /// Parent EchoLink account callsign.
     pub callsign: &'a str,
     /// Parent EchoLink network node number.
@@ -152,6 +152,7 @@ pub struct EchoLinkProxyIdentity<'a> {
 
 pub(super) fn resolve(
     layers: &Layers<'_>,
+    proxy: Option<&Layers<'_>>,
     warnings: &mut Vec<CandidateWarning>,
 ) -> EchoLinkSettings {
     let defaults = |field| default_value(field).expect("known public account field");
@@ -204,24 +205,26 @@ pub(super) fn resolve(
         &["audio_port"],
         &["allow"],
         &["deny"],
-        &["proxy", "host"],
-        &["proxy", "port"],
     ] {
         let field = match path {
             ["rx", _] => "receive_gain_db",
             ["tx", _] => "transmit_gain_db",
-            ["proxy", "host"] => "proxy_host",
-            ["proxy", "port"] => "proxy_port",
             [.., field] => *field,
             [] => unreachable!("known field paths"),
         };
         let relevant = match field {
-            "proxy_host" | "proxy_port" => is_proxy,
             "bind_address" | "audio_port" => !is_proxy,
             _ => true,
         };
         if relevant && let Some(value) = layers.get(path) {
             normalized_text.insert(field, public_text(value));
+        }
+    }
+    if let Some(proxy) = proxy {
+        for (path, field) in [(&["host"][..], "proxy_host"), (&["port"][..], "proxy_port")] {
+            if let Some(value) = proxy.get(path) {
+                normalized_text.insert(field, public_text(value));
+            }
         }
     }
     for (i, field) in ["max_stations", "max_pending_handshakes"]
@@ -280,11 +283,8 @@ fn public_text(value: &Value) -> String {
 }
 
 pub(super) fn trim_inactive(transport: EchoLinkTransport, fields: &mut Map<String, Value>) {
-    let inactive = match transport {
-        EchoLinkTransport::Direct => &["proxy"][..],
-        EchoLinkTransport::Proxy => &["bind_address", "audio_port"][..],
-    };
-    for key in inactive {
-        fields.remove(*key);
+    if transport == EchoLinkTransport::Proxy {
+        fields.remove("bind_address");
+        fields.remove("audio_port");
     }
 }

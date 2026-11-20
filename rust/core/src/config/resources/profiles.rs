@@ -1,6 +1,8 @@
 //! Typed, public modular protocol settings resolved from identified local bodies.
 
 mod allstarlink;
+/// Final public ownership and account projections for private records.
+pub mod credentials;
 mod echolink;
 mod jitter;
 mod normalize;
@@ -22,12 +24,12 @@ use super::{
         ResourceScope,
     },
 };
-use crate::config::{EchoLinkSettings, EchoLinkTransport};
+use crate::config::EchoLinkSettings;
 use normalize::{Layers, normalize};
 use serde_json::{Map, Value};
 use std::{collections::BTreeMap, fmt};
 
-/// Sparse public protocol resource.
+/// Recognized local authoring fields of one bound resource.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NormalizedProtocolResource {
     /// Registry-owned resource binding.
@@ -59,19 +61,6 @@ impl ProtocolProfile<EchoLinkSettings> {
             },
         )
     }
-
-    /// Inspect Proxy credential affinity only for a complete selected Proxy.
-    pub fn proxy_identity(&self) -> Option<EchoLinkProxyIdentity<'_>> {
-        let parent = self.directory_identity()?;
-        let settings = &self.settings;
-        (settings.transport == EchoLinkTransport::Proxy && !settings.proxy_host.is_empty())
-            .then_some(EchoLinkProxyIdentity {
-                callsign: parent.callsign,
-                node_number: parent.node_number,
-                host: &settings.proxy_host,
-                port: settings.proxy_port,
-            })
-    }
 }
 
 /// Public protocol and metadata settings for one port.
@@ -87,10 +76,54 @@ pub struct ResolvedProtocolPort {
     pub allstarlink: Option<ProtocolProfile<AllStarLinkProfileSettings>>,
     /// Explicit EchoLink instance.
     pub echolink: Option<ProtocolProfile<EchoLinkSettings>>,
+    /// Independently captured proxy child of this port's EchoLink account.
+    pub echolink_proxy: Option<ResourceBinding>,
     /// Explicit phone-patch instance.
     pub phone_patch: Option<ProtocolProfile<PhonePatchProfileSettings>>,
     /// Relationship diagnostics scoped to this effective port.
     pub warnings: Vec<CandidateWarning>,
+}
+
+/// Independently captured protocol settings at one scope.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResolvedProtocolAccounts {
+    /// Explicit AllStarLink instance.
+    pub allstarlink: Option<ProtocolProfile<AllStarLinkProfileSettings>>,
+    /// Explicit EchoLink instance.
+    pub echolink: Option<ProtocolProfile<EchoLinkSettings>>,
+    /// Independently captured proxy child of this scope's EchoLink account.
+    pub echolink_proxy: Option<ResourceBinding>,
+    /// Explicit phone-patch instance.
+    pub phone_patch: Option<ProtocolProfile<PhonePatchProfileSettings>>,
+}
+
+fn proxy_identity(
+    echo: Option<&ProtocolProfile<EchoLinkSettings>>,
+    binding: Option<ResourceBinding>,
+) -> Option<EchoLinkProxyIdentity<'_>> {
+    let binding = binding?;
+    let account = echo?;
+    let parent = account.directory_identity()?;
+    let settings = &account.settings;
+    (!settings.proxy_host.is_empty()).then_some(EchoLinkProxyIdentity {
+        binding,
+        callsign: parent.callsign,
+        node_number: parent.node_number,
+        host: &settings.proxy_host,
+        port: settings.proxy_port,
+    })
+}
+impl ResolvedProtocolAccounts {
+    /// Credential affinity of this scope's real proxy child and parent account.
+    pub fn proxy_identity(&self) -> Option<EchoLinkProxyIdentity<'_>> {
+        proxy_identity(self.echolink.as_ref(), self.echolink_proxy)
+    }
+}
+impl ResolvedProtocolPort {
+    /// Credential affinity of the port's proxy child, including an inactive proxy.
+    pub fn proxy_identity(&self) -> Option<EchoLinkProxyIdentity<'_>> {
+        proxy_identity(self.echolink.as_ref(), self.echolink_proxy)
+    }
 }
 
 /// A protocol relationship with no safe resolution.
@@ -135,12 +168,18 @@ impl std::error::Error for ProtocolProfileError {}
 /// Owned public local and effective protocol profiles for one candidate.
 #[derive(Debug, Default)]
 pub struct ResolvedProtocolProfiles {
+    site: ResolvedProtocolAccounts,
     local: BTreeMap<ResourceId, NormalizedProtocolResource>,
     ports: BTreeMap<ResourceId, ResolvedProtocolPort>,
     warnings: Vec<CandidateWarning>,
 }
 
 impl ResolvedProtocolProfiles {
+    /// Typed public account defaults owned by the site, even when there are no ports.
+    pub fn site_accounts(&self) -> &ResolvedProtocolAccounts {
+        &self.site
+    }
+
     /// Find the normalized local body by registered protocol resource ID.
     pub fn local(&self, id: ResourceId) -> Option<&NormalizedProtocolResource> {
         self.local.get(&id)
@@ -182,6 +221,7 @@ impl ModularCandidate<'_> {
             let schema = match binding.kind {
                 ResourceKind::Allstarlink => allstarlink::FIELDS,
                 ResourceKind::Echolink => echolink::FIELDS,
+                ResourceKind::EcholinkProxy => echolink::PROXY_FIELDS,
                 ResourceKind::PhonePatch => phone::FIELDS,
                 _ => continue,
             };
@@ -197,6 +237,13 @@ impl ModularCandidate<'_> {
                 );
             }
         }
+        result.site = resolve_accounts(
+            |kind| {
+                let local = result.local.get(&registry.binding(site, kind)?.id)?;
+                Some(Layers { local, site: None })
+            },
+            &mut result.warnings,
+        );
         for (key, id) in registry.port_keys() {
             let mut warnings = Vec::new();
             let scope = ResourceScope::Port(id);
@@ -207,15 +254,12 @@ impl ModularCandidate<'_> {
                     .and_then(|binding| result.local.get(&binding.id));
                 Some(Layers { local, site })
             };
-            let allstarlink = layers(ResourceKind::Allstarlink).map(|layers| {
-                profile(&layers, &mut warnings, |layers, _| {
-                    AllStarLinkProfileSettings::resolve(layers)
-                })
-            });
-            let echolink = layers(ResourceKind::Echolink)
-                .map(|layers| profile(&layers, &mut warnings, echolink::resolve));
-            let phone_patch = layers(ResourceKind::PhonePatch)
-                .map(|layers| profile(&layers, &mut warnings, PhonePatchProfileSettings::resolve));
+            let ResolvedProtocolAccounts {
+                allstarlink,
+                echolink,
+                echolink_proxy,
+                phone_patch,
+            } = resolve_accounts(layers, &mut warnings);
             if let Some(echo) = &echolink {
                 let local = result
                     .local
@@ -236,6 +280,7 @@ impl ModularCandidate<'_> {
                     peer_audio: registry.binding(scope, ResourceKind::PeerAudio),
                     allstarlink,
                     echolink,
+                    echolink_proxy,
                     phone_patch,
                     warnings,
                 },
@@ -243,6 +288,35 @@ impl ModularCandidate<'_> {
         }
         validate_ownership(result.ports.values())?;
         Ok(result)
+    }
+}
+
+fn resolve_accounts<'a>(
+    layers: impl Fn(ResourceKind) -> Option<Layers<'a>>,
+    warnings: &mut Vec<CandidateWarning>,
+) -> ResolvedProtocolAccounts {
+    let allstarlink = layers(ResourceKind::Allstarlink).map(|layers| {
+        profile(&layers, warnings, |layers, _| {
+            AllStarLinkProfileSettings::resolve(layers)
+        })
+    });
+    let proxy = layers(ResourceKind::EcholinkProxy);
+    let echolink = layers(ResourceKind::Echolink).map(|layers| {
+        profile(&layers, warnings, |parent, warnings| {
+            echolink::resolve(parent, proxy.as_ref(), warnings)
+        })
+    });
+    let echolink_proxy = echolink
+        .as_ref()
+        .and(proxy.map(|layers| layers.local.binding));
+    let phone_patch = layers(ResourceKind::PhonePatch)
+        .map(|layers| profile(&layers, warnings, PhonePatchProfileSettings::resolve));
+
+    ResolvedProtocolAccounts {
+        allstarlink,
+        echolink,
+        echolink_proxy,
+        phone_patch,
     }
 }
 

@@ -125,6 +125,15 @@ pub enum PrivateChange {
 pub struct PrivateValue(Zeroizing<Vec<u8>>);
 
 impl PrivateValue {
+    /// Retain a private token from a bounded, duplicate-checked create or replacement request.
+    pub fn from_token(token: &BorrowedValue<'_>) -> Self {
+        Self::from_raw(token.raw())
+    }
+
+    fn from_raw(raw: &str) -> Self {
+        Self(Zeroizing::new(raw.as_bytes().to_vec()))
+    }
+
     /// Borrow the supplied JSON for credential validation after profile resolution.
     pub fn as_json(&self) -> &[u8] {
         &self.0
@@ -212,9 +221,7 @@ pub fn stage_patch(
             edit.map(|edit| PrivateEdit {
                 slot,
                 change: match edit {
-                    PendingEdit::Set(raw) => {
-                        PrivateChange::Set(PrivateValue(Zeroizing::new(raw.as_bytes().to_vec())))
-                    }
+                    PendingEdit::Set(raw) => PrivateChange::Set(PrivateValue::from_raw(raw)),
                     PendingEdit::Remove => PrivateChange::Remove,
                 },
             })

@@ -19,8 +19,8 @@ pub enum ManifestError {
     Decode(JsonResourceError),
     /// The public manifest format version is missing or unsupported.
     UnsupportedFormat,
-    /// The manifest contains unsupported private reachability.
-    UnsupportedPrivate,
+    /// The encrypted index reference is malformed.
+    InvalidPrivate,
     /// A required structural field is missing or invalid.
     InvalidField(&'static str),
     /// Additional rows repeat a resource UUID.
@@ -38,9 +38,7 @@ impl fmt::Display for ManifestError {
         match self {
             Self::Decode(error) => error.fmt(formatter),
             Self::UnsupportedFormat => formatter.write_str("unsupported public manifest format"),
-            Self::UnsupportedPrivate => {
-                formatter.write_str("private manifest references are unsupported")
-            }
+            Self::InvalidPrivate => formatter.write_str("invalid encrypted index reference"),
             Self::InvalidField(field) => write!(formatter, "invalid manifest field {field}"),
             Self::DuplicateResourceId => formatter.write_str("duplicate manifest resource ID"),
             Self::InvalidMetadata => {
@@ -183,12 +181,48 @@ impl ObjectReference {
     }
 }
 
+/// Selected encrypted index or record, addressed by canonical UUIDs and exact digest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrivateReference {
+    /// Stable record identity within the selecting store.
+    pub record: ResourceId,
+    /// Immutable sealed object version.
+    pub version: ResourceId,
+    /// Digest of the exact sealed document.
+    pub sha256: ContentHash,
+}
+
+impl PrivateReference {
+    /// Encode only opaque identifiers and the integrity reference.
+    pub fn encode(self) -> Value {
+        json!({"record":self.record.to_string(),"version":self.version.to_string(),"sha256":self.sha256.hex()})
+    }
+
+    /// Validate an exact, path-free private object reference.
+    pub fn decode(value: &Value) -> Result<Self, ManifestError> {
+        let invalid = ManifestError::InvalidPrivate;
+        let fields = value.as_object().ok_or(invalid)?;
+        let text = |k: &str| fields.get(k).and_then(Value::as_str).ok_or(invalid);
+        let uuid = |k| {
+            let input = text(k)?;
+            let id: ResourceId = input.parse().map_err(|_| invalid)?;
+            (id.to_string() == input).then_some(id).ok_or(invalid)
+        };
+        Ok(Self {
+            record: uuid("record")?,
+            version: uuid("version")?,
+            sha256: text("sha256")?.parse().map_err(|_| invalid)?,
+        })
+    }
+}
+
 /// Supported public staging graph, with references and no configuration bodies.
 pub struct PublicManifest {
     id: ManifestId,
     revision: LogicalRevision,
     registry: ResourceRegistry,
     references: BTreeMap<ResourceId, ObjectReference>,
+    private: Option<PrivateReference>,
 }
 
 impl PublicManifest {
@@ -268,6 +302,7 @@ impl PublicManifest {
             revision,
             registry,
             references,
+            private: None,
         })
     }
 
@@ -281,9 +316,15 @@ impl PublicManifest {
         {
             return Err(ManifestError::UnsupportedFormat);
         }
-        if root.contains_key("private") {
-            return Err(ManifestError::UnsupportedPrivate);
-        }
+        let raw_private = root.remove("private");
+        let private = raw_private
+            .as_ref()
+            .map(PrivateReference::decode)
+            .transpose()?;
+        let extra_private = raw_private
+            .as_ref()
+            .and_then(Value::as_object)
+            .map_or(0, |fields| fields.len() - 3);
 
         let id = parse_field(root.remove("id"), "id")?;
         let revision = parse_field(root.remove("revision"), "revision")?;
@@ -313,12 +354,13 @@ impl PublicManifest {
                 .collect::<Result<Vec<_>, _>>()?,
             _ => return Err(ManifestError::InvalidField("members")),
         };
-        let mut warnings = vec![ResourceWarning::UnknownField; root.len()];
+        let mut warnings = vec![ResourceWarning::UnknownField; root.len() + extra_private];
         let rows = resources
             .into_iter()
             .map(|(id, value)| decode_row(&id, value, site, &mut warnings))
             .collect::<Result<Vec<_>, ManifestError>>()?;
         let mut value = Self::with_members(id, revision, site, &ports, rows, &members)?;
+        value.private = private;
         // A zero/one-member collection has only one possible ordering.
         if order.is_some() || ports.len() > 1 {
             let invalid = ManifestError::InvalidField("port_order");
@@ -342,6 +384,11 @@ impl PublicManifest {
 
     /// Emit deterministic reference-only JSON with canonical UUIDs and object paths.
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_with_private(self.private)
+    }
+
+    /// Encode the public graph with the encrypted index selected by its transaction.
+    pub fn encode_with_private(&self, private: Option<PrivateReference>) -> Vec<u8> {
         let port_keys = self
             .registry
             .port_keys()
@@ -382,6 +429,9 @@ impl PublicManifest {
             "port_keys": port_keys,
             "resources": resources,
         });
+        if let Some(reference) = private {
+            encoded["private"] = reference.encode();
+        }
         if self.registry.port_order.len() > 1 {
             encoded["port_order"] = json!(
                 self.registry
@@ -405,7 +455,14 @@ impl PublicManifest {
 
     /// Compare the complete retained configuration independently of manifest ID and logical revision.
     pub fn same_configuration(&self, other: &Self) -> bool {
-        self.registry == other.registry && self.references == other.references
+        self.registry == other.registry
+            && self.references == other.references
+            && self.private == other.private
+    }
+
+    /// Opaque encrypted index reference selected by this manifest.
+    pub fn private(&self) -> Option<PrivateReference> {
+        self.private
     }
 
     /// Return the immutable manifest identifier.

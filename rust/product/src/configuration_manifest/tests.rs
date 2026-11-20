@@ -3,13 +3,14 @@
 use super::*;
 use rpt_advanced_core::config::resources::{
     PortKey,
-    candidate::{CandidateProblem, ResourceBinding, ResourceId, ResourceKind, ResourceScope},
+    candidate::{ResourceBinding, ResourceId, ResourceKind, ResourceScope},
     manifest::ObjectReference,
 };
 use rptadv_peer_support::working_files::{
     WorkingFiles,
     immutable::{ArtifactLimits, ImmutableTarget},
 };
+use serde_json::json;
 use std::{
     fs,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
@@ -245,6 +246,25 @@ fn installed_graph_reopens_its_exact_bytes_and_assembles_after_the_guard() {
 }
 
 #[test]
+fn review_private_containers_cannot_be_read_back_as_public_objects() {
+    for config in [
+        json!({"credentials":"fixture"}),
+        json!({"credentials":[{"password":"fixture"}]}),
+        json!({"proxy":{"credentials":["fixture"]}}),
+    ] {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        let guard = store.try_edit().unwrap();
+        let body = json!({"id":ECHO,"kind":"echolink","configuration":config}).to_string();
+        let (_, digest) = install_fixture(&guard, &body);
+        assert_eq!(
+            load(&guard, &digest, LIMITS).unwrap_err(),
+            PublicLoadError::InvalidEnvelope
+        );
+    }
+}
+
+#[test]
 fn rejects_wrong_manifest_digest_id_or_revision_before_reading_children() {
     let fixture = Fixture::new();
     let store = fixture.open();
@@ -317,13 +337,9 @@ fn matching_object_hash_does_not_override_envelope_identity() {
     let guard = store.try_edit().unwrap();
     let alternate = ECHO_BODY.replace(ECHO, PORT);
     let (_, digest) = install_fixture(&guard, &alternate);
-    let loaded = load(&guard, &digest, LIMITS).unwrap();
     assert_eq!(
-        loaded.assemble_candidate().unwrap_err(),
-        CandidateError {
-            resource: port_binding(ECHO, ResourceKind::Echolink),
-            problem: CandidateProblem::InvalidEnvelope("id"),
-        },
+        load(&guard, &digest, LIMITS).unwrap_err(),
+        PublicLoadError::InvalidEnvelope
     );
     assert_eq!(
         fs::read(fixture.object(ECHO)).unwrap(),

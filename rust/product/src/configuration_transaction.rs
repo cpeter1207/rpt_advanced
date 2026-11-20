@@ -1,7 +1,13 @@
 //! Durable cross-resource selection, working publication and read-only startup inspection.
 pub mod import;
 
-use crate::configuration_manifest::{LoadedPublicManifest, load_public_manifest};
+use crate::{
+    configuration_manifest::{LoadedPublicManifest, load_public_manifest, load_public_objects},
+    configuration_private::{
+        CredentialEdit, Credentials, PrivateSelection, PrivateStore, SecretsState,
+    },
+};
+use rpt_advanced_core::config::resources::candidate::{CapturedResource, ModularCandidate};
 use rpt_advanced_core::config::resources::{
     ResourceWarning,
     candidate::ResourceId,
@@ -12,6 +18,7 @@ use rpt_advanced_core::config::resources::{
         WorkingTarget,
     },
 };
+use rptadv_peer_support::sealed_records::KeyId;
 use rptadv_peer_support::working_files::{
     CaptureError, CaptureLimits, CapturePath, EditGuard, FileRequirement, Fingerprint,
     WorkingSnapshot,
@@ -34,6 +41,8 @@ pub enum StartupStatus {
     StorageFault,
     /// Working bytes differ from the accepted or recoverable tree.
     ExternalEdit,
+    /// Private state cannot be used for mutation or activation.
+    SecretsUnavailable,
 }
 
 /// Verified selected state plus historical evidence; an error from inspect is a storage fault.
@@ -44,6 +53,10 @@ pub struct Selected {
     pub digest: ContentHash,
     /// Manifest selected for the desired configuration.
     pub desired: LoadedPublicManifest,
+    /// Private portion of the desired configuration, or its availability status.
+    pub private: PrivateSelection,
+    /// Distinct retained graph's authenticated private selection.
+    pub last_known_good_private: Option<PrivateSelection>,
     /// Previous verified selection, when distinct from desired.
     pub last_known_good: Option<LoadedPublicManifest>,
     /// Startup eligibility derived from disk evidence.
@@ -59,6 +72,8 @@ pub struct Selected {
 pub enum TransactionError {
     /// The selected store could not be read or verified.
     StorageFault,
+    /// Protected private graph cannot be used for this operation.
+    SecretsUnavailable,
     /// The observed inventory no longer matches the expected tree.
     ExternalEdit,
     /// The selector or lifecycle precondition failed.
@@ -291,6 +306,7 @@ enum Boundary {
     WorkingDirSync,
     OrphanSync,
     Objects,
+    PrivateArtifacts,
     Manifest,
     Journal,
     Pointer,
@@ -303,6 +319,7 @@ pub struct Transaction<'a, 'store> {
     #[cfg(test)]
     boundary: Option<&'a dyn Fn(Boundary) -> Result<(), TransactionError>>,
     guard: &'a EditGuard<'store>,
+    write_key: Option<&'a KeyId>,
     limits: CaptureLimits,
 }
 
@@ -312,10 +329,54 @@ impl<'a, 'store> Transaction<'a, 'store> {
         Self {
             guard,
             limits,
+            write_key: None,
             #[cfg(test)]
             boundary: None,
         }
     }
+    /// Production hosts must select their external write key even for a public-only graph.
+    /// Missing material blocks mutations while inspect can still return public resources.
+    /// A different selected index key requires stopped-writer maintenance.
+    pub fn with_write_key(mut self, key: &'a KeyId) -> Self {
+        self.write_key = Some(key);
+        self
+    }
+
+    fn private_store(
+        &self,
+        store: ResourceId,
+        bytes: u64,
+        paths: usize,
+    ) -> PrivateStore<'_, 'store> {
+        let mut limits = self.limits;
+        limits.max_total_bytes = limits.max_total_bytes.saturating_sub(bytes);
+        limits.max_paths = limits.max_paths.saturating_sub(paths);
+        PrivateStore {
+            guard: self.guard,
+            store,
+            write_key: self.write_key,
+            limits,
+        }
+    }
+    fn private_selection(
+        &self,
+        store: ResourceId,
+        graph: &LoadedPublicManifest,
+    ) -> PrivateSelection {
+        let used = graph.object_sizes().map(|(_, n)| n as u64).sum::<u64>()
+            + graph.manifest_bytes().len() as u64;
+        let owners = graph
+            .assemble_candidate()
+            .map_err(|_| SecretsState::Error)
+            .and_then(|c| c.credential_owners().map_err(|_| SecretsState::Error));
+        self.private_store(
+            store,
+            used,
+            1 + graph.manifest().registry().bindings().len(),
+        )
+        .select(graph.manifest().private(), owners)
+    }
+
     #[cfg(test)]
     fn at(&self, point: Boundary) -> Result<(), TransactionError> {
         self.boundary.map_or(Ok(()), |callback| callback(point))
@@ -427,7 +488,30 @@ impl<'a, 'store> Transaction<'a, 'store> {
                 }
             }
         };
+        let private = self.private_selection(state.store, &desired);
+        let last_known_good_private = last_known_good
+            .as_ref()
+            .map(|g| self.private_selection(state.store, g));
+        let private_warnings = private.warning_count()
+            + last_known_good_private
+                .as_ref()
+                .map_or(0, PrivateSelection::warning_count);
+        warnings.extend(std::iter::repeat_n(
+            ResourceWarning::UnknownField,
+            private_warnings,
+        ));
+        let status = if private.state() != SecretsState::Ready
+            || last_known_good_private
+                .as_ref()
+                .is_some_and(|p| p.state() != SecretsState::Ready)
+        {
+            StartupStatus::SecretsUnavailable
+        } else {
+            status
+        };
         Ok(Selected {
+            private,
+            last_known_good_private,
             state,
             digest: hash(&bytes),
             desired,
@@ -449,11 +533,32 @@ impl<'a, 'store> Transaction<'a, 'store> {
         objects: &[(ResourceId, &[u8])],
         journal_id: ResourceId,
     ) -> Result<StatePointer, TransactionError> {
+        self.commit_credentials(admission, source, manifest, objects, journal_id, &[])
+            .map(|(state, _)| state)
+    }
+
+    /// Publish final public settings and explicit write-only edits in one selector switch.
+    /// The returned count is the number of invalid private setting values ignored.
+    pub fn commit_credentials(
+        &self,
+        admission: Admission,
+        source: &WorkingSnapshot,
+        manifest: &PublicManifest,
+        objects: &[(ResourceId, &[u8])],
+        journal_id: ResourceId,
+        edits: &[CredentialEdit],
+    ) -> Result<(StatePointer, usize), TransactionError> {
+        if let Some(key) = self.write_key {
+            rptadv_peer_support::sealed_records::load_systemd_key(key)
+                .map_err(|_| TransactionError::SecretsUnavailable)?;
+        }
         if self.guard.bookkeeping_fault() {
             return Err(TransactionError::StorageFault);
         }
         let source_hash = digest(source);
         let mut previous_ports = BTreeSet::new();
+        let restoring = matches!(admission, Admission::Restore { .. });
+        let mut retained_private = Credentials::default();
         let (store, prior, lkg) = match admission {
             Admission::Provision { store } => {
                 if self.guard.bootstrap_identity().map_err(capture_error)? != Some(store.uuid())
@@ -473,6 +578,10 @@ impl<'a, 'store> Transaction<'a, 'store> {
                 if old.status == StartupStatus::StorageFault {
                     return Err(TransactionError::StorageFault);
                 }
+                if old.status == StartupStatus::SecretsUnavailable {
+                    return Err(TransactionError::SecretsUnavailable);
+                }
+                let mut use_lkg = false;
                 let (expect, working, recovery) = match admission {
                     Admission::Save { state } => (state, old.state.clean_working, false),
                     Admission::Reload { state, working } => (state, Some(working), false),
@@ -481,6 +590,10 @@ impl<'a, 'store> Transaction<'a, 'store> {
                         working,
                         retained,
                     } => {
+                        if !edits.is_empty() {
+                            return Err(TransactionError::InvalidCandidate);
+                        }
+                        use_lkg = retained != old.state.desired;
                         let source = if retained == old.state.desired {
                             Some(&old.desired)
                         } else if old.state.last_known_good.as_ref() == Some(&retained) {
@@ -529,6 +642,14 @@ impl<'a, 'store> Transaction<'a, 'store> {
                         || Ok(()),
                     )
                     .map_err(write_error)?;
+                retained_private = if use_lkg {
+                    old.last_known_good_private
+                        .ok_or(TransactionError::InvalidCandidate)?
+                } else {
+                    old.private
+                }
+                .into_credentials()
+                .map_err(|_| TransactionError::SecretsUnavailable)?;
                 (old.state.store, Some(old.digest), old.state.last_known_good)
             }
         };
@@ -540,17 +661,30 @@ impl<'a, 'store> Transaction<'a, 'store> {
         }
         let mut remaining = self.limits.max_total_bytes;
         let mut installed = BTreeSet::new();
+        let mut pending = Vec::with_capacity(objects.len());
         for &(id, bytes) in objects {
+            if bytes.len() as u64 > remaining.min(limits.max_file_bytes) {
+                return Err(TransactionError::InvalidCandidate);
+            }
+            let binding = manifest
+                .registry()
+                .by_id(id)
+                .ok_or(TransactionError::InvalidCandidate)?;
+            if !crate::configuration_private::public_envelope(binding, bytes) {
+                return Err(TransactionError::InvalidCandidate);
+            }
             let r = manifest
                 .reference(id)
                 .ok_or(TransactionError::InvalidCandidate)?;
-            if !installed.insert(id) || hash(bytes) != *r.sha256() || bytes.len() as u64 > remaining
-            {
+            if !installed.insert(id) || hash(bytes) != *r.sha256() {
                 return Err(TransactionError::InvalidCandidate);
             }
             remaining -= bytes.len() as u64;
             let t = ImmutableTarget::public_object(&id.to_string(), r.version().as_str())
                 .map_err(|_| TransactionError::InvalidCandidate)?;
+            pending.push((id, t, bytes));
+        }
+        for (id, t, bytes) in pending {
             self.guard
                 .prepare_object_parent(id.uuid())
                 .map_err(capture_error)?;
@@ -560,7 +694,36 @@ impl<'a, 'store> Transaction<'a, 'store> {
         }
         #[cfg(test)]
         self.at(Boundary::Objects)?;
-        let bytes = manifest.encode();
+        let verified_objects = load_public_objects(self.guard, manifest, self.limits, 0)
+            .map_err(|_| TransactionError::StorageFault)?;
+        let captures = verified_objects
+            .iter()
+            .map(|(binding, obj)| CapturedResource {
+                binding: *binding,
+                json: obj.bytes(),
+            })
+            .collect::<Vec<_>>();
+        let candidate = ModularCandidate::assemble(manifest.registry(), &captures)
+            .map_err(|_| TransactionError::InvalidCandidate)?;
+        let owners = candidate
+            .credential_owners()
+            .map_err(|_| TransactionError::InvalidCandidate)?;
+        let private_store = self.private_store(
+            store,
+            captures.iter().map(|c| c.json.len() as u64).sum(),
+            1 + manifest.registry().bindings().len(),
+        );
+        let (private, warnings) = if restoring {
+            (manifest.private(), 0)
+        } else {
+            if manifest.private().is_some() && manifest.private() != retained_private.reference() {
+                return Err(TransactionError::InvalidCandidate);
+            }
+            private_store.prepare(&retained_private, &owners, edits)?
+        };
+        #[cfg(test)]
+        self.at(Boundary::PrivateArtifacts)?;
+        let bytes = manifest.encode_with_private(private);
         let r = ManifestRef {
             manifest: manifest.id().clone(),
             revision: manifest.revision().clone(),
@@ -574,6 +737,9 @@ impl<'a, 'store> Transaction<'a, 'store> {
         #[cfg(test)]
         self.at(Boundary::Manifest)?;
         let verified = self.load(&r)?;
+        if self.private_selection(store, &verified).state() != SecretsState::Ready {
+            return Err(TransactionError::SecretsUnavailable);
+        }
         for (id, bytes) in verified
             .verified_objects()
             .filter(|(id, _)| !installed.contains(id))
@@ -629,7 +795,7 @@ impl<'a, 'store> Transaction<'a, 'store> {
         self.switch(prior, &state, Some(source_hash), source.directories())?;
         #[cfg(test)]
         self.at(Boundary::Pointer)?;
-        Ok(state)
+        Ok((state, warnings))
     }
     fn switch(
         &self,
@@ -693,6 +859,9 @@ impl<'a, 'store> Transaction<'a, 'store> {
     /// Repeating after any partial write validates the recorded source or already-target.
     pub fn reconcile(&self) -> Result<(), TransactionError> {
         let mut selected = self.inspect()?;
+        if selected.status == StartupStatus::SecretsUnavailable {
+            return Err(TransactionError::SecretsUnavailable);
+        }
         if selected.status == StartupStatus::StorageFault {
             return Err(TransactionError::StorageFault);
         }
@@ -797,17 +966,14 @@ impl<'a, 'store> Transaction<'a, 'store> {
             });
         }
         let result = (|| {
-            let bytes = self
-                .guard
-                .read_state(self.artifact_limits().max_file_bytes)
-                .map_err(capture_error)?
-                .ok_or(TransactionError::StorageFault)?;
-            if hash(&bytes) != selected.digest {
+            let current = self.inspect()?;
+            if current.status == StartupStatus::SecretsUnavailable {
+                return Err(TransactionError::SecretsUnavailable);
+            }
+            if current.digest != selected.digest {
                 return Err(TransactionError::Conflict);
             }
-            let state = StatePointer::decode(&bytes)
-                .map_err(|_| TransactionError::StorageFault)?
-                .value;
+            let state = current.state;
             if state.store != selected.state.store
                 || state.desired != selected.state.desired
                 || state.journal.is_some()
@@ -817,7 +983,9 @@ impl<'a, 'store> Transaction<'a, 'store> {
             let next = with_observed_activation(state, observed);
             self.switch(Some(selected.digest), &next, None, None)
         })();
-        self.guard.set_bookkeeping_fault(result.is_err());
+        if result != Err(TransactionError::SecretsUnavailable) {
+            self.guard.set_bookkeeping_fault(result.is_err());
+        }
         result.map_err(|error| ActivationWriteError { observed, error })
     }
 }

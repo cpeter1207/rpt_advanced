@@ -319,6 +319,25 @@ impl ResourceRegistry {
         self.by_id(*self.named_keys.get(&(scope, kind, key.clone()))?)
     }
 
+    /// Select one complete mailbox identity at this scope, falling back to the complete site
+    /// identity only when a local member of that number is absent.
+    pub fn effective_mailbox(
+        &self,
+        scope: ResourceScope,
+        number: &PortKey,
+    ) -> Option<ResourceBinding> {
+        self.by_id(scope.id())
+            .filter(|binding| binding.scope == scope && binding.kind == ResourceKind::Metadata)?;
+        self.named_binding(scope, ResourceKind::Mailbox, number)
+            .or_else(|| {
+                self.named_binding(
+                    ResourceScope::Site(self.site),
+                    ResourceKind::Mailbox,
+                    number,
+                )
+            })
+    }
+
     /// Ordered named bindings and exact local keys.
     pub fn members(&self) -> &[(ResourceBinding, PortKey)] {
         &self.members
@@ -425,6 +444,7 @@ pub struct CapturedResource<'a> {
 
 /// Unvalidated local section or protocol body held for later domain validation.
 pub struct StagedResource {
+    captured: bool,
     binding: ResourceBinding,
     fields: Map<String, Value>,
 }
@@ -433,6 +453,11 @@ impl StagedResource {
     /// The stable identity held by this staged resource.
     pub fn binding(&self) -> ResourceBinding {
         self.binding
+    }
+
+    /// Whether the input carried an explicit resource, including an empty body.
+    pub fn was_captured(&self) -> bool {
+        self.captured
     }
 
     pub(super) fn fields(&self) -> &Map<String, Value> {
@@ -505,15 +530,14 @@ impl<'registry> ModularCandidate<'registry> {
             if kind == ResourceKind::Metadata {
                 continue;
             }
-            let fields = captured
-                .remove(&id)
-                .or_else(|| (!kind.has_optional_presence()).then(Map::new));
-            if let Some(fields) = fields {
+            let fields = captured.remove(&id);
+            if fields.is_some() || !kind.has_optional_presence() {
                 staged.insert(
                     id,
                     StagedResource {
                         binding: ResourceBinding { id, scope, kind },
-                        fields,
+                        captured: fields.is_some(),
+                        fields: fields.unwrap_or_default(),
                     },
                 );
             }
@@ -539,6 +563,11 @@ impl<'registry> ModularCandidate<'registry> {
     /// The specified port's sparse metadata, resolvable against the site's metadata.
     pub fn port_metadata(&self, port: ResourceId) -> Option<&PortMetadata> {
         self.ports.get(&port)
+    }
+
+    /// Borrow a named member's staging body within core domain preparation.
+    pub(super) fn member_fields(&self, id: ResourceId) -> Option<&Map<String, Value>> {
+        self.staged.get(&id).map(StagedResource::fields)
     }
 
     /// Inspect local-body presence for a bound ordinary section or protocol.

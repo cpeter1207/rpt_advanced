@@ -39,7 +39,8 @@ impl PhoneMailbox {
     }
 }
 
-fn valid_hash(value: &str) -> bool {
+/// Check the bounded salted Argon2id PHC contract before retaining a mailbox PIN digest.
+pub fn valid_mailbox_pin_hash(value: &str) -> bool {
     if value.len() > 256 {
         return false;
     }
@@ -64,7 +65,7 @@ fn valid_hash(value: &str) -> bool {
 // only first_name, callsign and pin_hash; the remaining known case is first_name.
 pub(super) fn value_valid(key: &str, value: &str) -> bool {
     match key {
-        "pin_hash" => valid_hash(value),
+        "pin_hash" => valid_mailbox_pin_hash(value),
         "callsign" => {
             !value.is_empty()
                 && value.len() <= 16

@@ -13,6 +13,10 @@ use std::{
     },
 };
 
+thread_local! {
+    pub(crate) static ALLOCATION_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
 thread_local! { static FAIL_BYTES: Cell<usize> = const { Cell::new(0) }; }
 thread_local! {
     pub(crate) static ERROR_LOGS: std::cell::RefCell<Vec<(i32, String)>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -26,6 +30,11 @@ pub(crate) fn error_log(priority: i32, message: &str) {
 struct Allocator;
 
 fn reject(bytes: usize) -> bool {
+    let _ = ALLOCATION_COUNT.try_with(|slot| {
+        if let Some(n) = slot.get() {
+            slot.set(Some(n + 1));
+        }
+    });
     FAIL_BYTES
         .try_with(|slot| {
             if slot.get() == bytes {
