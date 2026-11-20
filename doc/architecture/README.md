@@ -26,7 +26,7 @@ no-follow descriptor access and caller-supplied limits produce owned bytes plus
 a content fingerprint for guarded rechecks. The product adapter maps UUID/kind
 bindings to fixed paths and assembles the candidate from those exact bytes.
 This is not discovery of new resources or a complete working-tree reload.
-The next host storage unit installs immutable public object/manifest bytes
+The host storage unit installs immutable public object/manifest bytes
 under the same edit guard. Typed targets, exclusive private staging, file sync,
 no-replace rename and parent sync protect existing artifacts. Equal retries
 verify bytes and confirm durability; a post-rename sync failure remains an

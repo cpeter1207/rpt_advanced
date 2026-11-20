@@ -250,7 +250,7 @@ required before merge and has not been claimed by this milestone.
 
 ## Fourth milestone: durable immutable artifact installation
 
-**Host implementation verified, 2026-11-20; native checkpoint pending.** Extended the protected host storage boundary with
+**Completed, 2026-11-20.** Extended the protected host storage boundary with
 bounded installation of immutable public objects and manifests. Typed targets
 select only those namespaces. Reuse the existing guard, no-follow descriptor
 checks and locked libraries. Protected object/manifest parent directories must
@@ -287,3 +287,28 @@ work; full production coverage is still a pre-merge requirement.
 The only dependency change adds an edge to the already locked uuid parser,
 with default features disabled. No new package version, native ABI, core model
 or product caller is introduced. Existing working-file capture stays read-only.
+
+### Fourth-milestone native checkpoint
+
+Native Debian 13 arm64 verification passed **64 affected tests**, zero failures,
+at published source `1e2ef0395d0638cf21a344babdb0bd5e996f9d37` using isolated
+Rust 1.88. The complete peer-support suite and product capture regressions
+passed, including the actual node's temporary-path conditions. The controller
+service was active before and after; installed packages, binaries, live
+configuration and service state were unchanged.
+
+The native log and receipt are under the node workspace's `.work/` directory.
+Log SHA-256:
+`b2b278b45df0093d658f8dea3be80253d76f83c854d3b218e704ff9a1a0ec105`.
+Host RED/GREEN, full affected checks and the approved review remain under
+`.work/json-rest/milestone-4-*`. Two minor test follow-ups remain recorded in
+this document and the execution ledger for the required pre-merge coverage work.
+
+Milestone 4 is complete and execution pauses per the checklist. Protected
+object/manifest parents must be provisioned before installation; the later
+bootstrap/create path must synchronize that provisioning. Installed artifacts
+alone do not accept settings. Full discovery and profiles, immutable reference
+formats, private records, journal/state-pointer transactions, working-file
+publication, HTTP/HAL and the coordinated controller INI cutover remain pending.
+USBRadioPlus INI is preserved. Full production coverage, Doxygen, packaging and
+staged-install validation remain part of the required pull-request gate.
