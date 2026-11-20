@@ -1,5 +1,7 @@
 //! Owned JSON resource decoding and site-to-port inheritance.
 
+pub mod candidate;
+
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -123,7 +125,13 @@ impl LocalMetadata {
         input: &[u8],
         inherit_from: ScopeParent,
     ) -> Result<ResourceResolution<Self>, JsonResourceError> {
-        let mut fields = decode_object(input)?;
+        Self::normalize(decode_object(input)?, inherit_from)
+    }
+
+    fn normalize(
+        mut fields: Map<String, Value>,
+        inherit_from: ScopeParent,
+    ) -> Result<ResourceResolution<Self>, JsonResourceError> {
         let name = fields
             .remove("name")
             .and_then(into_string)

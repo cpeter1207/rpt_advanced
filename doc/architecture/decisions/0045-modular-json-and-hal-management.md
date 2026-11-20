@@ -33,6 +33,14 @@ wire types when enabling shared Serde features; objects must not become numbers
 or strings through library-internal token names. Scope metadata and inheritance
 remain in core. No new external ABI or independently deployed provider is added.
 
+The core modular candidate uses an authoritative UUID/key/kind/owner registry
+and identified captured bytes. Ordinary missing records mean empty overrides
+with retained identity. Site protocol defaults and explicit port instances have
+separate presence semantics. All ordinary kinds support site defaults. The
+candidate is staging data until domain validation; raw bodies are not public
+HAL or accepted runtime settings. Filesystem capture and publication stay with
+the host/product control plane.
+
 Store accepted resources and private records as immutable objects selected by
 one durably committed manifest/state pointer. Keep editable working files
 separate and import them only on explicit reload. Validate, save and activate

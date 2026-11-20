@@ -27,6 +27,12 @@ or extra edge cases. Build/test at major milestones on node524950.local in a
 home-directory workspace; this does not authorize changing the installed
 service or its live configuration.
 
+Registry-backed candidates own resource IDs, exact keys, kinds and owners.
+Captured payloads cannot reassign those bindings. Keep unvalidated section data
+separate from normalized public/effective views. All ordinary section kinds can
+have site defaults, including control, memories and scan lists. Site protocol
+defaults do not create port protocol instances; presence is explicit.
+
 ## Shared rpt_advanced project baseline
 
 This baseline applies to every production, shared-library, and workflow

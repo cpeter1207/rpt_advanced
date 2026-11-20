@@ -34,7 +34,9 @@ qualification are distinct from software implementation and passive node health.
 [ADR 0045](doc/architecture/decisions/0045-modular-json-and-hal-management.md), the
 [design](docs/superpowers/specs/2026-11-18-json-rest-configuration-design.md) and
 [updated checklist](docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md).
-The initial JSON model/inheritance work does not replace the running INI path.
+The first decoder/metadata milestone is verified. Registry-backed modular
+candidates are now in progress; neither model milestone replaces the running
+INI path.
 Remove controller INI during the coordinated store/provider cutover and retain
 USBRadioPlus INI. Keep remaining resource, storage, API, provider, scheduler,
 action, message and native milestone verification items unchecked until tested.

@@ -16,6 +16,12 @@ described below is removed at the coordinated store/provider cutover.
 USBRadioPlus retains its own public INI loader. Unknown JSON keys and unusable
 setting values warn and fall back through inheritance/defaults.
 
+The next model milestone adds UUID-backed resource identities and explicit
+scope/kind ownership to in-memory candidates. Typed metadata is resolved
+separately from opaque unvalidated section bodies. Site defaults apply to all
+ordinary sections; protocol presence is established only by port documents.
+Storage, full profiles and runtime activation remain pending.
+
 ## System boundary
 
 [ADR 0044](decisions/0044-phone-peers-and-rf-presentation-pacing.md) records the

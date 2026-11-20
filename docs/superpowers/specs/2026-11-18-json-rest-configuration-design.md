@@ -207,6 +207,28 @@ Keep one instance per port/protocol kind in this contract, matching the current 
 
 Shared site equipment retains one logical/physical owner. Inheriting settings exposes references to that owner rather than duplicating acquisition, alarms, fan control or outputs. A changed physical source must pass exclusive-ownership validation. Preserve the existing scheduler's scope/execution policy when moving its definitions into individual resources.
 
+### Candidate identity and ownership
+
+The in-memory candidate assembly takes already captured resource bytes and an
+authoritative registry of UUIDs, exact port keys, kinds and owners. Cross-check
+the documented file identities against that registry. Do not derive ownership
+from payload fields or local-key text. Missing ordinary records retain their
+known registry identity and mean an empty local override; missing optional port
+protocol records mean no configured instance. Site defaults cannot create one.
+
+Every ordinary section may have site defaults, including control, memories and
+scan lists; the abbreviated layout below is not a scope restriction. The
+ordinary working-file envelope uses id, kind and configuration; port metadata
+also retains key. Owner/scope are capture/manifest context, not additional
+authoring fields. Unknown extra fields follow the warning/ignore policy. Flat
+events retain their separately specified root-level form.
+
+Raw candidate section bodies remain unvalidated staging data. Only normalized
+typed metadata is an effective settings view at this stage. Do not automatically
+serialize these raw bodies into public HAL or activate them. Filesystem capture,
+profile/capability validation and durable state publication remain separate
+control-plane responsibilities.
+
 ## Modular JSON storage
 
 ### Layout
@@ -229,6 +251,9 @@ working/
     tx/signaling.json
     interface.json
     peer-audio.json
+    control.json
+    memories.json
+    scan-lists.json
     protocol-defaults/allstarlink.json
     protocol-defaults/echolink.json
     protocol-defaults/phone-patch.json

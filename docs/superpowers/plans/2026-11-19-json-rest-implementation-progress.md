@@ -118,7 +118,58 @@ artifacts remain in the node user's home workspace. The existing standalone
 controller was active during and after the build; no installed binary or live
 configuration was changed.
 
-The first milestone is complete and execution pauses here per the checklist.
+The first milestone is complete. Execution resumed for milestone 2 at the user’s request.
 Storage, full resource profiles, HTTP/HAL, credentials, runtime activation and
 controller INI removal remain unchecked. USBRadioPlus INI is preserved. The
 complete native pull-request coverage/package gate remains pending.
+
+## Second milestone: resource identity and ownership
+
+**In progress, 2026-11-19.** Assemble an in-memory modular candidate from
+identified captured JSON bytes. The expected registry owns UUIDs, exact port
+keys, resource kinds and scope/owner bindings. Metadata remains typed; other
+section bodies are explicitly unvalidated staging inputs, not public HAL output
+or runtime-ready settings.
+
+Known ordinary section slots keep their registry identity when a file is absent
+and supply an empty local override. All ordinary sections can have site defaults,
+including control, memories and scan lists. Site protocol documents are defaults;
+only supplied port protocol documents establish independent AllStarLink, EchoLink
+or phone-patch presence. Disabled port settings do not erase configured presence.
+
+The selected ordinary file shape is `id`, `kind`, `configuration`, plus the
+exact `key` on port metadata. Owner/scope come from typed capture and registry
+context. Extra owner/scope file fields warn and are ignored. This does not add
+fields to the authoring contract or apply a configuration wrapper to flat events.
+
+Filesystem capture, locks/fingerprints, complete setting profiles, public
+serialization, private records and activation remain later steps. Secure capture
+must be implemented with those ownership/bounds requirements together; no partial
+file reader or live INI replacement is introduced by this model milestone.
+
+### Second-milestone implementation and host verification
+
+The core now contains `ResourceId`, `ResourceRegistry` and `ModularCandidate`
+under `config::resources::candidate`. Metadata resources share their scope UUID.
+The immutable registry binds exact keys and unique scope/kind slots; assembly
+cross-checks captured envelopes and fails without partial state. Missing known
+ordinary bodies remain empty overrides with their existing identity. Only an
+explicit port protocol capture creates protocol presence, even when the port
+is disabled. Site protocol defaults create no memberships.
+
+Raw bodies remain opaque staging data; typed metadata reuses the existing
+normalizer and inheritance. Unknown owner/scope envelope fields warn and cannot
+reassign ownership. The `uuid` parser/formatter adds one locked package
+(1.26.1, default features disabled), with no unrelated dependency upgrades or
+new native ABI. UUID generation remains part of future create/import work.
+
+All six new behavioral tests failed before implementation. Host verification
+passed **130 configuration tests**, then **829 complete core/shared tests**,
+Rustdoc with warnings denied and the full fast formatting/lint/static-analysis
+gate in the maintained constrained Debian 13 image with the pinned IAX overlay.
+Review approved specification and production quality. One nonblocking test-only
+readability note is deferred: two malformed-JSON table rows contain coordinates
+that their variant/redaction assertions intentionally ignore.
+
+Native node build/tests and the milestone checkpoint are next. No installed
+service, connection, DSP or live configuration has been changed.
