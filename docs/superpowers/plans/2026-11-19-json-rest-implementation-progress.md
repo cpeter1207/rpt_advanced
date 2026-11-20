@@ -546,8 +546,16 @@ members and direct regression cases, plus direct Unicode-surrogate tests. Host e
 covers 771 core unit tests, 88 core integration tests, one JSON test, five product wire
 reply tests, 29 speech tests and 215 standalone tests (1,109 unique affected tests).
 Strict Rustdoc and the complete push preflight passed, including formatting, Ruff,
-Cppcheck, Clang-Tidy and workspace Clippy. Native node checkpoint is pending for this
-source revision; installed services/configuration have not changed.
+Cppcheck, Clang-Tidy and workspace Clippy. Source revision
+`df5db6462dd35130f8a89272ed368333f43c5714` also passed all 860 core/JSON tests
+and 248 further affected tests in the native node home workspace (1,108 total).
+The installed service remained active, and its configuration/artifacts were not changed.
+
+One preexisting standalone foreground fixture tried to create a collision at the live
+service's fixed `/run/rpt-advanced/radio-control.sock` path and was blocked by permissions.
+That fixture remains covered by the isolated host/CI run rather than being forced onto
+the active node. The remaining native bin/CLI/registration, product wire and speech
+checks passed separately; the original failure log is retained.
 
 The optional broader full-product run reached the existing 2,000-peer stress test and
 hit the constrained runner's 1,536 MiB memory limit, confirmed by Docker's OOM event.

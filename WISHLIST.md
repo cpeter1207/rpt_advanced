@@ -39,9 +39,9 @@ storage, public manifest/readback, sealed-record/key-loader and typed private
 artifact I/O milestones are verified on the development host and native node.
 Resolved account bindings, private manifest adoption, complete discovery,
 accepted-state transactions, full domain validation and runtime cutover remain
-pending. Typed modular protocol profiles and resource-local JSON Patch staging are now
-implemented with focused and core regression coverage; their integrated host/native
-checkpoint and subsequent private/store/runtime joins remain tracked. These control-plane foundations do not replace the running INI path.
+pending. Typed modular protocol profiles and resource-local JSON Patch staging passed
+focused, core and affected-host checks plus their native home-workspace checkpoint.
+Subsequent private/store/runtime joins remain tracked. These control-plane foundations do not replace the running INI path.
 Remove controller INI during the coordinated store/provider cutover and retain
 USBRadioPlus INI. Keep remaining resource, storage, API, provider, scheduler,
 action, message and native milestone verification items unchecked until tested.
