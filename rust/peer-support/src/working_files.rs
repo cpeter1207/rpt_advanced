@@ -481,25 +481,33 @@ fn read_selected(
         }
         other => other?,
     };
-    let limit = limits.max_file_bytes.min(*remaining);
+    let captured = read_pinned_regular(&handle, &metadata, limits.max_file_bytes.min(*remaining))?;
+    *remaining -= captured.bytes.len() as u64;
+    Ok(Some(captured))
+}
+
+/// Read a previously inspected regular file through its pinned descriptor.
+fn read_pinned_regular(
+    handle: &File,
+    metadata: &Metadata,
+    limit: u64,
+) -> Result<CapturedFile, CaptureError> {
     if metadata.len() > limit {
         return Err(CaptureError::Limits);
     }
 
-    let version = FileVersion::from(&metadata);
-    let file = reopen_regular(&handle, &version)?;
+    let version = FileVersion::from(metadata);
+    let file = reopen_regular(handle, &version)?;
     let mut reader = file.take(limit.saturating_add(1));
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
         .map_err(|_| CaptureError::Io)?;
     check_version(reader.get_ref(), &version)?;
-    let size = bytes.len() as u64;
-    if size > limit {
+    if bytes.len() as u64 > limit {
         return Err(CaptureError::Limits);
     }
-    *remaining -= size;
-    Ok(Some(CapturedFile { version, bytes }))
+    Ok(CapturedFile { version, bytes })
 }
 
 /// Frame the sorted selection using path lengths, presence tags, and SHA-256.

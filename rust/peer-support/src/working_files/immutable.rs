@@ -1,4 +1,4 @@
-//! Durable installation of prepared public objects and manifests on Linux.
+//! Protected readback and durable installation of public objects and manifests on Linux.
 //!
 //! Writers coordinate through the held edit lock. Revalidation can detect
 //! changes that are observed before it finishes, with a final race against
@@ -6,7 +6,8 @@
 
 use super::{
     CaptureError, EditGuard, FileVersion, PATH_FLAGS, WorkingFiles, check_inode, check_version,
-    file_handle, on_recheck, open_error, protected_directory, reopen_regular, valid_component,
+    file_handle, on_recheck, open_error, protected_directory, read_pinned_regular, reopen_regular,
+    valid_component,
 };
 use ring::{
     digest,
@@ -83,13 +84,63 @@ impl fmt::Debug for ImmutableTarget {
     }
 }
 
-/// Caller-supplied bounds for one immutable installation.
+/// Caller-supplied bounds for one immutable artifact.
 #[derive(Clone, Copy, Debug)]
-pub struct InstallLimits {
+pub struct ArtifactLimits {
     /// Maximum length of the actual store-relative path in bytes.
     pub max_path_bytes: usize,
-    /// Maximum size of the supplied artifact in bytes.
+    /// Maximum size of the artifact in bytes.
     pub max_file_bytes: u64,
+}
+
+/// Owned exact bytes and verified SHA-256 of a protected immutable artifact.
+pub struct ImmutableArtifact {
+    bytes: Vec<u8>,
+    sha256: [u8; 32],
+}
+
+impl ImmutableArtifact {
+    /// Borrow the exact bytes of the artifact.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Borrow the verified SHA-256 digest of the bytes.
+    pub fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+}
+
+impl fmt::Debug for ImmutableArtifact {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ImmutableArtifact(..)")
+    }
+}
+
+/// Content-free failure from immutable readback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadError {
+    /// The protected path or edit lock could not be validated or read.
+    Store(CaptureError),
+    /// The exact bytes do not match the expected digest.
+    DigestMismatch,
+}
+
+impl fmt::Display for ReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => error.fmt(f),
+            Self::DigestMismatch => f.write_str("immutable artifact digest mismatch"),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {}
+
+impl From<CaptureError> for ReadError {
+    fn from(error: CaptureError) -> Self {
+        Self::Store(error)
+    }
 }
 
 /// Receipt for a synchronized immutable artifact.
@@ -171,6 +222,43 @@ enum InstallBoundary {
 }
 
 impl EditGuard<'_> {
+    /// Read a protected immutable artifact and verify its exact bytes.
+    pub fn read_immutable(
+        &self,
+        target: &ImmutableTarget,
+        expected_sha256: &[u8; 32],
+        limits: ArtifactLimits,
+    ) -> Result<ImmutableArtifact, ReadError> {
+        self.read(target, expected_sha256, limits, || {})
+    }
+
+    /// Verify a pinned read with a per-call boundary just before revalidation.
+    fn read(
+        &self,
+        target: &ImmutableTarget,
+        expected_sha256: &[u8; 32],
+        limits: ArtifactLimits,
+        before_confirm: impl FnOnce(),
+    ) -> Result<ImmutableArtifact, ReadError> {
+        if target.relative_len() > limits.max_path_bytes {
+            return Err(CaptureError::Limits.into());
+        }
+        self.check_lock()?;
+        let parent = target.open_parent(self.store)?;
+        let (handle, metadata) = file_handle(&parent, Path::new(&target.leaf), self.store.uid)?;
+        let captured = read_pinned_regular(&handle, &metadata, limits.max_file_bytes)?;
+        let sha256 = artifact_sha256(&captured.bytes);
+        if &sha256 != expected_sha256 {
+            return Err(ReadError::DigestMismatch);
+        }
+        before_confirm();
+        self.confirm_binding(target, &parent, &captured.version)?;
+        Ok(ImmutableArtifact {
+            bytes: captured.bytes,
+            sha256,
+        })
+    }
+
     /// Install trusted prepared bytes and synchronize the resulting artifact.
     ///
     /// A durability-unknown result permits an exact-byte retry. This operation
@@ -179,7 +267,7 @@ impl EditGuard<'_> {
         &self,
         target: &ImmutableTarget,
         bytes: &[u8],
-        limits: InstallLimits,
+        limits: ArtifactLimits,
     ) -> Result<InstalledArtifact, InstallError> {
         self.install(target, bytes, limits, |_| Ok(()))
     }
@@ -189,7 +277,7 @@ impl EditGuard<'_> {
         &self,
         target: &ImmutableTarget,
         bytes: &[u8],
-        limits: InstallLimits,
+        limits: ArtifactLimits,
         boundary: impl FnMut(InstallBoundary) -> Result<(), InstallError>,
     ) -> Result<InstalledArtifact, InstallError> {
         if target.relative_len() > limits.max_path_bytes
@@ -214,9 +302,10 @@ impl EditGuard<'_> {
             Err(CaptureError::Missing) => self.publish(target, &parent, bytes, boundary)?,
             Err(error) => return Err(error.into()),
         };
-        let mut sha256 = [0; 32];
-        sha256.copy_from_slice(digest::digest(&digest::SHA256, bytes).as_ref());
-        Ok(InstalledArtifact { outcome, sha256 })
+        Ok(InstalledArtifact {
+            outcome,
+            sha256: artifact_sha256(bytes),
+        })
     }
 
     /// Stage and publish without replacing any existing final entry.
@@ -235,7 +324,7 @@ impl EditGuard<'_> {
         scratch.file.sync_all().map_err(|_| InstallError::Io)?;
         boundary(InstallBoundary::BeforePublish)?;
         scratch.check_name().map_err(on_recheck)?;
-        self.check_install_parent(target, parent)?;
+        self.check_artifact_parent(target, parent)?;
         let leaf = Path::new(&target.leaf);
         match fs::renameat_with(
             parent,
@@ -285,7 +374,7 @@ impl EditGuard<'_> {
             }
         }
         check_version(&file, &version)?;
-        self.check_install_parent(target, parent)?;
+        self.check_artifact_parent(target, parent)?;
         file.sync_all()
             .map_err(|_| InstallError::DurabilityUnknown)?;
         self.sync_and_confirm(target, parent, &version)?;
@@ -293,7 +382,7 @@ impl EditGuard<'_> {
     }
 
     /// Verify that the pinned parent and held lock are still current.
-    fn check_install_parent(
+    fn check_artifact_parent(
         &self,
         target: &ImmutableTarget,
         parent: &File,
@@ -311,12 +400,29 @@ impl EditGuard<'_> {
         version: &FileVersion,
     ) -> Result<(), InstallError> {
         fs::fsync(parent).map_err(|_| InstallError::DurabilityUnknown)?;
-        let (current, _) = file_handle(parent, Path::new(&target.leaf), self.store.uid)
-            .map_err(|_| InstallError::DurabilityUnknown)?;
-        check_version(&current, version).map_err(|_| InstallError::DurabilityUnknown)?;
-        self.check_install_parent(target, parent)
+        self.confirm_binding(target, parent, version)
             .map_err(|_| InstallError::DurabilityUnknown)
     }
+
+    /// Reopen and verify the final leaf, protected parent chain and held lock.
+    fn confirm_binding(
+        &self,
+        target: &ImmutableTarget,
+        parent: &File,
+        version: &FileVersion,
+    ) -> Result<(), CaptureError> {
+        let (current, _) =
+            file_handle(parent, Path::new(&target.leaf), self.store.uid).map_err(on_recheck)?;
+        check_version(&current, version)?;
+        self.check_artifact_parent(target, parent)
+    }
+}
+
+/// Compute the SHA-256 digest of exact artifact bytes.
+fn artifact_sha256(bytes: &[u8]) -> [u8; 32] {
+    let mut sha256 = [0; 32];
+    sha256.copy_from_slice(digest::digest(&digest::SHA256, bytes).as_ref());
+    sha256
 }
 
 /// Exclusively created private entry, cleaned on abort until rename consumes it.

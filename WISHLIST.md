@@ -38,7 +38,8 @@ The decoder/metadata, registry/candidate, guarded registered-file capture and
 immutable artifact installation milestones are verified on the development host
 and native node. Complete resource discovery, accepted-state/journal publication,
 full domain validation and runtime cutover remain pending. These control-plane
-foundations do not replace the running INI path.
+foundations do not replace the running INI path. Typed public-manifest
+readback and reference validation are the current implementation slice.
 Remove controller INI during the coordinated store/provider cutover and retain
 USBRadioPlus INI. Keep remaining resource, storage, API, provider, scheduler,
 action, message and native milestone verification items unchecked until tested.

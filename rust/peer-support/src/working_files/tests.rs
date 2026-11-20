@@ -34,7 +34,6 @@ pub(super) struct Fixture {
 impl Fixture {
     pub(super) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        // Leave room for the Unix-domain socket under the native test TMPDIR.
         let parent = env::temp_dir().join(format!(
             "rw-{:x}-{:x}",
             std::process::id(),
@@ -83,6 +82,13 @@ pub(super) fn write(path: &Path, bytes: &[u8]) {
         .write_all(bytes)
         .unwrap();
     mode(path, 0o600);
+}
+
+/// Bind through a short procfd path so the fixture root can exceed sun_path.
+pub(super) fn bind_socket(path: &Path) -> UnixListener {
+    let parent = File::open(path.parent().unwrap()).unwrap();
+    let procfd = PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()));
+    UnixListener::bind(procfd.join(path.file_name().unwrap())).unwrap()
 }
 
 fn required(relative: &str) -> CapturePath {
@@ -294,7 +300,7 @@ fn optional_enoent_is_absence_but_symlinks_special_files_and_bad_modes_fail() {
     )
     .unwrap();
     mkfifoat(CWD, fixture.path("fifo"), Mode::RUSR | Mode::WUSR).unwrap();
-    let _socket = UnixListener::bind(fixture.path("socket")).unwrap();
+    let _socket = bind_socket(&fixture.path("socket"));
     write(&fixture.path("mode-leaf"), b"protected value");
     mode(&fixture.path("mode-leaf"), 0o1600);
     directory(&fixture.path("mode-dir"));

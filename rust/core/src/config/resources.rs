@@ -1,6 +1,7 @@
 //! Owned JSON resource decoding and site-to-port inheritance.
 
 pub mod candidate;
+pub mod manifest;
 
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;

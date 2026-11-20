@@ -51,10 +51,14 @@ pub enum ResourceScope {
 }
 
 impl ResourceScope {
-    fn metadata_binding(self) -> ResourceBinding {
+    pub(super) fn id(self) -> ResourceId {
         let (Self::Site(id) | Self::Port(id)) = self;
+        id
+    }
+
+    fn metadata_binding(self) -> ResourceBinding {
         ResourceBinding {
-            id,
+            id: self.id(),
             scope: self,
             kind: ResourceKind::Metadata,
         }
@@ -96,6 +100,31 @@ pub enum ResourceKind {
 
 impl ResourceKind {
     const PROTOCOLS: [Self; 3] = [Self::Allstarlink, Self::Echolink, Self::PhonePatch];
+
+    /// Identify protocol defaults and instances using the candidate's presence rules.
+    pub(super) fn is_protocol(self) -> bool {
+        Self::PROTOCOLS.contains(&self)
+    }
+
+    /// Parse an exact supported envelope kind.
+    pub(super) fn from_wire(text: &str) -> Option<Self> {
+        [
+            Self::Metadata,
+            Self::Radio,
+            Self::RxAudio,
+            Self::RxSignaling,
+            Self::TxAudio,
+            Self::TxSignaling,
+            Self::Interface,
+            Self::PeerAudio,
+            Self::Control,
+            Self::Memories,
+            Self::ScanLists,
+        ]
+        .into_iter()
+        .chain(Self::PROTOCOLS)
+        .find(|kind| kind.as_str() == text)
+    }
 
     /// Canonical JSON envelope kind.
     pub fn as_str(self) -> &'static str {
@@ -203,6 +232,16 @@ impl ResourceRegistry {
             return Err(binding.error(CandidateProblem::DuplicateSlot));
         }
         Ok(())
+    }
+
+    /// Return the site's UUID, which is also its metadata resource ID.
+    pub fn site_id(&self) -> ResourceId {
+        self.site
+    }
+
+    /// Iterate the exact registered port keys and their scope UUIDs.
+    pub fn port_keys(&self) -> impl Iterator<Item = (&PortKey, ResourceId)> + '_ {
+        self.ports.iter().map(|(key, &id)| (key, id))
     }
 
     /// Find a port by the exact registered key.
@@ -401,7 +440,7 @@ impl<'registry> ModularCandidate<'registry> {
             }
             let fields = captured
                 .remove(&id)
-                .or_else(|| (!ResourceKind::PROTOCOLS.contains(&kind)).then(Map::new));
+                .or_else(|| (!kind.is_protocol()).then(Map::new));
             if let Some(fields) = fields {
                 staged.insert(
                     id,

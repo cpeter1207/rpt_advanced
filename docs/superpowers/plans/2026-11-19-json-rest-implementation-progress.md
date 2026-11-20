@@ -312,3 +312,46 @@ formats, private records, journal/state-pointer transactions, working-file
 publication, HTTP/HAL and the coordinated controller INI cutover remain pending.
 USBRadioPlus INI is preserved. Full production coverage, Doxygen, packaging and
 staged-install validation remain part of the required pull-request gate.
+
+
+## Fifth milestone: public manifest and verified readback
+
+**Host implementation verified, 2026-11-20; native checkpoint pending.** Added a typed reference-only public manifest and
+protected, bounded readback of explicitly selected immutable artifacts. Freeze
+format-1 fields as format_version/id/revision/site_uuid/port_keys/resources,
+with complete version/object/sha256 reference triplets. Required metadata and
+port protocol instances reference objects; empty ordinary slots retain UUIDs.
+Private graphs are unsupported and cannot silently lose reachability.
+
+The caller supplies trusted manifest ID, logical revision and digest. Product
+owns the manifest registry and exact verified bytes, then assembles the existing
+borrowed candidate on demand. This avoids a self-referential model. Logical
+revision, object version and manifest identity have distinct types; raw port
+keys remain exact JSON strings and never become paths.
+
+This milestone does not select state, activate settings, complete profiles or
+invent a private/journal/recovery format. The future selecting owner must bind
+its manifest digest to accepted state. Root/object hash validation and storage
+structure do not turn opaque section bodies into public or effective settings.
+
+### Fifth-milestone host verification
+
+Six core manifest groups, six host readback groups and five product loader
+groups failed against inert implementations, then passed after implementation.
+The final maintained constrained Debian 13 host gate passed **910 tests**, zero
+failures, across the complete core/shared-JSON/peer-support suites and both
+product capture/manifest suites. Rustdoc with warnings denied and the full fast
+formatting/lint/static gate passed, including Cppcheck, Clang-Tidy and workspace
+Clippy. Every run freshly pulled the recorded `c3800ed0` image digest.
+
+Separate host and core/product specification/code reviews approved both tasks
+with no findings. Both deferred M4 fixture notes are resolved: the socket uses
+a short procfd binding, and an observed replacement at the owned scratch name
+is explicitly preserved. The older M2 test-coordinate readability note remains
+unrelated deferred work. No dependencies, package versions or C ABI changed.
+The unreleased Rust API now calls the shared read/write cap ArtifactLimits;
+there is no obsolete InstallLimits compatibility alias.
+
+Reports, exact commands, RED/GREEN evidence and approved reviews remain under
+`.work/json-rest/milestone-5-*`. Required profile validation, accepted state and
+runtime activation are still separate from this reference/integrity validation.

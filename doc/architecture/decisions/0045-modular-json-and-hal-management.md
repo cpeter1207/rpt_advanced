@@ -64,6 +64,15 @@ that storage is unchanged. This primitive does not validate or select accepted
 configuration and cannot write state, private, journal or working namespaces.
 Directory provisioning and the complete transaction protocol remain separate.
 
+The public-manifest staging codec uses format_version/id/revision/site_uuid/
+port_keys/resources and exact-byte SHA-256 references. Empty ordinary bindings
+retain identities; metadata and port protocol instances require referenced
+objects. A selecting owner supplies the trusted manifest ID, revision and digest.
+The protected readback layer never infers accepted state from files it finds.
+Private graphs remain explicitly unsupported until their codec exists; unknown
+extra members retain the warning policy. Candidate assembly borrows the owned
+manifest registry without making raw section bodies runtime-ready.
+
 Replace the Unix maintenance socket with loopback HTTPS/HAL. Require authorized
 mTLS on every backend route, with separate proxy and CLI identities. Expose
 GET everywhere, PUT/PATCH on writable resources, and POST/DELETE on creatable

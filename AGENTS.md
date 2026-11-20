@@ -47,6 +47,13 @@ confirm durability. State-pointer, journal, private-record and working-file
 publication use their own coordinated protocols; opaque candidates are not
 validated public settings.
 
+Public-manifest readback takes a trusted manifest ID, logical revision and
+SHA-256 from its selecting owner. Verify manifest/object hashes and canonical
+resource references before assembling a staged candidate. Preserve exact port
+keys independently of paths. Unknown extra fields warn; unsafe identity,
+integrity or unsupported private graphs cannot default. Readback must not select
+state or imply domain validation/activation.
+
 ## Shared rpt_advanced project baseline
 
 This baseline applies to every production, shared-library, and workflow

@@ -309,16 +309,49 @@ A resource file contains its writable configuration and necessary identity metad
 
 A manifest contains IDs, versions, hashes, ownership and references to public/private objects, plus the exact local-key-to-port-ID registry. It does not embed configuration bodies.
 
+The initial public-manifest staging codec fixes the previously illustrative
+field names: format_version=1, id, revision, site_uuid, port_keys and resources.
+port_keys maps exact JSON-string local keys to UUIDs. A resource row has kind
+and owner; its version/object/sha256 reference triplet is either fully present
+or fully absent. SHA-256 uses 64 lowercase hexadecimal digits over exact object
+bytes, and object must be the path derived from the row UUID and version.
+Metadata requires an object; an empty ordinary/site-default row retains its
+identity. A port protocol row requires an object, and absent protocols have no
+row. The supported staging codec does not require the complete future resource
+catalog and explicitly rejects a supplied private graph until that codec exists.
+Unknown extra members warn and are ignored; unsafe identities, integrity fields,
+unsupported kinds and format versions cannot safely default.
+
+Manifest IDs, logical revisions and object versions have distinct types. Tokens
+are nonempty single POSIX components excluding dot, parent-dot, slash and NUL;
+UUID paths are canonical, and local keys never become path components. Verified
+readback takes a trusted manifest ID, revision and exact-byte digest from its
+selecting owner. It does not discover/select state.json, choose accepted state
+or validate opaque domain bodies. Those coordinated responsibilities remain
+later work. The example below shows only the currently modeled public kinds;
+object bodies are separate files.
+
 ```json
 {
+  "format_version": 1,
   "id": "manifest-42",
   "revision": "r-42",
+  "site_uuid": "11111111-1111-4111-8111-111111111111",
+  "port_keys": {},
   "resources": {
+    "11111111-1111-4111-8111-111111111111": {
+      "kind": "metadata",
+      "owner": "11111111-1111-4111-8111-111111111111",
+      "version": "v-3",
+      "object": "objects/11111111-1111-4111-8111-111111111111/v-3.json",
+      "sha256": "63781307a48e20674a88b12a8d81821db30dcff3fa867bf0ebeea67ae87b75f5"
+    },
     "33333333-3333-4333-8333-333333333333": {
       "kind": "rx-audio",
       "owner": "11111111-1111-4111-8111-111111111111",
       "version": "v-7",
-      "object": "objects/33333333-3333-4333-8333-333333333333/v-7.json"
+      "object": "objects/33333333-3333-4333-8333-333333333333/v-7.json",
+      "sha256": "3952b26dbd72bef6606a9ab1409ee3280cbf147c2aa681af414df137288d4093"
     }
   }
 }

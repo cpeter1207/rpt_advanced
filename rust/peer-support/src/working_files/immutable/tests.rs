@@ -1,9 +1,9 @@
-//! Exercise installation and durability boundaries against real protected files.
+//! Exercise immutable artifact installation and readback against protected files.
 
 use super::*;
 use crate::working_files::{
     WorkingFiles,
-    tests::{Fixture, directory, mode, write},
+    tests::{Fixture, bind_socket, directory, mode, write},
 };
 use ring::digest;
 use rustix::{
@@ -12,20 +12,21 @@ use rustix::{
 };
 use std::{
     fs,
-    os::unix::{
-        fs::{MetadataExt, symlink},
-        net::UnixListener,
-    },
+    os::unix::fs::{MetadataExt, symlink},
     path::{Path, PathBuf},
 };
 
 const UUID: &str = "abcd1234-1234-4abc-8abc-12345678abcd";
 const UPPER_UUID: &str = "ABCD1234-1234-4ABC-8ABC-12345678ABCD";
-const LIMITS: InstallLimits = InstallLimits {
+const LIMITS: ArtifactLimits = ArtifactLimits {
     max_path_bytes: 128,
     max_file_bytes: 128,
 };
 const PAYLOAD: &[u8] = b"opaque-artifact\0\xff";
+const PAYLOAD_SHA256: [u8; 32] = [
+    0xee, 0xaa, 0x07, 0x59, 0xe1, 0x8a, 0xb8, 0x30, 0xaa, 0x55, 0x4e, 0xa2, 0x15, 0xe2, 0x2f, 0xf9,
+    0x59, 0xc4, 0x8a, 0x22, 0x3e, 0x02, 0xb0, 0x0d, 0xd0, 0x0e, 0x1c, 0x6c, 0xda, 0xe8, 0x98, 0x63,
+];
 
 fn manifests(fixture: &Fixture) -> PathBuf {
     let path = fixture.root.join("manifests");
@@ -215,6 +216,12 @@ fn rejects_invalid_ids_and_protected_layout_violations() {
                 .unwrap_err(),
             unsafe_file
         );
+        assert_eq!(
+            guard
+                .read_immutable(target, &PAYLOAD_SHA256, LIMITS)
+                .unwrap_err(),
+            ReadError::Store(CaptureError::UnsafeFile)
+        );
     };
 
     for path in [fixture.root.join("objects"), object_parent.clone()] {
@@ -246,10 +253,12 @@ fn rejects_invalid_ids_and_protected_layout_violations() {
     check(&target);
     fs::remove_file(&leaf).unwrap();
 
-    let _socket = UnixListener::bind(&leaf).unwrap();
-    mode(&leaf, 0o600);
-    check(&target);
-    fs::remove_file(&leaf).unwrap();
+    let socket_id = "socket-file-that-exceeds-the-native-unix-path-limit";
+    let socket = parent.join(format!("{socket_id}.json"));
+    let _listener = bind_socket(&socket);
+    mode(&socket, 0o600);
+    check(&ImmutableTarget::manifest(socket_id).unwrap());
+    fs::remove_file(&socket).unwrap();
 
     write(&leaf, b"protected file");
     mode(&leaf, 0o640);
@@ -300,12 +309,12 @@ fn enforces_relative_path_and_byte_bounds_before_staging() {
     let object_parent = objects(&fixture);
     let files = fixture.open();
     let guard = files.try_edit().unwrap();
-    let exact = InstallLimits {
+    let exact = ArtifactLimits {
         max_path_bytes: "manifests/\u{e9}.json".len(),
         max_file_bytes: 4,
     };
     let target = ImmutableTarget::manifest("\u{e9}").unwrap();
-    let short_path = InstallLimits {
+    let short_path = ArtifactLimits {
         max_path_bytes: exact.max_path_bytes - 1,
         ..exact
     };
@@ -325,7 +334,7 @@ fn enforces_relative_path_and_byte_bounds_before_staging() {
     );
 
     let empty = ImmutableTarget::public_object(UPPER_UUID, "version").unwrap();
-    let object_limits = InstallLimits {
+    let object_limits = ArtifactLimits {
         max_path_bytes: format!("objects/{UUID}/version.json").len(),
         max_file_bytes: 0,
     };
@@ -334,7 +343,7 @@ fn enforces_relative_path_and_byte_bounds_before_staging() {
             .install_immutable(
                 &empty,
                 b"",
-                InstallLimits {
+                ArtifactLimits {
                     max_path_bytes: object_limits.max_path_bytes - 1,
                     ..object_limits
                 },
@@ -487,4 +496,204 @@ fn revalidates_parent_and_lock_at_publication_boundaries() {
             assert_eq!(fs::read(original_parent.join("a.json")).unwrap(), PAYLOAD);
         }
     }
+}
+
+#[test]
+fn reads_exact_bytes_and_digest_beyond_the_guard_lifetime() {
+    let artifacts = {
+        let fixture = Fixture::new();
+        let parent = manifests(&fixture);
+        let object_parent = objects(&fixture);
+        let files = fixture.open();
+        let guard = files.try_edit().unwrap();
+        let object = ImmutableTarget::public_object(UPPER_UUID, " b\u{e9}ta ").unwrap();
+        [
+            (target(), parent.join("a.json")),
+            (object, object_parent.join(" b\u{e9}ta .json")),
+        ]
+        .map(|(target, path)| {
+            let installed = guard.install_immutable(&target, PAYLOAD, LIMITS).unwrap();
+            assert_eq!(installed.sha256(), &PAYLOAD_SHA256);
+            let before = FileVersion::from(&fs::metadata(&path).unwrap());
+            let artifact = guard
+                .read_immutable(&target, &PAYLOAD_SHA256, LIMITS)
+                .unwrap();
+            assert!(before == FileVersion::from(&fs::metadata(&path).unwrap()));
+            assert_eq!(fs::read(&path).unwrap(), PAYLOAD);
+            assert_eq!(
+                names(path.parent().unwrap()),
+                [path.file_name().unwrap().to_str().unwrap()]
+            );
+            artifact
+        })
+    };
+    for artifact in artifacts {
+        assert_eq!(artifact.bytes(), PAYLOAD);
+        assert_eq!(artifact.sha256(), &PAYLOAD_SHA256);
+        assert_eq!(format!("{artifact:?}"), "ImmutableArtifact(..)");
+    }
+}
+
+#[test]
+fn rejects_wrong_digest_and_same_length_corruption_without_repair() {
+    let fixture = Fixture::new();
+    let parent = manifests(&fixture);
+    let path = parent.join("a.json");
+    let files = fixture.open();
+    let guard = files.try_edit().unwrap();
+    let target = target();
+    guard.install_immutable(&target, PAYLOAD, LIMITS).unwrap();
+    let mut corrupt = PAYLOAD.to_vec();
+    corrupt[0] ^= 1;
+
+    for (expected, current) in [(&[0; 32], PAYLOAD), (&PAYLOAD_SHA256, corrupt.as_slice())] {
+        write(&path, current);
+        let before = FileVersion::from(&fs::metadata(&path).unwrap());
+        let error = guard.read_immutable(&target, expected, LIMITS).unwrap_err();
+        assert_eq!(error, ReadError::DigestMismatch);
+        assert_eq!(
+            format!("{error:?} {error}"),
+            "DigestMismatch immutable artifact digest mismatch"
+        );
+        assert!(before == FileVersion::from(&fs::metadata(&path).unwrap()));
+        assert_eq!(fs::read(&path).unwrap(), current);
+        assert_eq!(names(&parent), ["a.json"]);
+    }
+}
+
+#[test]
+fn missing_artifact_read_does_not_create_entries() {
+    let fixture = Fixture::new();
+    let files = fixture.open();
+    let guard = files.try_edit().unwrap();
+    let target = target();
+    let missing = ReadError::Store(CaptureError::Missing);
+
+    assert_eq!(
+        guard
+            .read_immutable(&target, &PAYLOAD_SHA256, LIMITS)
+            .unwrap_err(),
+        missing
+    );
+    assert!(!fixture.root.join("manifests").exists());
+    let parent = manifests(&fixture);
+    assert_eq!(
+        guard
+            .read_immutable(&target, &PAYLOAD_SHA256, LIMITS)
+            .unwrap_err(),
+        missing
+    );
+    assert!(names(&parent).is_empty());
+}
+
+#[test]
+fn read_checks_exact_path_and_byte_caps() {
+    let fixture = Fixture::new();
+    let files = fixture.open();
+    let guard = files.try_edit().unwrap();
+    let exact = ArtifactLimits {
+        max_path_bytes: "manifests/\u{e9}.json".len(),
+        max_file_bytes: PAYLOAD.len() as u64,
+    };
+    let target = ImmutableTarget::manifest("\u{e9}").unwrap();
+    let short_path = ArtifactLimits {
+        max_path_bytes: exact.max_path_bytes - 1,
+        ..exact
+    };
+    // A missing directory would produce Missing if resolution preceded the limit.
+    let limit = ReadError::Store(CaptureError::Limits);
+    assert_eq!(
+        guard
+            .read_immutable(&target, &PAYLOAD_SHA256, short_path)
+            .unwrap_err(),
+        limit
+    );
+
+    let parent = manifests(&fixture);
+    let path = parent.join("\u{e9}.json");
+    write(&path, PAYLOAD);
+    let short_file = ArtifactLimits {
+        max_file_bytes: exact.max_file_bytes - 1,
+        ..exact
+    };
+    assert_eq!(
+        guard
+            .read_immutable(&target, &PAYLOAD_SHA256, short_file)
+            .unwrap_err(),
+        limit
+    );
+    assert_eq!(
+        guard
+            .read_immutable(&target, &PAYLOAD_SHA256, exact)
+            .unwrap()
+            .bytes(),
+        PAYLOAD
+    );
+    assert_eq!(names(&parent), ["\u{e9}.json"]);
+}
+
+#[test]
+fn read_rejects_replaced_file_parent_chain_or_lock_after_reading() {
+    for replaced in ["file", "namespace", "lock"] {
+        let fixture = Fixture::new();
+        let resource = objects(&fixture);
+        let path = resource.join("v.json");
+        write(&path, PAYLOAD);
+        let files = fixture.open();
+        let guard = files.try_edit().unwrap();
+        let target = ImmutableTarget::public_object(UUID, "v").unwrap();
+        let moved = fixture.root.join("moved");
+        let result = guard.read(&target, &PAYLOAD_SHA256, LIMITS, || match replaced {
+            "file" => {
+                fs::rename(&path, &moved).unwrap();
+                write(&path, PAYLOAD);
+            }
+            "namespace" => {
+                fs::rename(fixture.root.join("objects"), &moved).unwrap();
+                write(&objects(&fixture).join("v.json"), PAYLOAD);
+            }
+            _ => {
+                let lock = fixture.root.join("edit.lock");
+                fs::rename(&lock, &moved).unwrap();
+                write(&lock, b"existing lock");
+            }
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            ReadError::Store(CaptureError::Changed),
+            "{replaced}"
+        );
+        assert!(moved.exists());
+        assert_eq!(fs::read(path).unwrap(), PAYLOAD);
+    }
+}
+
+#[test]
+fn abort_preserves_a_replacement_at_the_owned_scratch_name() {
+    let fixture = Fixture::new();
+    let parent = manifests(&fixture);
+    let moved = parent.join("displaced");
+    let files = fixture.open();
+    let guard = files.try_edit().unwrap();
+    let mut scratch_name = String::new();
+    let result = guard.install(&target(), PAYLOAD, LIMITS, |boundary| {
+        assert!(boundary == InstallBoundary::BeforePublish);
+        let mut entries = names(&parent);
+        assert_eq!(entries.len(), 1);
+        scratch_name = entries.pop().unwrap();
+        let scratch = parent.join(&scratch_name);
+        fs::rename(&scratch, &moved).unwrap();
+        write(&scratch, b"replacement");
+        Ok(())
+    });
+    assert_eq!(
+        result.unwrap_err(),
+        InstallError::Store(CaptureError::Changed)
+    );
+    assert_eq!(fs::read(&moved).unwrap(), PAYLOAD);
+    assert_eq!(
+        fs::read(parent.join(&scratch_name)).unwrap(),
+        b"replacement"
+    );
+    assert_eq!(names(&parent), [scratch_name.as_str(), "displaced"]);
 }

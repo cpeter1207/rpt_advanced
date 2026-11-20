@@ -34,6 +34,12 @@ explicit uncertain outcome. Protected parent directories are preprovisioned.
 Installing an artifact does not accept a configuration. State-pointer/journal
 publication, full profiles and runtime activation remain pending.
 
+The next public-manifest layer stores only IDs, exact key bindings and immutable
+object references/hashes. The product loader takes an explicit trusted manifest
+selection, reads through the guarded host boundary and owns its verified bytes.
+It assembles the existing borrowed candidate on demand. Format/ownership/hash
+validation is separate from complete domain profiles and state selection.
+
 ## System boundary
 
 [ADR 0044](decisions/0044-phone-peers-and-rf-presentation-pacing.md) records the
