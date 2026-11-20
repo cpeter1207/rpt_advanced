@@ -27,6 +27,8 @@ Use test-driven development.
 
 [x] - Complete the UUID/key/owner registry and modular candidate assembly milestone, including explicit protocol presence, empty ordinary overrides and native node verification.
 
+[x] - Complete bounded read-only capture of registered working files under an edit lock, selected-path fingerprints/rechecks and product candidate assembly; pass host and native node checks. Complete discovery and durable publication remain pending.
+
 [] - Finalize recurring start/end pairing, overnight windows, overlapping occurrences/grace periods, calendar startup without recovery, missed checks and legacy permanent-route ownership before implementing scheduler transitions.
 
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.

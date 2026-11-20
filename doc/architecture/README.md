@@ -20,7 +20,7 @@ The core model now adds UUID-backed resource identities and explicit
 scope/kind ownership to in-memory candidates. Typed metadata is resolved
 separately from opaque unvalidated section bodies. Site defaults apply to all
 ordinary sections; protocol presence is established only by port documents.
-The next host layer, `rptadv_peer_support::working_files`, captures an explicit
+The host layer, `rptadv_peer_support::working_files`, captures an explicit
 registered path selection under the preprovisioned `edit.lock`. Protected,
 no-follow descriptor access and caller-supplied limits produce owned bytes plus
 a content fingerprint for guarded rechecks. The product adapter maps UUID/kind

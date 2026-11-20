@@ -186,7 +186,7 @@ has not been claimed by these scoped model checks.
 
 ## Third milestone: guarded capture of registered working files
 
-**Host implementation verified, 2026-11-20; native checkpoint pending.** Added bounded read-only capture under a preprovisioned
+**Completed, 2026-11-20.** Added bounded read-only capture under a preprovisioned
 service-owned edit lock, with protected descriptor-relative no-follow access,
 owned byte snapshots and SHA-256 content fingerprints for guarded rechecks.
 The product adapter maps registry UUID/kind bindings to fixed paths and passes
@@ -212,12 +212,37 @@ Rustdoc with warnings denied and full fast formatting/lint/static analysis,
 including Cppcheck, Clang-Tidy and workspace Clippy. The freshly pulled image
 resolved the recorded `c3800ed0` digest and used the verified matched IAX overlay.
 
-Independent specification/code review approved the slice. A nonblocking
-fixture-only note is deferred: timestamp-only shared fixture names could collide
-in parallel tests; use a process-local counter when editing that fixture next.
-The serial host/native milestone runs do not depend on parallel construction.
+Independent specification/code review approved the slice. The native checkpoint
+then exposed a test-fixture socket path exceeding Linux's pathname limit under
+the home-directory TMPDIR. The same failure was reproduced in the maintained
+container before replacing timestamp names with compact process/counter names.
+All ten capture tests passed under the exact 72-byte TMPDIR after the fix; the
+scoped re-review and full fast checks passed again. This also resolved the
+initial review's minor fixture-uniqueness note. Production code was unchanged.
 
 The Linux host-glue crate reuses locked ring 0.17.14 and adds rustix 1.1.6 for safe
 filesystem/locking APIs (transitive errno 0.3.15 and linux-raw-sys 0.12.1).
 Existing dependency versions are unchanged; core remains independent of host
-filesystem crates. Native verification and its final checkpoint remain pending.
+filesystem crates.
+
+### Third-milestone native checkpoint
+
+Native Debian 13 arm64 verification passed **886 tests**, zero failures, at
+published source `9a5325e8d59318ee7d13ac88e3713e43bc6a01ad` with isolated
+Rust 1.88. This includes the complete core, shared JSON and peer-support suites
+and the four product capture tests. The controller service was active before
+and after the build; no installed binary, package, live configuration or service
+state was changed. Native temporary fixture DSOs used the executable home
+filesystem because the node's `/tmp` is mounted noexec.
+
+The native log and receipt remain under the node workspace's `.work/` directory;
+the log SHA-256 is
+`408b44e7647a75c4aec96dc020b7b9507cd1c6f31109b912a5ea4e84e8cb94d3`.
+Host reports, review and exact commands remain under `.work/json-rest/`.
+
+Milestone 3 is complete and execution pauses per the checklist. Capture covers
+only registered paths. Complete discovery, resource profiles, durable accepted
+state/publication, credentials, HTTP/HAL and the coordinated controller INI
+cutover remain pending. USBRadioPlus INI is preserved. The complete native
+pull-request coverage, Doxygen, packaging and staged-install gate is still
+required before merge and has not been claimed by this milestone.
