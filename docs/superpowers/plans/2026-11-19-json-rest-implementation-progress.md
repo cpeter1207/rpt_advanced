@@ -574,7 +574,7 @@ The HTTPS component includes real nginx/Apache fixtures, bounded nonblocking coo
 
 Command preparation now covers the audited action inventory, all 78 default DTMF mappings, shared ordered macro actions, exact raw parameters/fixed values, source/owner/grant constraints and known static cycles. Two review rounds closed all ten findings. Final host verification passed 791 core tests and 88 integration tests, documentation, formatting, Clippy and full fast checks. Runtime collectors, macro execution and RX mute remain separate pending joins.
 
-The hron schedule provider source `238811360fc34908a8ea9d4174bfe49d874d2a0e` passed its full required Debian 13 amd64/arm64 PR gate, including production line/branch coverage. USBRadioPlus typed preparation source `a771f76cdb144d6d245e625020844d55e970feb0` includes independent peer DSP without physical selection; targeted host/native tests passed. Its full PR gate identified missing getter return documentation; correction is in progress before platform/coverage verification. Both provider PRs remain drafts; no release or installation is implied.
+The hron schedule provider source `238811360fc34908a8ea9d4174bfe49d874d2a0e` passed its full required Debian 13 amd64/arm64 PR gate, including production line/branch coverage. USBRadioPlus typed preparation source `a771f76cdb144d6d245e625020844d55e970feb0` includes independent peer DSP without physical selection; targeted host/native tests passed. Its full ARM64 package/install gate passed. The current AMD64 production coverage gate still needs a generated deserialization error path exercised; no full coverage success is claimed. Both provider PRs remain drafts; no release or installation is implied.
 
 Continuous execution proceeds through typed radio settings, private account graph adoption and hron event scheduling. The authorized stopping point remains implementation/runtime cutover, before any separately authorized deployment.
 
@@ -586,3 +586,14 @@ Independent review closed reserved public credential-container leakage, mixed-ke
 
 
 The authorized workflow repairs are merged: shared-workflows PR 18 and controller-workflows PR 60 permit the exact validated manifest-selected package versions to replace newer image packages. Immutable source/package pins and validation remain enforced. Controller CI now passes that downgrade step; a transient GitHub release API HTTP 502 interrupted its retry before production checks, so the failed job was retried. USBRadioPlus passed the full ARM64 package/install gate; its reviewed admission/normalization coverage fixes are published in `0ab539e0bda75c5f28d191acde950824f4ec7c9c`, with the AMD64 coverage gate pending.
+
+
+## Continuous checkpoint: typed radio and calendar foundations
+
+Published source `efa824b30b3b80f60933303ee18bed37ac54e1f1` integrates the reviewed RF/DSP/interface profiles, native typed station/peer preparation, public command/mailbox identities and hron event/calendar policy. These retain separate physical and peer owners, raw public authoring, capability failures, monotonic reservations and the four agreed occurrence policies. The local source boundary guard permits only the checked recurrence descriptor function-pointer forms; review closed direct C-import bypasses with regression fixtures.
+
+The constrained Debian 13 AMD64 host and native ARM64 home workspace both passed 992 distinct affected tests: 830 core unit tests, 112 integrations, one JSON test, 35 product configuration tests, one host-zone test and 13 actual provider preparation tests. The child-process key fixture and an extra host rollback run make raw execution totals larger; earlier progress commentary counted the child fixture separately. Strict Rustdoc and complete fast checks passed on the development host. The native service remained active; installed files and configuration were unchanged.
+
+The controller manifest now selects the released ABI3 PCM ring alpha6 required by USBRadioPlus, the recurrence provider alpha3 and typed-preparation provider alpha36. Hosted setup still requires reviewed workflow support for the USBRadioPlus source pin and the provider's isolated Rust1.93 build while retaining the controller's Rust1.88 baseline. These prerequisites are in progress; the full controller CI gate has not passed.
+
+Public HAL/store coordination, typed site defaults, Fluent/equipment/telemetry joins, the global command executor and real JSON process startup remain in progress. Serial/key-input and other documented native capability gaps must be completed before runtime cutover. This checkpoint does not activate modular JSON on the installed service.

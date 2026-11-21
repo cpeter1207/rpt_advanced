@@ -80,6 +80,7 @@ pub(super) fn resolve(
     default: Option<SignalSource>,
     interface: &super::super::Interface,
     w: &mut Vec<CandidateWarning>,
+    site: &mut super::super::SitePrerequisites,
 ) -> Option<SignalBinding> {
     let mut selected = default.map(|source| SignalBinding {
         source,
@@ -138,7 +139,10 @@ pub(super) fn resolve(
                 Use::Encoder => Vec::new(),
             };
         }
-        if (usage == Use::Encoder || source == SignalSource::Parallel) && pins.is_empty() {
+        if (usage == Use::Encoder || source == SignalSource::Parallel)
+            && pins.is_empty()
+            && !site.defer(owner, "pin")
+        {
             warn(w, owner, "pin");
             continue;
         }

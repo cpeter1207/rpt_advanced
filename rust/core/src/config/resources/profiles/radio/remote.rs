@@ -58,6 +58,16 @@ impl fmt::Debug for RemotePolicy {
     }
 }
 impl RemotePolicy {
+    /// Explicit public device, kept separate from the arbitrary public option keys.
+    pub fn hamlib_device(&self) -> Option<&str> {
+        self.hamlib_options.get("rig_pathname").map(String::as_str)
+    }
+    /// Effective public options. The device is the sole source of the reserved SDK pathname key.
+    pub fn authored_hamlib_options(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.hamlib_options
+            .iter()
+            .filter(|(k, _)| k.as_str() != "rig_pathname")
+    }
     pub(super) fn read(
         c: &Inputs<'_>,
         l: &Inputs<'_>,

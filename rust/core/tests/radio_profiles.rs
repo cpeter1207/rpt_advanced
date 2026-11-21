@@ -13,6 +13,13 @@ fn id(n: u32) -> ResourceId {
 }
 
 fn with_port(rows: &[(bool, Kind, Option<Value>)], verify: impl FnOnce(ModularCandidate<'_>)) {
+    with_scopes(true, rows, verify);
+}
+fn with_scopes(
+    registered: bool,
+    rows: &[(bool, Kind, Option<Value>)],
+    verify: impl FnOnce(ModularCandidate<'_>),
+) {
     let port = id(2);
     let site = id(1);
     let bindings: Vec<_> = rows
@@ -28,8 +35,8 @@ fn with_port(rows: &[(bool, Kind, Option<Value>)], verify: impl FnOnce(ModularCa
             kind: *kind,
         })
         .collect();
-    let registry =
-        ResourceRegistry::new(site, &[(port, PortKey::new("Écho ; #"))], &bindings).unwrap();
+    let ports = registered.then(|| (port, PortKey::new("Écho ; #")));
+    let registry = ResourceRegistry::new(site, ports.as_slice(), &bindings).unwrap();
     let bodies: Vec<_> = registry
         .bindings()
         .filter_map(|b| {
@@ -858,4 +865,347 @@ fn repeated_transmit_tones_retain_warning_free_sparse_and_effective_maps() {
             assert!(p.warnings().is_empty());
         },
     );
+}
+
+#[test]
+fn a_zero_port_site_resolves_radio_and_independent_processing_without_claiming_hardware() {
+    let site = id(1);
+    let bindings = [
+        (Kind::Radio, json!({"duplex_mode":"full"})),
+        (Kind::PeerAudio, json!({})),
+        (
+            Kind::Interface,
+            json!({"audio":{"device_identifier":"site policy; no open"}}),
+        ),
+    ];
+    let slots: Vec<_> = bindings
+        .iter()
+        .enumerate()
+        .map(|(i, (kind, _))| ResourceBinding {
+            id: id(i as u32 + 3),
+            scope: ResourceScope::Site(site),
+            kind: *kind,
+        })
+        .collect();
+    let registry = ResourceRegistry::new(site, &[], &slots).unwrap();
+    let docs: Vec<_> = registry
+        .bindings()
+        .map(|b| {
+            let settings = slots
+                .iter()
+                .position(|r| r.id == b.id)
+                .map(|i| bindings[i].1.clone())
+                .unwrap_or_else(|| json!({"name":"site","inherit_from":null}));
+            (
+                b,
+                serde_json::to_vec(
+                    &json!({"id":b.id.to_string(),"kind":b.kind.as_str(),"configuration":settings}),
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let captures: Vec<_> = docs
+        .iter()
+        .map(|(binding, json)| CapturedResource {
+            binding: *binding,
+            json,
+        })
+        .collect();
+    let candidate = ModularCandidate::assemble(&registry, &captures).unwrap();
+    let resolved = candidate.resolve_radio_profiles().unwrap();
+    let policy = resolved.site();
+    assert!(policy.general.full_duplex());
+    assert_eq!(
+        policy.interface.audio.device_identifier,
+        "site policy; no open"
+    );
+    assert!(policy.processing.link.is_some());
+    assert!(policy.processing.local.is_none());
+    assert!(resolved.port(site).is_none());
+}
+
+#[test]
+fn site_radio_projection_and_registered_port_use_their_own_precedence_and_capture() {
+    with_port(
+        &[
+            (
+                false,
+                Kind::RxSignaling,
+                Some(json!({"squelch":{"level":713}})),
+            ),
+            (
+                true,
+                Kind::RxSignaling,
+                Some(json!({"squelch":{"level":206}})),
+            ),
+            (true, Kind::PeerAudio, Some(json!({}))),
+        ],
+        |c| {
+            let resolved = c.resolve_radio_profiles().unwrap();
+            assert_eq!(resolved.site().signals.rx.squelch.level, 713);
+            assert!(resolved.site().processing.link.is_none());
+            let local = resolved.port(id(2)).unwrap();
+            assert_eq!(local.signals.rx.squelch.level, 206);
+            assert!(local.processing.link.is_some());
+        },
+    );
+}
+
+#[test]
+fn site_unresolved_scan_keeps_its_typed_selectors_while_a_real_port_supplies_its_memories() {
+    let m = json!({"frequency":146.52,"offset":{"enabled":false,"direction":"minus","frequency":0.6},"mode":"FM","tx_ctcss":{"enabled":false,"frequency":100},"rx_ctcss":{"enabled":false,"frequency":100}});
+    with_port(
+        &[
+            (false, Kind::Radio, Some(json!({"startup_memory":1}))),
+            (
+                false,
+                Kind::ScanLists,
+                Some(json!({"north":{"selector":2,"members":[1],"priority":1}})),
+            ),
+            (true, Kind::Memories, Some(json!({"entries":[m]}))),
+            (true, Kind::PeerAudio, None),
+        ],
+        |c| {
+            let p = c.resolve_radio_profiles().unwrap();
+            assert_eq!(p.site().scan_lists["north"].members, [1]);
+            assert_eq!(p.site().general.startup_memory, Some(1));
+            assert!(
+                p.site_diagnostics()
+                    .iter()
+                    .any(|d| d.resource.id == id(4) && d.field == "members")
+            );
+            assert_eq!(
+                p.port(id(2)).unwrap().settings.scan_lists["north"].members,
+                [1]
+            );
+            assert_eq!(
+                p.source(ResourceScope::Site(id(1)), Kind::ScanLists)
+                    .unwrap()
+                    .id,
+                id(4)
+            );
+            assert!(
+                p.source(ResourceScope::Port(id(2)), Kind::PeerAudio)
+                    .is_none()
+            );
+        },
+    );
+}
+#[test]
+fn public_radio_timings_and_hamlib_device_are_lossless_before_native_projection() {
+    with_port(
+        &[
+            (
+                false,
+                Kind::RxSignaling,
+                Some(json!({"timing":{"on_delay_ms":21}})),
+            ),
+            (
+                true,
+                Kind::TxSignaling,
+                Some(json!({"ptt":{"timing":{"off_delay_ms":39}}})),
+            ),
+            (
+                false,
+                Kind::Control,
+                Some(
+                    json!({"hamlib":{"device":" /dev/station ","options":{"custom":" keep ","rig_pathname":"ignored"}}}),
+                ),
+            ),
+        ],
+        |c| {
+            let p = c.resolve_radio_profiles().unwrap();
+            let site = p.site();
+            assert_eq!(
+                (site.signals.rx.on_delay_ms, site.signals.rx.on_delay_blocks),
+                (21, 2)
+            );
+            let radio = p.port(id(2)).unwrap();
+            assert_eq!(
+                (
+                    radio.signals.tx.off_delay_ms,
+                    radio.signals.tx.off_delay_blocks
+                ),
+                (39, 2)
+            );
+            assert_eq!(radio.general.duplex_mode.as_str(), "half");
+            assert_eq!(radio.remote.hamlib_device(), Some(" /dev/station "));
+            assert_eq!(
+                radio
+                    .remote
+                    .authored_hamlib_options()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect::<Vec<_>>(),
+                [("custom", " keep ")]
+            );
+            assert_eq!(
+                radio.remote.hamlib_options["rig_pathname"],
+                " /dev/station "
+            );
+        },
+    );
+}
+
+#[test]
+fn site_scan_rows_without_selectors_or_members_remain_typed_and_editable() {
+    with_port(
+        &[(
+            false,
+            Kind::ScanLists,
+            Some(json!({"north":{"timing":{"dwell_ms":750},"priority":2}})),
+        )],
+        |candidate| {
+            let resolved = candidate.resolve_radio_profiles().unwrap();
+            let scan = &resolved.partial_site_scans()["north"];
+            assert_eq!(
+                (scan.selector, scan.members.as_deref(), scan.priority),
+                (None, None, Some(2))
+            );
+            assert_eq!(scan.dwell_ms, 750);
+            assert!(resolved.port(id(2)).unwrap().scan_lists.is_empty());
+        },
+    );
+}
+
+#[test]
+fn c1_site_ptt_retains_parallel_source_when_only_the_port_supplies_the_connector() {
+    with_port(
+        &[
+            (
+                false,
+                Kind::TxSignaling,
+                Some(json!({"ptt":{"source":"parallel","inverted":true}})),
+            ),
+            (
+                true,
+                Kind::Interface,
+                Some(json!({"parallel":{"outputs":{"2":"ptt"}}})),
+            ),
+        ],
+        |c| {
+            let p = c.resolve_radio_profiles().unwrap();
+            let site = &p.site().signals.tx.ptt;
+            assert_eq!(site.source.as_str(), "parallel");
+            assert!(site.pins.is_empty() && site.inverted);
+            assert!(
+                p.site_diagnostics()
+                    .iter()
+                    .any(|d| d.resource.id == id(3) && d.field == "pin")
+            );
+            let child = &p.port(id(2)).unwrap().signals.tx.ptt;
+            assert_eq!(child.source.as_str(), "parallel");
+            assert_eq!(child.pins, [2]);
+            assert!(child.inverted);
+        },
+    );
+}
+#[test]
+fn c1_site_clip_indicator_retains_pin_when_only_the_port_supplies_output_direction() {
+    with_port(
+        &[
+            (
+                false,
+                Kind::Interface,
+                Some(json!({"gpio":{"clip_led_pin":1}})),
+            ),
+            (
+                true,
+                Kind::Interface,
+                Some(json!({"gpio":{"pins":{"1":"out0"}}})),
+            ),
+        ],
+        |c| {
+            let p = c.resolve_radio_profiles().unwrap();
+            assert_eq!(p.site().interface.gpio.clip_led_pin, Some(1));
+            assert!(
+                p.site_diagnostics()
+                    .iter()
+                    .any(|d| d.resource.id == id(3) && d.field == "clip_led_pin")
+            );
+            assert_eq!(p.port(id(2)).unwrap().interface.gpio.clip_led_pin, Some(1));
+            assert_eq!(
+                p.port(id(2)).unwrap().interface.gpio.pins[0].as_str(),
+                "out0"
+            );
+        },
+    );
+}
+#[test]
+fn c1_site_ctcss_hang_retains_duration_when_only_the_port_supplies_the_ptt_hang() {
+    with_port(
+        &[
+            (
+                false,
+                Kind::TxSignaling,
+                Some(json!({"ctcss":{"timing":{"hang_ms":100}}})),
+            ),
+            (
+                true,
+                Kind::TxSignaling,
+                Some(json!({"ptt":{"timing":{"hang_ms":200}}})),
+            ),
+        ],
+        |c| {
+            let p = c.resolve_radio_profiles().unwrap();
+            assert_eq!(
+                (
+                    p.site().signals.tx.ctcss.hang_ms,
+                    p.site().signals.tx.hang_ms
+                ),
+                (100, 0)
+            );
+            assert!(
+                p.site_diagnostics()
+                    .iter()
+                    .any(|d| d.resource.id == id(3) && d.field == "hang_ms")
+            );
+            let tx = &p.port(id(2)).unwrap().signals.tx;
+            assert_eq!((tx.ctcss.hang_ms, tx.hang_ms), (100, 200));
+        },
+    );
+}
+#[test]
+fn c2_only_the_inheriting_port_projects_its_signaling_pin_onto_the_interface() {
+    for registered in [false, true] {
+        with_scopes(
+            registered,
+            &[
+                (
+                    false,
+                    Kind::Interface,
+                    Some(json!({"parallel":{"outputs":{"2":"ptt","5":"out1"}}})),
+                ),
+                (
+                    false,
+                    Kind::TxSignaling,
+                    Some(json!({"ptt":{"source":"parallel","pin":[3]}})),
+                ),
+            ],
+            |c| {
+                let p = c.resolve_radio_profiles().unwrap();
+                assert_eq!(
+                    p.site().interface.parallel.outputs[..4]
+                        .iter()
+                        .map(|o| o.as_str())
+                        .collect::<Vec<_>>(),
+                    ["ptt", "", "", "out1"]
+                );
+                assert_eq!(p.site().signals.tx.ptt.pins, [3]);
+                assert!(p.site_diagnostics().is_empty());
+                if !registered {
+                    assert!(p.port(id(2)).is_none());
+                    return;
+                }
+                let child = p.port(id(2)).unwrap();
+                assert_eq!(
+                    child.interface.parallel.outputs[..4]
+                        .iter()
+                        .map(|o| o.as_str())
+                        .collect::<Vec<_>>(),
+                    ["", "ptt", "", "out1"]
+                );
+            },
+        );
+    }
 }

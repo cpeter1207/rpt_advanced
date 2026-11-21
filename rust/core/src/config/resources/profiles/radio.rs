@@ -5,6 +5,8 @@ macro_rules! choices {
         #[derive(Clone,Copy,Debug,PartialEq,Eq)]
         pub enum $name {$(#[doc=concat!("Public selection `",$wire,"`.")] $variant),+}
         impl $name {
+            /// Canonical public spelling for this selection.
+            pub fn as_str(self) -> &'static str { match self { $(Self::$variant => $wire,)+ } }
             fn read(value:&str)->Self{match value{$($wire=>Self::$variant,)+ _=>unreachable!("normalized station selector")}}
         }
     }
@@ -25,7 +27,7 @@ use super::{
     CandidateWarning, EffectiveMetadata, ModularCandidate, NormalizedProfileResource, PortKey,
     ResourceBinding, ResourceId, ResourceKind, ResourceScope,
 };
-pub use memories::{Memory, MemoryMode, MemoryTone, ScanList};
+pub use memories::{Memory, MemoryMode, MemoryTone, PartialSiteScan, ScanList};
 use std::{collections::BTreeMap, fmt};
 
 /// Unresolvable relationship in an effective radio profile.
@@ -49,6 +51,22 @@ impl fmt::Display for RadioProfileError {
 }
 impl std::error::Error for RadioProfileError {}
 
+/// Site defaults may rely on a real port to complete a recognized hardware or timing relationship.
+struct SitePrerequisites<'a>(Option<&'a mut Vec<RadioProfileError>>);
+impl SitePrerequisites<'_> {
+    fn defer(&mut self, resource: ResourceBinding, field: &'static str) -> bool {
+        if let Some(problems) = self.0.as_mut() {
+            problems.push(RadioProfileError {
+                resource,
+                conflicting: None,
+                field,
+            });
+            return true;
+        }
+        false
+    }
+}
+
 /// Effective radio configuration for one exact local port.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RadioPortProfile {
@@ -58,6 +76,19 @@ pub struct RadioPortProfile {
     pub key: PortKey,
     /// Resolved metadata with its local display name.
     pub metadata: EffectiveMetadata,
+    /// Effective radio settings shared with the site-default projection.
+    pub settings: RadioSettings,
+}
+impl std::ops::Deref for RadioPortProfile {
+    type Target = RadioSettings;
+    fn deref(&self) -> &Self::Target {
+        &self.settings
+    }
+}
+
+/// Resolved public radio settings. Only a registered port carries a physical identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RadioSettings {
     /// General radio and remote scan/tune settings.
     pub general: RadioGeneral,
     /// Hardware selectors, mixer intentions and configured wiring.
@@ -79,13 +110,38 @@ pub struct RadioPortProfile {
 }
 
 /// Verified radio definitions and recognized public overrides.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ResolvedRadioProfiles {
+    site: RadioSettings,
+    partial_site_scans: BTreeMap<String, PartialSiteScan>,
+    site_diagnostics: Vec<RadioProfileError>,
+    site_warnings: Vec<CandidateWarning>,
+    sources: BTreeMap<(ResourceScope, ResourceKind), ResourceBinding>,
     local: BTreeMap<ResourceId, NormalizedProfileResource>,
     ports: BTreeMap<ResourceId, RadioPortProfile>,
     warnings: Vec<CandidateWarning>,
 }
 impl ResolvedRadioProfiles {
+    /// Inspect field-normalized site defaults even when their references need a port override.
+    pub fn site(&self) -> &RadioSettings {
+        &self.site
+    }
+    /// Field-normalized site scan rows waiting for selectors or members from a port.
+    pub fn partial_site_scans(&self) -> &BTreeMap<String, PartialSiteScan> {
+        &self.partial_site_scans
+    }
+    /// Relationships requiring completion or correction before stand-alone site admission.
+    pub fn site_diagnostics(&self) -> &[RadioProfileError] {
+        &self.site_diagnostics
+    }
+    /// Source-attributed warnings for site defaults independent of individual port admission.
+    pub fn site_warnings(&self) -> &[CandidateWarning] {
+        &self.site_warnings
+    }
+    /// Captured authoring resource, including an explicitly empty processing document.
+    pub fn source(&self, scope: ResourceScope, kind: ResourceKind) -> Option<ResourceBinding> {
+        self.sources.get(&(scope, kind)).copied()
+    }
     /// Read normalized sparse authoring fields by resource UUID.
     pub fn local(&self, id: ResourceId) -> Option<&NormalizedProfileResource> {
         self.local.get(&id)
@@ -105,10 +161,9 @@ impl ModularCandidate<'_> {
     pub fn resolve_radio_profiles(&self) -> Result<ResolvedRadioProfiles, RadioProfileError> {
         let registry = self.registry();
         let site = ResourceScope::Site(registry.site_id());
-        let mut result = ResolvedRadioProfiles {
-            warnings: self.warnings().to_vec(),
-            ..Default::default()
-        };
+        let mut local = BTreeMap::new();
+        let mut sources = BTreeMap::new();
+        let mut warnings = self.warnings().to_vec();
         for b in registry.bindings() {
             let Some(resource) = self.staged(b.scope, b.kind) else {
                 continue;
@@ -120,27 +175,25 @@ impl ModularCandidate<'_> {
                     } else {
                         station::INTERFACE
                     };
-                    super::normalize::normalize(b, resource.fields(), schema, &mut result.warnings)
+                    super::normalize::normalize(b, resource.fields(), schema, &mut warnings)
                 }
                 ResourceKind::RxSignaling | ResourceKind::TxSignaling => {
-                    signals::normalize(b, resource.fields(), &mut result.warnings)
+                    signals::normalize(b, resource.fields(), &mut warnings)
                 }
-                ResourceKind::Control => {
-                    remote::control(b, resource.fields(), &mut result.warnings)
-                }
+                ResourceKind::Control => remote::control(b, resource.fields(), &mut warnings),
                 ResourceKind::Power | ResourceKind::Limits => {
                     let schema = if b.kind == ResourceKind::Power {
                         remote::fields::POWER
                     } else {
                         remote::fields::LIMITS
                     };
-                    super::normalize::normalize(b, resource.fields(), schema, &mut result.warnings)
+                    super::normalize::normalize(b, resource.fields(), schema, &mut warnings)
                 }
                 ResourceKind::Memories => {
-                    memories::normalize_memories(b, resource.fields(), &mut result.warnings)
+                    memories::normalize_memories(b, resource.fields(), &mut warnings)
                 }
                 ResourceKind::ScanLists => {
-                    memories::normalize_scans(b, resource.fields(), &mut result.warnings)
+                    memories::normalize_scans(b, resource.fields(), &mut warnings)
                 }
                 ResourceKind::RxAudio | ResourceKind::TxAudio | ResourceKind::PeerAudio => {
                     let schema = match b.kind {
@@ -148,11 +201,14 @@ impl ModularCandidate<'_> {
                         ResourceKind::TxAudio => processing::fields::TX_AUDIO,
                         _ => processing::fields::LINK,
                     };
-                    super::normalize::normalize(b, resource.fields(), schema, &mut result.warnings)
+                    super::normalize::normalize(b, resource.fields(), schema, &mut warnings)
                 }
                 _ => continue,
             };
-            result.local.insert(
+            if resource.was_captured() {
+                sources.insert((b.scope, b.kind), b);
+            }
+            local.insert(
                 b.id,
                 NormalizedProfileResource {
                     binding: b,
@@ -160,97 +216,187 @@ impl ModularCandidate<'_> {
                 },
             );
         }
+        let mut site_warnings = warnings
+            .iter()
+            .filter(|w| w.resource.scope == site)
+            .cloned()
+            .collect();
+        let mut site_diagnostics = Vec::new();
+        let mut partial_site_scans = BTreeMap::new();
+        let site_settings = self.radio_settings(
+            site,
+            &local,
+            &mut site_warnings,
+            &mut site_diagnostics,
+            Some(&mut partial_site_scans),
+        );
         let mut device_claims = BTreeMap::new();
+        let mut ports = BTreeMap::new();
         for (key, id) in registry.port_keys() {
-            let layers = |kind| {
-                [ResourceScope::Port(id), site].map(|scope| {
-                    registry
-                        .binding(scope, kind)
-                        .and_then(|b| result.local.get(&b.id))
-                })
-            };
-            let inputs = |kind| inputs::Inputs::from_resources(layers(kind));
-            let mut general = RadioGeneral::read(&inputs(ResourceKind::Radio));
-            let mut interface =
-                Interface::read(&inputs(ResourceKind::Interface), &mut result.warnings);
-            let rx_audio = RxAudio::read(&inputs(ResourceKind::RxAudio));
-            let tx_audio = TxAudio::read(&inputs(ResourceKind::TxAudio));
-            let signals = RadioSignals::read(
-                &inputs(ResourceKind::RxSignaling),
-                &inputs(ResourceKind::TxSignaling),
-                &interface,
-                &mut result.warnings,
-            )?;
-            let port_binding = registry
-                .binding(ResourceScope::Port(id), ResourceKind::Metadata)
-                .expect("registered port identity");
-            claims::apply(&mut interface, &signals, port_binding)?;
-            let mut role = |kind| {
-                let captured = [ResourceScope::Port(id), site]
-                    .map(|scope| self.staged(scope, kind).is_some_and(|s| s.was_captured()));
-                processing::resolve(kind, layers(kind), captured, &mut result.warnings)
-            };
-            let processing = ProcessingRoles {
-                local: role(ResourceKind::RxAudio),
-                link: role(ResourceKind::PeerAudio),
-                voice_telemetry: role(ResourceKind::TxAudio),
-            };
-            let memories = memories::effective(layers(ResourceKind::Memories));
-            general.startup_memory = inputs(ResourceKind::Radio)
-                .values(&["startup_memory"])
-                .find_map(|(value, b)| {
-                    let n = value.as_u64()?;
-                    if n as usize <= memories.len() {
-                        Some(n as u32)
-                    } else {
-                        super::normalize::warn(&mut result.warnings, b, "startup_memory");
-                        None
-                    }
-                });
-            let remote = RemotePolicy::read(
-                &inputs(ResourceKind::Control),
-                &inputs(ResourceKind::Limits),
-                &inputs(ResourceKind::Power),
-                &general,
-                memories.len(),
-                &mut result.warnings,
-            );
-            let scan_lists = memories::scans(
-                layers(ResourceKind::ScanLists),
-                memories.len(),
-                &mut result.warnings,
-            )?;
+            let scope = ResourceScope::Port(id);
+            let mut diagnostics = Vec::new();
+            let settings =
+                self.radio_settings(scope, &local, &mut warnings, &mut diagnostics, None);
+            if let Some(error) = diagnostics.into_iter().next() {
+                return Err(error);
+            }
             let metadata = self
                 .port_metadata(id)
                 .expect("assembled metadata")
                 .effective(self.site_metadata());
             if metadata.enabled {
+                let binding = registry
+                    .binding(scope, ResourceKind::Metadata)
+                    .expect("registered port identity");
                 claims::reserve(
                     &mut device_claims,
-                    &interface,
-                    &signals,
-                    &remote,
-                    port_binding,
+                    &settings.interface,
+                    &settings.signals,
+                    &settings.remote,
+                    binding,
                 )?;
             }
-            result.ports.insert(
+            ports.insert(
                 id,
                 RadioPortProfile {
                     id,
                     key: key.clone(),
                     metadata,
-                    processing,
-                    general,
-                    interface,
-                    rx_audio,
-                    tx_audio,
-                    signals,
-                    remote,
-                    memories,
-                    scan_lists,
+                    settings,
                 },
             );
         }
-        Ok(result)
+        Ok(ResolvedRadioProfiles {
+            site: site_settings,
+            partial_site_scans,
+            site_diagnostics,
+            site_warnings,
+            sources,
+            local,
+            ports,
+            warnings,
+        })
+    }
+
+    fn radio_settings(
+        &self,
+        scope: ResourceScope,
+        local: &BTreeMap<ResourceId, NormalizedProfileResource>,
+        warnings: &mut Vec<CandidateWarning>,
+        diagnostics: &mut Vec<RadioProfileError>,
+        partial_site_scans: Option<&mut BTreeMap<String, PartialSiteScan>>,
+    ) -> RadioSettings {
+        let registry = self.registry();
+        let site = ResourceScope::Site(registry.site_id());
+        let site_only = scope == site;
+        let scopes = [(!site_only).then_some(scope), Some(site)];
+        let owner = registry
+            .binding(scope, ResourceKind::Metadata)
+            .expect("registered scope identity");
+        let layers = |kind| {
+            scopes.map(|scope| {
+                scope
+                    .and_then(|s| registry.binding(s, kind))
+                    .and_then(|b| local.get(&b.id))
+            })
+        };
+        let inputs = |kind| inputs::Inputs::from_resources(layers(kind));
+        let mut general = RadioGeneral::read(&inputs(ResourceKind::Radio));
+        let mut interface = Interface::read(
+            &inputs(ResourceKind::Interface),
+            warnings,
+            &mut SitePrerequisites(site_only.then_some(&mut *diagnostics)),
+        );
+        let rx_audio = RxAudio::read(&inputs(ResourceKind::RxAudio));
+        let tx_audio = TxAudio::read(&inputs(ResourceKind::TxAudio));
+        let signals = RadioSignals::read(
+            &inputs(ResourceKind::RxSignaling),
+            &inputs(ResourceKind::TxSignaling),
+            &interface,
+            site_only,
+            warnings,
+            diagnostics,
+        );
+        // The site exposes the authored connector roles. A port exposes the actual prepared wiring.
+        let mut projected;
+        let wiring = if site_only {
+            projected = interface.clone();
+            &mut projected
+        } else {
+            &mut interface
+        };
+        if let Err(error) = claims::apply(wiring, &signals, owner) {
+            diagnostics.push(error);
+        }
+        let mut role = |kind| {
+            let captured = scopes.map(|scope| {
+                scope
+                    .and_then(|scope| self.staged(scope, kind))
+                    .is_some_and(|s| s.was_captured())
+            });
+            processing::resolve(kind, layers(kind), captured, warnings)
+        };
+        let processing = ProcessingRoles {
+            local: role(ResourceKind::RxAudio),
+            link: role(ResourceKind::PeerAudio),
+            voice_telemetry: role(ResourceKind::TxAudio),
+        };
+        let memories = memories::effective(layers(ResourceKind::Memories));
+        general.startup_memory = inputs(ResourceKind::Radio)
+            .values(&["startup_memory"])
+            .find_map(|(value, b)| {
+                let n = value.as_u64()?;
+                if n as usize <= memories.len() {
+                    Some(n as u32)
+                } else if site_only {
+                    diagnostics.push(RadioProfileError {
+                        resource: b,
+                        conflicting: None,
+                        field: "startup_memory",
+                    });
+                    Some(n as u32)
+                } else {
+                    super::normalize::warn(warnings, b, "startup_memory");
+                    None
+                }
+            });
+        let mut remote = RemotePolicy::read(
+            &inputs(ResourceKind::Control),
+            &inputs(ResourceKind::Limits),
+            &inputs(ResourceKind::Power),
+            &general,
+            memories.len(),
+            warnings,
+        );
+        if site_only
+            && !remote.enabled
+            && let Some((v, b)) = inputs(ResourceKind::Control).values(&["enabled"]).next()
+            && v.as_bool() == Some(true)
+        {
+            diagnostics.push(RadioProfileError {
+                resource: b,
+                conflicting: None,
+                field: "enabled",
+            });
+            remote.enabled = true;
+        }
+        let scan_lists = memories::scans(
+            layers(ResourceKind::ScanLists),
+            memories.len(),
+            partial_site_scans,
+            warnings,
+            diagnostics,
+        );
+        RadioSettings {
+            general,
+            interface,
+            rx_audio,
+            tx_audio,
+            signals,
+            processing,
+            remote,
+            memories,
+            scan_lists,
+        }
     }
 }

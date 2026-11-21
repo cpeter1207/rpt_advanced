@@ -120,6 +120,8 @@ pub struct RxSignals {
     pub ctcss: RxCtcss,
     /// DCS qualification.
     pub dcs: RxDcs,
+    /// Effective public RX-on delay in milliseconds.
+    pub on_delay_ms: u32,
     /// Delay before opening receive in 20-ms blocks.
     pub on_delay_blocks: u32,
     /// DSP squelch delay.
@@ -178,6 +180,8 @@ pub struct TxSignals {
     pub ptt: SignalBinding,
     /// Key-up settling time.
     pub settle_ms: u32,
+    /// Effective public PTT-off delay in milliseconds.
+    pub off_delay_ms: u32,
     /// Key-down tail in 20-ms blocks.
     pub off_delay_blocks: u32,
     /// Transmitter activity hang.
@@ -199,7 +203,7 @@ pub struct RadioSignals {
     /// Transmitter signaling.
     pub tx: TxSignals,
 }
-fn enabled_pair(v: &Inputs<'_>) -> Result<[bool; 2], RadioProfileError> {
+fn enabled_pair(v: &Inputs<'_>, diagnostics: &mut Vec<RadioProfileError>) -> [bool; 2] {
     let enabled = ["ctcss", "dcs"].map(|name| {
         v.values(&[name, "enabled"])
             .next()
@@ -212,13 +216,13 @@ fn enabled_pair(v: &Inputs<'_>) -> Result<[bool; 2], RadioProfileError> {
         } else {
             (c, d)
         };
-        return Err(RadioProfileError {
+        diagnostics.push(RadioProfileError {
             resource,
             conflicting: (resource != other).then_some(other),
             field: "ctcss_dcs",
         });
     }
-    Ok(enabled.map(|owner| owner.is_some()))
+    enabled.map(|owner| owner.is_some())
 }
 impl RxSignals {
     fn read(
@@ -226,6 +230,7 @@ impl RxSignals {
         wiring: &super::Interface,
         [ctcss, dcs]: [bool; 2],
         w: &mut Vec<CandidateWarning>,
+        site: &mut super::SitePrerequisites,
     ) -> Self {
         let squelch = Squelch {
             enabled: v.flag(&["squelch", "enabled"], true),
@@ -236,6 +241,7 @@ impl RxSignals {
                 Some(SignalSource::Dsp),
                 wiring,
                 w,
+                site,
             )
             .expect("built-in squelch"),
             level: v.uint(&["squelch", "level"], 500),
@@ -262,8 +268,10 @@ impl RxSignals {
             Some(SignalSource::Dsp),
             wiring,
             w,
+            site,
         )
         .expect("built-in decoder");
+        let on_delay_ms = v.uint(&["timing", "on_delay_ms"], 0);
         Self {
             squelch,
             vad_enabled,
@@ -282,7 +290,8 @@ impl RxSignals {
                 source: SignalSource::read(v.text(&["dcs", "source"], "dsp")),
                 code: DigitalCode::read(v),
             },
-            on_delay_blocks: v.uint(&["timing", "on_delay_ms"], 0).div_ceil(20),
+            on_delay_ms,
+            on_delay_blocks: on_delay_ms.div_ceil(20),
             squelch_delay_ms: v.uint(&["timing", "squelch_delay_ms"], 0),
             kerchunk_max_ms: v.uint(&["timing", "kerchunk_max_ms"], 500),
         }
@@ -294,13 +303,14 @@ impl TxSignals {
         wiring: &super::Interface,
         [ctcss, dcs]: [bool; 2],
         w: &mut Vec<CandidateWarning>,
+        site: &mut super::SitePrerequisites,
     ) -> Self {
         let hang_ms = v.uint(&["ptt", "timing", "hang_ms"], 0);
         let tone_hang = v
             .values(&["ctcss", "timing", "hang_ms"])
             .find_map(|(value, b)| {
                 let n = u32::try_from(value.as_u64()?).ok()?;
-                if n > hang_ms {
+                if n > hang_ms && !site.defer(b, "hang_ms") {
                     warn(w, b, "hang_ms");
                     None
                 } else {
@@ -316,12 +326,15 @@ impl TxSignals {
             Some(SignalSource::SoundChipGpio),
             wiring,
             w,
+            site,
         )
         .expect("built-in PTT");
+        let off_delay_ms = v.uint(&["ptt", "timing", "off_delay_ms"], 0);
         Self {
             ptt,
             settle_ms: v.uint(&["ptt", "timing", "settle_ms"], 500),
-            off_delay_blocks: v.uint(&["ptt", "timing", "off_delay_ms"], 0).div_ceil(20),
+            off_delay_ms,
+            off_delay_blocks: off_delay_ms.div_ceil(20),
             hang_ms,
             timeout_ms: v.uint(&["ptt", "timing", "timeout_ms"], 180000),
             rx_blanking_ms: v.uint(&["ptt", "timing", "rx_blanking_ms"], 0),
@@ -329,7 +342,15 @@ impl TxSignals {
                 enabled: ctcss,
                 source,
                 tones: Tones::read(v, source == SignalSource::Dsp, false, w),
-                output: binding::resolve(v, &["ctcss", "output"], Use::Encoder, None, wiring, w),
+                output: binding::resolve(
+                    v,
+                    &["ctcss", "output"],
+                    Use::Encoder,
+                    None,
+                    wiring,
+                    w,
+                    site,
+                ),
                 level_dbfs: v.number(&["ctcss", "level_dbfs"], -24.0),
                 turnoff: TurnoffMode::read(v.text(&["ctcss", "turnoff", "mode"], "phase_shift")),
                 phase_shift_degrees: v.number(&["ctcss", "turnoff", "phase_shift_degrees"], 120.0),
@@ -341,7 +362,15 @@ impl TxSignals {
             dcs: TxDcs {
                 enabled: dcs,
                 source: SignalSource::read(v.text(&["dcs", "source"], "dsp")),
-                output: binding::resolve(v, &["dcs", "output"], Use::Encoder, None, wiring, w),
+                output: binding::resolve(
+                    v,
+                    &["dcs", "output"],
+                    Use::Encoder,
+                    None,
+                    wiring,
+                    w,
+                    site,
+                ),
                 code: DigitalCode::read(v),
                 level_dbfs: v.number(&["dcs", "level_dbfs"], -24.0),
                 turnoff_enabled: v.flag(&["dcs", "turnoff", "enabled"], true),
@@ -355,11 +384,16 @@ impl RadioSignals {
         rx: &Inputs<'_>,
         tx: &Inputs<'_>,
         wiring: &super::Interface,
+        site_only: bool,
         w: &mut Vec<CandidateWarning>,
-    ) -> Result<Self, RadioProfileError> {
+        diagnostics: &mut Vec<RadioProfileError>,
+    ) -> Self {
+        let receive = enabled_pair(rx, diagnostics);
+        let transmit = enabled_pair(tx, diagnostics);
+        let mut site = super::SitePrerequisites(site_only.then_some(&mut *diagnostics));
         let mut signals = Self {
-            rx: RxSignals::read(rx, wiring, enabled_pair(rx)?, w),
-            tx: TxSignals::read(tx, wiring, enabled_pair(tx)?, w),
+            rx: RxSignals::read(rx, wiring, receive, w, &mut site),
+            tx: TxSignals::read(tx, wiring, transmit, w, &mut site),
         };
         let use_rx_operating_tone =
             signals.rx.ctcss.enabled && signals.rx.ctcss.binding.source == SignalSource::Dsp;
@@ -402,13 +436,13 @@ impl RadioSignals {
                 .values(&["ctcss", "frequency_hz"])
                 .find(|(v, _)| fields::tenths(v) == Some(decoder.tones.frequency))
         {
-            return Err(RadioProfileError {
+            diagnostics.push(RadioProfileError {
                 resource,
                 conflicting: None,
                 field: "frequency_hz",
             });
         }
-        Ok(signals)
+        signals
     }
 }
 

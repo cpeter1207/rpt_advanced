@@ -186,6 +186,14 @@ Store one logical section per resource, rather than one file per parameter or on
 | Named definitions | Sensors, inputs, outputs, alarms, fans, mailboxes, telemetry definitions, named messages and legacy permanent groups |
 | Scheduler | One resource per event in one collection; start is required, end optional, and each boundary references a command macro |
 | Commands | Command settings and one collection of command macros shared by scheduled, named and DTMF callers |
+
+Fan `ptt_nodes` selectors use exact registered port keys. Omission selects the actual owning port for a port-owned fan and an empty PTT set for a site-owned fan. Site ownership never implies all ports or a synthetic port; temperature control remains independent of PTT selection.
+
+Telemetry has one ordinary `telemetry-settings` resource at `telemetry/settings.json` for ducking, timing, speech and Morse controls. Its API is `/{scope}/telemetry/` (GET, PUT, PATCH). Four independent named kinds use `telemetry/identifiers`, `telemetry/announcements`, `telemetry/tails` and `telemetry/courtesies`; each collection supports GET, PUT, PATCH, POST and DELETE, and each UUID member supports GET, PUT, PATCH and DELETE. Here `{scope}` is `site` or `ports/{port}`. Names are bare authored keys, unique within their scope and family, so two families can use the same key. The separate named message kind remains at `telemetry/messages`.
+
+This refines the unreleased prototype's generic `telemetry/definitions` catalog. Retire that unused kind explicitly; old prototype identities must be rejected or converted offline, never silently interpreted as telemetry settings or another family. No installed controller JSON layout is being migrated by this source change.
+
+
 | Optional protocols | One independent AllStarLink, EchoLink or phone-patch instance per port/protocol kind |
 | Private data | One encrypted account/scope record, separately referenced from public resources |
 

@@ -233,7 +233,11 @@ impl WiringProfile {
     }
 }
 impl Gpio {
-    fn read(v: &Inputs<'_>, w: &mut Vec<super::CandidateWarning>) -> Self {
+    fn read(
+        v: &Inputs<'_>,
+        w: &mut Vec<super::CandidateWarning>,
+        site: &mut super::SitePrerequisites,
+    ) -> Self {
         let wiring_profile = WiringProfile::read(v.text(&["gpio", "wiring_profile"], "dudeusb"));
         let keys = ["1", "2", "3", "4", "5", "6", "7", "8"];
         let pins = std::array::from_fn(|i| {
@@ -257,7 +261,7 @@ impl Gpio {
                     return Some(None);
                 }
                 let n = value.as_u64()? as u8;
-                if pins[usize::from(n - 1)] != GpioMode::Input {
+                if pins[usize::from(n - 1)] != GpioMode::Input || site.defer(b, "clip_led_pin") {
                     Some(Some(n))
                 } else {
                     super::super::normalize::warn(w, b, "clip_led_pin");
@@ -273,10 +277,14 @@ impl Gpio {
     }
 }
 impl Interface {
-    pub(super) fn read(v: &Inputs<'_>, w: &mut Vec<super::CandidateWarning>) -> Self {
+    pub(super) fn read(
+        v: &Inputs<'_>,
+        w: &mut Vec<super::CandidateWarning>,
+        site: &mut super::SitePrerequisites,
+    ) -> Self {
         Self {
             audio: InterfaceAudio::read(v),
-            gpio: Gpio::read(v, w),
+            gpio: Gpio::read(v, w, site),
             parallel: Parallel {
                 device: v.text(&["parallel", "device"], "/dev/parport0").into(),
                 base_address: v.uint(&["parallel", "base_address"], 888),

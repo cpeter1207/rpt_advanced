@@ -53,11 +53,11 @@ pub struct Memory {
 
 /// Effective scan definition; the containing key retains the exact scan name.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ScanList {
+pub struct ScanList<Selector = u32, Members = Vec<u32>> {
     /// Positive operation selector.
-    pub selector: u32,
+    pub selector: Selector,
     /// Ordered, distinct memory selectors.
-    pub members: Vec<u32>,
+    pub members: Members,
     /// Optional priority selector in this scan.
     pub priority: Option<u32>,
     /// Milliseconds after tune and settling.
@@ -67,6 +67,9 @@ pub struct ScanList {
     /// Delay before scan dwell begins.
     pub settle_ms: u64,
 }
+
+/// Site scan defaults that a concrete port can complete by supplying a selector or member list.
+pub type PartialSiteScan = ScanList<Option<u32>, Option<Vec<u32>>>;
 
 type Body = Map<String, Value>;
 type Sources<'a> = [Option<&'a NormalizedProfileResource>; 2];
@@ -241,8 +244,11 @@ pub(super) fn normalize_scans(
 pub(super) fn scans(
     layers: Sources<'_>,
     memory_count: usize,
+    mut partial_site_scans: Option<&mut BTreeMap<String, PartialSiteScan>>,
     w: &mut Vec<CandidateWarning>,
-) -> Result<BTreeMap<String, ScanList>, RadioProfileError> {
+    diagnostics: &mut Vec<RadioProfileError>,
+) -> BTreeMap<String, ScanList> {
+    let retain_site_references = partial_site_scans.is_some();
     let mut scans = BTreeMap::new();
     let mut selectors = BTreeSet::new();
     let names = layers
@@ -272,11 +278,20 @@ pub(super) fn scans(
                 .find_map(|(row, _)| row.get("timing")?.get(key)?.as_u64())
                 .unwrap_or(default)
         };
-        let Some((selector, selector_source)) = field("selector") else {
-            warn(w, source, "selector");
-            continue;
-        };
-        let selector = selector.as_u64().expect("normalized selector") as u32;
+        let selector =
+            field("selector").map(|(v, b)| (v.as_u64().expect("normalized selector") as u32, b));
+        if selector.is_none() {
+            if retain_site_references {
+                diagnostics.push(RadioProfileError {
+                    resource: source,
+                    conflicting: None,
+                    field: "selector",
+                });
+            } else {
+                warn(w, source, "selector");
+                continue;
+            }
+        }
         let mut members = None;
         for (row, b) in sources.into_iter().flatten() {
             if let Some(values) = row.get("members").and_then(Value::as_array) {
@@ -288,31 +303,58 @@ pub(super) fn scans(
                     members = Some(values);
                     break;
                 }
+                if retain_site_references {
+                    diagnostics.push(RadioProfileError {
+                        resource: b,
+                        conflicting: None,
+                        field: "members",
+                    });
+                    members = Some(values);
+                    break;
+                }
                 warn(w, b, "members");
             }
         }
-        let Some(members) = members else {
+        if members.is_none() {
             if let Some((_, resource)) = field("members") {
-                return Err(RadioProfileError {
+                diagnostics.push(RadioProfileError {
                     conflicting: None,
                     resource,
                     field: "members",
                 });
             }
-            warn(w, source, "members");
-            continue;
-        };
+            if retain_site_references {
+                diagnostics.push(RadioProfileError {
+                    resource: source,
+                    conflicting: None,
+                    field: "members",
+                });
+            } else {
+                warn(w, source, "members");
+                continue;
+            }
+        }
         let priority = sources.into_iter().flatten().find_map(|(row, b)| {
             let n = row.get("priority")?.as_u64()? as u32;
-            if members.contains(&n) {
+            if members.as_ref().is_some_and(|values| values.contains(&n)) {
                 Some(n)
             } else {
+                if retain_site_references {
+                    diagnostics.push(RadioProfileError {
+                        resource: b,
+                        conflicting: None,
+                        field: "priority",
+                    });
+                    return Some(n);
+                }
                 warn(w, b, "priority");
                 None
             }
         });
-        if !selectors.insert(selector) {
-            return Err(RadioProfileError {
+        if let Some((selector, selector_source)) = selector
+            && !selectors.insert(selector)
+        {
+            diagnostics.push(RadioProfileError {
                 conflicting: None,
                 resource: selector_source,
                 field: "selector",
@@ -333,17 +375,37 @@ pub(super) fn scans(
             |d, s| d.checked_add(s).is_some(),
             w,
         );
-        scans.insert(
-            name.clone(),
-            ScanList {
-                selector,
-                members,
-                priority,
-                dwell_ms,
-                settle_ms,
-                resume_delay_ms: timing("resume_delay_ms", 2000),
-            },
-        );
+        let resume_delay_ms = timing("resume_delay_ms", 2000);
+        match (selector, members) {
+            (Some((selector, _)), Some(members)) => {
+                scans.insert(
+                    name.clone(),
+                    ScanList {
+                        selector,
+                        members,
+                        priority,
+                        dwell_ms,
+                        settle_ms,
+                        resume_delay_ms,
+                    },
+                );
+            }
+            (selector, members) => {
+                if let Some(partial) = partial_site_scans.as_deref_mut() {
+                    partial.insert(
+                        name.clone(),
+                        PartialSiteScan {
+                            selector: selector.map(|(s, _)| s),
+                            members,
+                            priority,
+                            dwell_ms,
+                            settle_ms,
+                            resume_delay_ms,
+                        },
+                    );
+                }
+            }
+        }
     }
-    Ok(scans)
+    scans
 }
