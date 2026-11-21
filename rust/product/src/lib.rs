@@ -25,6 +25,8 @@ pub mod directory;
 pub mod host;
 pub mod lifecycle;
 pub mod link;
+#[cfg(target_os = "linux")]
+pub mod management;
 pub mod media;
 pub mod phone;
 mod radio_control;

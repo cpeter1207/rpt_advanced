@@ -100,7 +100,7 @@ pub(super) fn message_with_status(
         .map_err(|_| RuntimeError::Preparation)
 }
 
-pub(super) fn morse(source: &str) -> Option<String> {
+pub(crate) fn morse(source: &str) -> Option<String> {
     const ALLOWED: &[u8] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/.,?-=+@()'!\":;_$& \t\r\n";
     let text: String = source

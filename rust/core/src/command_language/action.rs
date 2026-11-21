@@ -1,4 +1,5 @@
 //! Strict action objects shared by runtime requests, named macros and DTMF bindings.
+use super::ProtectedOperand;
 use super::{
     ActionError,
     fields::{Fields, Result},
@@ -13,7 +14,6 @@ use crate::{
 };
 use serde_json::Value;
 use std::sync::Arc;
-use zeroize::Zeroizing;
 
 /// Explicit playback routing override for one admitted message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,17 +31,17 @@ pub enum MuteTarget {
     /// Local qualified receiver.
     Port,
     /// Exact current direct peer selection, never dialed.
-    Peer(String),
+    Peer(ProtectedOperand<String>),
     /// Current network peers, optionally restricted by transport protocol.
     Peers(Option<ProtocolId>),
     /// Calling phone or explicit call identifier, otherwise unique attached caller.
-    PhonePatch(Option<String>),
+    PhonePatch(Option<ProtectedOperand<String>>),
 }
 /// Prepared intent at the owners' control boundary. No serialization or unrestricted Debug.
 #[derive(Clone)]
 pub enum Action {
     /// Existing link handler; its source/grant/loop/peer checks still apply.
-    Link(Command),
+    Link(Command<ProtectedOperand<String>>),
     /// Existing radio operating owner.
     Radio(RadioAction),
     /// Existing site controller.
@@ -55,7 +55,7 @@ pub enum Action {
     /// Await this named macro in the invoking scope.
     CallMacro(String),
     /// Feed a fresh local macro collector, retaining its own inactivity completion.
-    ExecuteDtmf(String),
+    ExecuteDtmf(ProtectedOperand<String>),
     /// Queue a composition with the explicit output selection.
     Message(String, Destination),
     /// Cooperative wait; None uses the prepared per-invocation pause setting.
@@ -65,9 +65,9 @@ pub enum Action {
     /// Clear the actual source's selected remote target.
     ExitCommandMode,
     /// Deliver one digit to an addressed target, subject to existing policy.
-    SendCommandDigit(String, char),
+    SendCommandDigit(ProtectedOperand<String>, ProtectedOperand<char>),
     /// Source-owned grant action. True unlocks; credentials never enter configuration or logs.
-    Administration(bool, Option<Zeroizing<String>>),
+    Administration(bool, Option<ProtectedOperand<String>>),
     /// Actual local receiver keypad test.
     PadTest,
 }
@@ -76,15 +76,15 @@ pub struct PreparedAction {
     /// Domain-specific operation.
     pub action: Action,
     /// Generic caller text, independent of any decoded node/selector. May be sensitive.
-    pub parameter: Option<Zeroizing<String>>,
+    pub parameter: Option<ProtectedOperand<String>>,
 }
 fn digits(s: &str, min: usize, max: usize) -> bool {
     (min..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
 }
-pub(super) fn node(s: Option<&str>) -> Result<String> {
+pub(super) fn node(s: Option<&str>) -> Result<ProtectedOperand<String>> {
     let s = s.ok_or(ActionError::Parameter)?;
-    PeerIdentity::from_operator(s).map_err(|_| ActionError::Parameter)?;
-    Ok(s.to_owned())
+    PeerIdentity::operator_target(s).map_err(|_| ActionError::Parameter)?;
+    Ok(s.into())
 }
 fn name(f: &mut Fields<'_>) -> Result<String> {
     let s = f.text("name")?;
@@ -95,14 +95,14 @@ fn name(f: &mut Fields<'_>) -> Result<String> {
     {
         return Err(ActionError::Field("name"));
     }
-    Ok(s.to_owned())
+    Ok(s.into())
 }
-fn symbols(f: &mut Fields<'_>) -> Result<String> {
+fn symbols(f: &mut Fields<'_>) -> Result<ProtectedOperand<String>> {
     let s = f.text("digits")?;
     if s.is_empty() || s.len() > 4096 || !s.chars().all(crate::link::valid_digit) {
         return Err(ActionError::Field("digits"));
     }
-    Ok(s.to_owned())
+    Ok(s.into())
 }
 pub(super) fn link_action(action: &str, f: &mut Fields<'_>) -> Result<Option<LinkAction>> {
     use LinkAction as L;
@@ -169,7 +169,7 @@ pub(super) fn link(a: LinkAction, p: Option<&str>) -> Result<Action> {
     ) {
         p.unwrap_or_default().into()
     } else {
-        String::new()
+        "".into()
     };
     Ok(Action::Link(Command {
         action: a,
@@ -206,11 +206,9 @@ fn host_action(action: &str, f: &mut Fields<'_>, p: Option<&str>) -> Result<Host
             "admit_incoming" => H::AdmitIncoming,
             _ => return Err(ActionError::Field("operation")),
         },
-        "feed_dtmf_symbol" => H::Symbol(f.digit("digit")?),
+        "feed_dtmf_symbol" => H::Symbol(f.digit("digit")?.into()),
         "actual_receiver_unkey" => H::ReceiverUnkey,
-        "controller_input" if f.text("operation")? == "dtmf" => {
-            H::Input(Zeroizing::new(symbols(f)?))
-        }
+        "controller_input" if f.text("operation")? == "dtmf" => H::Input(symbols(f)?),
         "phone_session" => match f.text("operation")? {
             "authenticate" => {
                 let mailbox = f.text("mailbox")?;
@@ -218,7 +216,7 @@ fn host_action(action: &str, f: &mut Fields<'_>, p: Option<&str>) -> Result<Host
                 if !digits(mailbox, 1, 32) || !digits(pin, 4, 32) {
                     return Err(ActionError::Invalid);
                 }
-                H::PhoneAuthenticate(Zeroizing::new(mailbox.into()), Zeroizing::new(pin.into()))
+                H::PhoneAuthenticate(mailbox.into(), pin.into())
             }
             "retire" => H::PhoneRetire,
             _ => return Err(ActionError::Field("operation")),
@@ -230,9 +228,9 @@ fn host_action(action: &str, f: &mut Fields<'_>, p: Option<&str>) -> Result<Host
                 "phone_select_command_target" => P::SelectTarget(node(p)?),
                 "phone_send_node_digit" => P::NodeDigit {
                     target: node(p)?,
-                    digit: f.digit("digit")?,
+                    digit: f.digit("digit")?.into(),
                 },
-                "phone_send_telephone_digit" => P::TelephoneDigit(f.digit("digit")?),
+                "phone_send_telephone_digit" => P::TelephoneDigit(f.digit("digit")?.into()),
                 "phone_exit_command_mode" => P::ExitCommandMode,
                 "phone_manual_key" => P::ManualKey,
                 "phone_manual_unkey" => P::ManualUnkey,
@@ -282,7 +280,7 @@ fn prepare(v: &Value, persisted: bool) -> Result<PreparedAction> {
                 Some(["0", "1", "2", "3"][f.choice("mode", &["off", "on", "follow", "demand"])?]),
             )?,
             "exit_command_mode" => Action::ExitCommandMode,
-            "send_command_digit" => Action::SendCommandDigit(node(p)?, f.digit("digit")?),
+            "send_command_digit" => Action::SendCommandDigit(node(p)?, f.digit("digit")?.into()),
             "radio" => Action::Radio(radio::typed(&mut f)?),
             "set_output" => Action::Site(SiteCommand::Output {
                 name: name(&mut f)?,
@@ -360,7 +358,7 @@ fn prepare(v: &Value, persisted: bool) -> Result<PreparedAction> {
                         .transpose()?,
                 ),
                 "phone_patch" => {
-                    MuteTarget::PhonePatch(p.filter(|s| !s.is_empty()).map(String::from))
+                    MuteTarget::PhonePatch(p.filter(|s| !s.is_empty()).map(Into::into))
                 }
                 _ => return Err(ActionError::Field("target")),
             }),
@@ -376,10 +374,7 @@ fn prepare(v: &Value, persisted: bool) -> Result<PreparedAction> {
                 {
                     return Err(ActionError::Parameter);
                 }
-                Action::Administration(
-                    a == "unlock_administration",
-                    code.or(p).map(|s| Zeroizing::new(s.into())),
-                )
+                Action::Administration(a == "unlock_administration", code.or(p).map(Into::into))
             }
             _ => Action::Host(host_action(a, &mut f, p)?),
         }
@@ -393,6 +388,6 @@ fn prepare(v: &Value, persisted: bool) -> Result<PreparedAction> {
     f.finish()?;
     Ok(PreparedAction {
         action,
-        parameter: p.map(|s| Zeroizing::new(s.into())),
+        parameter: p.map(Into::into),
     })
 }

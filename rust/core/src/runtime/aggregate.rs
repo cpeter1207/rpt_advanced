@@ -213,7 +213,7 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         &mut self,
         now_ms: u64,
         observations: &crate::site::SiteObservations,
-        ptt: &std::collections::BTreeMap<NodeId, bool>,
+        ptt: &std::collections::BTreeMap<crate::config::resources::PortKey, bool>,
     ) -> Vec<crate::site::SiteEffect> {
         let effects = self.site.advance(now_ms, observations, ptt);
         self.control
@@ -1221,6 +1221,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
                         .map_err(|_| RuntimeError::Preparation)?,
                     node: node.name.clone(),
                     callsign: node.settings.callsign.clone(),
+                    port: Default::default(),
+                    event: None,
+                    builtin: Default::default(),
                     links,
                     sensors: site
                         .sensors

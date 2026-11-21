@@ -856,3 +856,80 @@ fn site_host_polls_configured_owner_without_a_second_radio_reservation() {
     );
     assert!(host.stop(2100));
 }
+
+#[test]
+fn round_one_host_merges_cached_sensor_calibration_quality_and_original_time() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.context = ptr::without_provenance_mut(1);
+    table.radio_site_snapshot = Some(observation);
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let document = document(
+        "usb",
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\nactive_level=low\n",
+    );
+    let mut site = ResolvedSiteSettings::resolve(&document, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+    use rpt_advanced_core::{
+        config::{
+            Calibration, SensorSettings,
+            resources::{PortKey, profiles::equipment::BoundInterface},
+        },
+        site::SensorState,
+    };
+    let declared = BoundInterface {
+        key: PortKey::new("1000"),
+        port: "929e52be-6854-4c46-85f2-000000000002".parse().unwrap(),
+        property: "/gpio/pins/2".into(),
+    };
+    let sensor = SensorSettings {
+        name: "sense".into(),
+        enabled: true,
+        endpoint: None,
+        interface: Some(declared),
+        unit: "V".into(),
+        label_message_id: String::new(),
+        precision: 1,
+        poll_interval_ms: 100,
+        stale_after_ms: 5000,
+        smoothing_ms: 0,
+        dtmf_id: None,
+        calibration: Calibration::TwoPoint {
+            input_low: 0.0,
+            input_high: 1.0,
+            value_low: 5.0,
+            value_high: 20.0,
+        },
+    };
+    site.sensors.push(sensor.clone());
+    let mut state = SensorState::new(sensor);
+    let radio = RadioSite::prepare(&[("1000".to_owned(), site)].into_iter().collect()).unwrap();
+    let mut host = Host::start(document, media(), services, Instant::now(), clock()).unwrap();
+    let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    host.install_sites(Acquisition::default(), radio);
+    let values = host.poll_sites(2000);
+    let raw = &values["1000"].sensors["sense"];
+    assert_eq!(
+        (raw.value, raw.quality, raw.observed_at_ms),
+        (Some(1.0), ReadingQuality::Valid, Some(1950))
+    );
+    state.observe(raw.clone(), 2000);
+    let first = state.snapshot(2000);
+    assert_eq!(first.current.value, Some(20.0));
+    assert_eq!(first.current.observed_at_ms, Some(1950));
+    let again = host.poll_sites(2000);
+    state.observe(again["1000"].sensors["sense"].clone(), 2000);
+    assert_eq!(state.snapshot(2000), first);
+    let input = &values["1000"].inputs["door"];
+    assert_eq!(input.value, Some(false));
+    assert_eq!(input.observed_at_ms, Some(1950));
+    assert_eq!(input.quality, ReadingQuality::Valid);
+    assert_eq!(
+        crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
+        drops
+    );
+    assert!(host.stop(2100));
+}

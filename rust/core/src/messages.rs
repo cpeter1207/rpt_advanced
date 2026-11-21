@@ -1,11 +1,17 @@
 //! Fluent-backed bounded messages, prepared on control for their explicit audience.
 
+/// Native Fluent parsing and composition boundaries for modular configuration.
+pub mod patterns;
+/// Configuration preparation of native Fluent locale overlays.
+pub mod projection;
+
 use crate::schedule::{CivilTime, Weekday};
 use fluent_bundle::{FluentArgs, FluentResource, concurrent::FluentBundle};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use unic_langid::LanguageIdentifier;
 
@@ -308,14 +314,37 @@ pub enum CatalogError {
     InvalidMessage,
 }
 
-type Bundle = FluentBundle<FluentResource>;
+type Bundle = FluentBundle<Arc<FluentResource>>;
+
+#[derive(Default)]
+pub(crate) struct InheritedArguments {
+    pub(crate) available: BTreeMap<String, MessageArgument>,
+    pub(crate) unavailable: BTreeMap<String, String>,
+}
+
+enum CandidateText {
+    Form(String),
+    Unavailable(String),
+}
+
+struct CatalogLayer {
+    bundle: Bundle,
+    resource: Arc<FluentResource>,
+    dependencies: std::sync::OnceLock<projection::Dependencies>,
+    // Complete lower same-language snapshots for argument-dependent per-form fallback.
+    lower: Vec<CatalogLayer>,
+    inherited: bool,
+}
 
 /// One configuration generation's validated Fluent catalog.
 pub struct MessageCatalog {
-    english: Bundle,
+    english: CatalogLayer,
     // Low-to-high precedence; lookup falls back separately for each attribute.
-    overlays: Vec<Bundle>,
+    overlays: Vec<CatalogLayer>,
     translation_warnings: Vec<String>,
+    pub(crate) fallback_bindings: projection::MessageBindings,
+    pub(crate) inherited_bindings: projection::MessageBindings,
+    inherited_definitions: BTreeMap<String, projection::LocalizedMessage>,
 }
 
 impl MessageCatalog {
@@ -374,7 +403,7 @@ impl MessageCatalog {
         translation: Option<&str>,
     ) -> Result<Self, CatalogError> {
         let english = parse_bundle("en-US", english).map_err(|_| CatalogError::InvalidEnglish)?;
-        validate_english(&english)?;
+        validate_english(&english.bundle)?;
         let (translated, translation_warnings) = if locale == "en-US" {
             (None, Vec::new())
         } else {
@@ -383,7 +412,7 @@ impl MessageCatalog {
                 Some(source) => match parse_bundle(locale, source) {
                     Err(()) => (None, vec!["catalog is malformed".into()]),
                     Ok(bundle) => {
-                        let warnings = validate_translation(&bundle, true);
+                        let warnings = validate_translation(&bundle.bundle, true);
                         (Some(bundle), warnings)
                     }
                 },
@@ -393,6 +422,9 @@ impl MessageCatalog {
             english,
             overlays: translated.into_iter().collect(),
             translation_warnings,
+            fallback_bindings: Default::default(),
+            inherited_bindings: Default::default(),
+            inherited_definitions: Default::default(),
         })
     }
 
@@ -400,7 +432,7 @@ impl MessageCatalog {
         match parse_bundle(locale, source) {
             Ok(bundle) => {
                 self.translation_warnings
-                    .extend(validate_translation(&bundle, false));
+                    .extend(validate_translation(&bundle.bundle, false));
                 self.overlays.push(bundle);
             }
             Err(()) => self
@@ -524,29 +556,62 @@ impl MessageCatalog {
         )
     }
 
+    /// Use the real built-in contract during static validation for structural packaged parts.
+    pub(crate) fn validate_named(
+        &self,
+        id: &str,
+        args: &BTreeMap<String, MessageArgument>,
+    ) -> Result<MessageForms, CatalogError> {
+        self.format_attributes(id, |attribute| {
+            let mut values = required_sample_args(id);
+            set_named_arguments(&mut values, args, attribute);
+            values
+        })
+    }
+
     /// Format a validated configuration-selected ID; arguments are data, never content tokens.
     pub fn format_named(
         &self,
         id: &str,
         args: &BTreeMap<String, MessageArgument>,
     ) -> Result<MessageForms, CatalogError> {
-        self.format_attributes(id, |attribute| {
-            let mut values = FluentArgs::new();
-            for (name, value) in args {
-                match value {
-                    MessageArgument::Number(value) => values.set(name, *value),
-                    MessageArgument::Forms(forms) => values.set(
-                        name,
-                        match attribute {
-                            "text" => forms.text.as_str(),
-                            "tts" => forms.tts.as_str(),
-                            _ => forms.morse.as_str(),
-                        },
-                    ),
-                }
-            }
-            values
-        })
+        self.format_attributes(id, |attribute| named_arguments(args, attribute))
+    }
+
+    /// Format each candidate with the arguments supplied by its own declaration scope.
+    pub(crate) fn format_named_scoped(
+        &self,
+        id: &str,
+        current: &BTreeMap<String, MessageArgument>,
+        inherited: &InheritedArguments,
+    ) -> Result<MessageForms, CatalogError> {
+        self.format_candidates(
+            false,
+            |_| MAX_MESSAGE_BYTES,
+            |layer, attr| {
+                let message = layer.bundle.get_message(id)?;
+                let pattern = message.get_attribute(attr)?.value();
+                let args = named_arguments(
+                    if layer.inherited {
+                        &inherited.available
+                    } else {
+                        current
+                    },
+                    attr,
+                );
+                format_candidate_pattern(
+                    &layer.bundle,
+                    pattern,
+                    &args,
+                    layer.inherited.then_some(inherited),
+                    |text| {
+                        attr != "morse"
+                            || crate::runtime::morse_text(text).is_some()
+                            || (id == "remote-unit" && text.is_empty())
+                    },
+                )
+            },
+        )
     }
 
     fn format_attributes<'a>(
@@ -565,22 +630,58 @@ impl MessageCatalog {
         arguments: impl Fn(&str) -> FluentArgs<'a>,
         maximum: impl Fn(&str) -> usize,
     ) -> Result<MessageForms, CatalogError> {
+        self.format_checked(arguments, maximum, |bundle, attribute, args| {
+            let output = format_attribute(bundle, id, attribute, args)?;
+            // Named playback checks projected Morse per candidate, including lower same-locale forms.
+            let require = self.english.dependencies.get().is_some()
+                && attribute == "morse"
+                && !(id == "remote-unit" && output.is_empty());
+            (!require || crate::runtime::morse_text(&output).is_some()).then_some(output)
+        })
+    }
+
+    fn format_checked<'a>(
+        &self,
+        arguments: impl Fn(&str) -> FluentArgs<'a>,
+        maximum: impl Fn(&str) -> usize,
+        format: impl Fn(&Bundle, &str, &FluentArgs<'_>) -> Option<String>,
+    ) -> Result<MessageForms, CatalogError> {
+        self.format_candidates(false, maximum, |layer, attr| {
+            format(&layer.bundle, attr, &arguments(attr)).map(CandidateText::Form)
+        })
+    }
+
+    fn format_candidates(
+        &self,
+        english_only: bool,
+        maximum: impl Fn(&str) -> usize,
+        format: impl Fn(&CatalogLayer, &str) -> Option<CandidateText>,
+    ) -> Result<MessageForms, CatalogError> {
         let mut output = Vec::with_capacity(3);
         for attribute in ATTRIBUTES {
-            let args = arguments(attribute);
             let mut too_long = false;
             let text = self
                 .overlays
                 .iter()
                 .rev()
                 .chain(std::iter::once(&self.english))
+                .flat_map(|layer| std::iter::once(layer).chain(layer.lower.iter().rev()))
                 .find_map(|bundle| {
-                    let text = format_attribute(bundle, id, attribute, &args)?;
+                    if english_only && !std::ptr::eq(bundle, &self.english) {
+                        return None;
+                    }
+                    let candidate = format(bundle, attribute)?;
+                    let CandidateText::Form(text) = candidate else {
+                        return Some(candidate);
+                    };
+                    if text.contains('\0') {
+                        return None;
+                    }
                     if text.len() > maximum(attribute) {
                         too_long = true;
                         None
                     } else {
-                        Some(text)
+                        Some(CandidateText::Form(text))
                     }
                 })
                 .ok_or(if too_long {
@@ -588,7 +689,20 @@ impl MessageCatalog {
                 } else {
                     CatalogError::InvalidMessage
                 })?;
-            output.push(text);
+            match text {
+                CandidateText::Form(text) => output.push(text),
+                CandidateText::Unavailable(label) => {
+                    let argument = MessageArgument::Forms(MessageForms {
+                        text: label.clone(),
+                        tts: label.clone(),
+                        morse: label,
+                    });
+                    return self.format_named(
+                        "site-value-unavailable",
+                        &BTreeMap::from([("label".into(), argument)]),
+                    );
+                }
+            }
         }
         let mut output = output.into_iter();
         Ok(MessageForms {
@@ -761,7 +875,7 @@ impl MessageCatalog {
 }
 
 impl Message<'_> {
-    fn id(&self) -> &'static str {
+    pub(crate) fn id(&self) -> &'static str {
         match self {
             Self::PhoneAuthentication { .. } => "phone-authentication",
             Self::DtmfMacroStopped => "dtmf-macro-stopped",
@@ -797,6 +911,29 @@ impl Message<'_> {
             Self::DurationPart { .. } => "duration-unit",
             Self::ParrotLevels { .. } => "parrot-levels",
         }
+    }
+
+    pub(crate) fn captured_arguments(&self) -> BTreeMap<String, MessageArgument> {
+        self.args()
+            .into_iter()
+            .map(|(name, value)| {
+                let argument = match value {
+                    fluent_bundle::FluentValue::String(value) => {
+                        let value = value.into_owned();
+                        MessageArgument::Forms(MessageForms {
+                            text: value.clone(),
+                            tts: value.clone(),
+                            morse: value,
+                        })
+                    }
+                    fluent_bundle::FluentValue::Number(value) => {
+                        MessageArgument::Number(value.value)
+                    }
+                    _ => unreachable!("built-in requests supply only string and number arguments"),
+                };
+                (name.into_owned(), argument)
+            })
+            .collect()
     }
 
     fn args(&self) -> FluentArgs<'_> {
@@ -908,13 +1045,42 @@ impl Message<'_> {
     }
 }
 
-fn parse_bundle(locale: &str, source: &str) -> Result<Bundle, ()> {
+fn named_arguments<'a>(
+    args: &'a BTreeMap<String, MessageArgument>,
+    attribute: &str,
+) -> FluentArgs<'a> {
+    let mut values = FluentArgs::new();
+    set_named_arguments(&mut values, args, attribute);
+    values
+}
+
+fn set_named_arguments<'a>(
+    values: &mut FluentArgs<'a>,
+    args: &'a BTreeMap<String, MessageArgument>,
+    attribute: &str,
+) {
+    for (name, value) in args {
+        match value {
+            MessageArgument::Number(value) => values.set(name, *value),
+            MessageArgument::Forms(forms) => values.set(name, forms.attribute(attribute)),
+        }
+    }
+}
+
+fn parse_bundle(locale: &str, source: &str) -> Result<CatalogLayer, ()> {
     let locale: LanguageIdentifier = locale.parse().map_err(|_| ())?;
-    let resource = FluentResource::try_new(source.to_owned()).map_err(|_| ())?;
+    let resource = Arc::new(FluentResource::try_new(source.to_owned()).map_err(|_| ())?);
     let mut bundle = FluentBundle::new_concurrent(vec![locale]);
     bundle.set_use_isolating(false);
-    bundle.add_resource(resource).map_err(|_| ())?;
-    Ok(bundle)
+    bundle.add_builtins().map_err(|_| ())?;
+    bundle.add_resource(resource.clone()).map_err(|_| ())?;
+    Ok(CatalogLayer {
+        bundle,
+        resource,
+        dependencies: Default::default(),
+        lower: Vec::new(),
+        inherited: false,
+    })
 }
 
 fn validate_english(bundle: &Bundle) -> Result<(), CatalogError> {
@@ -1053,6 +1219,38 @@ fn required_sample_args(id: &str) -> FluentArgs<'static> {
         _ => {}
     }
     args
+}
+
+// Resolve first so only variables the chosen Fluent branch actually reads can replace the segment.
+fn format_candidate_pattern(
+    bundle: &Bundle,
+    pattern: &fluent_syntax::ast::Pattern<&str>,
+    args: &FluentArgs<'_>,
+    inherited: Option<&InheritedArguments>,
+    valid: impl FnOnce(&str) -> bool,
+) -> Option<CandidateText> {
+    use fluent_bundle::{
+        FluentError,
+        resolver::{ResolverError, errors::ReferenceKind},
+    };
+    let mut errors = Vec::new();
+    let rendered = bundle.format_pattern(pattern, Some(args), &mut errors);
+    if errors.is_empty() {
+        return valid(&rendered).then(|| CandidateText::Form(rendered.into_owned()));
+    }
+    let inherited = inherited?;
+    errors.iter().find_map(|error| {
+        let FluentError::ResolverError(ResolverError::Reference(ReferenceKind::Variable { id })) =
+            error
+        else {
+            return None;
+        };
+        inherited
+            .unavailable
+            .get(id)
+            .cloned()
+            .map(CandidateText::Unavailable)
+    })
 }
 
 fn format_attribute(

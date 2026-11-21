@@ -421,6 +421,14 @@ impl CommandLanguage {
     /// Resolve two command projections after all JSON Patch operations. Named resources
     /// are supplied under macros by the in-memory registry adapter only.
     pub(crate) fn resolve(site: &Value, port: &Value) -> Result<Self, LanguageError> {
+        Self::resolve_with_mappings(site, port, |_, _| {})
+    }
+
+    pub(crate) fn resolve_with_mappings(
+        site: &Value,
+        port: &Value,
+        mut mapping: impl FnMut(&str, &Value),
+    ) -> Result<Self, LanguageError> {
         let mut result = Self {
             mappings: BTreeMap::new(),
             macros: BTreeMap::new(),
@@ -513,6 +521,7 @@ impl CommandLanguage {
             {
                 return Err(LanguageError::MissingMacro);
             }
+            mapping(&key, &obj);
             result.mappings.insert(key, m);
         }
         result.validate_calls()?;

@@ -6,7 +6,6 @@ use super::{
 };
 use crate::{command::LinkAction, remote_base_command::parse_remote_command};
 use serde_json::Value;
-use zeroize::Zeroizing;
 
 /// A validated complete command binding. The key remains independent of this spelling.
 #[derive(Clone)]
@@ -157,11 +156,11 @@ impl Completed<'_> {
                 {
                     return Err(ActionError::Parameter);
                 }
-                Action::Administration(*unlock, (!p.is_empty()).then(|| Zeroizing::new(p.into())))
+                Action::Administration(*unlock, (!p.is_empty()).then(|| p.into()))
             }
             D::MutePeer => Action::Mute(MuteTarget::Peer(action::node(Some(p))?)),
             D::MutePhone => Action::Mute(MuteTarget::PhonePatch((!p.is_empty()).then(|| p.into()))),
-            D::SendDigit(d) => Action::SendCommandDigit(action::node(Some(p))?, *d),
+            D::SendDigit(d) => Action::SendCommandDigit(action::node(Some(p))?, (*d).into()),
         })
     }
     /// Recheck exact-source eligibility and entry protection before invoking the domain owner.
@@ -209,7 +208,7 @@ impl Completed<'_> {
         Ok(super::Invocation {
             context,
             action,
-            parameter: Some(Zeroizing::new(self.parameter.into())),
+            parameter: Some(self.parameter.into()),
             origin: super::ParameterOrigin::Dtmf,
         })
     }

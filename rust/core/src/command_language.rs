@@ -20,6 +20,42 @@ pub use host::{HostAction, InterfaceAction, MaintenanceAction, MixerTarget, Pin}
 pub use profiles::{CommandLanguage, LanguageError, LanguageWarning, MacroLimits};
 pub use radio::{CapabilityValue, OperatingSignal, OperatingState, RadioAction};
 
+/// A typed action operand whose clones share one allocation, wiped on its final drop.
+/// Formatting this owner never exposes its content.
+pub struct ProtectedOperand<T: zeroize::Zeroize>(std::sync::Arc<zeroize::Zeroizing<T>>);
+impl<T: zeroize::Zeroize> Clone for ProtectedOperand<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl<T: zeroize::Zeroize> From<T> for ProtectedOperand<T> {
+    fn from(value: T) -> Self {
+        Self(std::sync::Arc::new(zeroize::Zeroizing::new(value)))
+    }
+}
+impl From<&str> for ProtectedOperand<String> {
+    fn from(value: &str) -> Self {
+        value.to_owned().into()
+    }
+}
+impl<T: zeroize::Zeroize> std::ops::Deref for ProtectedOperand<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+impl<T: zeroize::Zeroize + PartialEq> PartialEq for ProtectedOperand<T> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+impl<T: zeroize::Zeroize + Eq> Eq for ProtectedOperand<T> {}
+impl<T: zeroize::Zeroize> std::fmt::Debug for ProtectedOperand<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProtectedOperand([redacted])")
+    }
+}
+
 /// Value-free validation diagnostics. Field identifiers always come from the decoder.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ActionError {

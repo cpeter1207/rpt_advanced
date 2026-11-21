@@ -164,6 +164,43 @@ pub fn stage_patch(
     policy: &PatchPolicy<'_>,
     limits: PatchLimits,
 ) -> Result<StagedPatch, PatchError> {
+    patch_slots(authoring, input, policy, limits, false, None)
+}
+
+/// Apply a patch to an operation draft. Replacing its enclosing action discards
+/// omitted write-only operands, which belong only to that particular action.
+pub fn stage_draft_patch(
+    authoring: &Value,
+    input: &[u8],
+    policy: &PatchPolicy<'_>,
+    limits: PatchLimits,
+) -> Result<StagedPatch, PatchError> {
+    patch_slots(authoring, input, policy, limits, true, None)
+}
+
+/// A profile may stage a public array at a protected object path after screening its
+/// borrowed subtree for reserved names. The ordinary final normalizer handles its type.
+pub type IgnoreMalformed = fn(&Pointer, &BorrowedValue<'_>) -> bool;
+
+/// Stage ordinary profile settings with its exact malformed-container normalization policy.
+pub fn stage_profile_patch(
+    authoring: &Value,
+    input: &[u8],
+    policy: &PatchPolicy<'_>,
+    limits: PatchLimits,
+    allow_array: IgnoreMalformed,
+) -> Result<StagedPatch, PatchError> {
+    patch_slots(authoring, input, policy, limits, false, Some(allow_array))
+}
+
+fn patch_slots(
+    authoring: &Value,
+    input: &[u8],
+    policy: &PatchPolicy<'_>,
+    limits: PatchLimits,
+    replace_operands: bool,
+    allow_array: Option<IgnoreMalformed>,
+) -> Result<StagedPatch, PatchError> {
     let request_error = |kind| PatchError {
         kind,
         operation: None,
@@ -190,9 +227,10 @@ pub fn stage_patch(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let policy = Paths::parse(policy).map_err(request_error)?;
+    let mut policy = Paths::parse(policy).map_err(request_error)?;
+    policy.allow_array = allow_array;
     policy
-        .validate_authoring(authoring)
+        .validate_authoring(authoring, replace_operands)
         .map_err(request_error)?;
     check_stage(authoring, limits).map_err(request_error)?;
     let mut stage = authoring.clone();
@@ -200,13 +238,92 @@ pub fn stage_patch(
     check_stage(&stage, limits).map_err(request_error)?;
     let mut edits = vec![None; policy.secret_slots.len()];
     for (index, op) in operations.into_iter().enumerate() {
+        if replace_operands
+            && matches!(
+                op.action,
+                Action::Add(_) | Action::Replace(_) | Action::Remove
+            )
+        {
+            for (i, slot) in policy.secret_slots.iter().enumerate() {
+                if *slot != &*op.path && slot.starts_with(&op.path) {
+                    edits[i] = Some(PendingEdit::Remove);
+                }
+            }
+        }
+        let enclosed =
+            if replace_operands && matches!(op.action, Action::Add(_) | Action::Replace(_)) {
+                policy
+                    .secret_slots
+                    .iter()
+                    .filter(|slot| **slot != &*op.path && slot.starts_with(&op.path))
+                    .copied()
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
         op.apply(&mut stage, &policy, limits, &mut edits)
+            .map(|()| {
+                for slot in enclosed {
+                    let (parent, name) = slot.split_back().expect("validated operand");
+                    if let Some(fields) = stage
+                        .pointer_mut(parent.as_str())
+                        .and_then(Value::as_object_mut)
+                    {
+                        fields
+                            .entry(name.decoded().into_owned())
+                            .or_insert(Value::Null);
+                    }
+                }
+            })
             .and_then(|()| check_stage(&stage, limits))
             .map_err(|kind| PatchError {
                 kind,
                 operation: Some(index),
             })?;
     }
+    Ok(finish(stage, &policy, edits))
+}
+
+/// Project a bounded PUT/POST directly from borrowed request bytes. Explicit
+/// private values follow exactly the same ownership path as JSON Patch.
+pub fn stage_replacement(
+    input: &[u8],
+    policy: &PatchPolicy<'_>,
+    limits: PatchLimits,
+) -> Result<StagedPatch, PatchError> {
+    stage_profile_replacement(input, policy, limits, None)
+}
+
+/// Stage replacement with optional profile-specific handling of a malformed protected ancestor.
+pub fn stage_profile_replacement(
+    input: &[u8],
+    policy: &PatchPolicy<'_>,
+    limits: PatchLimits,
+    allow_array: Option<IgnoreMalformed>,
+) -> Result<StagedPatch, PatchError> {
+    let error = |kind| PatchError {
+        kind,
+        operation: None,
+    };
+    if input.len() > limits.request_bytes {
+        return Err(error(PatchErrorKind::Limit));
+    }
+    let value = rptadv_json::decode_borrowed(input).map_err(|_| error(PatchErrorKind::Syntax))?;
+    let mut paths = Paths::parse(policy).map_err(error)?;
+    paths.allow_array = allow_array;
+    let mut edits = vec![None; paths.secret_slots.len()];
+    let stage = paths
+        .project(&value, Pointer::root(), limits, &mut edits)
+        .map_err(error)?;
+    check_stage(&stage, limits).map_err(error)?;
+    Ok(finish(stage, &paths, edits))
+}
+
+fn finish(
+    mut stage: Value,
+    policy: &Paths<'_>,
+    edits: Vec<Option<PendingEdit<'_>>>,
+) -> StagedPatch {
     for slot in &policy.secret_slots {
         if let Some((parent, name)) = slot.split_back()
             && let Some(Value::Object(fields)) = stage.pointer_mut(parent.as_str())
@@ -227,10 +344,10 @@ pub fn stage_patch(
             })
         })
         .collect();
-    Ok(StagedPatch {
+    StagedPatch {
         authoring: stage,
         private_edits,
-    })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -240,6 +357,7 @@ enum PendingEdit<'a> {
 }
 
 struct Paths<'a> {
+    allow_array: Option<IgnoreMalformed>,
     writable: Vec<&'a Pointer>,
     server_owned: Vec<&'a Pointer>,
     secret_slots: Vec<&'a Pointer>,
@@ -254,6 +372,7 @@ impl<'a> Paths<'a> {
                 .collect::<Result<Vec<_>, _>>()
         };
         let paths = Self {
+            allow_array: None,
             writable: parse(policy.writable)?,
             server_owned: parse(policy.server_owned)?,
             secret_slots: parse(policy.secret_slots)?,
@@ -270,7 +389,11 @@ impl<'a> Paths<'a> {
         Ok(paths)
     }
 
-    fn validate_authoring(&self, stage: &Value) -> Result<(), PatchErrorKind> {
+    fn validate_authoring(
+        &self,
+        stage: &Value,
+        optional_parent: bool,
+    ) -> Result<(), PatchErrorKind> {
         if !self.authoring_fields(stage, Pointer::root()) {
             return Err(PatchErrorKind::Authoring);
         }
@@ -282,7 +405,9 @@ impl<'a> Paths<'a> {
         for path in &self.secret_slots {
             let parent = path.parent().expect("validated secret member");
             if stage.pointer(path.as_str()).is_some()
-                || !stage.pointer(parent.as_str()).is_some_and(Value::is_object)
+                || !stage
+                    .pointer(parent.as_str())
+                    .map_or(optional_parent, Value::is_object)
                 || has_array_ancestor(stage, path)
             {
                 return Err(PatchErrorKind::Authoring);
@@ -308,11 +433,12 @@ impl<'a> Paths<'a> {
     fn seed_slots(&self, stage: &mut Value) {
         for path in &self.secret_slots {
             let (parent, name) = path.split_back().expect("validated secret member");
-            stage
+            if let Some(fields) = stage
                 .pointer_mut(parent.as_str())
                 .and_then(Value::as_object_mut)
-                .expect("validated secret parent")
-                .insert(name.decoded().into_owned(), Value::Null);
+            {
+                fields.insert(name.decoded().into_owned(), Value::Null);
+            }
         }
     }
 
@@ -345,6 +471,49 @@ impl<'a> Paths<'a> {
         } else {
             Err(PatchErrorKind::Forbidden)
         }
+    }
+
+    fn check_array_operation(
+        &self,
+        stage: &Value,
+        path: &Pointer,
+        action: &Action<'_>,
+    ) -> Result<(), PatchErrorKind> {
+        let Some(allowed) = self.allow_array else {
+            return Ok(());
+        };
+        // A temporary array may contain public elements, but no operation can
+        // insert a reserved hash beneath it and expose it in a later step.
+        for slot in &self.secret_slots {
+            let (parent, name) = slot.split_back().expect("validated private path");
+            if path == parent
+                || !path.starts_with(parent)
+                || !stage.pointer(parent.as_str()).is_some_and(Value::is_array)
+            {
+                continue;
+            }
+            let name = name.decoded();
+            if path
+                .tokens()
+                .skip(parent.count())
+                .any(|token| token.decoded() == name)
+            {
+                return Err(PatchErrorKind::Forbidden);
+            }
+            let safe = match action {
+                Action::Add(value) | Action::Replace(value) | Action::Test(value) => {
+                    allowed(parent, value)
+                }
+                Action::Move(from) | Action::Copy(from) => !stage
+                    .pointer(from.as_str())
+                    .is_some_and(|v| contains_member(v, &name)),
+                Action::Remove => true,
+            };
+            if !safe {
+                return Err(PatchErrorKind::Forbidden);
+            }
+        }
+        Ok(())
     }
 
     fn project<'input>(
@@ -386,10 +555,24 @@ impl<'a> Paths<'a> {
             BorrowedChildren::Array(_)
                 if intersects(path, &self.secret_slots) || intersects(path, &self.server_owned) =>
             {
-                Err(PatchErrorKind::Forbidden)
+                if self.allow_array.is_some_and(|allowed| allowed(path, value)) {
+                    public_value(value, limits)
+                } else {
+                    Err(PatchErrorKind::Forbidden)
+                }
             }
             _ => public_value(value, limits),
         }
+    }
+}
+
+fn contains_member(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Object(fields) => {
+            fields.contains_key(key) || fields.values().any(|v| contains_member(v, key))
+        }
+        Value::Array(items) => items.iter().any(|v| contains_member(v, key)),
+        _ => false,
     }
 }
 
@@ -456,6 +639,7 @@ impl<'a> Operation<'a> {
         edits: &mut [Option<PendingEdit<'a>>],
     ) -> Result<(), PatchErrorKind> {
         let Self { path, action } = self;
+        policy.check_array_operation(stage, &path, &action)?;
         let operation = match action {
             Action::Add(value) => {
                 let value = policy.project(value, &path, limits, edits)?;

@@ -172,7 +172,7 @@ impl fmt::Debug for ResourceBinding {
 }
 
 /// Exact port-key lookup and unique resource slots for one site.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ResourceRegistry {
     pub(super) port_order: Vec<(ResourceId, PortKey)>,
     site: ResourceId,

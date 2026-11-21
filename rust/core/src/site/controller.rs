@@ -5,7 +5,7 @@ use super::{
     Observation, OutputRequest, OutputSnapshot, OutputState, ReadingQuality, SensorSnapshot,
     SensorState, SiteError,
 };
-use crate::config::{InputSettings, NodeId, ResolvedSiteSettings, SiteAction};
+use crate::config::{InputSettings, ResolvedSiteSettings, SiteAction, resources::PortKey};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Acquired observations only; policy owns calibration, debounce and timers.
@@ -169,7 +169,7 @@ pub struct SiteController {
     published_outputs: BTreeMap<String, bool>,
     inhibitors: BTreeSet<String>,
     availability: BTreeMap<String, FanOutput>,
-    ptt: BTreeMap<NodeId, bool>,
+    ptt: BTreeMap<PortKey, bool>,
 }
 impl SiteController {
     /// Prepare all named policy state outside audio; no device is opened here.
@@ -230,6 +230,7 @@ impl SiteController {
             {
                 if old.enabled == policy.enabled
                     && old.endpoint == policy.endpoint
+                    && old.interface == policy.interface
                     && old.active_high == policy.active_high
                 {
                     retained_outputs.insert(policy.name.clone());
@@ -290,7 +291,7 @@ impl SiteController {
         &mut self,
         now_ms: u64,
         observations: &SiteObservations,
-        ptt: &BTreeMap<NodeId, bool>,
+        ptt: &BTreeMap<PortKey, bool>,
     ) -> Vec<SiteEffect> {
         self.ptt.clone_from(ptt);
         let mut effects = Vec::new();

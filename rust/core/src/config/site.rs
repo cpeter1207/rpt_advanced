@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 #[path = "site_policy.rs"]
 mod policy;
 pub use policy::{AlarmCondition, AlarmSettings, FanMode, FanSettings, SiteAction};
+pub(crate) use policy::{curve_valid, parse_action};
 
 /// Configuration families sharing the site inheritance rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +102,27 @@ pub enum Calibration {
 }
 
 impl Calibration {
+    /// Build a calibration only when both spans and their ratio remain finite.
+    pub(crate) fn two_point(
+        input_low: f64,
+        input_high: f64,
+        value_low: f64,
+        value_high: f64,
+    ) -> Option<Self> {
+        let input_span = input_high - input_low;
+        let value_span = value_high - value_low;
+        (input_span != 0.0
+            && input_span.is_finite()
+            && value_span.is_finite()
+            && (value_span / input_span).is_finite())
+        .then_some(Calibration::TwoPoint {
+            input_low,
+            input_high,
+            value_low,
+            value_high,
+        })
+    }
+
     /// Apply calibration once; nonfinite results are acquisition faults.
     pub fn apply(self, value: f64) -> Option<f64> {
         let result = match self {
@@ -128,6 +150,8 @@ pub struct SensorSettings {
     pub enabled: bool,
     /// Instance-only source identity.
     pub endpoint: Option<SiteEndpoint>,
+    /// Cached property of the already owning radio, mutually exclusive with an external endpoint.
+    pub interface: Option<super::resources::profiles::equipment::BoundInterface>,
     /// Optional localized label; an empty value uses the stable name.
     pub label_message_id: String,
     /// Engineering unit used in reports.
@@ -155,6 +179,8 @@ pub struct InputSettings {
     pub enabled: bool,
     /// Instance-only source identity.
     pub endpoint: Option<SiteEndpoint>,
+    /// Cached property of the already owning radio, mutually exclusive with an external endpoint.
+    pub interface: Option<super::resources::profiles::equipment::BoundInterface>,
     /// Electrical high means logical active when true.
     pub active_high: bool,
     /// Time the changed state must remain stable.
@@ -176,6 +202,8 @@ pub struct OutputSettings {
     pub enabled: bool,
     /// Instance-only owned endpoint.
     pub endpoint: Option<SiteEndpoint>,
+    /// Cached property of the already owning radio, mutually exclusive with an external endpoint.
+    pub interface: Option<super::resources::profiles::equipment::BoundInterface>,
     /// Electrical polarity of logical on.
     pub active_high: bool,
     /// Initial logical demand.
@@ -448,18 +476,7 @@ impl<'a> Fields<'a> {
         let input_high = finite(&self.value("input_high")?)?;
         let value_low = finite(&self.value("value_low")?)?;
         let value_high = finite(&self.value("value_high")?)?;
-        let input_span = input_high - input_low;
-        let value_span = value_high - value_low;
-        (input_span != 0.0
-            && input_span.is_finite()
-            && value_span.is_finite()
-            && (value_span / input_span).is_finite())
-        .then_some(Calibration::TwoPoint {
-            input_low,
-            input_high,
-            value_low,
-            value_high,
-        })
+        Calibration::two_point(input_low, input_high, value_low, value_high)
     }
     fn actions(&self, key: &str) -> Vec<SiteAction> {
         policy::actions(&self.text(key)).expect("validated action list")
@@ -521,6 +538,7 @@ pub(super) fn resolve_definitions(
                     name,
                     enabled,
                     endpoint,
+                    interface: None,
                     label_message_id: fields.text("label_message_id"),
                     unit: fields.text("unit"),
                     precision: fields.number("precision") as u8,
@@ -535,6 +553,7 @@ pub(super) fn resolve_definitions(
                     name,
                     enabled,
                     endpoint,
+                    interface: None,
                     active_high: fields.text("active_level") == "high",
                     debounce_ms: fields.number("debounce_ms"),
                     dtmf_id,
@@ -546,6 +565,7 @@ pub(super) fn resolve_definitions(
                     name,
                     enabled,
                     endpoint,
+                    interface: None,
                     active_high: fields.text("active_level") == "high",
                     startup_on: fields.text("startup_state") == "on",
                     safe_on: fields.text("safe_state") == "on",

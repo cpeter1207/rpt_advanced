@@ -93,3 +93,45 @@ fn site_radio_observation_preserves_age_and_never_normalizes_a_failed_read() {
         ReadingQuality::Unavailable
     );
 }
+
+#[test]
+fn public_capability_uses_exact_port_mask_and_published_pin_name() {
+    use rpt_advanced_core::config::resources::{
+        PortKey,
+        candidate::ResourceKind,
+        profiles::equipment::{BoundInterface, InterfaceCapability},
+    };
+    let mut reference = BoundInterface {
+        port: "929e52be-6854-4c46-85f2-000000000001".parse().unwrap(),
+        key: PortKey::new("local / a"),
+        property: "/gpio/pins/2".into(),
+    };
+    let cached = |key: &PortKey, bank: u32| {
+        assert_eq!(key.as_str(), "local / a");
+        assert_eq!(bank, 0);
+        Some(abi::UrpAstSiteSnapshot {
+            generation: 1,
+            input_mask: 2,
+            output_mask: 4,
+            ..snapshot()
+        })
+    };
+    assert_eq!(
+        cached_pin_capability(&reference, ResourceKind::Sensor, cached),
+        Some(InterfaceCapability::Boolean)
+    );
+    assert_eq!(
+        cached_pin_capability(&reference, ResourceKind::Output, cached),
+        None
+    );
+    reference.property = "/gpio/pins/02".into();
+    assert_eq!(
+        cached_pin_capability(&reference, ResourceKind::Input, cached),
+        None
+    );
+    reference.property = "/gpio/pins/3".into();
+    assert_eq!(
+        cached_pin_capability(&reference, ResourceKind::Output, cached),
+        Some(InterfaceCapability::DigitalOutput)
+    );
+}

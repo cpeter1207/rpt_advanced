@@ -25,6 +25,56 @@ pub fn pin(backend: SiteBackend, line: &str, output: bool) -> Result<(u32, u32),
     }
 }
 
+/// Resolve a public GPIO/parallel property on the declared bank, using the native pin map.
+pub(super) fn property_pin(
+    property: &str,
+    output: bool,
+) -> Result<Option<(u32, u32)>, ReadingQuality> {
+    let Some((backend, line)) = property
+        .strip_prefix("/gpio/pins/")
+        .map(|line| (SiteBackend::Cm119, line))
+        .or_else(|| {
+            property
+                .strip_prefix("/parallel/pins/")
+                .map(|line| (SiteBackend::Parallel, line))
+        })
+    else {
+        return Ok(None);
+    };
+    // Only the exact published property name identifies this pin and its exclusive output claim.
+    if line.starts_with('0') || !line.bytes().all(|c| c.is_ascii_digit()) {
+        return Err(ReadingQuality::Unavailable);
+    }
+    pin(backend, line, output).map(Some)
+}
+
+/// Check only a cached capability mask published by the physical radio owner.
+/// Caller supplies the selected real port and bank's cache; this function never opens hardware.
+pub fn cached_pin_capability(
+    owner: &rpt_advanced_core::config::resources::profiles::equipment::BoundInterface,
+    kind: rpt_advanced_core::config::resources::candidate::ResourceKind,
+    cache: impl FnOnce(
+        &rpt_advanced_core::config::resources::PortKey,
+        u32,
+    ) -> Option<abi::UrpAstSiteSnapshot>,
+) -> Option<rpt_advanced_core::config::resources::profiles::equipment::InterfaceCapability> {
+    use rpt_advanced_core::config::resources::{
+        candidate::ResourceKind, profiles::equipment::InterfaceCapability,
+    };
+    let output = match kind {
+        ResourceKind::Output => true,
+        ResourceKind::Input | ResourceKind::Sensor => false,
+        _ => return None,
+    };
+    let (bank, mask) = property_pin(&owner.property, output).ok()??;
+    validate(&cache(&owner.key, bank)?, mask, output).ok()?;
+    Some(if output {
+        InterfaceCapability::DigitalOutput
+    } else {
+        InterfaceCapability::Boolean
+    })
+}
+
 /// Reject unavailable/reserved pins using the selected owner's published capability.
 pub fn validate(
     snapshot: &abi::UrpAstSiteSnapshot,

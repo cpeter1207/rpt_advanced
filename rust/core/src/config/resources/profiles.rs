@@ -6,11 +6,15 @@ pub mod command_policy;
 /// Final public ownership and account projections for private records.
 pub mod credentials;
 mod echolink;
+/// Checked station equipment and physical interface bindings.
+pub mod equipment;
 mod jitter;
 /// Public identities keyed by their real mailbox number and declaring resource.
 pub mod mailbox;
 mod normalize;
 mod phone;
+/// Named Fluent and media message preparation for a real management scope.
+pub mod public_messages;
 pub mod radio;
 
 pub use allstarlink::{AllStarLinkAccountIdentity, AllStarLinkProfileSettings};

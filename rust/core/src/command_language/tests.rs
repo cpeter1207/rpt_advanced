@@ -200,6 +200,27 @@ fn real_generation_source_and_protection_survive_parameter_conversion_and_nested
         source: CommandSource::Receiver,
         requires_grant: false,
     };
+    {
+        let secret_test = "*5806492#";
+        let prepared = prepare_runtime_action(
+            &json!({"action":"execute_dtmf","digits":secret_test,"parameter":secret_test}),
+        )
+        .unwrap();
+        let mut management = ctx.clone();
+        management.source = CommandSource::Management("test".into());
+        let admitted = prepared.admit(&management, false).unwrap();
+        let (Action::ExecuteDtmf(held), Action::ExecuteDtmf(dispatched)) =
+            (&prepared.action, &admitted.action)
+        else {
+            unreachable!()
+        };
+        assert_eq!(held.as_ptr(), dispatched.as_ptr());
+        assert_eq!(
+            prepared.parameter.as_ref().unwrap().as_ptr(),
+            admitted.parameter.as_ref().unwrap().as_ptr()
+        );
+        assert!(!format!("{dispatched:?} {:?}", admitted.parameter).contains(secret_test));
+    }
     let mut without_port = ctx.clone();
     without_port.owner =
         ResourceScope::Site("11111111-1111-4111-8111-111111111111".parse().unwrap());
@@ -637,7 +658,7 @@ fn invalid_optional_macro_mode_preserves_replacement_order() {
     let actions = &c.macros["x"];
     assert_eq!(actions.len(), 2);
     assert!(
-        matches!(&actions[0].action, Action::Link(c) if c.action==LinkAction::Transceive && c.node=="1234")
+        matches!(&actions[0].action, Action::Link(c) if c.action==LinkAction::Transceive && c.node.as_str()=="1234")
     );
     assert!(matches!(&actions[1].action, Action::Link(c) if c.action==LinkAction::Time));
     assert_eq!(
@@ -750,4 +771,22 @@ fn authenticated_phone_grammar_reports_its_unavailable_owner() {
     ));
     phone.end();
     assert!(matches!(a.admit(&ctx, false), Err(ActionError::SourceOnly)));
+}
+
+#[test]
+fn prepared_and_admitted_arguments_keep_their_redacted_owners() {
+    let operand = "8059176";
+    let action = prepare_runtime_action(&json!({"action":"connect","parameter":operand})).unwrap();
+    let Action::Link(link) = &action.action else {
+        unreachable!()
+    };
+    assert_eq!(link.node.as_str(), operand);
+    assert!(!format!("{link:?} {:?}", action.parameter).contains(operand));
+    let typed = prepare_runtime_action(&json!({"action":"execute_dtmf","digits":operand})).unwrap();
+    let Action::ExecuteDtmf(digits) = typed.action else {
+        unreachable!()
+    };
+    let copy = digits.clone();
+    assert!(std::ptr::eq(digits.as_ptr(), copy.as_ptr()));
+    assert_eq!(format!("{copy:?}"), "ProtectedOperand([redacted])");
 }

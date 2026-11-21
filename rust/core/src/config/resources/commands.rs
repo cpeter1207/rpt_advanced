@@ -36,6 +36,16 @@ impl ScopedCommands {
 impl ModularCandidate<'_> {
     /// Resolve only captured resources for the given site or port, then validate effective references.
     pub fn command_language(&self, scope: ResourceScope) -> Result<ScopedCommands, LanguageError> {
+        self.command_language_with_mappings(scope, |_, _| {})
+    }
+
+    /// Also observe complete validated mapping bodies, including built-ins, without
+    /// retaining a parallel JSON inventory in the live command engine.
+    pub fn command_language_with_mappings(
+        &self,
+        scope: ResourceScope,
+        mapping: impl FnMut(&str, &Value),
+    ) -> Result<ScopedCommands, LanguageError> {
         let registry = self.registry();
         let site = ResourceScope::Site(registry.site_id());
         let scopes = match scope {
@@ -97,7 +107,7 @@ impl ModularCandidate<'_> {
             settings.insert("macros".into(), Value::Object(macros));
             bodies[i] = Value::Object(settings);
         }
-        let mut language = CommandLanguage::resolve(&bodies[0], &bodies[1])?;
+        let mut language = CommandLanguage::resolve_with_mappings(&bodies[0], &bodies[1], mapping)?;
         language.warnings.extend(selector_warnings);
         if embedded {
             language.warnings.push(LanguageWarning::Unknown);
@@ -114,7 +124,12 @@ impl ModularCandidate<'_> {
                 Action::Site(SiteCommand::ResetExtrema(name)) => Some((ResourceKind::Sensor, name)),
                 Action::Link(c)
                     if c.action == LinkAction::SiteStatus
-                        && selectors.values().filter(|&&v| v == c.node).take(2).count() != 1 =>
+                        && selectors
+                            .values()
+                            .filter(|&&v| v == c.node.as_str())
+                            .take(2)
+                            .count()
+                            != 1 =>
                 {
                     return Err(LanguageError::MissingResource);
                 }

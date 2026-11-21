@@ -47,6 +47,8 @@ Use test-driven development.
 
 [x] - Complete unified typed action, macro and DTMF configuration preparation with the full command inventory and 78 default mappings, exact parameter handling, permission/source admission and static reference checks. Runtime collectors/execution/mute joins remain pending.
 
+[x] - Complete reviewed modular HAL/store coordination, protected operation receipts, Fluent message preparation and cached site equipment profiles; pass the combined development-host gate with 1,230 distinct affected tests and full fast checks. Native checkpoint, complete typed API projections and actual runtime/bootstrap joins remain pending.
+
 [x] - Record approved scheduler policies: pair a start with its next end and skip overlapping starts; ignore the in-progress occurrence when restart_recovery is false; skip missed calendar work while forcing pending monotonic deadlines; cancel without either boundary macro if nominal end arrives before start execution. Preserve existing permanent-route ownership and hold fences.
 
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.

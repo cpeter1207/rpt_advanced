@@ -56,6 +56,12 @@ fn marker(id: Uuid) -> String {
 }
 
 impl WorkingFiles {
+    /// Fence further publications when an owner could not acquire its bookkeeping guard after adoption.
+    /// Only an authoritative guarded activation update can clear this condition.
+    pub fn mark_bookkeeping_fault(&self) {
+        self.bookkeeping_fault.store(true, Ordering::Release);
+    }
+
     /// Initialize an empty store or explicitly resume its matching, unfinished UUID.
     pub fn provision(path: &Path, id: Uuid) -> Result<Self, CaptureError> {
         Self::provision_with(path, id, || Ok(()))
@@ -309,6 +315,66 @@ impl EditGuard<'_> {
         if expected.is_none() && self.bootstrap_identity()?.is_none() {
             return Err(InstallError::Conflict);
         }
+        self.replace_root_record(
+            Path::new("state.json"),
+            expected,
+            bytes,
+            limit,
+            recheck,
+            after_rename,
+        )?;
+        if let Some(id) = self.store.bootstrap {
+            self.retire_marker(id)
+                .map_err(|_| InstallError::DurabilityUnknown)?;
+        }
+        Ok(())
+    }
+
+    /// Read the bounded management operation ledger under the same protected root and edit lock.
+    pub fn read_operations(&self, limit: u64) -> Result<Option<Vec<u8>>, CaptureError> {
+        self.check_lock()?;
+        let bytes = self.read_leaf(&self.store.root, Path::new("operations.json"), limit)?;
+        self.check_lock()?;
+        Ok(bytes)
+    }
+
+    /// Publish frozen execution intent or observed outcomes using guarded root-record CAS.
+    pub fn replace_operations(
+        &self,
+        expected: Option<&[u8; 32]>,
+        bytes: &[u8],
+        limit: u64,
+    ) -> Result<(), InstallError> {
+        self.replace_operations_checked(expected, bytes, limit, || Ok(()))
+    }
+
+    /// Publish an operation record with a checkpoint between rename and directory sync.
+    pub fn replace_operations_checked(
+        &self,
+        expected: Option<&[u8; 32]>,
+        bytes: &[u8],
+        limit: u64,
+        after_rename: impl FnOnce() -> Result<(), InstallError>,
+    ) -> Result<(), InstallError> {
+        self.replace_root_record(
+            Path::new("operations.json"),
+            expected,
+            bytes,
+            limit,
+            || Ok(()),
+            after_rename,
+        )
+    }
+
+    fn replace_root_record(
+        &self,
+        name: &Path,
+        expected: Option<&[u8; 32]>,
+        bytes: &[u8],
+        limit: u64,
+        recheck: impl FnOnce() -> Result<(), InstallError>,
+        after_rename: impl FnOnce() -> Result<(), InstallError>,
+    ) -> Result<(), InstallError> {
         if bytes.len() as u64 > limit {
             return Err(InstallError::Limits);
         }
@@ -316,31 +382,25 @@ impl EditGuard<'_> {
         let mut stage = stage(&root, bytes)?;
         recheck()?;
         stage.check_name()?;
-        let current = self.read_state(limit)?;
+        self.check_lock()?;
+        let current = self.read_leaf(&root, name, limit)?;
+        self.check_lock()?;
         if current.as_deref().map(artifact_sha256).as_ref() != expected {
             return Err(InstallError::Conflict);
         }
-        publish(
-            &mut stage,
-            &root,
-            &root,
-            Path::new("state.json"),
-            expected.is_none(),
-        )?;
+        publish(&mut stage, &root, &root, name, expected.is_none())?;
         after_rename().map_err(|_| InstallError::DurabilityUnknown)?;
         root.sync_all()
             .map_err(|_| InstallError::DurabilityUnknown)?;
         self.check_lock()
             .map_err(|_| InstallError::DurabilityUnknown)?;
         let current = self
-            .read_state(limit)
+            .read_leaf(&root, name, limit)
+            .map_err(|_| InstallError::DurabilityUnknown)?;
+        self.check_lock()
             .map_err(|_| InstallError::DurabilityUnknown)?;
         if current.as_deref() != Some(bytes) {
             return Err(InstallError::DurabilityUnknown);
-        }
-        if let Some(id) = self.store.bootstrap {
-            self.retire_marker(id)
-                .map_err(|_| InstallError::DurabilityUnknown)?;
         }
         Ok(())
     }

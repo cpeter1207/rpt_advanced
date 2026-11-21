@@ -1,7 +1,7 @@
 //! Cooling demand and faults without claiming unverified hardware state.
 
 use super::SiteError;
-use crate::config::{FanMode, FanSettings, NodeId};
+use crate::config::{FanMode, FanSettings, resources::PortKey};
 use std::collections::BTreeMap;
 
 /// Actual backend availability/capability, not inferred from a configured name.
@@ -96,7 +96,7 @@ impl FanState {
     pub fn advance(
         &mut self,
         now_ms: u64,
-        ptt: &BTreeMap<NodeId, bool>,
+        ptt: &BTreeMap<PortKey, bool>,
         temperature: Option<f64>,
         rpm: Option<f64>,
         output: FanOutput,

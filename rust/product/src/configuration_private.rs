@@ -150,6 +150,28 @@ fn key_error(e: KeyLoadError) -> SecretsState {
 
 /// Check the declared identity and exclude reserved credential subtrees before public storage.
 pub(crate) fn public_envelope(binding: ResourceBinding, bytes: &[u8]) -> bool {
+    check_envelope(binding, bytes, false)
+}
+
+/// The import normalizer may discard wrong-typed COMMAND.admin. Keep reserved names out
+/// of staging even when someone placed them inside a malformed array.
+pub(crate) fn public_input_envelope(binding: ResourceBinding, bytes: &[u8]) -> bool {
+    check_envelope(binding, bytes, true)
+}
+
+pub(crate) fn has_admin_hash(value: &rptadv_json::BorrowedValue<'_>) -> bool {
+    match &value.children {
+        BorrowedChildren::Object(fields) => {
+            fields.contains_key("lock_hash")
+                || fields.contains_key("unlock_hash")
+                || fields.values().any(has_admin_hash)
+        }
+        BorrowedChildren::Array(items) => items.iter().any(has_admin_hash),
+        BorrowedChildren::Scalar => false,
+    }
+}
+
+fn check_envelope(binding: ResourceBinding, bytes: &[u8], staging: bool) -> bool {
     let Ok(root) = decode_borrowed(bytes) else {
         return false;
     };
@@ -176,9 +198,15 @@ pub(crate) fn public_envelope(binding: ResourceBinding, bytes: &[u8]) -> bool {
         return false;
     };
     match binding.kind {
-        Allstarlink | Echolink | EcholinkProxy | PhonePatch => !body.contains_key("credentials") && !body.contains_key("proxy"),
-        Command => body.get("admin").is_none_or(|admin| matches!(&admin.children,
-            BorrowedChildren::Object(fields) if !fields.contains_key("lock_hash") && !fields.contains_key("unlock_hash"))),
+        Allstarlink | Echolink | EcholinkProxy | PhonePatch => {
+            !body.contains_key("credentials") && !body.contains_key("proxy")
+        }
+        Command => body.get("admin").is_none_or(|admin| match &admin.children {
+            BorrowedChildren::Object(fields) => {
+                !fields.contains_key("lock_hash") && !fields.contains_key("unlock_hash")
+            }
+            _ => staging && !has_admin_hash(admin),
+        }),
         Mailbox => !body.contains_key("pin_hash") && !body.contains_key("pin_configured"),
         _ => true,
     }

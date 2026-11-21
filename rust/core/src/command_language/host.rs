@@ -1,10 +1,10 @@
 //! Exact control-plane payloads for the existing host, maintenance and interface owners.
+use super::ProtectedOperand;
 use super::{
     ActionError,
     fields::{Fields, Result},
 };
 use crate::phone_dtmf::PhoneDtmfAction;
-use zeroize::Zeroizing;
 
 /// Physical mixer channel.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -106,15 +106,15 @@ pub enum HostAction {
     /// Host-only receive policy.
     ReceivePolicy,
     /// Real ingress symbol.
-    Symbol(char),
+    Symbol(ProtectedOperand<char>),
     /// Real receiver falling edge.
     ReceiverUnkey,
     /// Real ingress symbols; never a macro collector.
-    Input(Zeroizing<String>),
+    Input(ProtectedOperand<String>),
     /// Authenticated call grammar, currently inert.
-    PhoneGrammar(std::sync::Arc<PhoneDtmfAction>),
+    PhoneGrammar(std::sync::Arc<PhoneDtmfAction<ProtectedOperand<String>, ProtectedOperand<char>>>),
     /// Authenticate the actual call with ephemeral mailbox digits and PIN.
-    PhoneAuthenticate(Zeroizing<String>, Zeroizing<String>),
+    PhoneAuthenticate(ProtectedOperand<String>, ProtectedOperand<String>),
     /// Retire the exact live call.
     PhoneRetire,
     /// Provider-owned incoming authorization.

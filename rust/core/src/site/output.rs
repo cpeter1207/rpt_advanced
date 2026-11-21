@@ -49,6 +49,7 @@ impl OutputState {
     /// Changed endpoints must already have completed safe ownership handoff.
     pub fn reconfigure(&mut self, settings: OutputSettings) {
         if self.settings.endpoint != settings.endpoint
+            || self.settings.interface != settings.interface
             || self.settings.active_high != settings.active_high
         {
             *self = Self::new(settings);

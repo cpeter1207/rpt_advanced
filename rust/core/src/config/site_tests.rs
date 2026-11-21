@@ -239,7 +239,7 @@ fn site_policy_fan_references_and_curve_boundaries() {
         let parsed = resolve(&format!("{base}[fan 1000 f]\nptt_nodes={value}\n")).unwrap();
         assert_eq!(
             parsed.value.fans[0].ptt_nodes,
-            vec![NodeId::new("1000").unwrap()]
+            vec![crate::config::resources::PortKey::new("1000")]
         );
         assert!(!parsed.warnings.is_empty());
     }

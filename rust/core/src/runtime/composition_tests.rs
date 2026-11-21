@@ -269,6 +269,9 @@ fn snapshot() -> MessageValueSnapshot {
         time_format: TimeFormat::TwelveHour,
         node: "524950".into(),
         callsign: "KG0BP".into(),
+        port: Default::default(),
+        event: None,
+        builtin: Default::default(),
         links: MessageForms {
             text: "No links".into(),
             tts: "No links".into(),
@@ -498,4 +501,439 @@ fn composition_site_selectors_respect_command_size_and_report_active_input() {
         program.primary[0].speech.as_ref().unwrap().text,
         "door is active."
     );
+}
+
+#[test]
+fn flat_identity_arguments_use_the_immutable_peer_and_explicit_port() {
+    use crate::config::IdentitySource::*;
+    let catalog = MessageCatalog::from_sources(
+        "en-US",
+        include_str!("../../../../messages/en-US.ftl"),
+        None,
+    )
+    .unwrap();
+    let mut observed = snapshot();
+    observed.port.allstarlink_number = Some("987".into());
+    observed.port.name = "Home".into();
+    assert!(
+        observed
+            .binding(&BindingSource::Identity(PeerNumber), &catalog)
+            .is_err()
+    );
+    observed.event = Some(MessageEventIdentity {
+        kind: "connected".into(),
+        peer_protocol: Some("echolink".into()),
+        peer_number: Some("001".into()),
+        peer_callsign: None,
+    });
+    for (source, expected, spoken) in [
+        (NodeName, "Home", "Home"),
+        (AllstarlinkNumber, "987", "9,8,7"),
+        (PeerNumber, "001", "0,0,1"),
+        (PeerProtocol, "echolink", "echolink"),
+        (EventKind, "connected", "connected"),
+    ] {
+        assert_eq!(
+            observed
+                .binding(&BindingSource::Identity(source), &catalog)
+                .unwrap(),
+            BoundValue::Available(MessageArgument::Forms(MessageForms {
+                text: expected.into(),
+                tts: spoken.into(),
+                morse: expected.into()
+            }))
+        );
+    }
+    assert!(
+        observed
+            .binding(&BindingSource::Identity(PeerCallsign), &catalog)
+            .is_err()
+    );
+}
+
+#[test]
+fn public_fluent_media_parts_use_one_attempt_and_never_dispatch_formatted_input() {
+    use crate::composition::PublicMessageSource;
+    use crate::messages::patterns::NativePattern;
+    let base = recipe("[message root]\ncontent=Literal\n");
+    let mut settings = base.settings_for(None).clone();
+    settings
+        .bindings
+        .insert("observed".into(), BindingSource::Sensor("a/b".into()));
+    let (catalog, _) = MessageCatalog::from_sources(
+        "en-US",
+        include_str!("../../../../messages/en-US.ftl"),
+        None,
+    )
+    .unwrap()
+    .project_locales(&"en-US".parse().unwrap(), &BTreeMap::new())
+    .unwrap();
+    let pattern = NativePattern::parse("Reading { $observed }").unwrap();
+    let compiled = Composition::compile_public(
+        settings.clone(),
+        &PublicMessageSource::Content(pattern),
+        Arc::new(BTreeMap::new()),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &catalog,
+        MorseRequirement::Required,
+    )
+    .unwrap();
+    let mut values = snapshot();
+    values.sensors.insert(
+        "a/b".into(),
+        Observation {
+            value: Some(uniform("{ file }")),
+            observed_at_ms: Some(23),
+            quality: ReadingQuality::Valid,
+        },
+    );
+    let rendered = compiled.prepare_text(&catalog, &values).unwrap();
+    assert_eq!(rendered[0].text, "Reading { file }");
+    let program = compiled.prepare(&catalog, &values).unwrap();
+    assert_eq!(program.primary.len(), 1);
+    assert!(program.primary[0].file.is_none());
+    values.sensors.get_mut("a/b").unwrap().quality = ReadingQuality::Stale;
+    assert!(
+        compiled.prepare_text(&catalog, &values).unwrap()[0]
+            .text
+            .contains("unavailable")
+    );
+    values.sensors.get_mut("a/b").unwrap().quality = ReadingQuality::Valid;
+    values.sensors.get_mut("a/b").unwrap().value = Some(uniform(&"é".repeat(64)));
+    assert!(compiled.prepare_text(&catalog, &values).is_err());
+}
+
+#[test]
+fn review35_explicit_media_requires_valid_static_morse() {
+    use crate::{
+        composition::PublicMessageSource, media::MorseSource, messages::patterns::NativePattern,
+    };
+    let (catalog, _) = MessageCatalog::from_sources(
+        "en-US",
+        include_str!("../../../../messages/en-US.ftl"),
+        None,
+    )
+    .unwrap()
+    .project_locales(&"en-US".parse().unwrap(), &Default::default())
+    .unwrap();
+    let mut settings = recipe("[message root]\ncontent=Literal\n")
+        .settings_for(None)
+        .clone();
+    settings.media.file = Some("recording.wav".into());
+    settings.media.morse = Some(MorseSource {
+        text: "你好".into(),
+        speed_wpm: 20,
+        frequency_hz: 800.0,
+        level_db: -6,
+    });
+    let source = PublicMessageSource::Media {
+        speech: None,
+        morse: Some(NativePattern::parse("你好").unwrap()),
+    };
+    assert!(
+        Composition::compile_public(
+            settings,
+            &source,
+            Arc::new(BTreeMap::new()),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &catalog,
+            MorseRequirement::Required
+        )
+        .is_err()
+    );
+}
+#[test]
+fn review35_captured_typed_and_ordinary_values_share_the_actual_format_call() {
+    use crate::messages::{patterns::NativePattern, projection::LocalizedMessage};
+    let mut projected = LocalizedMessage::default();
+    projected
+        .locales
+        .entry("en-US".parse().unwrap())
+        .or_default()
+        .insert(
+            "text".into(),
+            NativePattern::parse("{ $greeting_text } / { $node-name }").unwrap(),
+        );
+    let (catalog, bindings) = MessageCatalog::from_sources(
+        "en-US",
+        include_str!("../../../../messages/en-US.ftl"),
+        None,
+    )
+    .unwrap()
+    .project_locales(
+        &"en-US".parse().unwrap(),
+        &BTreeMap::from([("time-announcement".into(), projected)]),
+    )
+    .unwrap();
+    let mut settings = recipe("[message root]\ncontent=Literal\n")
+        .settings_for(None)
+        .clone();
+    settings.message_id = Some("time-announcement".into());
+    settings.bindings = bindings["time-announcement"].clone();
+    let mut values = snapshot();
+    values.port.name = "Station".into();
+    values.capture_builtin(&Message::TimeAnnouncement {
+        greeting_text: "Good day",
+        greeting_tts: "Good day",
+        time: "12:34",
+    });
+    assert_eq!(
+        message_forms(&settings, &values, &catalog).unwrap().text,
+        "Good day / Station"
+    );
+}
+
+#[test]
+fn real_argument_fallback_resolves_the_installed_forms_own_normal_binding() {
+    use crate::messages::{patterns::NativePattern, projection::LocalizedMessage};
+    let en = include_str!("../../../../messages/en-US.ftl");
+    let mut def = LocalizedMessage::default();
+    def.locales
+        .entry("fr".parse().unwrap())
+        .or_default()
+        .insert(
+            "text".into(),
+            NativePattern::parse("long { $node-name }").unwrap(),
+        );
+    let (catalog, bindings) =
+        MessageCatalog::from_sources("fr", en, Some("no-links =\n    .text = PORT { $node-key }"))
+            .unwrap()
+            .project_locales(
+                &"fr".parse().unwrap(),
+                &BTreeMap::from([("no-links".into(), def)]),
+            )
+            .unwrap();
+    let mut settings = recipe("[message root]\ncontent=Literal\n")
+        .settings_for(None)
+        .clone();
+    settings.bindings = bindings["no-links"].clone();
+    settings.message_id = Some("no-links".into());
+    let mut at_playback = snapshot();
+    at_playback.port.name = "z".repeat(126);
+    let formatted = message_forms(&settings, &at_playback, &catalog).unwrap();
+    assert_eq!(formatted.text, format!("PORT {}", at_playback.node));
+}
+#[test]
+fn sparse_builtin_presentation_retains_its_captured_arguments() {
+    let (catalog, bindings) = MessageCatalog::from_sources(
+        "en-US",
+        include_str!("../../../../messages/en-US.ftl"),
+        None,
+    )
+    .unwrap()
+    .project_locales(
+        &"en-US".parse().unwrap(),
+        &BTreeMap::from([("time-announcement".into(), Default::default())]),
+    )
+    .unwrap();
+    let mut settings = recipe("[message root]\ncontent=Literal\n")
+        .settings_for(None)
+        .clone();
+    settings.message_id = Some("time-announcement".into());
+    settings.bindings = bindings["time-announcement"].clone();
+    let mut values = snapshot();
+    values.capture_builtin(&Message::TimeAnnouncement {
+        greeting_text: "Good day",
+        greeting_tts: "Hello",
+        time: "12:34",
+    });
+    assert_eq!(
+        message_forms(&settings, &values, &catalog).unwrap().tts,
+        "Hello. The time is 12:34."
+    );
+}
+
+#[test]
+fn round_two_media_native_reference_validates_english_and_uses_optional_morse_fallback() {
+    use crate::{
+        composition::PublicMessageSource,
+        media::MorseSource,
+        messages::{patterns::NativePattern, projection::LocalizedMessage},
+    };
+    for (en, fr, valid) in [("GO", "你好", true), ("你好", "GO", false)] {
+        let mut label = LocalizedMessage::default();
+        for (lang, text) in [("en-US", en), ("fr", fr)] {
+            let forms = label.locales.entry(lang.parse().unwrap()).or_default();
+            for (attr, source) in [("text", text), ("tts", "Okay"), ("morse", "OK")] {
+                forms.insert(attr.into(), NativePattern::parse(source).unwrap());
+            }
+        }
+        let localized = BTreeMap::from([("label".into(), label)]);
+        let (catalog, _) = MessageCatalog::from_sources(
+            "en-US",
+            include_str!("../../../../messages/en-US.ftl"),
+            None,
+        )
+        .unwrap()
+        .project_locales(&"fr".parse().unwrap(), &localized)
+        .unwrap();
+        let mut settings = recipe("[message root]\ncontent=Literal\n")
+            .settings_for(None)
+            .clone();
+        settings.media.file = Some("recording.wav".into());
+        settings.media.morse = Some(MorseSource {
+            text: "{ label.text }".into(),
+            speed_wpm: 20,
+            frequency_hz: 800.0,
+            level_db: -6,
+        });
+        let pattern = NativePattern::parse("{ label.text }").unwrap();
+        for payload in [
+            PublicMessageSource::Media {
+                speech: None,
+                morse: Some(pattern.clone()),
+            },
+            PublicMessageSource::Content(pattern),
+        ] {
+            let result = Composition::compile_public(
+                settings.clone(),
+                &payload,
+                Arc::new(BTreeMap::new()),
+                &BTreeMap::new(),
+                &localized,
+                &catalog,
+                MorseRequirement::Required,
+            );
+            assert_eq!(result.is_ok(), valid);
+            if let Ok(recipe) = result {
+                assert_eq!(
+                    recipe.prepare(&catalog, &snapshot()).unwrap().morse[0].text,
+                    "GO"
+                );
+            }
+        }
+    }
+}
+#[test]
+fn round_two_site_fallback_keeps_its_alias_binding() {
+    use crate::messages::{patterns::NativePattern, projection::LocalizedMessage};
+    let mut site = LocalizedMessage::default();
+    for (lang, attr, val) in [
+        ("en-US", "text", "EN"),
+        ("en-US", "tts", "SAY"),
+        ("en-US", "morse", "EN"),
+        ("fr", "text", "SITE { $alias }"),
+    ] {
+        site.locales
+            .entry(lang.parse().unwrap())
+            .or_default()
+            .insert(attr.into(), NativePattern::parse(val).unwrap());
+    }
+    site.bindings.insert(
+        "alias".into(),
+        BindingSource::from_public_path("node.key").unwrap(),
+    );
+    let mut port = site.clone();
+    port.bindings.insert(
+        "alias".into(),
+        BindingSource::from_public_path("node.name").unwrap(),
+    );
+    port.locales
+        .get_mut(&"fr".parse().unwrap())
+        .unwrap()
+        .insert(
+            "text".into(),
+            NativePattern::parse("LONG { $alias }").unwrap(),
+        );
+    let previous = BTreeMap::from([("notice".into(), site)]);
+    let current = BTreeMap::from([("notice".into(), port)]);
+    let (catalog, bindings, _) = MessageCatalog::from_sources(
+        "en-US",
+        include_str!("../../../../messages/en-US.ftl"),
+        None,
+    )
+    .unwrap()
+    .project_message_sources(
+        &"fr".parse().unwrap(),
+        &current,
+        &Default::default(),
+        &previous,
+    )
+    .unwrap();
+    let mut settings = recipe("[message root]\ncontent=Literal\n")
+        .settings_for(None)
+        .clone();
+    settings.message_id = Some("notice".into());
+    settings.bindings = bindings["notice"].clone();
+    let mut values = snapshot();
+    values.port.name = "Z".repeat(126);
+    assert_eq!(
+        message_forms(&settings, &values, &catalog).unwrap().text,
+        format!("SITE {}", values.node)
+    );
+}
+
+#[test]
+fn round_three_site_candidate_localizes_unavailable_readings_only_when_selected() {
+    use crate::messages::{patterns::NativePattern, projection::LocalizedMessage};
+    for (path, input) in [("sensor:outdoor", false), ("input:outdoor", true)] {
+        let mut site = LocalizedMessage::default();
+        for (lang, attr, value) in [
+            ("en-US", "text", "Ready"),
+            ("en-US", "tts", "SAY"),
+            ("en-US", "morse", "EN"),
+            ("fr", "text", "TEMP { $reading }"),
+        ] {
+            site.locales
+                .entry(lang.parse().unwrap())
+                .or_default()
+                .insert(attr.into(), NativePattern::parse(value).unwrap());
+        }
+        site.bindings.insert(
+            "reading".into(),
+            BindingSource::from_public_path(path).unwrap(),
+        );
+        let mut port = site.clone();
+        port.locales
+            .get_mut(&"fr".parse().unwrap())
+            .unwrap()
+            .insert(
+                "text".into(),
+                NativePattern::parse("LONG { $node-name }").unwrap(),
+            );
+        let previous = BTreeMap::from([("notice".into(), site)]);
+        let current = BTreeMap::from([("notice".into(), port)]);
+        let selected = "fr".parse().unwrap();
+        let (catalog,bindings,_)=MessageCatalog::from_sources("fr",include_str!("../../../../messages/en-US.ftl"),Some("site-value-unavailable =\n    .text = { $label } indisponible\n    .tts = { $label } absent\n    .morse = { $label } ABSENT\n")).unwrap().project_message_sources(&selected,&current,&Default::default(),&previous).unwrap();
+        let mut settings = recipe("[message root]\ncontent=Literal\n")
+            .settings_for(None)
+            .clone();
+        settings.message_id = Some("notice".into());
+        settings.bindings = bindings["notice"].clone();
+        let mut values = snapshot();
+        let readings = if input {
+            &mut values.inputs
+        } else {
+            &mut values.sensors
+        };
+        readings.insert(
+            "outdoor".into(),
+            Observation {
+                value: Some(MessageArgument::Number(7.0)),
+                observed_at_ms: Some(15),
+                quality: ReadingQuality::Stale,
+            },
+        );
+        values.port.name = "AB".into();
+        assert_eq!(
+            message_forms(&settings, &values, &catalog).unwrap().text,
+            "LONG AB"
+        );
+        values.port.name = "Z".repeat(126);
+        let unavailable = message_forms(&settings, &values, &catalog).unwrap();
+        assert_eq!(unavailable.text, "outdoor indisponible");
+        assert_eq!(unavailable.tts, "outdoor absent");
+        let readings = if input {
+            &mut values.inputs
+        } else {
+            &mut values.sensors
+        };
+        readings.get_mut("outdoor").unwrap().quality = ReadingQuality::Valid;
+        assert_eq!(
+            message_forms(&settings, &values, &catalog).unwrap().text,
+            "TEMP 7"
+        );
+    }
 }

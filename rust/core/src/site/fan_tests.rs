@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 fn settings(extra: &str) -> crate::config::FanSettings {
     ResolvedSiteSettings::resolve(&ConfigDocument::parse(&format!("[1000]\n[sensor 1000 heat]\n[sensor 1000 tach]\n[output 1000 relay]\nenabled=yes\nbackend=hwmon\ndevice=chip\nline=pwm1\n[fan 1000 cooling]\nenabled=yes\noutput=relay\nmode=ptt\n{extra}")).unwrap(), &NodeId::new("1000").unwrap()).unwrap().value.fans.remove(0)
 }
-fn ptt(on: bool) -> BTreeMap<NodeId, bool> {
-    BTreeMap::from([(NodeId::new("1000").unwrap(), on)])
+fn ptt(on: bool) -> BTreeMap<crate::config::resources::PortKey, bool> {
+    BTreeMap::from([(crate::config::resources::PortKey::new("1000"), on)])
 }
 fn available(pwm: bool) -> FanOutput {
     FanOutput {

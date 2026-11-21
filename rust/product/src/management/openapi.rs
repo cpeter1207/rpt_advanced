@@ -1,0 +1,233 @@
+//! Code-first OpenAPI 3.1 for the authenticated route catalog.
+use super::{Fault, Route, Target, schema};
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
+use utoipa::{
+    OpenApi, ToSchema,
+    openapi::{
+        Content, Header, HttpMethod, Object, PathsBuilder, Ref, Required, ResponseBuilder,
+        SecurityRequirement, Server, Type,
+        path::{OperationBuilder, Parameter, ParameterBuilder, ParameterIn, PathItemBuilder},
+        request_body::RequestBodyBuilder,
+        security::SecurityScheme,
+    },
+};
+
+#[derive(Serialize, ToSchema)]
+pub(super) struct ManagementError {
+    pub error: &'static str,
+    #[serde(rename = "_links")]
+    #[schema(value_type=Object)]
+    pub links: Value,
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "Repeater controller management", version = "1"),
+    components(schemas(ManagementError))
+)]
+struct ManagementApi;
+
+fn parameter(
+    name: &str,
+    location: ParameterIn,
+    required: bool,
+    description: &str,
+    ty: Type,
+) -> Parameter {
+    ParameterBuilder::new()
+        .name(name)
+        .parameter_in(location)
+        .description(Some(description))
+        .required(if required {
+            Required::True
+        } else {
+            Required::False
+        })
+        .schema(Some(Object::with_type(ty)))
+        .build()
+}
+
+pub(super) fn media(route: &Route) -> &'static str {
+    match route.target {
+        Target::OpenApi => "application/json",
+        Target::Schema => "application/schema+json",
+        _ => "application/hal+json",
+    }
+}
+
+fn method(name: &str) -> HttpMethod {
+    match name {
+        "GET" => HttpMethod::Get,
+        "PUT" => HttpMethod::Put,
+        "POST" => HttpMethod::Post,
+        "PATCH" => HttpMethod::Patch,
+        "DELETE" => HttpMethod::Delete,
+        _ => unreachable!("registered method"),
+    }
+}
+
+pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
+    let mut api = ManagementApi::openapi();
+    api.servers = Some(vec![Server::new(mount)]);
+    api.security = Some(vec![SecurityRequirement::new(
+        "service",
+        Vec::<String>::new(),
+    )]);
+    let components = api.components.as_mut().expect("documented error schema");
+    components.add_security_scheme(
+        "service",
+        SecurityScheme::MutualTls {
+            description: Some(
+                "Every backend request requires an approved service client certificate.".into(),
+            ),
+            extensions: None,
+        },
+    );
+    let errors = [
+        Fault::Malformed,
+        Fault::Forbidden,
+        Fault::Missing,
+        Fault::Method,
+        Fault::Accept,
+        Fault::Conflict,
+        Fault::Gone,
+        Fault::PreconditionFailed,
+        Fault::TooLarge,
+        Fault::Media,
+        Fault::Invalid,
+        Fault::PreconditionRequired,
+        Fault::Unavailable,
+    ];
+    for error in errors {
+        let (status, code) = error.wire();
+        components.responses.insert(
+            status.as_u16().to_string(),
+            ResponseBuilder::new()
+                .description(code)
+                .content(
+                    "application/hal+json",
+                    Content::new(Some(Ref::from_schema_name("ManagementError"))),
+                )
+                .build()
+                .into(),
+        );
+    }
+    let mut paths = PathsBuilder::new();
+    for route in routes.values() {
+        let mut item = PathItemBuilder::new();
+        let parameters: Vec<_> = route
+            .path
+            .split('/')
+            .filter_map(|v| v.strip_prefix('{')?.strip_suffix('}'))
+            .map(|name| {
+                let desc = if name == "name" {
+                    "Public profile or relation name"
+                } else {
+                    "Canonical lowercase UUID"
+                };
+                parameter(name, ParameterIn::Path, true, desc, Type::String)
+            })
+            .collect();
+        if !parameters.is_empty() {
+            item = item.parameters(Some(parameters));
+        }
+        for &name in route.methods {
+            let mut op = OperationBuilder::new().summary(Some(format!("{name} {}", route.profile)));
+            let success = match (name, route.target) {
+                ("GET", _) | (_, Target::Operation) => "200",
+                ("POST", _) => "201",
+                _ => "202",
+            };
+            let mut result = ResponseBuilder::new().description(match success {
+                "201" => "Created a registered member",
+                "202" => "Accepted desired configuration",
+                _ => "Current representation or operation receipt",
+            });
+            let read = if name == "GET" || route.target == Target::Operation {
+                Content::new(Some(Ref::new(format!(
+                    "{mount}/schemas/{}/",
+                    schema::response_name(route)
+                ))))
+            } else {
+                Content::new(Some(Object::with_type(Type::Object)))
+            };
+            result = result.content(media(route), read);
+            if name == "GET" {
+                result = result.header("ETag", Header::new(Object::with_type(Type::String)));
+            }
+            if name == "POST" {
+                result = result.header("Location", Header::new(Object::with_type(Type::String)));
+            }
+            op = op.response(success, result.build());
+            for error in errors {
+                let status = error.wire().0.as_u16().to_string();
+                if name == "GET"
+                    && !matches!(
+                        error,
+                        Fault::Malformed
+                            | Fault::Forbidden
+                            | Fault::Missing
+                            | Fault::Method
+                            | Fault::Accept
+                            | Fault::Unavailable
+                    )
+                {
+                    continue;
+                }
+                op = op.response(&status, Ref::from_response_name(&status));
+            }
+            if name == "GET" && matches!(route.target, Target::Collection(_)) {
+                for q in ["offset", "limit"] {
+                    op = op.parameter(parameter(
+                        q,
+                        ParameterIn::Query,
+                        false,
+                        "Window of embedded collection members",
+                        Type::Integer,
+                    ));
+                }
+            }
+            if name != "GET" {
+                let create = name == "PUT" && route.target == Target::Operation;
+                op = op.parameter(parameter(
+                    "If-Match",
+                    ParameterIn::Header,
+                    !create,
+                    "Current strong validator for the exact canonical target",
+                    Type::String,
+                ));
+                if create {
+                    op = op.parameter(parameter(
+                        "If-None-Match",
+                        ParameterIn::Header,
+                        false,
+                        "Use * for first creation instead of If-Match",
+                        Type::String,
+                    ));
+                }
+            }
+            if matches!(name, "POST" | "PUT" | "PATCH") {
+                let (content, profile) = if name == "PATCH" {
+                    ("application/json-patch+json", "json-patch".to_owned())
+                } else {
+                    ("application/hal+json", schema::name(route, name == "POST"))
+                };
+                op = op.request_body(Some(
+                    RequestBodyBuilder::new()
+                        .required(Some(Required::True))
+                        .content(
+                            content,
+                            Content::new(Some(Ref::new(format!("{mount}/schemas/{profile}/")))),
+                        )
+                        .build(),
+                ));
+            }
+            item = item.operation(method(name), op);
+        }
+        paths = paths.path(&route.path, item.build());
+    }
+    api.paths = paths.build();
+    serde_json::to_value(api).expect("serializable OpenAPI document")
+}

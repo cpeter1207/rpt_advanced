@@ -580,3 +580,37 @@ fn account_state_is_atomic_and_missing_key_leaves_public_management_readable() {
         TransactionError::SecretsUnavailable
     );
 }
+
+#[test]
+fn import_stage_distinguishes_wrong_admin_shape_from_reserved_private_members() {
+    use crate::configuration_private::{public_envelope, public_input_envelope};
+    let id = SITE.parse().unwrap();
+    let b = ResourceBinding {
+        id,
+        scope: ResourceScope::Site(id),
+        kind: ResourceKind::Command,
+    };
+    let encode = |admin| {
+        serde_json::to_vec(
+            &serde_json::json!({"id":SITE,"kind":"command","configuration":{"admin":admin}}),
+        )
+        .unwrap()
+    };
+    for value in [
+        serde_json::json!(null),
+        serde_json::json!(false),
+        serde_json::json!([1, 2]),
+    ] {
+        let raw = encode(value);
+        assert!(public_input_envelope(b, &raw));
+        assert!(!public_envelope(b, &raw));
+    }
+    for value in [
+        serde_json::json!({"unlock_hash":"forbidden"}),
+        serde_json::json!([{"lock_hash":"forbidden"}]),
+    ] {
+        let raw = encode(value);
+        assert!(!public_input_envelope(b, &raw));
+        assert!(!public_envelope(b, &raw));
+    }
+}

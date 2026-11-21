@@ -542,3 +542,5 @@ fn selecting_fields_limits_and_unsafe_working_layout_fail_closed() {
     assert_eq!(tx.inspect().unwrap().status, StartupStatus::StorageFault);
     assert_eq!(tx.reconcile(), Err(TransactionError::StorageFault));
 }
+
+mod http;

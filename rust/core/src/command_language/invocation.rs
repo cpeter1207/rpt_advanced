@@ -1,10 +1,10 @@
 //! Trusted invocation metadata and shared accounting for the cooperative executor.
+use super::ProtectedOperand;
 use super::{
     Action, ActionError, CommandLanguage, CommandSource, InvocationContext, MacroOutcome,
     PreparedAction, host::HostAction,
 };
 use std::sync::Arc;
-use zeroize::Zeroizing;
 
 /// Origin of the generic parameter; only a DTMF node operand can use the remembered-target shortcut.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,7 +21,7 @@ pub struct Invocation {
     /// Existing domain intent or cooperative macro operation.
     pub action: Action,
     /// Ephemeral raw parameter; deliberately excluded from Debug, serialization and receipts.
-    pub parameter: Option<Zeroizing<String>>,
+    pub parameter: Option<ProtectedOperand<String>>,
     /// Typed literals and DTMF input have distinct node-zero semantics.
     pub origin: ParameterOrigin,
 }
@@ -78,22 +78,18 @@ impl Action {
     }
 }
 impl PreparedAction {
-    /// Bind a typed action to the real source before dispatch. Ingress adapters alone can submit ingress.
-    pub fn admit(
-        &self,
-        context: &InvocationContext,
-        live_grant: bool,
-    ) -> Result<Invocation, ActionError> {
-        context.recheck(live_grant)?;
-        self.action.check_scope(context)?;
-        let phone = matches!(&context.source,CommandSource::Connection{reply:r,..} if r.phone_source().is_some());
+    /// Check trust provenance without inventing a live generation. Final admission
+    /// rechecks this policy together with the actual owner, grant and generation.
+    pub fn check_source(&self, source: &CommandSource) -> Result<(), ActionError> {
+        let phone =
+            matches!(source,CommandSource::Connection{reply:r,..} if r.phone_source().is_some());
         let input = matches!(
-            context.source,
+            source,
             CommandSource::Receiver | CommandSource::Connection { .. }
         );
         let allowed = match &self.action {
             Action::Host(HostAction::PhoneAuthenticate(..) | HostAction::PhoneRetire) => phone,
-            _ if matches!(&context.source,CommandSource::Connection{reply:r,..} if r.phone_source().is_some() && !r.phone_authenticated()) => {
+            _ if matches!(source,CommandSource::Connection{reply:r,..} if r.phone_source().is_some() && !r.phone_authenticated()) => {
                 false
             }
             Action::Host(HostAction::PhoneGrammar(_)) if phone => {
@@ -105,24 +101,35 @@ impl PreparedAction {
                 | HostAction::Stop
                 | HostAction::ReloadPoll
                 | HostAction::ReceivePolicy,
-            ) => matches!(context.source, CommandSource::Host),
+            ) => matches!(source, CommandSource::Host),
             Action::Host(HostAction::AuthorizeIncoming | HostAction::AdmitIncoming) => {
-                matches!(context.source, CommandSource::Provider)
+                matches!(source, CommandSource::Provider)
             }
             Action::Host(HostAction::Symbol(_) | HostAction::Input(_)) => input,
             Action::Host(HostAction::ReceiverUnkey) | Action::PadTest => {
-                matches!(context.source, CommandSource::Receiver)
+                matches!(source, CommandSource::Receiver)
             }
             Action::Administration(..) => input,
-            Action::Maintenance(_) => matches!(
-                context.source,
-                CommandSource::Management(_) | CommandSource::Host
-            ),
+            Action::Maintenance(_) => {
+                matches!(source, CommandSource::Management(_) | CommandSource::Host)
+            }
             _ => true,
         };
         if !allowed {
             return Err(ActionError::SourceOnly);
         }
+        Ok(())
+    }
+
+    /// Bind a typed action to the real source before dispatch. Ingress adapters alone can submit ingress.
+    pub fn admit(
+        &self,
+        context: &InvocationContext,
+        live_grant: bool,
+    ) -> Result<Invocation, ActionError> {
+        context.recheck(live_grant)?;
+        self.action.check_scope(context)?;
+        self.check_source(&context.source)?;
         Ok(Invocation {
             context: context.clone(),
             action: self.action.clone(),

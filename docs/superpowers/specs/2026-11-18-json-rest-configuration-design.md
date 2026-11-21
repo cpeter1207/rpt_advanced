@@ -1,7 +1,8 @@
 # Modular JSON Configuration and HAL REST API Design
 
 Created: 2026-11-18  
-Updated: 2026-11-19  
+Updated: 2026-11-20
+
 Status: Draft for review; unified events, controller-start permanent links and same-time execution ordering incorporated  
 Logical parameter reference: [repeater-management.schema.json](../../../repeater-management.schema.json)  
 Complete logical parameter example: [repeater-configuration-complete.example.json](../../../repeater-configuration-complete.example.json)

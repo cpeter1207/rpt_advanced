@@ -2,7 +2,7 @@
 use super::candidate::{ResourceBinding, ResourceId, ResourceKind, ResourceScope};
 
 #[derive(Clone, Copy)]
-enum Layout {
+pub(crate) enum Layout {
     File(&'static str),
     Collection(&'static str),
     Protocol,
@@ -121,7 +121,12 @@ const PROFILES: &[(ResourceKind, &str, Layout)] = &[
 ];
 
 impl ResourceKind {
-    fn profile(self) -> (&'static str, Layout) {
+    /// Iterate the complete format-1 resource inventory in discovery order.
+    pub fn catalog() -> impl Iterator<Item = Self> {
+        PROFILES.iter().map(|(kind, _, _)| *kind)
+    }
+
+    pub(crate) fn profile(self) -> (&'static str, Layout) {
         let (_, name, layout) = PROFILES
             .iter()
             .find(|(kind, _, _)| *kind == self)

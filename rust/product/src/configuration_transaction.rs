@@ -51,6 +51,8 @@ pub struct Selected {
     pub state: StatePointer,
     /// Exact digest used for pointer compare-and-replace.
     pub digest: ContentHash,
+    /// Fingerprint of the current complete working tree, if safely captured.
+    pub observed_working: Option<ContentHash>,
     /// Manifest selected for the desired configuration.
     pub desired: LoadedPublicManifest,
     /// Private portion of the desired configuration, or its availability status.
@@ -120,6 +122,22 @@ pub enum Admission {
         /// Explicitly observed working digest.
         working: ContentHash,
     },
+}
+
+/// Complete guarded desired-state publication, including the explicitly staged private changes.
+pub struct Publication<'a> {
+    /// Exact state and working-tree preconditions.
+    pub admission: Admission,
+    /// Captured complete working tree.
+    pub source: &'a WorkingSnapshot,
+    /// Validated registry and selected immutable objects.
+    pub manifest: &'a PublicManifest,
+    /// New or changed public object bytes.
+    pub objects: &'a [(ResourceId, &'a [u8])],
+    /// Fresh durable publication journal identity.
+    pub journal_id: ResourceId,
+    /// Write-only changes bound to their final resource owners.
+    pub edits: &'a [CredentialEdit],
 }
 
 fn hash(bytes: &[u8]) -> ContentHash {
@@ -298,7 +316,7 @@ fn check_pointer_budget(
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Boundary {
+pub(crate) enum Boundary {
     PointerBarrier,
     DesiredSync,
     FinalSync,
@@ -377,6 +395,15 @@ impl<'a, 'store> Transaction<'a, 'store> {
         .select(graph.manifest().private(), owners)
     }
 
+    /// Exercise a real persistence boundary using the fixture supplied by the caller.
+    #[cfg(test)]
+    pub(crate) fn with_checkpoint(
+        mut self,
+        checkpoint: &'a dyn Fn(Boundary) -> Result<(), TransactionError>,
+    ) -> Self {
+        self.boundary = Some(checkpoint);
+        self
+    }
     #[cfg(test)]
     fn at(&self, point: Boundary) -> Result<(), TransactionError> {
         self.boundary.map_or(Ok(()), |callback| callback(point))
@@ -471,12 +498,14 @@ impl<'a, 'store> Transaction<'a, 'store> {
         if state.clean_working.is_some_and(|clean| clean != expected) {
             return Err(TransactionError::StorageFault);
         }
+        let mut observed_working = None;
         let status = match self.inventory() {
             Err(TransactionError::ExternalEdit) => StartupStatus::ExternalEdit,
             Err(_) => StartupStatus::StorageFault,
             Ok(snapshot) => {
+                observed_working = Some(digest(&snapshot));
                 let consistent = journal.as_ref().map_or_else(
-                    || digest(&snapshot) == expected,
+                    || observed_working == Some(expected),
                     |j| reconcilable(&snapshot, j),
                 );
                 if !consistent {
@@ -512,6 +541,7 @@ impl<'a, 'store> Transaction<'a, 'store> {
         Ok(Selected {
             private,
             last_known_good_private,
+            observed_working,
             state,
             digest: hash(&bytes),
             desired,
@@ -548,6 +578,35 @@ impl<'a, 'store> Transaction<'a, 'store> {
         journal_id: ResourceId,
         edits: &[CredentialEdit],
     ) -> Result<(StatePointer, usize), TransactionError> {
+        self.commit_prepared(
+            Publication {
+                admission,
+                source,
+                manifest,
+                objects,
+                journal_id,
+                edits,
+            },
+            |_| Ok(()),
+        )
+    }
+
+    /// Allow a caller to finish effect-free runtime preparation against the verified final
+    /// credentials before the journal or selector is published. Plaintext stays under its
+    /// typed owner and an error leaves the previously selected configuration intact.
+    pub fn commit_prepared(
+        &self,
+        publication: Publication<'_>,
+        finish: impl FnOnce(&Credentials) -> Result<(), TransactionError>,
+    ) -> Result<(StatePointer, usize), TransactionError> {
+        let Publication {
+            admission,
+            source,
+            manifest,
+            objects,
+            journal_id,
+            edits,
+        } = publication;
         if let Some(key) = self.write_key {
             rptadv_peer_support::sealed_records::load_systemd_key(key)
                 .map_err(|_| TransactionError::SecretsUnavailable)?;
@@ -737,9 +796,11 @@ impl<'a, 'store> Transaction<'a, 'store> {
         #[cfg(test)]
         self.at(Boundary::Manifest)?;
         let verified = self.load(&r)?;
-        if self.private_selection(store, &verified).state() != SecretsState::Ready {
-            return Err(TransactionError::SecretsUnavailable);
-        }
+        let private = self.private_selection(store, &verified);
+        let credentials = private
+            .credentials()
+            .map_err(|_| TransactionError::SecretsUnavailable)?;
+        finish(credentials)?;
         for (id, bytes) in verified
             .verified_objects()
             .filter(|(id, _)| !installed.contains(id))
