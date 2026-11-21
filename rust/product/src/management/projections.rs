@@ -8,15 +8,16 @@ use rpt_advanced_core::config::{
         ScopeParent,
         candidate::{
             ModularCandidate, ResourceBinding as Binding, ResourceId as Id, ResourceKind as Kind,
-            ResourceRegistry, ResourceScope as Scope,
+            ResourceScope as Scope,
         },
         events::{Boundary, Trigger},
+        generation::{RuntimeConfiguration, ScopeConfiguration},
         profiles::*,
     },
 };
 use serde_json::{Map, Value, json};
 pub(super) use sources::Origin;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 pub(super) struct EventLinks {
     pub start: Binding,
@@ -43,16 +44,36 @@ fn parent(p: ScopeParent) -> Value {
     }
 }
 
-impl Projections {
+/// Public views and native configuration obtained from one checked capture and installation.
+pub struct PreparedConfiguration {
+    pub(super) public: Projections,
+    runtime: Arc<RuntimeConfiguration>,
+    inputs: Arc<ProfileInputs>,
+}
+impl PreparedConfiguration {
+    /// Value-free normalization diagnostics produced by this checked generation.
+    pub(crate) fn diagnostics(&self) -> &[super::Diagnostic] {
+        &self.public.warnings
+    }
+
+    /// Borrow the installed input snapshot used throughout this candidate's preparation.
+    pub fn inputs(&self) -> &Arc<ProfileInputs> {
+        &self.inputs
+    }
+    /// Retain the verified native graph without borrowing captured files or HAL fields.
+    pub fn runtime(&self) -> &Arc<RuntimeConfiguration> {
+        &self.runtime
+    }
+    /// Prepare registered owners, compile their relationships and project their public views.
     pub fn prepare(
         candidate: &ModularCandidate<'_>,
-        registry: &ResourceRegistry,
         zone: Option<&str>,
-        inputs: &ProfileInputs,
+        inputs: &Arc<ProfileInputs>,
     ) -> Result<Self, Fault> {
         #[cfg(test)]
         super::FULL_PREPARATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut out = Self::default();
+        let registry = candidate.registry();
+        let mut out = Projections::default();
         let profiles = candidate
             .resolve_protocol_profiles()
             .map_err(|_| Fault::Conflict)?;
@@ -89,7 +110,7 @@ impl Projections {
                 .or_default()
                 .push(d.field);
         }
-        let mut equipment_scopes = Vec::new();
+        let mut scopes = BTreeMap::new();
         let site = Scope::Site(registry.site_id());
         for (scope, id) in std::iter::once((site, registry.site_id()))
             .chain(registry.port_keys().map(|(_, p)| (Scope::Port(p), p)))
@@ -154,8 +175,8 @@ impl Projections {
                 .permanent_groups(scope, &aliases)
                 .map_err(|_| Fault::Conflict)?;
             out.warnings
-                .extend(groups.warnings.into_iter().map(Diagnostic::Resource));
-            out.local.extend(groups.local);
+                .extend(groups.warnings.iter().copied().map(Diagnostic::Resource));
+            out.local.extend(groups.local.clone());
             for (b, g) in groups.effective.values() {
                 let mut fields = json!({"remote_node":g.remote_nodes});
                 if let Some(name) = &g.group_name {
@@ -279,6 +300,13 @@ impl Projections {
                             .interfaces
                             .get(&(kind, b.port, b.property.clone()))
                             .copied()
+                            .or_else(|| {
+                                crate::site::radio::declared_pin_capability(
+                                    radio.port(b.port)?,
+                                    b,
+                                    kind,
+                                )
+                            })
                     },
                     &commands,
                     &messages,
@@ -295,14 +323,17 @@ impl Projections {
                         }
                     }
                 };
-            if let Some(account) = echo
+            let echo_status = if let Some(account) = echo
                 && !account.settings.status_message.is_empty()
             {
                 let status = messages
                     .compile_text_only(&account.settings.status_message)
                     .map_err(|_| Fault::Conflict)?;
                 add_recipe(Kind::Echolink, None, &status);
-            }
+                Some(status)
+            } else {
+                None
+            };
             for key in commands.language.mapping_messages() {
                 if let Some(recipe) = command_recipes.get(key) {
                     add_recipe(Kind::Command, None, recipe);
@@ -385,7 +416,7 @@ impl Projections {
             }
             out.fixed_effective.insert(
                 (scope, Kind::TelemetrySettings),
-                Value::Object(media.effective),
+                Value::Object(media.effective.clone()),
             );
             for (binding, fields) in media
                 .members
@@ -396,17 +427,16 @@ impl Projections {
                 out.effective
                     .insert((scope, binding.id), Value::Object(fields.clone()));
             }
-            out.local.extend(telemetry.local);
-            out.local.extend(messages.local);
+            out.local.extend(telemetry.local.clone());
+            out.local.extend(messages.local.clone());
             out.local.extend(station.local.clone());
-            equipment_scopes.push(station);
             let events = candidate
                 .event_profiles(&commands, zone)
                 .map_err(|_| Fault::Conflict)?;
             out.warnings
                 .extend(events.warnings.iter().copied().map(Diagnostic::Resource));
-            out.local.extend(events.local);
-            for event in events.events {
+            out.local.extend(events.local.clone());
+            for event in &events.events {
                 let warnings = event
                     .start
                     .warnings
@@ -423,24 +453,55 @@ impl Projections {
                     },
                 );
                 let mut body = json!({"start":boundary(&event.start),"restart_recovery":event.restart_recovery});
-                if let Some(end) = event.end {
-                    body["end"] = boundary(&end);
+                if let Some(end) = &event.end {
+                    body["end"] = boundary(end);
                 }
                 if let Some(v) = event.sequence_number {
                     body["sequence_number"] = json!(v);
                 }
-                if let Some((_, key)) = event.replace_permanent {
+                if let Some((_, key)) = &event.replace_permanent {
                     body["replace_permanent"] = json!(key.as_str());
                 }
                 out.effective.insert((scope, event.binding.id), body);
             }
+            scopes.insert(
+                scope,
+                ScopeConfiguration {
+                    metadata: e,
+                    commands,
+                    policy,
+                    mailboxes,
+                    messages: Arc::new(messages),
+                    command_messages: Arc::new(command_recipes),
+                    echo_status,
+                    telemetry,
+                    media,
+                    equipment: station,
+                    permanent: groups,
+                    events,
+                },
+            );
         }
-        equipment::ScopedEquipment::acquisition_plan(&equipment_scopes)
-            .map_err(|_| Fault::Conflict)?;
+        let acquisition =
+            equipment::ScopedEquipment::acquisition_plan(scopes.values().map(|s| &s.equipment))
+                .map_err(|_| Fault::Conflict)?;
         out.add_sources(registry);
-        Ok(out)
+        let runtime = Arc::new(RuntimeConfiguration {
+            registry: registry.clone(),
+            radio,
+            protocols: profiles,
+            scopes,
+            acquisition,
+        });
+        Ok(Self {
+            public: out,
+            runtime,
+            inputs: Arc::clone(inputs),
+        })
     }
+}
 
+impl Projections {
     fn protocol<T>(&mut self, scope: Scope, p: &ProtocolProfile<T>, mut fields: Value) {
         let public = fields.as_object_mut().expect("public protocol fields");
         public.retain(|_, v| !v.is_null());

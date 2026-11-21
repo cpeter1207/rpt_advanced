@@ -41,7 +41,17 @@ pub use command_program::{CommandCompletion, CommandReceipt, CommandResponse};
 
 #[path = "reload.rs"]
 mod reload;
+use crate::config::resources::generation::RuntimeConfiguration;
 use reload::ReloadTransaction;
+
+#[path = "aggregate_modular.rs"]
+mod modular;
+pub use modular::PreparedConfigurationTransition;
+
+enum ConfigurationSource {
+    Document(ConfigDocument),
+    Modular(Arc<RuntimeConfiguration>),
+}
 
 fn queue_status_media(
     telemetry: &mut ControllerControl,
@@ -124,7 +134,7 @@ struct ControlState<C: Send> {
     activity: ActivitySnapshot,
     started_ms: u64,
     prior_activity_ms: Option<u64>,
-    catalog: MessageCatalog,
+    catalog: Arc<MessageCatalog>,
     messages: super::composition::MessageRecipes,
 }
 struct GroupAnnouncement {
@@ -175,6 +185,7 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     host: NodeHost<DtmfWorker, RuntimeTransmit<A>>,
     device: Box<dyn DeviceHandoff>,
     device_open: bool,
+    failed_station_replacement: bool,
     pending_peer_cleanup: bool,
     links: NodeLinkControl,
     control: ControlState<C>,
@@ -183,6 +194,7 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     time_format: u64,
     group_announcements: Vec<GroupAnnouncement>,
     echo_telemetry: crate::link::EchoTelemetryPolicy,
+    echo_announcement: crate::config::EchoLinkAnnouncement,
 }
 impl<A: Send, C: Send> RuntimeNode<A, C> {
     /// Reconcile event group holds before reserving any route operation. Verify this node's
@@ -276,9 +288,7 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         now_ms: u64,
     ) -> Result<Vec<crate::site::SiteEffect>, crate::site::SiteError> {
         let result = self.site.command(command, now_ms);
-        self.control
-            .telemetry
-            .set_site_inhibit(self.site.transmit_inhibited());
+        self.publish_rf_inhibit();
         result
     }
     /// Advance station protection and publish its RF gate independently of media admission.
@@ -289,11 +299,15 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         ptt: &std::collections::BTreeMap<crate::config::resources::PortKey, bool>,
     ) -> Vec<crate::site::SiteEffect> {
         let effects = self.site.advance(now_ms, observations, ptt);
-        self.control
-            .telemetry
-            .set_site_inhibit(self.site.transmit_inhibited());
+        self.publish_rf_inhibit();
         effects
     }
+    fn publish_rf_inhibit(&self) {
+        self.control
+            .telemetry
+            .set_site_inhibit(self.failed_station_replacement || self.site.transmit_inhibited());
+    }
+
     /// Borrow a current/retiring adapter dispatcher only on control. Once exposed, its generation
     /// requires an explicit `detached` acknowledgment after dispatcher stop/drain before reclaim.
     pub fn adapter_control_mut(&mut self, generation: u64) -> Option<&mut C> {
@@ -407,6 +421,9 @@ impl RuntimeDispatch {
 }
 
 struct Candidate<A: Send, C: Send> {
+    scope: Option<crate::config::resources::candidate::ResourceId>,
+    commands: Option<command_dispatch::PreparedCommands>,
+    admin: Option<Arc<super::dtmf::AdminCodes>>,
     dtmf_macros: Vec<crate::dtmf_macro::CompiledDtmfMacro>,
     dtmf_macro_limits: crate::dtmf_macro::DtmfMacroLimits,
     remote_commands: Option<crate::remote_base_command::RemoteCommandConfiguration>,
@@ -418,6 +435,9 @@ struct Candidate<A: Send, C: Send> {
     control: ControlState<C>,
     status: ResolvedIdentifierSettings,
     time_format: u64,
+    station_changed: bool,
+    echo_telemetry: crate::link::EchoTelemetryPolicy,
+    echo_announcement: crate::config::EchoLinkAnnouncement,
     links: LinkScheduler,
     device: Option<Box<dyn DeviceHandoff>>,
 }
@@ -435,6 +455,8 @@ pub struct Runtime<A: Send = (), C: Send = ()> {
     revision: u64,
     generation: u64,
     document: ConfigDocument,
+    modular: Option<Arc<RuntimeConfiguration>>,
+    configuration_gate: Arc<AtomicBool>,
     warnings: Vec<ConfigWarning>,
     nodes: Vec<RuntimeNode<A, C>>,
     retired: Vec<RuntimeNode<A, C>>,
@@ -447,20 +469,15 @@ pub struct Runtime<A: Send = (), C: Send = ()> {
     pending_reload: Option<ReloadTransaction<A, C>>,
 }
 impl<A: Send, C: Send> Runtime<A, C> {
-    /// Prepare every enabled node and schedule before opening/publishing any candidate.
-    /// Pending devices retain revision zero; the control owner must poll_reload
-    /// until activation completes before exposing initial registrations.
-    pub fn start(
-        document: ConfigDocument,
-        media: &dyn NativeMediaPreparer,
-        adapter: impl FnMut(&str, &ResolvedNodeSettings) -> Result<PreparedAdapter<A, C>, RuntimeError>,
-        device: impl FnMut(&str, &ResolvedNodeSettings) -> Result<Box<dyn DeviceHandoff>, RuntimeError>,
-        clock: RuntimeClock,
-    ) -> Result<Self, RuntimeError> {
-        let mut runtime = Self {
+    /// Start with no selected configuration, active generation or radio.
+    /// The first successful adoption uses the ordinary runtime publication path.
+    pub fn idle() -> Self {
+        Self {
             revision: 0,
             generation: 0,
             document: ConfigDocument::default(),
+            modular: None,
+            configuration_gate: Arc::new(AtomicBool::new(false)),
             warnings: Vec::new(),
             nodes: Vec::new(),
             retired: Vec::new(),
@@ -471,7 +488,26 @@ impl<A: Send, C: Send> Runtime<A, C> {
             disconnect_notices: Vec::new(),
             stopping: false,
             pending_reload: None,
-        };
+        }
+    }
+
+    /// Share this aggregate's fail-closed transmit interlock with its service owner.
+    /// Site policy retains an independent gate for each station.
+    pub fn configuration_gate(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.configuration_gate)
+    }
+
+    /// Prepare every enabled node and schedule before opening/publishing any candidate.
+    /// Pending devices retain revision zero; the control owner must poll_reload
+    /// until activation completes before exposing initial registrations.
+    pub fn start(
+        document: ConfigDocument,
+        media: &dyn NativeMediaPreparer,
+        adapter: impl FnMut(&str, &ResolvedNodeSettings) -> Result<PreparedAdapter<A, C>, RuntimeError>,
+        device: impl FnMut(&str, &ResolvedNodeSettings) -> Result<Box<dyn DeviceHandoff>, RuntimeError>,
+        clock: RuntimeClock,
+    ) -> Result<Self, RuntimeError> {
+        let mut runtime = Self::idle();
         runtime.reload(document, media, adapter, device, clock)?;
         Ok(runtime)
     }
@@ -489,7 +525,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         now_ms: u64,
     ) -> Result<u64, RuntimeError> {
         self.reclaim();
-        if self.stopping {
+        if self.stopping || self.reload_pending() {
             return Err(RuntimeError::Busy);
         }
         let generation = self
@@ -543,8 +579,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             activity,
             started_ms: now_ms,
             prior_activity_ms: None,
-            catalog: MessageCatalog::load(&node.settings.language)
-                .map_err(|_| RuntimeError::Preparation)?,
+            catalog: Arc::clone(&node.control.catalog),
             messages: super::composition::MessageRecipes::default(),
         };
         std::mem::swap(&mut next.telemetry, &mut node.control.telemetry);
@@ -647,6 +682,33 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .collect()
     }
 
+    fn next_configuration(&mut self, clock: RuntimeClock) -> Result<(u64, u64), RuntimeError> {
+        self.reclaim();
+        if self.stopping || self.pending_reload.is_some() || !self.retired.is_empty() {
+            return Err(RuntimeError::Busy);
+        }
+        // A failed handoff can stop an incumbent permanently. Keep it reachable
+        // through physical stop and detachment, then prepare a fresh owner.
+        self.nodes.retain_mut(|node| {
+            node.device_open || node.status(clock.now_ms).state != LifecycleState::Stopped
+        });
+        if self.nodes.iter_mut().any(|node| {
+            let status = node.status(clock.now_ms);
+            status.active.is_none() || status.retiring.is_some()
+        }) {
+            return Err(RuntimeError::Busy);
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(RuntimeError::Preparation)?;
+        let generation_id = self
+            .generation
+            .checked_add(1)
+            .ok_or(RuntimeError::Preparation)?;
+        Ok((revision, generation_id))
+    }
+
     /// Fully prepare a candidate, switch changed devices with rollback, then publish all nodes.
     /// Success may leave reload_pending true while hardware opens or rolls back.
     /// Poll on control without discarding the prior configuration or device contexts.
@@ -665,25 +727,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         ) -> Result<Box<dyn DeviceHandoff>, RuntimeError>,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
-        self.reclaim();
-        if self.stopping
-            || self.pending_reload.is_some()
-            || !self.retired.is_empty()
-            || self
-                .nodes
-                .iter_mut()
-                .any(|node| node.status(clock.now_ms).retiring.is_some())
-        {
-            return Err(RuntimeError::Busy);
-        }
-        let revision = self
-            .revision
-            .checked_add(1)
-            .ok_or(RuntimeError::Preparation)?;
-        let generation_id = self
-            .generation
-            .checked_add(1)
-            .ok_or(RuntimeError::Preparation)?;
+        let (revision, generation_id) = self.next_configuration(clock)?;
         let mut warnings = Schema::validate(&document)?.warnings;
         let mut candidates = Vec::new();
         let mut events = Vec::new();
@@ -787,10 +831,23 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 activity,
                 started_ms: clock.now_ms,
                 prior_activity_ms: existing.and_then(|node| node.control.activity_ms()),
-                catalog,
+                catalog: Arc::new(catalog),
                 messages,
             };
+            let echo = crate::config::EchoLinkSettings::resolve(&document, &id)?.value;
             candidates.push(Candidate {
+                scope: None,
+                commands: None,
+                admin: super::dtmf::AdminCodes::checked(
+                    &settings.dtmf_admin_unlock_hash,
+                    &settings.dtmf_admin_lock_hash,
+                ),
+                station_changed: existing.is_some_and(|old| old.settings.radio != settings.radio),
+                echo_telemetry: crate::link::EchoTelemetryPolicy::new(
+                    echo.telemetry,
+                    echo.telemetry_dynamic,
+                ),
+                echo_announcement: echo.announcement,
                 dtmf_macros: dtmf_macros.value,
                 dtmf_macro_limits,
                 remote_commands,
@@ -826,7 +883,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .map_err(|_| RuntimeError::Preparation)?;
         }
         self.pending_reload = Some(ReloadTransaction::new(
-            document,
+            ConfigurationSource::Document(document),
             warnings,
             candidates,
             events,
@@ -863,51 +920,20 @@ impl<A: Send, C: Send> Runtime<A, C> {
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
         let ReloadTransaction {
-            document,
+            source,
             warnings,
-            mut candidates,
+            candidates,
             events,
             scheduler,
             revision,
             generation_id,
-            changed,
             updated,
-            opened,
             ..
         } = transaction;
-        // Accepted native updates retain their reverse until every device is ready.
-        for name in &updated {
-            let node = self
-                .nodes
-                .iter_mut()
-                .find(|node| &node.name == name)
-                .expect("updated lease");
-            if node.device.finish_update(true).is_err() {
-                // Commit has no remaining preparation or device I/O. A broken
-                // host contract degrades safely instead of publishing mixed state.
-                for (index, node) in self.nodes.iter_mut().enumerate() {
-                    if changed.contains(&index) || updated.contains(&node.name) {
-                        stop_node(node, clock.now_ms, &mut self.effects);
-                    }
-                }
-                for &index in opened.iter().rev() {
-                    candidates[index]
-                        .device
-                        .iter_mut()
-                        .for_each(|device| device.close());
-                }
-                return Err(RuntimeError::Restore);
-            }
-        }
         // No fallible preparation remains: external registration is still gated to these stable hosts.
         let mut next = Vec::with_capacity(candidates.len());
         for mut candidate in candidates {
-            let identity = NodeId::new(&candidate.name).expect("configured station");
-            let echo = crate::config::EchoLinkSettings::resolve(&document, &identity)
-                .expect("validated account settings")
-                .value;
-            let echo_telemetry =
-                crate::link::EchoTelemetryPolicy::new(echo.telemetry, echo.telemetry_dynamic);
+            let command_owner = candidate.commands.take();
             let policy = AccessPolicy::new(
                 &candidate.settings.link_allow_nodes,
                 &candidate.settings.link_deny_nodes,
@@ -930,8 +956,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     .active
                     .expect("active node");
                 let handoff = old.bounds.device != candidate.bounds.device
-                    || (old.settings.radio != candidate.settings.radio
-                        && !updated.contains(&candidate.name));
+                    || (candidate.station_changed && !updated.contains(&candidate.name));
                 let removed = old.links.withdraw_removed(&candidate.links);
                 if !removed.is_empty() {
                     self.effects
@@ -943,10 +968,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     old.control.telemetry.rx_mute().load(Ordering::Acquire),
                     Ordering::Release,
                 );
-                candidate
-                    .control
-                    .telemetry
-                    .set_site_inhibit(old.site.transmit_inhibited());
+                candidate.control.telemetry.set_site_inhibit(
+                    old.failed_station_replacement || old.site.transmit_inhibited(),
+                );
                 old.host
                     .control()
                     .publish_prepared(candidate.generation, clock.now_ms)
@@ -963,11 +987,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 old.command_messages = None;
                 old.links
                     .reconfigure(policy, commands, Some(candidate.links));
-                old.links.configure_admin(
-                    &candidate.settings.dtmf_admin_unlock_hash,
-                    &candidate.settings.dtmf_admin_lock_hash,
-                    candidate.settings.dtmf_admin_timeout_ms,
-                );
+                old.links
+                    .bind_admin(candidate.admin, candidate.settings.dtmf_admin_timeout_ms);
                 old.links
                     .configure_radio_owner(candidate.remote_commands.as_ref())
                     .expect("prevalidated remote command family");
@@ -978,17 +999,14 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 old.bounds = candidate.bounds;
                 old.status = candidate.status;
                 old.time_format = candidate.time_format;
-                old.echo_telemetry = echo_telemetry;
+                old.echo_telemetry = candidate.echo_telemetry;
+                old.echo_announcement = candidate.echo_announcement;
                 next.push(old);
             } else {
                 let mut links =
                     NodeLinkControl::new(&candidate.name, policy, commands, Some(candidate.links))
                         .expect("validated node identity");
-                links.configure_admin(
-                    &candidate.settings.dtmf_admin_unlock_hash,
-                    &candidate.settings.dtmf_admin_lock_hash,
-                    candidate.settings.dtmf_admin_timeout_ms,
-                );
+                links.bind_admin(candidate.admin, candidate.settings.dtmf_admin_timeout_ms);
                 links
                     .configure_radio_owner(candidate.remote_commands.as_ref())
                     .expect("prevalidated remote command family");
@@ -1005,6 +1023,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     host: NodeHost::new(candidate.generation),
                     device: candidate.device.expect("prepared new lease"),
                     device_open: true,
+                    failed_station_replacement: false,
                     pending_peer_cleanup: false,
                     links,
                     control: candidate.control,
@@ -1012,8 +1031,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     status: candidate.status,
                     time_format: candidate.time_format,
                     group_announcements: Vec::new(),
-                    echo_telemetry,
+                    echo_telemetry: candidate.echo_telemetry,
+                    echo_announcement: candidate.echo_announcement,
                 });
+            }
+            if let Some(commands) = command_owner {
+                commands.install(next.last_mut().expect("published candidate"));
             }
         }
         for mut removed in self.nodes.drain(..) {
@@ -1023,7 +1046,16 @@ impl<A: Send, C: Send> Runtime<A, C> {
         self.nodes = next;
         self.events = events;
         self.scheduler = Some(scheduler);
-        self.document = document;
+        match source {
+            ConfigurationSource::Document(document) => {
+                self.document = document;
+                self.modular = None;
+            }
+            ConfigurationSource::Modular(configuration) => {
+                self.document = ConfigDocument::default();
+                self.modular = Some(configuration);
+            }
+        }
         self.warnings = warnings;
         self.revision = revision;
         self.generation = generation_id;
@@ -1782,12 +1814,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 Message::PeerDisconnectedThirdParty { first, second }
             };
             let forms = if let Some((number, callsign)) = echo {
-                let identity = NodeId::new(&node.name).expect("configured station");
-                let account = crate::config::EchoLinkSettings::resolve(&self.document, &identity)
-                    .expect("validated account settings")
-                    .value;
                 node.control.catalog.format_echo_peer(
-                    account.announcement,
+                    node.echo_announcement,
                     number,
                     callsign,
                     &message,

@@ -52,6 +52,11 @@ impl ServerIdentity {
         Self { chain, key }
     }
 
+    /// Check the delivered certificate chain and matching signing key without binding a socket.
+    pub fn validate(self) -> Result<(), TransportError> {
+        self.into_resolver().map(|_| ())
+    }
+
     pub(super) fn into_resolver(mut self) -> Result<Arc<SingleCertAndKey>, TransportError> {
         // ring borrows the delivered DER only for parsing. Drop wipes it at this boundary.
         let key = rustls::crypto::ring::sign::any_supported_type(&self.key)

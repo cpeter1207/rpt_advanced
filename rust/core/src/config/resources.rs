@@ -4,6 +4,7 @@ pub mod candidate;
 pub mod catalog;
 pub mod commands;
 pub mod events;
+pub mod generation;
 pub mod manifest;
 /// Typed public protocol resolution.
 pub mod profiles;
@@ -109,6 +110,12 @@ impl PortKey {
     /// Borrow the unchanged identity text.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for PortKey {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 

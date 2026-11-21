@@ -226,6 +226,11 @@ pub struct Interface {
     pub keyboard_device: Option<String>,
 }
 impl WiringProfile {
+    /// Return whether a one-based CM119 pin is available for ordinary wiring on this profile.
+    pub fn ordinary_pin(self, pin: u8) -> bool {
+        (1..=8).contains(&pin) && self.ordinary_mask() & (1 << (pin - 1)) != 0
+    }
+
     pub(super) fn ordinary_mask(self) -> u8 {
         match self {
             Self::DudeUsb => 0xfb,

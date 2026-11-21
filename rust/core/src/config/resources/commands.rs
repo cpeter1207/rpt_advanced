@@ -15,7 +15,7 @@ pub struct ScopedCommands {
     /// Site or invoking port for this generation.
     pub scope: ResourceScope,
     /// Effective commands and bounded macro sequences.
-    pub language: CommandLanguage,
+    pub language: std::sync::Arc<CommandLanguage>,
     /// Recognized action/collector fields keyed by their actual authoring resource.
     local: BTreeMap<ResourceId, Map<String, Value>>,
     macro_owners: BTreeMap<String, ResourceBinding>,
@@ -164,7 +164,7 @@ impl ModularCandidate<'_> {
         }
         Ok(ScopedCommands {
             scope,
-            language,
+            language: language.into(),
             local,
             macro_owners,
         })

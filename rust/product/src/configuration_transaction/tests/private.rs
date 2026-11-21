@@ -283,6 +283,25 @@ fn check_inheritance_and_hashes(tx: &Transaction<'_, '_>, key: &KeyId) {
     let base = select(base, false);
     assert_eq!(base.configured(id(4), CredentialSlot::Unlock), Some(true));
     assert_eq!(base.configured(id(8), CredentialSlot::Phone), Some(true));
+    // Both live accounts select one authenticated allocation in this generation.
+    let retained_phone = base.retain(id(8), CredentialSlot::Phone).unwrap();
+    let site_phone = base.retain(id(7), CredentialSlot::Phone).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &retained_phone.bytes,
+        &site_phone.bytes
+    ));
+    let after_retirement = std::sync::Arc::downgrade(&retained_phone.bytes);
+    assert!(site_phone.same_version(&retained_phone));
+    let reopened = select(base.reference(), false);
+    let independently_opened = reopened.retain(id(8), CredentialSlot::Phone).unwrap();
+    assert!(retained_phone.same_version(&independently_opened));
+    assert!(!std::sync::Arc::ptr_eq(
+        &retained_phone.bytes,
+        &independently_opened.bytes
+    ));
+    drop(independently_opened);
+    drop(reopened);
+    drop(site_phone);
     // New local mailbox cannot borrow the site PIN. A retained PHC is required.
     assert!(prepare(&base, true, &[]).is_err());
     assert!(
@@ -306,6 +325,12 @@ fn check_inheritance_and_hashes(tx: &Transaction<'_, '_>, key: &KeyId) {
     );
     assert_eq!(shadow.configured(id(8), CredentialSlot::Phone), Some(false));
     assert_eq!(shadow.configured(id(6), CredentialSlot::Pin), Some(true));
+    assert!(shadow.retain(id(8), CredentialSlot::Phone).is_none());
+    assert!(shadow.retain(id(4), CredentialSlot::Unlock).is_none());
+    drop(base);
+    assert_eq!(retained_phone.bytes.expose_bytes(), b"site-phone");
+    drop(retained_phone);
+    assert!(after_retirement.upgrade().is_none());
     assert!(prepare(&shadow, true, &[write(None, id(6), CredentialSlot::Pin)]).is_err());
     let (retained, warnings) = prepare(
         &shadow,

@@ -12,7 +12,7 @@ mod systemd;
 #[cfg(test)]
 mod tests;
 
-pub use systemd::{KeyLoadError, load_systemd_key};
+pub use systemd::{KeyLoadError, load_systemd_key, load_systemd_tls};
 
 const STORAGE_FORMAT_VERSION: u32 = 1;
 const SEALED_FORMAT_VERSION: u32 = 1;

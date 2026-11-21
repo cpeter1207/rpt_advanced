@@ -277,7 +277,7 @@ pub struct ScopedMessages {
     /// Checked named message recipes retaining all media owners.
     pub recipes: BTreeMap<String, Composition>,
     /// Installed and JSON-projected locale forms.
-    pub catalog: MessageCatalog,
+    pub catalog: Arc<MessageCatalog>,
     /// Recoverable setting warnings tied to the authoring resource.
     pub warnings: Vec<CandidateWarning>,
     owners: BTreeMap<String, Vec<ResourceBinding>>,
@@ -611,7 +611,7 @@ impl ModularCandidate<'_> {
             local,
             effective,
             recipes,
-            catalog,
+            catalog: Arc::new(catalog),
             warnings,
             owners,
             definitions,
@@ -623,6 +623,11 @@ impl ModularCandidate<'_> {
 }
 
 impl ScopedMessages {
+    /// Effective renderer settings used by built-in status messages in this scope.
+    pub fn renderer_defaults(&self) -> &ResolvedMessageSettings {
+        &self.defaults
+    }
+
     /// Source binding for a normalized effective leaf, including inherited locale attributes.
     pub fn source(&self, name: &str, path: &[&str]) -> Option<ResourceBinding> {
         fn has(fields: &Object, path: &[&str]) -> bool {
@@ -860,7 +865,7 @@ mod tests {
                 .text,
             "COURT"
         );
-        assert!(scoped.compile_text_only("你好").is_ok());
+        assert!(scoped.compile_text_only("Ã¤Â½Â Ã¥Â¥Â½").is_ok());
         assert!(
             scoped
                 .compile_inline("{ site-time }", MorseRequirement::Optional)

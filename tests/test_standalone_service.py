@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Check standalone service isolation and package boundaries."""
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -21,20 +22,38 @@ def test_standalone_service_runs_as_dedicated_unprivileged_user() -> None:
     assert "User=rpt-advanced" in service
     assert "Group=rpt-advanced" in service
     assert (
-        "ExecStart=/usr/bin/rpt-advanced --foreground /etc/rpt_advanced/rpt_advanced.conf"
+        "ExecStart=/usr/bin/rpt-advanced --foreground /etc/rpt_advanced/rpt_advanced.service.json"
         in service
     )
+    assert "ConditionPathExists=/etc/rpt_advanced/rpt_advanced.service.json" in service
+    assert "ExecReload=/bin/kill -HUP $MAINPID" in service
+    assert "ImportCredential=rpt-advanced.tls.*" in service
+    assert "ImportCredential=rpt-advanced.aead.*" in service
     assert "Restart=on-failure" in service
     assert "NoNewPrivileges=yes" in service
     assert "ProtectSystem=strict" in service
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK" in service
 
 
-def test_standalone_package_installs_the_service_configuration_as_a_conffile() -> None:
+def test_standalone_package_ships_service_example_for_explicit_provisioning() -> None:
     manifest = (ROOT / "debian/rpt-advanced.install").read_text(encoding="utf-8")
-    assert (
-        "usr/share/doc/rpt-advanced/examples/rpt_advanced.conf etc/rpt_advanced"
-        in manifest.splitlines()
+    assert "usr/share/doc/rpt-advanced/**" in manifest.splitlines()
+    assert all("etc/rpt_advanced" not in line for line in manifest.splitlines())
+    example = json.loads((ROOT / "examples/rpt_advanced.service.json").read_bytes())
+    assert example["listen"].startswith("127.0.0.1:")
+    assert set(example) == {
+        "store_path",
+        "store_uuid",
+        "write_key_id",
+        "listen",
+        "authorities",
+        "server_chain",
+        "server_key",
+        "client_issuers",
+        "clients",
+    }
+    assert all(
+        set(client) == {"identity", "leaf_certificate"} for client in example["clients"]
     )
 
 
@@ -142,7 +161,7 @@ def test_shlibdeps_searches_every_private_adapter_library_directory() -> None:
 if __name__ == "__main__":
     for test in (
         test_standalone_service_runs_as_dedicated_unprivileged_user,
-        test_standalone_package_installs_the_service_configuration_as_a_conffile,
+        test_standalone_package_ships_service_example_for_explicit_provisioning,
         test_debian_install_manifests_are_not_executable_scripts,
         test_standalone_package_does_not_depend_on_asterisk,
         test_standalone_requires_current_radio_adapters,

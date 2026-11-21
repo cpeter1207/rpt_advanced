@@ -88,6 +88,18 @@ impl Product {
         }
         status == 0
     }
+    /// Request and wait for the checked working-store reload on the product owner.
+    pub(crate) fn reload_working(&self) -> bool {
+        // SAFETY: the loader retains the product for this lifecycle call. The
+        // null/zero span selects the fixed service actor and configured store.
+        let mut code = unsafe { self.0.reload.expect("checked reload group")(std::ptr::null(), 0) };
+        while code == 1 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            // SAFETY: the same retained table owns the pending receipt.
+            code = unsafe { self.0.reload_poll.expect("checked reload group")() };
+        }
+        code == 0
+    }
     /// Stop every product owner and drain accepted calls.
     pub fn stop(&self) -> bool {
         unsafe { self.0.stop.unwrap()() == 0 }

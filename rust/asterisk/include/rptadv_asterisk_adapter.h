@@ -8,6 +8,7 @@
 #define RPTADV_ASTERISK_ADAPTER_H
 #include <stdint.h>
 struct rptadv_product_descriptor_v1;
+struct rptadv_product_management_v1;
 struct rptadv_control_descriptor_v1;
 struct rptadv_file_descriptor;
 struct rptadv_speech_descriptor;
@@ -31,4 +32,13 @@ struct rptadv_asterisk_descriptor_v1 {
  * @return Immutable descriptor retained through every lifecycle call.
  */
 const struct rptadv_asterisk_descriptor_v1 *rptadv_asterisk_descriptor_v1(void);
+/** Start the authenticated managed service. The linked product and all adapter
+ * libraries remain loaded until the selected lifecycle confirms unload.
+ * @return Zero to retain the module, including cleanup after uncertain startup. */
+int rptadv_asterisk_load_management_v1(void *module,
+                                       const struct rptadv_product_descriptor_v1 *product,
+                                       const struct rptadv_product_management_v1 *management,
+                                       const struct rptadv_control_descriptor_v1 *control,
+                                       const struct rptadv_file_descriptor *file,
+                                       const struct rptadv_speech_descriptor *speech);
 #endif

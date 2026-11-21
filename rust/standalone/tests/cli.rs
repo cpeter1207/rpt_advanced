@@ -16,33 +16,17 @@ fn with_config<T>(text: &str, run: impl FnOnce(&str) -> T) -> T {
     result
 }
 
-#[cfg(unix)]
-fn with_secrets<T>(text: &str, run: impl FnOnce(&str) -> T) -> T {
-    use std::os::unix::fs::PermissionsExt;
-
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("rpt-advanced-secrets-{stamp}.conf"));
-    fs::write(&path, text).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    let result = run(path.to_str().unwrap());
-    fs::remove_file(path).unwrap();
-    result
-}
-
 #[test]
-fn check_config_validates_without_opening_hardware() {
+fn packaged_example_requires_an_explicitly_provisioned_store_and_credentials() {
     with_config(
-        include_str!("../../../examples/rpt_advanced.conf"),
+        include_str!("../../../examples/rpt_advanced.service.json"),
         |path| {
             let output = Command::new(env!("CARGO_BIN_EXE_rpt-advanced"))
                 .args(["--check-config", path])
                 .output()
                 .unwrap();
-            assert!(output.status.success());
-            assert!(String::from_utf8_lossy(&output.stdout).contains("configuration valid"));
+            assert_eq!(output.status.code(), Some(1));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("configuration invalid"));
         },
     );
 }
@@ -55,7 +39,7 @@ fn check_config_reports_invalid_configuration() {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("unknown node"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("configuration invalid"));
     });
 }
 
@@ -68,7 +52,8 @@ fn help_exits_successfully() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("--check-config"));
-    assert!(help.contains("--check-secrets-file"));
+    assert!(help.contains("--foreground <SERVICE-JSON>"));
+    assert!(!help.contains("--secrets-file"));
 }
 
 #[test]
@@ -155,7 +140,7 @@ fn invalid_arguments_are_rejected() {
         ])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     let output = Command::new(binary)
         .args(["--check-providers", "extra"])
         .output()
@@ -187,68 +172,57 @@ fn missing_config_file_is_reported() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("No such file"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read service provisioning"));
 }
 
 #[test]
-fn valid_configuration_warnings_are_printed() {
-    with_config("[1000]\nunknown_setting=value\n", |path| {
-        let output = Command::new(env!("CARGO_BIN_EXE_rpt-advanced"))
-            .args(["--check-config", path])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("warning:"));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("configuration valid"));
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn check_secrets_file_validates_without_printing_secrets() {
-    with_secrets("[general]\niax_secret=private-secret-value\n", |path| {
-        let output = Command::new(env!("CARGO_BIN_EXE_rpt-advanced"))
-            .args(["--check-secrets-file", path])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stdout.contains("secrets file valid"));
-        assert!(!stdout.contains("private-secret-value"));
-        assert!(!stderr.contains("private-secret-value"));
-    });
+fn rejected_provisioning_never_echoes_secret_fields() {
+    with_config(
+        r#"{"store_path":"/bad","aead_key":"private-secret-value"}"#,
+        |path| {
+            let output = Command::new(env!("CARGO_BIN_EXE_rpt-advanced"))
+                .args(["--check-config", path])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("configuration invalid"));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("private-secret-value"));
+        },
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn check_secrets_file_rejects_permissive_mode() {
-    use std::os::unix::fs::PermissionsExt;
-
-    with_secrets("[general]\niax_secret=private-secret-value\n", |path| {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_rpt-advanced"))
-            .args(["--check-secrets-file", path])
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(1));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("mode 0600"));
-        assert!(!stderr.contains("private-secret-value"));
+fn check_config_rejects_writable_and_symlinked_service_documents() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    with_config("{}", |path| {
+        let link = format!("{path}.link");
+        symlink(path, &link).unwrap();
+        for (candidate, mode) in [(&link[..], 0o600), (path, 0o666)] {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+            let result = Command::new(env!("CARGO_BIN_EXE_rpt-advanced"))
+                .args(["--check-config", candidate])
+                .output()
+                .unwrap();
+            assert_eq!(result.status.code(), Some(1));
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("cannot read service provisioning")
+            );
+        }
+        fs::remove_file(link).unwrap();
     });
 }
 
-#[cfg(unix)]
 #[test]
-fn check_secrets_file_rejects_malformed_contents_without_leaking_them() {
-    with_secrets("[general]\nunknown=private-secret-value\n", |path| {
+fn removed_secrets_checker_refuses_a_path_without_disclosing_contents() {
+    with_config("private-secret-value", |path| {
         let output = Command::new(env!("CARGO_BIN_EXE_rpt-advanced"))
             .args(["--check-secrets-file", path])
             .output()
             .unwrap();
-        assert_eq!(output.status.code(), Some(1));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("unknown option"));
-        assert!(!stderr.contains("private-secret-value"));
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-secret-value"));
+        assert!(output.stdout.is_empty());
     });
 }

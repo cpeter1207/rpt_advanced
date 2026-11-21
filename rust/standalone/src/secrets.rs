@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt, path::Path};
 
 /// IAX secrets parsed from an owner-only configuration file.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct SecretsFile {
     general: Option<String>,
     nodes: BTreeMap<String, String>,

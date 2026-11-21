@@ -293,3 +293,30 @@ fn rejects_a_replaced_leaf_or_credentials_directory_after_reading() {
         }
     }
 }
+
+#[test]
+fn tls_material_is_size_bounded_and_cannot_substitute_the_aead_credential() {
+    let fixture = Fixture::new();
+    write(&fixture.leaf, MATERIAL);
+    mode(&fixture.leaf, 0o400);
+    mode(&fixture.credentials, 0o500);
+    let read = || read_tls(Some(&fixture.credentials), &key_id());
+    assert_eq!(read().unwrap_err(), KeyLoadError::Missing);
+    mode(&fixture.credentials, 0o700);
+    let tls = fixture.credentials.join("rpt-advanced.tls.fixture-key_1");
+    symlink(&fixture.leaf, &tls).unwrap();
+    mode(&fixture.credentials, 0o500);
+    assert!(read().is_err());
+    mode(&fixture.credentials, 0o700);
+    fs::remove_file(&tls).unwrap();
+    write(&tls, b"fixture TLS bytes");
+    mode(&tls, 0o400);
+    mode(&fixture.credentials, 0o500);
+    assert_eq!(&read().unwrap()[..], b"fixture TLS bytes");
+    mode(&tls, 0o600);
+    assert!(read().is_err());
+    fs::write(&tls, vec![0u8; 65537]).unwrap();
+    mode(&tls, 0o400);
+    assert!(read().is_err());
+    assert!(fixture.load().is_ok());
+}

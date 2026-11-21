@@ -20,6 +20,23 @@ static BANK: Mutex<Bank> = Mutex::new(Bank {
 static REJECT_AFTER: AtomicUsize = AtomicUsize::new(0);
 static CLOSE_AFTER: Mutex<Option<(usize, Weak<Engine>)>> = Mutex::new(None);
 
+pub(crate) fn install_delayed_site_bank(host: &mut abi::rptadv_host_services_v10) {
+    let mut bank = BANK.lock().unwrap();
+    bank.generation = 7;
+    bank.mask = 0;
+    bank.high = 0;
+    bank.hold = 0;
+    bank.pending = None;
+    host.radio_site_bind = Some(bind);
+    host.radio_site_publish = Some(publish);
+    host.radio_site_snapshot = Some(snapshot);
+}
+pub(crate) fn site_bank_delay(hold: usize) -> u32 {
+    let mut bank = BANK.lock().unwrap();
+    bank.hold = hold;
+    bank.high
+}
+
 fn apply(bank: &mut Bank, binding: bool, mask: u32, high: u32) {
     if binding {
         bank.generation += 1;

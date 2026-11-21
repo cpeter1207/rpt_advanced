@@ -322,6 +322,22 @@ impl DigitOperation {
     }
 }
 
+/// A validated, zeroizing credential pair shared by independent source collectors.
+pub(super) struct AdminCodes {
+    unlock: zeroize::Zeroizing<String>,
+    lock: zeroize::Zeroizing<String>,
+}
+impl AdminCodes {
+    pub(super) fn checked(unlock: &str, lock: &str) -> Option<Arc<Self>> {
+        (valid_hash(unlock) && valid_hash(lock)).then(|| {
+            Arc::new(Self {
+                unlock: zeroize::Zeroizing::new(unlock.to_owned()),
+                lock: zeroize::Zeroizing::new(lock.to_owned()),
+            })
+        })
+    }
+}
+
 /// Serialized command collection; authorization/peer availability stays with link control.
 pub struct DtmfCommands {
     mapped: Option<MappedCollector>,
@@ -332,8 +348,7 @@ pub struct DtmfCommands {
     peer_source: bool,
     pad: Option<PadTestResult>,
     digit_deadline: Option<u64>,
-    admin_unlock_hash: String,
-    admin_lock_hash: String,
+    admin_codes: Option<Arc<AdminCodes>>,
     admin_timeout_ms: u64,
     admin_until_ms: Arc<AtomicU64>,
     radio_present: bool,
@@ -355,11 +370,8 @@ impl DtmfCommands {
             .map(|m| MappedCollector::new(m.profile.clone(), m.generation));
         commands.remote_access = self.remote_access;
         commands.radio_present = self.radio_present;
-        commands.configure_admin(
-            &self.admin_unlock_hash,
-            &self.admin_lock_hash,
-            self.admin_timeout_ms,
-        );
+        commands.admin_codes.clone_from(&self.admin_codes);
+        commands.admin_timeout_ms = self.admin_timeout_ms;
         commands.macros = self.macros.clone();
         commands.macro_limits = self.macro_limits;
         commands
@@ -376,8 +388,7 @@ impl DtmfCommands {
             peer_source: false,
             pad: None,
             digit_deadline: None,
-            admin_unlock_hash: String::new(),
-            admin_lock_hash: String::new(),
+            admin_codes: None,
             admin_timeout_ms: 300_000,
             admin_until_ms: Arc::new(AtomicU64::new(0)),
             remote_access: RemoteDtmfAccess::Disabled,
@@ -405,12 +416,7 @@ impl DtmfCommands {
             self.admin_until_ms.store(0, Ordering::Release);
             return true;
         }
-        let hash = if unlock {
-            &self.admin_unlock_hash
-        } else {
-            &self.admin_lock_hash
-        };
-        let valid = self.credentials_configured() && code.is_some_and(|s| verify_hash(hash, s));
+        let valid = code.is_some_and(|code| self.verify_admin(unlock, code));
         if valid || unlock {
             self.admin_until_ms.store(
                 if valid && unlock {
@@ -604,14 +610,13 @@ impl DtmfCommands {
     /// Install hashed DTMF credentials on control; administration stays unavailable unless both
     /// credential digests are valid Argon2id PHC strings.
     pub fn configure_admin(&mut self, unlock_hash: &str, lock_hash: &str, timeout_ms: u64) {
+        self.bind_admin(AdminCodes::checked(unlock_hash, lock_hash), timeout_ms);
+    }
+
+    pub(super) fn bind_admin(&mut self, codes: Option<Arc<AdminCodes>>, timeout_ms: u64) {
         self.cancel_macro();
-        self.admin_unlock_hash.clear();
-        self.admin_lock_hash.clear();
-        if valid_hash(unlock_hash) && valid_hash(lock_hash) && timeout_ms > 0 {
-            self.admin_unlock_hash.push_str(unlock_hash);
-            self.admin_lock_hash.push_str(lock_hash);
-            self.admin_timeout_ms = timeout_ms;
-        }
+        self.admin_codes = codes.filter(|_| timeout_ms > 0);
+        self.admin_timeout_ms = timeout_ms;
         self.admin_until_ms.store(0, Ordering::Release);
     }
     /// Select an independently authorized direct peer after the link owner validates it.
@@ -786,9 +791,7 @@ impl DtmfCommands {
                     return None;
                 }
                 self.admin_until_ms.store(
-                    if self.credentials_configured()
-                        && verify_hash(&self.admin_unlock_hash, &command.node)
-                    {
+                    if self.verify_admin(true, &command.node) {
                         now_ms.saturating_add(self.admin_timeout_ms)
                     } else {
                         0
@@ -801,9 +804,7 @@ impl DtmfCommands {
                 if !human {
                     return None;
                 }
-                if self.credentials_configured()
-                    && verify_hash(&self.admin_lock_hash, &command.node)
-                {
+                if self.verify_admin(false, &command.node) {
                     self.admin_until_ms.store(0, Ordering::Release);
                 }
                 return None;
@@ -922,8 +923,10 @@ impl DtmfCommands {
         }
     }
 
-    fn credentials_configured(&self) -> bool {
-        !self.admin_unlock_hash.is_empty() && !self.admin_lock_hash.is_empty()
+    fn verify_admin(&self, unlock: bool, code: &str) -> bool {
+        self.admin_codes
+            .as_ref()
+            .is_some_and(|pair| verify_hash(if unlock { &pair.unlock } else { &pair.lock }, code))
     }
 }
 

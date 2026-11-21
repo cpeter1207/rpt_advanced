@@ -211,6 +211,33 @@ fn independent_opens_are_busy_until_drop_including_unwind() {
 }
 
 #[test]
+fn writer_lease_owns_its_directory_separately_from_working_edits() {
+    let fixture = Fixture::new();
+    let first = fixture.open();
+    let second = fixture.open();
+    let writer = first.try_writer_lease().unwrap();
+    check_inode(&first.root, &writer.root).unwrap();
+    assert!(
+        rustix::io::fcntl_getfd(&writer.root)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC)
+    );
+    assert_eq!(first.try_writer_lease().unwrap_err(), CaptureError::Busy);
+    drop(second.try_edit().unwrap());
+    assert_eq!(second.try_writer_lease().unwrap_err(), CaptureError::Busy);
+    drop(first);
+    assert_eq!(second.try_writer_lease().unwrap_err(), CaptureError::Busy);
+    drop(writer);
+    mode(&fixture.root, 0o750);
+    assert_eq!(
+        second.try_writer_lease().unwrap_err(),
+        CaptureError::UnsafeFile
+    );
+    mode(&fixture.root, 0o700);
+    drop(second.try_writer_lease().unwrap());
+}
+
+#[test]
 fn lock_must_be_preprovisioned_and_held_inode_remain_current() {
     let fixture = Fixture::new();
     let lock = fixture.root.join("edit.lock");

@@ -1391,10 +1391,12 @@ mod tests {
             "installed-only",
             json!({"content":"{ no-links }"})
         )]));
+        let projected =
+            std::sync::Arc::try_unwrap(old.catalog).expect("fixture owns the retired catalog");
         candidate_fixture(vec![member], |candidate, scope| {
             assert!(
                 candidate
-                    .prepare_telemetry(scope, old.catalog, &"en-US".parse().unwrap())
+                    .prepare_telemetry(scope, projected, &"en-US".parse().unwrap())
                     .is_err()
             );
         });

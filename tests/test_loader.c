@@ -14,6 +14,7 @@ static const struct ast_module_info *metadata;
 static struct rptadv_asterisk_descriptor_v1 descriptor;
 static const struct rptadv_asterisk_descriptor_v1 *selected;
 static const struct rptadv_product_descriptor_v1 product;
+static const struct rptadv_product_management_v1 management;
 static const struct rptadv_control_descriptor_v1 control;
 static const struct rptadv_file_descriptor file;
 static const struct rptadv_speech_descriptor speech;
@@ -24,6 +25,9 @@ void ast_module_unregister(const struct ast_module_info *info) { assert(info == 
 
 const struct rptadv_asterisk_descriptor_v1 *rptadv_asterisk_descriptor_v1(void) { return selected; }
 const struct rptadv_product_descriptor_v1 *rptadv_product_descriptor_v1(void) { return &product; }
+const struct rptadv_product_management_v1 *rptadv_product_management_descriptor_v1(void) {
+    return &management;
+}
 const struct rptadv_control_descriptor_v1 *rptadv_control_descriptor_v1(void) { return &control; }
 const struct rptadv_file_descriptor *rptadv_file_adapter_descriptor(void) { return &file; }
 const struct rptadv_speech_descriptor *rptadv_speech_adapter_descriptor(void) { return &speech; }
@@ -37,8 +41,17 @@ static int load(void *module, const struct rptadv_product_descriptor_v1 *owner,
     assert(executor == &control);
     assert(files == &file);
     assert(voices == &speech);
-    ++load_calls;
     return load_result;
+}
+int rptadv_asterisk_load_management_v1(void *module,
+                                       const struct rptadv_product_descriptor_v1 *owner,
+                                       const struct rptadv_product_management_v1 *bootstrap,
+                                       const struct rptadv_control_descriptor_v1 *executor,
+                                       const struct rptadv_file_descriptor *files,
+                                       const struct rptadv_speech_descriptor *voices) {
+    assert(bootstrap == &management);
+    ++load_calls;
+    return load(module, owner, executor, files, voices);
 }
 static int reload(void) { return ++reload_calls; }
 static int unload(void) { return unload_result; }
@@ -86,6 +99,7 @@ int main(void) {
     assert(metadata->reload() == -1);
     load_result = 0;
     assert(metadata->load() == AST_MODULE_LOAD_SUCCESS);
+    assert(load_calls == 2);
     assert(metadata->reload() == 1);
     unload_result = -1;
     assert(metadata->unload() == -1);

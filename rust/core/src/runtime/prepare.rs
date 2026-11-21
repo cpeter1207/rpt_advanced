@@ -1,5 +1,9 @@
 //! Configuration-to-controller preparation. All allocation and external media work is offline.
 
+#[path = "prepare_modular.rs"]
+mod modular;
+pub(super) use modular::controller as modular_controller;
+
 use crate::{
     composition::MorseRequirement,
     config::{
@@ -431,7 +435,27 @@ pub(super) fn controller(
     controller
         .set_tails(tails)
         .map_err(|_| RuntimeError::Preparation)?;
-    if settings.transmit_timeout_ms != 0 {
+    set_timeout_media(
+        &mut controller,
+        station.as_mut(),
+        settings.transmit_timeout_ms,
+        &status,
+        catalog,
+        civil,
+    )?;
+    station.start().map_err(|_| RuntimeError::Preparation)?;
+    Ok((controller, control, status, station, recipes))
+}
+
+fn set_timeout_media(
+    controller: &mut NodeController,
+    station: &mut dyn StationMediaSession,
+    timeout_ms: u64,
+    status: &ResolvedIdentifierSettings,
+    catalog: &crate::messages::MessageCatalog,
+    civil: Option<CivilTime>,
+) -> Result<(), RuntimeError> {
+    if timeout_ms != 0 {
         // Duration month lengths use the captured date when available. Ordinary runtimes
         // without calendar scheduling retain a deterministic date instead of requiring a clock.
         let local = match civil {
@@ -440,21 +464,20 @@ pub(super) fn controller(
                 .expect("fixed fallback calendar date is valid"),
         };
         let timed_out = catalog
-            .format_timeout(settings.transmit_timeout_ms.div_ceil(1000), local)
+            .format_timeout(timeout_ms.div_ceil(1000), local)
             .map_err(|_| RuntimeError::Preparation)?;
         let cleared = catalog
             .format(&Message::RepeaterTimeoutCleared)
             .map_err(|_| RuntimeError::Preparation)?;
         let mut register = |forms: MessageForms| {
             let stream = station
-                .register(status_source(&status, &forms.morse, &forms.tts))
+                .register(status_source(status, &forms.morse, &forms.tts))
                 .map_err(|_| RuntimeError::Preparation)?;
             PreparedMedia::new_stream(stream).map_err(|_| RuntimeError::Preparation)
         };
         controller.set_timeout_media([register(timed_out)?, register(cleared)?]);
     }
-    station.start().map_err(|_| RuntimeError::Preparation)?;
-    Ok((controller, control, status, station, recipes))
+    Ok(())
 }
 
 #[cfg(test)]

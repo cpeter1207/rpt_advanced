@@ -317,9 +317,37 @@ struct rptadv_remote_ticket_v1 {
     int (*take)(void *ticket, rptadv_remote_sink_v1 sink, void *context); /**< Copy completion. */
     void (*destroy)(void *ticket); /**< Cancel before releasing, including while pending. */
 };
+/** Prepared physical station passed synchronously from its owning product DSO. */
+struct rptadv_station_request_v1 {
+    uint32_t struct_size;        /**< Complete readable record size. */
+    uint32_t abi_version;        /**< One. */
+    uint8_t port_uuid[16];       /**< Registry UUID in network byte order. */
+    uint64_t candidate_identity; /**< Nonzero, process-unique semantic staging attempt. */
+    const struct UrpAstDescriptor *product; /**< Actual matched product1 descriptor. */
+    const void *prepared; /**< Borrowed physical-preparation1 owner from this product. */
+};
+/** Immutable control-side physical station service, capability rptadv.station-binding1. */
+struct rptadv_station_binding_v1 {
+    uint32_t struct_size;        /**< Complete readable table size. */
+    uint32_t abi_version;        /**< One. */
+    const char *capability_name; /**< Process-lifetime terminated capability name. */
+    /** Copy or retain the provider configuration without reserving hardware or changing live state.
+     * Zero transfers a unique dormant plan. The operation may run on any serialized control owner.
+     */
+    int (*prepare)(void *context, const struct rptadv_station_request_v1 *request, void **plan);
+    /** Open this exact plan after durable publication. Zero transfers the ordinary unique radio.
+     * The live radio independently retains its provider, prepared data and operation context. */
+    int (*open_prepared)(void *context, const void *plan, size_t maximum_frames, void **radio);
+    /** Stage on the matching port. Zero staged, one untouched handoff, two pending (poll same
+     * plan). Any other result requires actual rollback or confirmed retirement before releasing
+     * ownership. */
+    int (*stage_update)(void *context, void *radio, const void *plan);
+    /** Destroy this plan exactly once after its last borrow. No creator-thread affinity. */
+    void (*release_plan)(void *context, void *plan);
+};
 /** Host I/O primitives consumed by the portable product owner.
  * On supported 64-bit platforms, ABI 10 retains its complete 360-byte prefix
- * through radio_update and appends five optional callbacks for a 400-byte table.
+ * through radio_update and its complete 400-byte prefix through radio_ready.
  * Omitted complete capability tails are copied as null; partial tails are rejected.
  * The immutable table, context and callback code remain valid through successful
  * product stop. The context supports concurrent calls. Each non-null radio/peer
@@ -537,6 +565,9 @@ struct rptadv_host_services_v10 {
     /** Observe activation without I/O: zero is ready, one is opening, negative
      * is the first failure. Remote compositions require this complete tail. */
     int (*radio_ready)(void *context, void *radio);
+    /** Optional typed physical station operations. A host advertising this must also implement
+     * radio_update phases one/two for commit/rollback; two means the same finish is pending. */
+    const struct rptadv_station_binding_v1 *station_binding;
 };
 
 /** Exact revision of a typed site control request. */
@@ -613,7 +644,9 @@ struct rptadv_product_descriptor_v1 {
     int (*digit)(const char *local, size_t local_length, uint8_t digit, uint32_t *completed);
     /** Resolve host requirements without starting workers or opening hardware.
      * Validate the whole document before emitting records. Diagnostics are warnings
-     * on success and a safe error on failure. Null node sink validates only. */
+     * on success and a safe error on failure. This historical physical-record enumerator
+     * requires a node sink; NULL returns -ENOTSUP without reading the document.
+     * Service JSON uses the separately negotiated managed inspection table. */
     int (*inspect_configuration)(const char *configuration, size_t configuration_length,
                                  rptadv_configuration_sink node, void *node_context,
                                  rptadv_text_sink_v1 diagnostic, void *diagnostic_context);
@@ -641,6 +674,40 @@ struct rptadv_product_descriptor_v1 {
      * completion. Each call is nonblocking with respect to physical rig I/O. */
     int (*reload_poll)(void);
 };
+
+/** Checked JSON management startup, negotiated independently of the frozen product table.
+ * A successful call retains providers until product.stop succeeds. -1 means startup
+ * was rejected and drained; -2 requires retaining all providers and retrying stop.
+ * A missing or invalid table cannot be replaced by legacy configuration start. */
+struct rptadv_product_management_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint8_t capability[16];
+    int (*start)(const struct rptadv_host_services_v10 *host,
+                 const struct rptadv_control_descriptor_v1 *control,
+                 const struct rptadv_file_descriptor *file,
+                 const struct rptadv_speech_descriptor *speech, const char *provisioning_json,
+                 size_t provisioning_length);
+};
+const struct rptadv_product_management_v1 *rptadv_product_management_descriptor_v1(void);
+
+/** Synchronous optional visitor for one registered port. The UUID points to 16 network-order
+ * bytes, and the exact UTF-8 key is a bounded span. Return zero to continue. */
+typedef int (*rptadv_managed_port_sink_v1)(void *context, const uint8_t *uuid, const char *key,
+                                           size_t key_length, uint32_t enabled);
+
+/** Read-only service-document validation and registered port enumeration.
+ * Both sink modes validate the same service TLS credentials, store identity and selected
+ * candidate before any records are emitted. No process writer lease or device is opened.
+ * All callbacks and spans are borrowed for this call; nonzero from a port sink aborts. */
+struct rptadv_product_inspection_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint8_t capability[16];
+    int (*inspect)(const char *provisioning_json, size_t length, rptadv_managed_port_sink_v1 port,
+                   void *port_context, rptadv_text_sink_v1 diagnostic, void *diagnostic_context);
+};
+const struct rptadv_product_inspection_v1 *rptadv_product_inspection_descriptor_v1(void);
 
 /** Return immutable process-lifetime product metadata.
  * @return Complete product descriptor retained through successful stop.

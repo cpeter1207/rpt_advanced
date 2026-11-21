@@ -1,4 +1,13 @@
-use crate::ResolvedRadioNode;
+pub(crate) mod station_binding;
+use crate::{
+    ResolvedRadioNode,
+    providers::{PhysicalProviders, PhysicalSet, ProviderError},
+    station_plan::StationPlan,
+};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Weak},
+};
 use std::{
     ffi::{c_char, c_void},
     str,
@@ -37,8 +46,10 @@ pub struct RadioReservation {
 pub struct RadioHostContext {
     /// All configured node radio selections.
     radios: Mutex<RadioSettings>,
-    /// Dynamically loaded providers; absent only for callback validation tests.
+    /// Dynamically loaded providers; supplied by legacy configured startup.
     pub providers: Option<&'static crate::providers::ProviderSet>,
+    typed_ports: Arc<Mutex<HashSet<[u8; 16]>>>,
+    physical: Mutex<Weak<PhysicalSet>>,
     next_generation: AtomicU64,
     pub(crate) observations: crate::processing::Observations,
 }
@@ -67,9 +78,36 @@ impl RadioHostContext {
                 staged: None,
             }),
             providers,
+            typed_ports: Arc::default(),
+            physical: Mutex::default(),
             next_generation: AtomicU64::new(0),
             observations: crate::processing::Observations::default(),
         }
+    }
+
+    fn station_providers(&self) -> Result<PhysicalProviders, ProviderError> {
+        if let Some(existing) = self.providers {
+            return Ok(PhysicalProviders::Existing(existing));
+        }
+        let mut physical = self
+            .physical
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = physical.upgrade() {
+            return Ok(PhysicalProviders::Loaded(existing));
+        }
+        let loaded = Arc::new(PhysicalSet::load()?);
+        *physical = Arc::downgrade(&loaded);
+        Ok(PhysicalProviders::Loaded(loaded))
+    }
+
+    fn next_generation(&self) -> Option<u64> {
+        self.next_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .ok()?
+            .checked_add(1)
     }
 
     /// Stage candidate radio settings for device handoff; the active snapshot remains available
@@ -173,10 +211,66 @@ impl RadioHostContext {
     }
 }
 
+/// A typed port remains reserved until its last live/update owner is destroyed.
+struct PortLease {
+    registry: Arc<Mutex<HashSet<[u8; 16]>>>,
+    port: [u8; 16],
+}
+impl Drop for PortLease {
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.port);
+    }
+}
+
+#[derive(Clone)]
+enum Selection {
+    Legacy(Box<RadioReservation>),
+    Typed {
+        plan: Arc<StationPlan>,
+        maximum_frames: u32,
+        lease: Arc<PortLease>,
+    },
+}
+impl From<RadioReservation> for Selection {
+    fn from(reservation: RadioReservation) -> Self {
+        Self::Legacy(Box::new(reservation))
+    }
+}
+
+impl Selection {
+    fn legacy(&self) -> Option<&RadioReservation> {
+        match self {
+            Self::Legacy(value) => Some(value),
+            Self::Typed { .. } => None,
+        }
+    }
+    fn view(&self) -> &crate::native_configuration::NativeRadioConfiguration {
+        match self {
+            Self::Legacy(value) => &value.radio.radio,
+            Self::Typed { plan, .. } => &plan.inspection,
+        }
+    }
+    fn key(&self) -> &str {
+        match self {
+            Self::Legacy(value) => &value.radio.node,
+            Self::Typed { plan, .. } => &plan.label,
+        }
+    }
+    fn maximum(&self) -> u32 {
+        match self {
+            Self::Legacy(value) => value.maximum_frames,
+            Self::Typed { maximum_frames, .. } => *maximum_frames,
+        }
+    }
+}
+
 struct RadioHandle {
-    reservation: RadioReservation,
+    reservation: Selection,
     active: Option<crate::radio_activation::ActiveRadio>,
-    pending: Option<RadioReservation>,
+    pending: Option<Selection>,
     metadata: crate::abi::rptadv_radio_metadata_v1,
 }
 
@@ -204,22 +298,27 @@ pub unsafe extern "C" fn radio_update(context: *mut c_void, radio: *mut c_void, 
             if handle.pending.is_some() {
                 return -5;
             }
-            let Ok(candidate) = host.update_reservation(&handle.reservation) else {
+            let Some(current) = handle.reservation.legacy() else {
+                return -2;
+            };
+            let Ok(candidate) = host.update_reservation(current) else {
                 return -1;
             };
-            let generation = host.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+            let Some(generation) = host.next_generation() else {
+                return -1;
+            };
             match active.stage_update(
                 &candidate.radio.radio.request(),
                 generation,
                 candidate.maximum_frames,
             ) {
                 Ok(true) => {
-                    handle.pending = Some(candidate);
+                    handle.pending = Some(Selection::from(candidate));
                     0
                 }
                 Ok(false) => 1,
                 Err(error) => {
-                    handle.pending = Some(candidate);
+                    handle.pending = Some(Selection::from(candidate));
                     error
                 }
             }
@@ -228,16 +327,20 @@ pub unsafe extern "C" fn radio_update(context: *mut c_void, radio: *mut c_void, 
             if handle.pending.is_none() {
                 return if phase == 2 { 0 } else { -7 };
             }
-            match active.finish_update(phase == 1) {
-                Ok(()) => {
-                    let candidate = handle.pending.take().expect("staged radio reservation");
-                    if phase == 1 {
-                        handle.reservation = candidate;
-                    }
-                    0
+            let status = if matches!(handle.reservation, Selection::Typed { .. }) {
+                active.finish_typed(phase == 1)
+            } else {
+                active
+                    .finish_update(phase == 1)
+                    .map_or_else(|code| code, |()| 0)
+            };
+            if status == 0 {
+                let candidate = handle.pending.take().expect("staged radio reservation");
+                if phase == 1 {
+                    handle.reservation = candidate;
                 }
-                Err(error) => error,
             }
+            status
         }
         _ => -1,
     }
@@ -279,8 +382,15 @@ pub unsafe extern "C" fn radio_control(
         {
             return -1;
         }
-        let reservation = handle.pending.as_ref().unwrap_or(&handle.reservation);
-        let (mode, frames) = reservation.radio.radio.receive_policy();
+        let candidate = handle.pending.as_ref().filter(|pending| {
+            matches!(pending, Selection::Legacy(_))
+                || handle
+                    .active
+                    .as_ref()
+                    .is_some_and(crate::radio_activation::ActiveRadio::candidate_acknowledged)
+        });
+        let reservation = candidate.unwrap_or(&handle.reservation);
+        let (mode, frames) = reservation.view().receive_policy();
         command.value = i64::from(mode);
         command.flags = frames;
         return 0;
@@ -292,7 +402,7 @@ pub unsafe extern "C" fn radio_control(
         let Some(sink) = sink else {
             return -1;
         };
-        let source = handle.reservation.radio.radio.processing_request();
+        let source = handle.reservation.view().processing_request();
         // SAFETY: the reservation owns the complete source configuration while
         // the synchronous sink copies it. No normalized aliases replace source.
         unsafe {
@@ -319,9 +429,7 @@ pub unsafe extern "C" fn radio_control(
     let status = active.maintenance(request, sink, sink_context);
     if status == 0 {
         if let Some((host, sink)) = processing {
-            let text = host
-                .observations
-                .text(handle.reservation.radio.node.as_str());
+            let text = host.observations.text(handle.reservation.key());
             // SAFETY: this complete borrowed text lasts through the synchronous sink.
             unsafe { sink(sink_context, text.as_ptr().cast(), text.len()) };
         }
@@ -453,7 +561,7 @@ pub unsafe extern "C" fn radio_open(
         return -1;
     };
     *output = Box::into_raw(Box::new(RadioHandle {
-        reservation,
+        reservation: Selection::from(reservation),
         active: None,
         pending: None,
         metadata: None,
@@ -505,18 +613,31 @@ pub unsafe extern "C" fn radio_activate(
     if handle.active.is_some() {
         return -1;
     }
-    let Some(providers) = host.providers.as_ref() else {
+    let Some(generation) = host.next_generation() else {
         return -1;
     };
-    // SAFETY: HostServicesOwner borrows the provider box owned by ProductRuntime; product.stop
-    // synchronously destroys this radio before either owner can be released.
-    let providers: &'static crate::providers::ProviderSet = providers;
-    let generation = host.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
-    let result = crate::radio_activation::ActiveRadio::open(
+    let legacy;
+    let (providers, source) = match &handle.reservation {
+        Selection::Legacy(value) => {
+            let Some(providers) = host.providers else {
+                return -1;
+            };
+            legacy = value.radio.radio.request();
+            (
+                providers,
+                crate::radio_activation::StationSource::Legacy(&legacy),
+            )
+        }
+        Selection::Typed { plan, .. } => (
+            plan.providers.as_ref(),
+            crate::radio_activation::StationSource::Prepared(plan),
+        ),
+    };
+    let result = crate::radio_activation::ActiveRadio::open_source(
         providers,
-        &handle.reservation.radio,
+        source,
         generation,
-        handle.reservation.maximum_frames,
+        handle.reservation.maximum(),
         crate::radio_activation::ProductRadioCallbacks {
             receive,
             receive_context,
@@ -654,6 +775,7 @@ pub unsafe extern "C" fn peer_bind_radio(
 
 #[cfg(test)]
 mod tests {
+    use super::Selection;
     use super::{
         RadioHandle, RadioHostContext, ReservationError, finish_activation, radio_activate,
         radio_destroy, radio_open, reserve_radio,
@@ -678,7 +800,7 @@ mod tests {
         let source = "[1000]\n; original comment\n[radio 1000]\nreceive_output_gain_db=-8\n";
         let radios = resolve_radio_nodes(source).unwrap();
         let mut handle = RadioHandle {
-            reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+            reservation: Selection::from(reserve_radio(&radios, "1000", 960).unwrap()),
             active: None,
             pending: None,
             metadata: None,
@@ -799,7 +921,7 @@ mod tests {
         api.native_finish_update = Some(finish);
         api.native_destroy_update = Some(destroy);
         let mut handle = RadioHandle {
-            reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+            reservation: Selection::from(reserve_radio(&radios, "1000", 960).unwrap()),
             active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
             pending: None,
             metadata: None,
@@ -838,7 +960,7 @@ mod tests {
             // SAFETY: the fixture retains all request and native-owner addresses.
             unsafe {
                 assert_eq!(super::radio_update(context, radio, 0), 0);
-                assert_eq!(handle.reservation.radio, radios[0]);
+                assert_eq!(handle.reservation.legacy().unwrap().radio, radios[0]);
                 assert_eq!(super::radio_update(context, radio, 0), -5);
                 FINISH_STATUS.set(-9);
                 assert_eq!(super::radio_update(context, radio, 2), -9);
@@ -854,16 +976,16 @@ mod tests {
             } else {
                 radios[0].clone()
             };
-            assert_eq!(handle.reservation.radio, expected);
+            assert_eq!(handle.reservation.legacy().unwrap().radio, expected);
             assert!(handle.pending.is_none());
         }
-        handle.reservation = reserve_radio(&radios, "1000", 960).unwrap();
+        handle.reservation = Selection::from(reserve_radio(&radios, "1000", 960).unwrap());
         REJECT.set(true);
         // SAFETY: rejected stage retains the exact previous source and abort owner.
         unsafe {
             assert_eq!(super::radio_update(context, radio, 0), -9);
             assert!(handle.pending.is_some());
-            assert_eq!(handle.reservation.radio, radios[0]);
+            assert_eq!(handle.reservation.legacy().unwrap().radio, radios[0]);
             assert_eq!(super::radio_update(context, radio, 2), 0);
             assert!(handle.pending.is_none());
             assert_eq!(super::radio_update(context, radio, 2), 0);
@@ -906,7 +1028,7 @@ mod tests {
         api.native_processing_status_text = Some(counters);
         api.native_status_text = Some(counters);
         let mut handle = RadioHandle {
-            reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+            reservation: Selection::from(reserve_radio(&radios, "1000", 960).unwrap()),
             active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
             pending: None,
             metadata: None,
@@ -986,7 +1108,7 @@ mod tests {
         use super::{radio_site_bind, radio_site_publish, radio_site_snapshot};
         let radios = resolve_radio_nodes("[1000]\n[radio 1000]\n").unwrap();
         let mut handle = RadioHandle {
-            reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+            reservation: Selection::from(reserve_radio(&radios, "1000", 960).unwrap()),
             active: None,
             pending: None,
             metadata: None,
@@ -1130,8 +1252,11 @@ mod tests {
         assert_eq!(result, 0);
         assert!(!reservation.is_null());
         let handle = unsafe { &*reservation.cast::<RadioHandle>() };
-        assert_eq!(handle.reservation.radio.node.as_str(), "1000");
-        assert_eq!(handle.reservation.maximum_frames, 960);
+        assert_eq!(
+            handle.reservation.legacy().unwrap().radio.node.as_str(),
+            "1000"
+        );
+        assert_eq!(handle.reservation.maximum(), 960);
         unsafe { radio_destroy(context, reservation) };
     }
 
@@ -1248,7 +1373,14 @@ mod tests {
         );
         let handle = unsafe { &*reservation.cast::<RadioHandle>() };
         assert_eq!(
-            handle.reservation.radio.radio.request().cm119_profile,
+            handle
+                .reservation
+                .legacy()
+                .unwrap()
+                .radio
+                .radio
+                .request()
+                .cm119_profile,
             crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_NHRC
         );
         unsafe { radio_destroy(context, reservation) };
@@ -1260,7 +1392,14 @@ mod tests {
         );
         let handle = unsafe { &*reservation.cast::<RadioHandle>() };
         assert_eq!(
-            handle.reservation.radio.radio.request().cm119_profile,
+            handle
+                .reservation
+                .legacy()
+                .unwrap()
+                .radio
+                .radio
+                .request()
+                .cm119_profile,
             crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_NHRC
         );
         unsafe { radio_destroy(context, reservation) };
@@ -1283,6 +1422,8 @@ mod tests {
         assert_eq!(
             unsafe { &*candidate.cast::<RadioHandle>() }
                 .reservation
+                .legacy()
+                .unwrap()
                 .radio
                 .radio
                 .request()
@@ -1300,6 +1441,8 @@ mod tests {
         assert_eq!(
             unsafe { &*rollback.cast::<RadioHandle>() }
                 .reservation
+                .legacy()
+                .unwrap()
                 .radio
                 .radio
                 .request()
@@ -1335,6 +1478,8 @@ mod tests {
         assert_eq!(
             unsafe { &*candidate.cast::<RadioHandle>() }
                 .reservation
+                .legacy()
+                .unwrap()
                 .radio
                 .radio
                 .request()
@@ -1349,9 +1494,16 @@ mod tests {
             0
         );
         let handle = unsafe { &*rollback.cast::<RadioHandle>() };
-        assert_eq!(handle.reservation.radio.channel, "old");
+        assert_eq!(handle.reservation.legacy().unwrap().radio.channel, "old");
         assert_eq!(
-            handle.reservation.radio.radio.request().cm119_profile,
+            handle
+                .reservation
+                .legacy()
+                .unwrap()
+                .radio
+                .radio
+                .request()
+                .cm119_profile,
             crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_SPHUSB
         );
         unsafe { radio_destroy(context, rollback) };
@@ -1485,7 +1637,7 @@ mod tests {
         let reservation =
             reserve_radio(&resolve_radio_nodes(document).unwrap(), "1000", 960).unwrap();
         let mut handle = RadioHandle {
-            reservation,
+            reservation: Selection::from(reservation),
             active: None,
             pending: None,
             metadata: None,
@@ -1542,8 +1694,9 @@ mod tests {
         }
 
         let mut handle = RadioHandle {
-            reservation: reserve_radio(&resolve_radio_nodes("[1000]\n").unwrap(), "1000", 960)
-                .unwrap(),
+            reservation: Selection::from(
+                reserve_radio(&resolve_radio_nodes("[1000]\n").unwrap(), "1000", 960).unwrap(),
+            ),
             active: None,
             pending: None,
             metadata: None,
@@ -1727,7 +1880,7 @@ mod receive_policy_tests {
     #[test]
     fn receive_policy_is_available_before_activation_and_tracks_pending_rollback() {
         let mut handle = RadioHandle {
-            reservation: reservation(0),
+            reservation: Selection::from(reservation(0)),
             active: None,
             pending: None,
             metadata: None,
@@ -1741,7 +1894,7 @@ mod receive_policy_tests {
         request.command.abi_version = 1;
         request.command.command = abi::URP_AST_COMMAND_GET_RECEIVE_POLICY;
         for mode in 0..=2 {
-            handle.reservation = reservation(mode);
+            handle.reservation = Selection::from(reservation(mode));
             assert_eq!(
                 // SAFETY: the stack handle and complete writable request remain retained.
                 unsafe {
@@ -1760,8 +1913,8 @@ mod receive_policy_tests {
                 (i64::from(mode), if mode == 0 { 0 } else { 7680 })
             );
         }
-        handle.reservation = reservation(0);
-        handle.pending = Some(reservation(2));
+        handle.reservation = Selection::from(reservation(0));
+        handle.pending = Some(Selection::from(reservation(2)));
         assert_eq!(
             // SAFETY: the same unique handle and complete request remain live.
             unsafe {

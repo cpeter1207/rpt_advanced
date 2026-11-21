@@ -63,6 +63,7 @@ impl WorkingFiles {
     }
 
     /// Initialize an empty store or explicitly resume its matching, unfinished UUID.
+    /// The returned handle retains the writer lease throughout initial selector publication.
     pub fn provision(path: &Path, id: Uuid) -> Result<Self, CaptureError> {
         Self::provision_with(path, id, || Ok(()))
     }
@@ -72,13 +73,12 @@ impl WorkingFiles {
         mut durable_component: impl FnMut() -> Result<(), CaptureError>,
     ) -> Result<Self, CaptureError> {
         let mut store = Self::open(path)?;
-        let root = readable(&store.root)?;
-        fs::flock(&root, FlockOperation::NonBlockingLockExclusive)
-            .map_err(|_| CaptureError::Busy)?;
+        let lease = store.try_writer_lease()?;
+        let root = &lease.root;
         let marker = marker(id);
         let mut marked = false;
         let mut empty = true;
-        for entry in Dir::read_from(&root).map_err(open_error)? {
+        for entry in Dir::read_from(root).map_err(open_error)? {
             let entry = entry.map_err(open_error)?;
             let name = entry
                 .file_name()
@@ -90,7 +90,7 @@ impl WorkingFiles {
             empty = false;
             let path = Path::new(name);
             if name == marker {
-                let dir = protected_directory(&root, path, store.uid)?;
+                let dir = protected_directory(root, path, store.uid)?;
                 for entry in Dir::read_from(readable(&dir)?).map_err(open_error)? {
                     if !matches!(
                         entry.map_err(open_error)?.file_name().to_bytes(),
@@ -101,7 +101,7 @@ impl WorkingFiles {
                 }
                 marked = true;
             } else if NAMESPACES.contains(&name) {
-                protected_directory(&root, path, store.uid)?;
+                protected_directory(root, path, store.uid)?;
             } else if name == EDIT_LOCK
                 || name.strip_prefix(".immutable-").is_some_and(|s| {
                     s.len() == 32
@@ -109,7 +109,7 @@ impl WorkingFiles {
                             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
                 })
             {
-                file_handle(&root, path, store.uid)?;
+                file_handle(root, path, store.uid)?;
             } else {
                 return Err(CaptureError::UnsafeFile);
             }
@@ -117,10 +117,10 @@ impl WorkingFiles {
         if !marked && !empty {
             return Err(CaptureError::UnsafeFile);
         }
-        ensure_dir(&root, Path::new(&marker), store.uid)?;
+        ensure_dir(root, Path::new(&marker), store.uid)?;
         durable_component()?;
         match fs::openat(
-            &root,
+            root,
             EDIT_LOCK,
             OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::RDWR,
             FILE,
@@ -133,14 +133,14 @@ impl WorkingFiles {
         }
         let guard = store.try_edit()?;
         guard.lock.sync_all().map_err(|_| CaptureError::Io)?;
-        sync_directory(&root)?;
+        sync_directory(root)?;
         for name in NAMESPACES {
             guard.check_lock()?;
-            ensure_dir(&root, Path::new(name), store.uid)?;
+            ensure_dir(root, Path::new(name), store.uid)?;
             durable_component()?;
         }
         drop(guard);
-        store.bootstrap = Some(id);
+        store.bootstrap = Some((id, lease));
         Ok(store)
     }
 }
@@ -148,12 +148,12 @@ impl WorkingFiles {
 impl EditGuard<'_> {
     /// Identity granted by explicit provisioning and still backed by its durable marker.
     pub fn bootstrap_identity(&self) -> Result<Option<Uuid>, CaptureError> {
-        let Some(id) = self.store.bootstrap else {
+        let Some((id, _)) = &self.store.bootstrap else {
             return Ok(None);
         };
         self.check_lock()?;
-        match protected_directory(&self.store.root, Path::new(&marker(id)), self.store.uid) {
-            Ok(_) => Ok(Some(id)),
+        match protected_directory(&self.store.root, Path::new(&marker(*id)), self.store.uid) {
+            Ok(_) => Ok(Some(*id)),
             Err(CaptureError::Missing) => Ok(None),
             Err(e) => Err(e),
         }
@@ -323,8 +323,8 @@ impl EditGuard<'_> {
             recheck,
             after_rename,
         )?;
-        if let Some(id) = self.store.bootstrap {
-            self.retire_marker(id)
+        if let Some((id, _)) = &self.store.bootstrap {
+            self.retire_marker(*id)
                 .map_err(|_| InstallError::DurabilityUnknown)?;
         }
         Ok(())
@@ -595,6 +595,34 @@ mod tests {
             assert!(WorkingFiles::provision(&path, id).is_err());
         }
     }
+    #[test]
+    fn provisioning_retains_the_anchored_directory_lease_through_first_selector() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("leased");
+        directory(&path);
+        let observer = WorkingFiles::open(&path).unwrap();
+        let contender = readable(&observer.root).unwrap();
+        let contend = || fs::flock(&contender, FlockOperation::NonBlockingLockExclusive);
+        let configured = WorkingFiles::provision_with(&path, new_identity().unwrap(), || {
+            assert_eq!(contend(), Err(Errno::WOULDBLOCK));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            contend(),
+            Err(Errno::WOULDBLOCK),
+            "provisioning released the writer before the first selector"
+        );
+        {
+            let guard = configured.try_edit().unwrap();
+            guard.replace_state(None, b"selected", 64).unwrap();
+            assert_eq!(contend(), Err(Errno::WOULDBLOCK));
+        }
+        assert_eq!(contend(), Err(Errno::WOULDBLOCK));
+        drop(configured);
+        assert!(contend().is_ok());
+    }
+
     #[test]
     fn rename_before_failed_sync_is_read_back_as_possibly_committed() {
         let fixture = Fixture::new();

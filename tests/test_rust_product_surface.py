@@ -277,7 +277,9 @@ def staged(
     doc = Path("usr/share/doc/rpt-advanced")
     documents = {doc / path: root / path for path in MANUALS}
     documents[doc / "copyright"] = root / "COPYING"
-    documents[doc / "examples/rpt_advanced.conf"] = root / "examples/rpt_advanced.conf"
+    documents[doc / "examples/rpt_advanced.service.json"] = (
+        root / "examples/rpt_advanced.service.json"
+    )
     for destination, source in documents.items():
         expected.add(destination)
         assert (stage / destination).read_bytes() == source.read_bytes(), str(
@@ -1139,7 +1141,10 @@ def verify_stage_policy() -> None:
         for source, destination in (
             *((path, path) for path in MANUALS),
             ("COPYING", "copyright"),
-            ("examples/rpt_advanced.conf", "examples/rpt_advanced.conf"),
+            (
+                "examples/rpt_advanced.service.json",
+                "examples/rpt_advanced.service.json",
+            ),
         ):
             write(root, source)
             write(stage, f"usr/share/doc/rpt-advanced/{destination}")

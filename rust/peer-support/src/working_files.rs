@@ -30,12 +30,59 @@ const EDIT_LOCK: &str = "edit.lock";
 const WORKING: &str = "working";
 const PATH_FLAGS: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 
+/// Read the service's public bootstrap document from a bounded pinned regular file.
+/// Certificate/password material is supplied independently through systemd credentials.
+pub fn read_service_provisioning(path: &Path) -> Result<Vec<u8>, CaptureError> {
+    const LIMIT: u64 = 64 * 1024;
+    let name = path.file_name().ok_or(CaptureError::UnsafePath)?;
+    let parent = path.parent().ok_or(CaptureError::UnsafePath)?;
+    let mut directory = directory_handle(
+        fs::CWD,
+        Path::new(if path.is_absolute() { "/" } else { "." }),
+    )?;
+    for component in parent.components() {
+        match component {
+            Component::Normal(part) => directory = directory_handle(&directory, Path::new(part))?,
+            Component::ParentDir => directory = directory_handle(&directory, Path::new(".."))?,
+            _ => {}
+        }
+    }
+    let handle = path_handle(&directory, Path::new(name))?;
+    let metadata = handle.metadata().map_err(|_| CaptureError::Io)?;
+    if !metadata.is_file()
+        || metadata.mode() & 0o022 != 0
+        || metadata.uid() != 0 && metadata.uid() != geteuid().as_raw()
+    {
+        return Err(CaptureError::UnsafeFile);
+    }
+    let captured = read_pinned_regular(&handle, &metadata, LIMIT)?;
+    check_version(
+        &path_handle(&directory, Path::new(name))?,
+        &captured.version,
+    )?;
+    Ok(captured.bytes)
+}
+
 /// Open descriptor for a trusted, service-owned configuration store.
 pub struct WorkingFiles {
     root: File,
     uid: u32,
-    bootstrap: Option<uuid::Uuid>,
+    expected_identity: Option<uuid::Uuid>,
+    bootstrap: Option<(uuid::Uuid, WriterLease)>,
     bookkeeping_fault: std::sync::atomic::AtomicBool,
+}
+
+/// Exclusive writer lifetime on the service-owned store directory inode.
+/// Keep this owner through shutdown and the drain of all service writers.
+#[must_use]
+pub struct WriterLease {
+    root: File,
+}
+
+impl fmt::Debug for WriterLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("WriterLease(..)")
+    }
 }
 
 /// Exclusive cooperative edit lock released when the guard drops.
@@ -176,9 +223,27 @@ impl WorkingFiles {
         Ok(Self {
             root,
             uid,
+            expected_identity: None,
             bootstrap: None,
             bookkeeping_fault: false.into(),
         })
+    }
+
+    /// Pin an externally provisioned store UUID for all selector inspections.
+    /// This records an expectation in memory and never creates or repairs disk state.
+    pub fn with_identity(mut self, id: uuid::Uuid) -> Self {
+        self.expected_identity = Some(id);
+        self
+    }
+
+    /// Acquire the directory lease on a fresh file description without waiting or creating files.
+    /// Online and offline writers contend here even between individual edit transactions.
+    pub fn try_writer_lease(&self) -> Result<WriterLease, CaptureError> {
+        let root = transaction::readable(&self.root)?;
+        lock_exclusive(&root)?;
+        check_inode(&self.root, &root)?;
+        checked_metadata(&root, self.uid, 0o700)?;
+        Ok(WriterLease { root })
     }
 
     /// Lock the existing regular edit file exclusively without waiting.
@@ -186,13 +251,7 @@ impl WorkingFiles {
         checked_metadata(&self.root, self.uid, 0o700)?;
         let (handle, metadata) = file_handle(&self.root, Path::new(EDIT_LOCK), self.uid)?;
         let lock = reopen_regular(&handle, &FileVersion::from(&metadata))?;
-        fs::flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
-            if error == Errno::WOULDBLOCK {
-                CaptureError::Busy
-            } else {
-                CaptureError::Io
-            }
-        })?;
+        lock_exclusive(&lock)?;
         let guard = EditGuard { store: self, lock };
         guard.check_lock()?;
         Ok(guard)
@@ -202,6 +261,16 @@ impl WorkingFiles {
     fn open_working(&self) -> Result<File, CaptureError> {
         protected_directory(&self.root, Path::new(WORKING), self.uid)
     }
+}
+
+fn lock_exclusive(file: &File) -> Result<(), CaptureError> {
+    fs::flock(file, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+        if error == Errno::WOULDBLOCK {
+            CaptureError::Busy
+        } else {
+            CaptureError::Io
+        }
+    })
 }
 
 impl CapturePath {
@@ -230,6 +299,13 @@ impl CapturePath {
 }
 
 impl EditGuard<'_> {
+    /// Refuse a state pointer belonging to a different service-provisioned store.
+    pub fn accepts_identity(&self, id: uuid::Uuid) -> bool {
+        self.store
+            .expected_identity
+            .is_none_or(|expected| expected == id)
+    }
+
     /// Capture only the selected paths and recheck them before returning bytes.
     pub fn capture(
         &self,

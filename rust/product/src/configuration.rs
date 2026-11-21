@@ -26,6 +26,9 @@ pub(crate) unsafe extern "C" fn inspect_configuration(
     diagnostic: abi::rptadv_text_sink_v1,
     diagnostic_context: *mut c_void,
 ) -> i32 {
+    let Some(sink) = node else {
+        return -libc::ENOTSUP;
+    };
     boundary(diagnostic, diagnostic_context, || {
         let source = unsafe { input(configuration, length) }?;
         let document = ConfigDocument::parse(source).map_err(|error| error.to_string())?;
@@ -35,7 +38,7 @@ pub(crate) unsafe extern "C" fn inspect_configuration(
             sink: diagnostic,
             context: diagnostic_context,
         };
-        // Validate every radio even without a node visitor; config checks use this path.
+        // Validate all radios before delivering the first host record.
         for name in document.nodes() {
             let identity = NodeId::new(name.to_owned()).map_err(|error| error.to_string())?;
             let settings = ResolvedNodeSettings::resolve(&document, &identity)
@@ -62,41 +65,39 @@ pub(crate) unsafe extern "C" fn inspect_configuration(
                 ),
             );
         }
-        if let Some(sink) = node {
-            for (identity, settings, radio, account) in nodes {
-                let secrets_file = account
-                    .secrets_file
-                    .as_ref()
-                    .map_or(std::borrow::Cow::Borrowed(""), |path| {
-                        path.to_string_lossy()
-                    });
-                radio.visit(|native| {
-                    let accepted = echolink::visit(identity.as_str(), &account, |account| {
-                        let record = abi::rptadv_node_host_configuration {
-                            struct_size: size_of::<abi::rptadv_node_host_configuration>() as u32,
-                            node: identity.as_str().as_ptr().cast(),
-                            node_length: identity.as_str().len(),
-                            channel: settings.channel.as_ptr().cast(),
-                            channel_length: settings.channel.len(),
-                            enabled: u32::from(settings.enabled),
-                            iax_port: settings.iax_local_port,
-                            registration_url: settings.iax_registration_url.as_ptr().cast(),
-                            registration_url_length: settings.iax_registration_url.len(),
-                            registration_interval_seconds: settings.iax_registration_interval_s,
-                            radio: native,
-                            echolink: std::ptr::from_ref(account).cast(),
-                            echolink_secrets_file: secrets_file.as_ptr(),
-                            echolink_secrets_file_length: secrets_file.len(),
-                        };
-                        unsafe { sink(node_context, &record) }
-                    });
-                    if accepted == 0 {
-                        Ok(())
-                    } else {
-                        Err("configuration visitor rejected a node".into())
-                    }
-                })?;
-            }
+        for (identity, settings, radio, account) in nodes {
+            let secrets_file = account
+                .secrets_file
+                .as_ref()
+                .map_or(std::borrow::Cow::Borrowed(""), |path| {
+                    path.to_string_lossy()
+                });
+            radio.visit(|native| {
+                let accepted = echolink::visit(identity.as_str(), &account, |account| {
+                    let record = abi::rptadv_node_host_configuration {
+                        struct_size: size_of::<abi::rptadv_node_host_configuration>() as u32,
+                        node: identity.as_str().as_ptr().cast(),
+                        node_length: identity.as_str().len(),
+                        channel: settings.channel.as_ptr().cast(),
+                        channel_length: settings.channel.len(),
+                        enabled: u32::from(settings.enabled),
+                        iax_port: settings.iax_local_port,
+                        registration_url: settings.iax_registration_url.as_ptr().cast(),
+                        registration_url_length: settings.iax_registration_url.len(),
+                        registration_interval_seconds: settings.iax_registration_interval_s,
+                        radio: native,
+                        echolink: std::ptr::from_ref(account).cast(),
+                        echolink_secrets_file: secrets_file.as_ptr(),
+                        echolink_secrets_file_length: secrets_file.len(),
+                    };
+                    unsafe { sink(node_context, &record) }
+                });
+                if accepted == 0 {
+                    Ok(())
+                } else {
+                    Err("configuration visitor rejected a node".into())
+                }
+            })?;
         }
         Ok(())
     })

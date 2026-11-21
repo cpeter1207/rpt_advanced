@@ -498,7 +498,7 @@ fn owned_pin(
 ) -> Result<Option<(String, u32, u32)>, ReadingQuality> {
     if let Some(reference) = interface {
         return Ok(property_pin(&reference.property, output)?
-            .map(|(bank, mask)| (reference.key.as_str().to_owned(), bank, mask)));
+            .map(|(bank, mask)| (reference.port.to_string(), bank, mask)));
     }
     let Some(e) = endpoint.filter(|e| radio(e)) else {
         return Ok(None);

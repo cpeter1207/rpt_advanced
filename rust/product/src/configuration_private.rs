@@ -26,7 +26,10 @@ use rptadv_peer_support::{
     },
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 type SlotKey = (ResourceId, CredentialSlot);
 
@@ -66,7 +69,19 @@ struct Entry {
     encoded_len: u64,
     owner: Value,
     affinity: Value,
-    value: Option<SecretBytes>,
+    value: Option<Arc<SecretBytes>>,
+}
+
+/// An authenticated zeroizing value and its opaque generation identity.
+/// Delegates never infer credential changes from plaintext or allocation addresses.
+pub(crate) struct RetainedCredential {
+    pub(crate) bytes: Arc<SecretBytes>,
+    reference: PrivateReference,
+}
+impl RetainedCredential {
+    pub(crate) fn same_version(&self, other: &Self) -> bool {
+        self.reference == other.reference
+    }
 }
 
 /// Authenticated index and credential bytes, held off the audio path.
@@ -85,6 +100,24 @@ impl Credentials {
     }
     /// Lookup a checked credential. A mask or an incomplete/mismatched account is unusable.
     pub fn get(&self, resource: ResourceId, slot: CredentialSlot) -> Option<&SecretBytes> {
+        self.selected_entry(resource, slot)?.value.as_deref()
+    }
+
+    /// Retain only the selected zeroizing credential across a durable owner handoff.
+    /// Repeated/inherited bindings share its allocation until their last owner retires.
+    pub(crate) fn retain(
+        &self,
+        resource: ResourceId,
+        slot: CredentialSlot,
+    ) -> Option<RetainedCredential> {
+        let entry = self.selected_entry(resource, slot)?;
+        Some(RetainedCredential {
+            bytes: Arc::clone(entry.value.as_ref()?),
+            reference: entry.reference,
+        })
+    }
+
+    fn selected_entry(&self, resource: ResourceId, slot: CredentialSlot) -> Option<&Entry> {
         let owner = self.owners.get(&(resource, slot))?;
         let affinity = owner.affinity.as_ref()?;
         let entry = self.entries.get(&(resource, slot)).or_else(|| {
@@ -97,9 +130,7 @@ impl Credentials {
             })?;
             self.entries.get(site.0)
         })?;
-        (&entry.affinity == affinity)
-            .then_some(entry.value.as_ref())
-            .flatten()
+        (&entry.affinity == affinity).then_some(entry)
     }
 
     /// Distinguish absent owners from verified configured/unconfigured state.
@@ -584,7 +615,7 @@ fn decode_entry(
         if owner.affinity.as_ref() != Some(&affinity) {
             return Err(invalid);
         }
-        Some(decode_value(raw, slot)?.ok_or(invalid)?)
+        Some(Arc::new(decode_value(raw, slot)?.ok_or(invalid)?))
     };
     let warnings = doc.warnings().len() + fields.len() - 4;
     Ok((

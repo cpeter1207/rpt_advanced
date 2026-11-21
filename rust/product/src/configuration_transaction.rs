@@ -444,6 +444,9 @@ impl<'a, 'store> Transaction<'a, 'store> {
             .ok_or(TransactionError::StorageFault)?;
         let decoded = StatePointer::decode(&bytes).map_err(|_| TransactionError::StorageFault)?;
         let state = decoded.value;
+        if !self.guard.accepts_identity(state.store.uuid()) {
+            return Err(TransactionError::StorageFault);
+        }
         let mut warnings = decoded.warnings;
         let desired = self.load(&state.desired)?;
         warnings.extend_from_slice(desired.manifest_warnings());

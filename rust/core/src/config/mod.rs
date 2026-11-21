@@ -37,7 +37,9 @@ pub(crate) use dtmf_macros::{compile_macros, macro_limits};
 pub use echolink::{EchoLinkAnnouncement, EchoLinkSettings, EchoLinkTelemetry, EchoLinkTransport};
 pub(crate) use messages::selector_valid as message_selector_valid;
 pub use messages::{BindingSource, IdentitySource, ResolvedMessageSettings};
-pub use phone_mailboxes::{PhoneMailbox, resolve_phone_mailboxes, valid_mailbox_pin_hash};
+pub use phone_mailboxes::{
+    PhoneMailbox, resolve_phone_mailboxes, valid_mailbox_pin_hash, verify_mailbox_pin,
+};
 pub use schema::Schema;
 pub use settings::valid_admin_hash;
 pub use settings::{

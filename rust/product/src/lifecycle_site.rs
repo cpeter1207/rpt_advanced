@@ -47,7 +47,7 @@ impl Engine {
         receive.recv().map_err(|_| RuntimeError::Rejected)?
     }
 
-    fn wait_sites(self: &Arc<Self>, resume: bool) -> Result<(), RuntimeError> {
+    pub(super) fn wait_sites(self: &Arc<Self>, resume: bool) -> Result<(), RuntimeError> {
         self.wait_sites_until(resume, Instant::now() + HANDOFF_TIMEOUT)
     }
 
@@ -83,8 +83,8 @@ impl Engine {
         if self.reloading.load(Ordering::Acquire) {
             return Err(RuntimeError::Busy);
         }
-        self.site_backends.validate(&document)?;
         let settings = crate::site::configured(&document)?;
+        self.site_backends.validate_scopes(settings.values())?;
         let definition = document.clone();
         let basis = self.run(move |host| host.site_basis(&definition))?;
         let acquisition = Acquisition::prepare_reload(
@@ -135,7 +135,7 @@ impl Engine {
         self.finish_reload(result.map(|_| ())).map(|()| true)
     }
 
-    fn finish_reload(
+    pub(super) fn finish_reload(
         self: &Arc<Self>,
         result: Result<(), RuntimeError>,
     ) -> Result<(), RuntimeError> {
@@ -157,3 +157,5 @@ impl Engine {
 #[cfg(test)]
 #[path = "lifecycle_site_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::{install_delayed_site_bank, site_bank_delay};

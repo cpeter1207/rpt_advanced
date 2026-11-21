@@ -52,11 +52,22 @@ pub struct ProductRadioCallbacks {
     pub metadata: abi::rptadv_radio_metadata_v1,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdatePhase {
+    Idle,
+    Legacy,
+    AwaitingAcceptance,
+    Staged,
+    Finishing(bool),
+    Recovery,
+}
+
 /// Native station handle; its shared product owns every hardware and DSP resource.
 pub struct ActiveRadio {
+    physical_providers: Option<crate::providers::PhysicalProviders>,
     handle: Option<NonNull<c_void>>,
     api: abi::UrpAstDescriptor,
-    updating: bool,
+    update: UpdatePhase,
     stop: unsafe extern "C" fn(*mut c_void) -> i32,
     destroy: unsafe extern "C" fn(*mut c_void),
     site_bind: unsafe extern "C" fn(*mut c_void, u32, *const abi::UrpAstSiteBinding) -> i32,
@@ -69,17 +80,52 @@ impl std::fmt::Debug for ActiveRadio {
         formatter
             .debug_struct("ActiveRadio")
             .field("open", &self.handle.is_some())
-            .field("updating", &self.updating)
+            .field("updating", &(self.update != UpdatePhase::Idle))
             .finish_non_exhaustive()
     }
 }
 
+/// Typed and legacy sources retain their own provider entry points.
+#[derive(Clone, Copy)]
+pub(crate) enum StationSource<'a> {
+    Legacy(&'a abi::UrpNativeStationConfig),
+    Prepared(&'a crate::station_plan::StationPlan),
+}
+impl<'a> From<&'a abi::UrpNativeStationConfig> for StationSource<'a> {
+    fn from(config: &'a abi::UrpNativeStationConfig) -> Self {
+        Self::Legacy(config)
+    }
+}
+impl StationSource<'_> {
+    fn config(self) -> *const abi::UrpNativeStationConfig {
+        match self {
+            Self::Legacy(config) => config,
+            Self::Prepared(_) => std::ptr::null(),
+        }
+    }
+}
 impl ActiveRadio {
     /// Copy resolved policy into the product, then start its native hardware path.
     /// Providers and callback contexts remain alive until this owner is dropped.
     pub fn open(
         providers: &'static ProviderSet,
         radio: &ResolvedRadioNode,
+        generation_id: u64,
+        maximum_frames: u32,
+        callbacks: ProductRadioCallbacks,
+    ) -> Result<Self, RadioActivationError> {
+        Self::open_source(
+            providers,
+            StationSource::Legacy(&radio.radio.request()),
+            generation_id,
+            maximum_frames,
+            callbacks,
+        )
+    }
+
+    pub(crate) fn open_source(
+        providers: &ProviderSet,
+        source: StationSource<'_>,
         generation_id: u64,
         maximum_frames: u32,
         callbacks: ProductRadioCallbacks,
@@ -101,17 +147,17 @@ impl ActiveRadio {
         Self::open_with_api(
             descriptors.product,
             &manifest,
-            &radio.radio.request(),
+            source,
             generation_id,
             maximum_frames,
             callbacks,
         )
     }
 
-    fn open_with_api(
+    fn open_with_api<'a>(
         api: &abi::UrpAstDescriptor,
         providers: &abi::UrpAstProviderManifest,
-        config: &abi::UrpNativeStationConfig,
+        source: impl Into<StationSource<'a>>,
         generation_id: u64,
         maximum_frames: u32,
         callbacks: ProductRadioCallbacks,
@@ -149,10 +195,11 @@ impl ActiveRadio {
             accepted_abi_version: 0,
             metadata: callbacks.metadata,
         };
+        let source = source.into();
         let args = abi::UrpNativeCreateArgs {
             struct_size: std::mem::size_of::<abi::UrpNativeCreateArgs>() as u32,
             abi_version: 1,
-            config,
+            config: source.config(),
             providers,
             callbacks: &callbacks,
             generation_id,
@@ -161,7 +208,16 @@ impl ActiveRadio {
         let mut handle = std::ptr::null_mut();
         // SAFETY: all request spans are retained for this synchronous create;
         // providers and callback contexts outlive the resulting native handle.
-        let status = unsafe { create(&args, &mut handle) };
+        let status = unsafe {
+            match source {
+                StationSource::Legacy(_) => create(&args, &mut handle),
+                StationSource::Prepared(plan) => (plan.physical.create.expect("validated"))(
+                    plan.prepared.as_ptr(),
+                    &args,
+                    &mut handle,
+                ),
+            }
+        };
         if status != 0 {
             if !handle.is_null() {
                 // SAFETY: failure transferred a partial handle from this descriptor.
@@ -171,9 +227,13 @@ impl ActiveRadio {
         }
         let handle = NonNull::new(handle).ok_or(RadioActivationError::Product(-1))?;
         let active = Self {
+            physical_providers: match source {
+                StationSource::Legacy(_) => None,
+                StationSource::Prepared(plan) => Some(plan.providers.clone()),
+            },
             handle: Some(handle),
             api: retain_operations(api),
-            updating: false,
+            update: UpdatePhase::Idle,
             stop,
             destroy,
             site_bind,
@@ -269,13 +329,22 @@ impl ActiveRadio {
             }
             return if code == 0 { -1 } else { code };
         }
+        let mut ticket = rptadv_peer_support::remote_ticket::Ticket {
+            context: ticket,
+            source,
+            take,
+            destroy,
+        };
+        if let Some(providers) = &self.physical_providers {
+            ticket = ticket.retaining(providers.clone());
+        }
         *output = abi::rptadv_remote_ticket_v1 {
             struct_size: std::mem::size_of::<abi::rptadv_remote_ticket_v1>() as u32,
             abi_version: 1,
-            context: ticket,
-            source: Some(source),
-            take: Some(take),
-            destroy: Some(destroy),
+            context: ticket.context,
+            source: Some(ticket.source),
+            take: Some(ticket.take),
+            destroy: Some(ticket.destroy),
         };
         0
     }
@@ -297,31 +366,51 @@ impl Drop for ActiveRadio {
 impl ActiveRadio {
     /// Stage a prepared same-device radio edit and wait for the shared owners'
     /// independent acknowledgments. Its reverse remains retained until finish.
-    pub(crate) fn stage_update(
+    pub(crate) fn stage_update<'a>(
         &mut self,
-        config: &abi::UrpNativeStationConfig,
+        source: impl Into<StationSource<'a>>,
         generation_id: u64,
         maximum_frames: u32,
     ) -> Result<bool, i32> {
-        if self.updating {
+        let Some(_token) = self.begin_update(
+            source.into(),
+            generation_id,
+            maximum_frames,
+            UpdatePhase::Legacy,
+        )?
+        else {
+            return Ok(false);
+        };
+        let code = await_update(|| self.accept_once());
+        if code == 0 { Ok(true) } else { Err(code) }
+    }
+
+    fn begin_update(
+        &mut self,
+        source: StationSource<'_>,
+        generation_id: u64,
+        maximum_frames: u32,
+        phase: UpdatePhase,
+    ) -> Result<Option<NativeUpdateToken>, i32> {
+        if self.update != UpdatePhase::Idle {
             return Err(-5);
         }
         let Some(handle) = self.handle else {
             return Err(-7);
         };
-        let (Some(prepare), Some(begin), Some(accept), Some(_), Some(destroy)) = (
+        let (Some(prepare), Some(begin), Some(_), Some(_), Some(destroy)) = (
             self.api.native_prepare_update,
             self.api.native_begin_update,
             self.api.native_accept_update,
             self.api.native_finish_update,
             self.api.native_destroy_update,
         ) else {
-            return Ok(false);
+            return Ok(None);
         };
         let args = abi::UrpNativeCreateArgs {
             struct_size: std::mem::size_of::<abi::UrpNativeCreateArgs>() as u32,
             abi_version: 1,
-            config,
+            config: source.config(),
             providers: std::ptr::null(),
             callbacks: std::ptr::null(),
             generation_id,
@@ -330,13 +419,25 @@ impl ActiveRadio {
         let mut prepared = std::ptr::null_mut();
         // SAFETY: the native owner retains its providers and callbacks. The update
         // request and all source spans are borrowed only for this preparation.
-        let code = unsafe { prepare(handle.as_ptr(), &args, &mut prepared) };
+        let code = unsafe {
+            match source {
+                StationSource::Legacy(_) => prepare(handle.as_ptr(), &args, &mut prepared),
+                StationSource::Prepared(plan) => {
+                    (plan.physical.prepare_update.expect("validated"))(
+                        handle.as_ptr(),
+                        plan.prepared.as_ptr(),
+                        &args,
+                        &mut prepared,
+                    )
+                }
+            }
+        };
         let token = NativeUpdateToken {
             handle: prepared,
             destroy,
         };
         if code == -3 {
-            return Ok(false);
+            return Ok(None);
         }
         if code != 0 {
             return Err(code);
@@ -344,28 +445,111 @@ impl ActiveRadio {
         if token.handle.is_null() {
             return Err(-1);
         }
-        self.updating = true;
+        self.update = phase;
         // SAFETY: this uniquely owned token is transferred into its original
         // station mailbox. Destroying its emptied wrapper never frees live ports.
         let code = unsafe { begin(handle.as_ptr(), token.handle) };
-        let code = if code == 0 {
-            // SAFETY: the original serialized station remains retained while polling.
-            await_update(|| unsafe { accept(handle.as_ptr()) })
+        if code == 0 {
+            Ok(Some(token))
         } else {
-            code
-        };
-        if code != 0 {
-            // Aggregate rollback owns the abort and can gate the controller if
-            // restoring this retained owner fails. Keep partial adoption alive.
-            return Err(code);
+            // Begin can publish to native callbacks before a later step fails.
+            // Keep the exact owner available for an explicit recovery finish.
+            Err(code)
         }
-        Ok(true)
+    }
+
+    fn accept_once(&self) -> i32 {
+        let (Some(handle), Some(accept)) = (self.handle, self.api.native_accept_update) else {
+            return -7;
+        };
+        // SAFETY: this serialized native station owns the same in-flight update.
+        unsafe { accept(handle.as_ptr()) }
+    }
+
+    /// Stage on this native owner and poll once. Only a preparation-time incompatibility
+    /// may request an untouched device handoff; an error after begin requires recovery.
+    pub(crate) fn stage_typed(
+        &mut self,
+        plan: &crate::station_plan::StationPlan,
+        generation: u64,
+        maximum: u32,
+    ) -> i32 {
+        match self.begin_update(
+            StationSource::Prepared(plan),
+            generation,
+            maximum,
+            UpdatePhase::AwaitingAcceptance,
+        ) {
+            Ok(Some(_token)) => self.poll_typed_stage(),
+            Ok(None) => 1,
+            Err(code) => {
+                if self.update == UpdatePhase::AwaitingAcceptance {
+                    self.update = UpdatePhase::Recovery;
+                }
+                if code < 0 { code } else { -7 }
+            }
+        }
+    }
+
+    pub(crate) fn poll_typed_stage(&mut self) -> i32 {
+        match self.update {
+            UpdatePhase::Staged => 0,
+            UpdatePhase::AwaitingAcceptance => match self.accept_once() {
+                0 => {
+                    self.update = UpdatePhase::Staged;
+                    0
+                }
+                1 => 2,
+                code => {
+                    self.update = UpdatePhase::Recovery;
+                    if code < 0 { code } else { -7 }
+                }
+            },
+            _ => -7,
+        }
+    }
+
+    pub(crate) fn has_typed_update(&self) -> bool {
+        !matches!(self.update, UpdatePhase::Idle | UpdatePhase::Legacy)
+    }
+
+    pub(crate) fn candidate_acknowledged(&self) -> bool {
+        matches!(
+            self.update,
+            UpdatePhase::Staged | UpdatePhase::Finishing(true)
+        )
+    }
+
+    /// Poll one finish step. Reversal remains possible during partial adoption, but an
+    /// unacknowledged or recovery-only edit can never be committed.
+    pub(crate) fn finish_typed(&mut self, commit: bool) -> i32 {
+        if !self.has_typed_update() || (commit && !self.candidate_acknowledged()) {
+            return -7;
+        }
+        let (Some(handle), Some(finish)) = (self.handle, self.api.native_finish_update) else {
+            return -7;
+        };
+        // SAFETY: the exact candidate and station remain retained between these bounded polls.
+        match unsafe { finish(handle.as_ptr(), u32::from(commit)) } {
+            0 => {
+                self.update = UpdatePhase::Idle;
+                0
+            }
+            1 => {
+                self.update = UpdatePhase::Finishing(commit);
+                2
+            }
+            code => {
+                self.update = UpdatePhase::Recovery;
+                if code < 0 { code } else { -7 }
+            }
+        }
     }
 
     /// Commit only after aggregate admission, or use the shared prepared reverse
     /// to restore the exact active processors after any later device fails.
     pub(crate) fn finish_update(&mut self, commit: bool) -> Result<(), i32> {
-        if !self.updating {
+        if self.update == UpdatePhase::Idle {
             return Ok(());
         }
         let handle = self.handle.ok_or(-7)?;
@@ -375,7 +559,7 @@ impl ActiveRadio {
         if code != 0 {
             return Err(code);
         }
-        self.updating = false;
+        self.update = UpdatePhase::Idle;
         Ok(())
     }
 
@@ -666,16 +850,26 @@ pub(crate) mod tests {
 
     pub(crate) fn empty_active_radio() -> ActiveRadio {
         ActiveRadio {
+            physical_providers: None,
             handle: None,
             // SAFETY: test operations are nullable pointers until assigned explicitly.
             api: unsafe { std::mem::zeroed() },
-            updating: false,
+            update: UpdatePhase::Idle,
             stop,
             destroy,
             site_bind,
             site_publish,
             site_snapshot,
         }
+    }
+
+    pub(crate) fn fixture_station_radio(
+        api: abi::UrpAstDescriptor,
+        providers: crate::providers::PhysicalProviders,
+    ) -> ActiveRadio {
+        let mut active = fixture_active_radio(api);
+        active.physical_providers = Some(providers);
+        active
     }
 
     pub(crate) fn fixture_active_radio(api: abi::UrpAstDescriptor) -> ActiveRadio {
@@ -1043,7 +1237,7 @@ pub(crate) mod tests {
             });
             FINISH.set(-6);
             assert_eq!(active.finish_update(commit), Err(-6));
-            assert!(active.updating);
+            assert_ne!(active.update, UpdatePhase::Idle);
             FINISH.set(0);
             active.finish_update(commit).unwrap();
             active.finish_update(false).unwrap();
@@ -1079,9 +1273,9 @@ pub(crate) mod tests {
         active.api.native_destroy_update = Some(destroy_update);
         CALLS.with(|calls| calls.borrow_mut().clear());
         assert!(matches!(active.stage_update(&config, 10, 960), Err(-9)));
-        assert!(active.updating);
+        assert_ne!(active.update, UpdatePhase::Idle);
         active.finish_update(false).unwrap();
-        assert!(!active.updating);
+        assert_eq!(active.update, UpdatePhase::Idle);
         CALLS.with(|calls| {
             assert_eq!(
                 &*calls.borrow(),
@@ -1095,7 +1289,7 @@ pub(crate) mod tests {
         ] {
             PREPARATION.set((code, token));
             assert_eq!(active.stage_update(&config, 10, 960), expected);
-            assert!(!active.updating);
+            assert_eq!(active.update, UpdatePhase::Idle);
         }
         active.handle = None;
     }

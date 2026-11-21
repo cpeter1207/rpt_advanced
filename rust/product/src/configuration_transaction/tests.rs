@@ -544,3 +544,156 @@ fn selecting_fields_limits_and_unsafe_working_layout_fail_closed() {
 }
 
 mod http;
+
+#[test]
+fn durable_zero_port_candidate_shares_prepared_owner_inputs_and_scoped_media() {
+    use crate::management::{PreparedConfiguration, ProfileInputs};
+    use rpt_advanced_core::config::resources::candidate::ResourceScope;
+    use std::sync::Arc;
+
+    let (fixture, store) = Fixture::new();
+    let inputs = Arc::new(ProfileInputs {
+        messages: rpt_advanced_core::messages::InstalledMessageSources::capture(),
+        interfaces: Default::default(),
+    });
+    let checked = {
+        let guard = store.try_edit().unwrap();
+        let tx = Transaction::new(&guard, LIMITS);
+        first(&tx);
+        let selection = tx.inspect().unwrap();
+        let candidate = selection.desired.assemble_candidate().unwrap();
+        PreparedConfiguration::prepare(&candidate, Some("UTC"), &inputs).unwrap()
+    };
+    drop(store);
+    drop(fixture);
+    assert!(Arc::ptr_eq(checked.inputs(), &inputs));
+    let runtime = checked.runtime();
+    let site = runtime.registry.site_id();
+    let scope = ResourceScope::Site(site);
+    assert_eq!(runtime.registry.port_keys().count(), 0);
+    assert_eq!(runtime.scopes.len(), 1);
+    assert_eq!(runtime.scopes[&scope].metadata.name, "first");
+    assert_eq!(runtime.scopes[&scope].commands.scope, scope);
+    assert_eq!(runtime.scopes[&scope].messages.scope, scope);
+    assert!(runtime.scopes[&scope].events.events.is_empty());
+    assert!(runtime.acquisition[&scope].sensors.is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn management_only_executor_has_no_radio_generation_or_revision_before_adoption() {
+    use crate::lifecycle::Engine;
+    use rptadv_peer_support::working_files::CaptureError;
+    use std::sync::atomic::Ordering;
+    let (fixture, provisioning) = Fixture::new();
+    let candidate = {
+        use crate::management::{PreparedConfiguration, ProfileInputs};
+        let guard = provisioning.try_edit().unwrap();
+        let tx = Transaction::new(&guard, LIMITS);
+        first(&tx);
+        let selected = tx.inspect().unwrap();
+        let captured = selected.desired.assemble_candidate().unwrap();
+        let inputs = std::sync::Arc::new(ProfileInputs {
+            messages: rpt_advanced_core::messages::InstalledMessageSources::capture(),
+            interfaces: Default::default(),
+        });
+        PreparedConfiguration::prepare(&captured, Some("UTC"), &inputs)
+            .unwrap()
+            .runtime()
+            .clone()
+    };
+    drop(provisioning);
+    let observer = WorkingFiles::open(&fixture.0).unwrap();
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let opened = crate::fixture::RADIO_OPENS.load(Ordering::Acquire);
+    let start = || {
+        // SAFETY: these fixture descriptors and their provider code outlive the drained executor.
+        unsafe {
+            Engine::start_management(
+                &observer,
+                crate::fixture::host_descriptor(),
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+            )
+        }
+    };
+    let engine = start().unwrap();
+    assert!(matches!(
+        start(),
+        Err(rpt_advanced_core::runtime::RuntimeError::Busy)
+    ));
+    assert!(
+        matches!(observer.try_writer_lease(), Err(CaptureError::Busy)),
+        "active control owner must exclude offline maintenance"
+    );
+    engine
+        .run(|host| {
+            assert_eq!(host.runtime.revision(), 0);
+            assert!(host.runtime.node_names().is_empty());
+            assert!(host.runtime.status(0).is_empty());
+            assert!(!host.runtime.reload_pending());
+            Ok(())
+        })
+        .unwrap();
+    let clock = engine.clock();
+    engine
+        .run(move |host| {
+            let mut stage = || {
+                host.runtime.prepare_configuration(
+                    candidate.clone(),
+                    &host.media,
+                    |_, _| panic!("empty registry requested an adapter"),
+                    |_, _| panic!("empty registry requested a device"),
+                    clock,
+                )
+            };
+            let staged = stage()?;
+            let stale = stage()?;
+            assert_eq!(host.runtime.revision(), 0);
+            assert!(host.runtime.modular_configuration().is_none());
+            host.runtime.adopt_configuration(staged, clock)?;
+            assert_eq!(host.runtime.revision(), 1);
+            assert!(std::sync::Arc::ptr_eq(
+                host.runtime.modular_configuration().unwrap(),
+                &candidate
+            ));
+            assert_eq!(
+                host.runtime.adopt_configuration(stale, clock),
+                Err(rpt_advanced_core::runtime::RuntimeError::Rejected)
+            );
+            assert!(host.runtime.node_names().is_empty());
+            Ok(())
+        })
+        .unwrap();
+    crate::fixture::CONTROL_SUBMIT_MODE.store(1, Ordering::Release);
+    assert!(!engine.stop());
+    assert_eq!(observer.try_writer_lease().unwrap_err(), CaptureError::Busy);
+    assert!(engine.stop());
+    drop(engine);
+    drop(observer.try_writer_lease().unwrap());
+    assert_eq!(crate::fixture::RADIO_OPENS.load(Ordering::Acquire), opened);
+}
+
+#[test]
+fn provisioned_store_identity_is_checked_on_independent_reopen() {
+    let (fixture, original) = Fixture::new();
+    first(&Transaction::new(&original.try_edit().unwrap(), LIMITS));
+    drop(original);
+    let verified = |identity: ResourceId| {
+        let opened = WorkingFiles::open(&fixture.0)
+            .unwrap()
+            .with_identity(identity.uuid());
+        let guard = opened.try_edit().unwrap();
+        Transaction::new(&guard, LIMITS)
+            .inspect()
+            .map(|selected| selected.state.store)
+    };
+    assert_eq!(
+        verified(SITE.parse().unwrap()),
+        Err(TransactionError::StorageFault)
+    );
+    assert_eq!(verified(STORE.parse().unwrap()), Ok(STORE.parse().unwrap()));
+}

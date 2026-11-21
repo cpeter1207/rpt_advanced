@@ -48,13 +48,81 @@ pub(super) fn property_pin(
     pin(backend, line, output).map(Some)
 }
 
+/// Describe ordinary pins declared by a checked registered station, without claiming a
+/// physical observation. Every later read/write still checks the active owner's mask.
+pub(crate) fn declared_pin_capability(
+    port: &rpt_advanced_core::config::resources::profiles::radio::RadioPortProfile,
+    owner: &rpt_advanced_core::config::resources::profiles::equipment::BoundInterface,
+    kind: rpt_advanced_core::config::resources::candidate::ResourceKind,
+) -> Option<rpt_advanced_core::config::resources::profiles::equipment::InterfaceCapability> {
+    use rpt_advanced_core::config::resources::{
+        candidate::ResourceKind,
+        profiles::{
+            equipment::InterfaceCapability,
+            radio::{
+                AudioBackend, GpioMode, ParallelInput, ParallelOutput, SignalBinding, SignalSource,
+            },
+        },
+    };
+    if owner.port != port.id || !port.metadata.enabled {
+        return None;
+    }
+    let output = match kind {
+        ResourceKind::Output => true,
+        ResourceKind::Input | ResourceKind::Sensor => false,
+        _ => return None,
+    };
+    let (bank, mask) = property_pin(&owner.property, output).ok()??;
+    let pin = owner.property.rsplit('/').next()?.parse::<u8>().ok()?;
+    let allowed = if bank == 0 {
+        let gpio = &port.interface.gpio;
+        let rx = &port.signals.rx;
+        let tx = &port.signals.tx;
+        let uses =
+            |b: &SignalBinding| b.source == SignalSource::SoundChipGpio && b.pins.contains(&pin);
+        let reserved = rx.squelch.enabled && uses(&rx.squelch.binding)
+            || rx.ctcss.enabled && uses(&rx.ctcss.binding)
+            || uses(&tx.ptt)
+            || tx.ctcss.enabled
+                && tx.ctcss.source == SignalSource::External
+                && tx.ctcss.output.as_ref().is_some_and(uses)
+            || tx.dcs.enabled
+                && tx.dcs.source == SignalSource::External
+                && tx.dcs.output.as_ref().is_some_and(uses);
+        port.interface.audio.backend == AudioBackend::SoundChip
+            && gpio.wiring_profile.ordinary_pin(pin)
+            && gpio.clip_led_pin != Some(pin)
+            && !reserved
+            && (gpio.pins[mask.trailing_zeros() as usize] != GpioMode::Input) == output
+    } else {
+        let parallel = &port.interface.parallel;
+        if parallel.device.is_empty() && parallel.base_address == 0 {
+            return None;
+        }
+        if output {
+            matches!(
+                parallel.outputs[(pin - 2) as usize],
+                ParallelOutput::Low | ParallelOutput::High
+            )
+        } else {
+            parallel.inputs[[10, 12, 13, 15].iter().position(|p| *p == pin)?]
+                == ParallelInput::Input
+        }
+    };
+    allowed.then_some(if output {
+        InterfaceCapability::DigitalOutput
+    } else {
+        InterfaceCapability::Boolean
+    })
+}
+
 /// Check only a cached capability mask published by the physical radio owner.
 /// Caller supplies the selected real port and bank's cache; this function never opens hardware.
 pub fn cached_pin_capability(
     owner: &rpt_advanced_core::config::resources::profiles::equipment::BoundInterface,
     kind: rpt_advanced_core::config::resources::candidate::ResourceKind,
     cache: impl FnOnce(
-        &rpt_advanced_core::config::resources::PortKey,
+        rpt_advanced_core::config::resources::candidate::ResourceId,
         u32,
     ) -> Option<abi::UrpAstSiteSnapshot>,
 ) -> Option<rpt_advanced_core::config::resources::profiles::equipment::InterfaceCapability> {
@@ -67,7 +135,7 @@ pub fn cached_pin_capability(
         _ => return None,
     };
     let (bank, mask) = property_pin(&owner.property, output).ok()??;
-    validate(&cache(&owner.key, bank)?, mask, output).ok()?;
+    validate(&cache(owner.port, bank)?, mask, output).ok()?;
     Some(if output {
         InterfaceCapability::DigitalOutput
     } else {

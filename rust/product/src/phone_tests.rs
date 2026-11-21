@@ -126,6 +126,78 @@ fn unconfigured_mailbox_cannot_authenticate_a_provider_admitted_call() {
     assert!(!reply.phone_authenticated());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn authenticated_call_retains_only_the_public_identity_selected_for_its_scope() {
+    use rpt_advanced_core::config::resources::{
+        PortKey,
+        candidate::{ResourceBinding, ResourceId, ResourceKind, ResourceScope},
+        profiles::mailbox::{PublicMailbox, ScopedMailboxes},
+    };
+    use rptadv_peer_support::sealed_records::SecretBytes;
+    use std::{collections::BTreeMap, sync::Arc};
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let port: ResourceId = "adcbbaff-de64-41a5-94dd-80a3ab259e9c".parse().unwrap();
+    let declaration: ResourceId = "b862047f-77d8-4707-9a2a-e464555ab9ef".parse().unwrap();
+    let other: ResourceId = "e9fa54ed-753a-4145-adfa-3df479e1843c".parse().unwrap();
+    let mut profiles = ScopedMailboxes {
+        effective: BTreeMap::new(),
+        warnings: Vec::new(),
+    };
+    profiles.effective.insert(
+        PortKey::new("0100"),
+        PublicMailbox {
+            binding: ResourceBinding {
+                id: declaration,
+                scope: ResourceScope::Port(port),
+                kind: ResourceKind::Mailbox,
+            },
+            number: rpt_advanced_core::link::MailboxId::new("0100").unwrap(),
+            first_name: "Chris".into(),
+            callsign: "KG0BP".into(),
+        },
+    );
+    let pin = "$argon2id$v=19$m=19456,t=2,p=1$c2l4dGVlbi1ieXRlLXNhbHQ$JJvcFomwgumB44bmQdOCEbN00saqrIis8c6S0WG6Kzw";
+    let selected = Arc::new(SecretBytes::new(pin.as_bytes().to_vec()));
+    let retained = Arc::downgrade(&selected);
+    let mut calls = PhoneCalls::new(1, 1).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let mut verify = |owner, mailbox, now| {
+        calls
+            .authenticate_scoped(
+                &source,
+                &reply,
+                &profiles,
+                |id| (id == owner).then_some(selected.as_ref()),
+                (mailbox, "1234"),
+                now,
+            )
+            .unwrap()
+    };
+    assert_eq!(verify(declaration, "100", 1), PhoneLogin::Retry);
+    assert_eq!(verify(other, "0100", 2), PhoneLogin::Retry);
+    assert_eq!(verify(declaration, "0100", 3), PhoneLogin::Authenticated);
+    drop(selected);
+    drop(profiles);
+    assert!(retained.upgrade().is_none());
+    let profile: &super::CallerMailbox = calls.mailbox(&source, &reply).unwrap();
+    assert_eq!(
+        (
+            profile.id.as_str(),
+            profile.first_name.as_str(),
+            profile.callsign.as_str()
+        ),
+        ("0100", "Chris", "KG0BP")
+    );
+    assert!(reply.phone_authenticated());
+    calls.retire(&source).unwrap();
+    assert!(calls.mailbox(&source, &reply).is_none());
+}
+
 #[test]
 fn mailbox_login_bounds_attempts_and_does_not_transfer_profiles_to_other_calls() {
     let _serial = crate::fixture::LIFECYCLE

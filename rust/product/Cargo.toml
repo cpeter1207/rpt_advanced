@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 serde_json = "1"
 crossbeam-queue = "0.3"
+libc = "0.2"
 libloading = "0.8"
 rpt-advanced-core = { path = "../core" }
 rptadv-json = { path = "../json" }
@@ -26,7 +27,6 @@ zeroize = "1"
 utoipa = { version = "=5.5.0", default-features = false, features = ["macros"] }
 
 [dev-dependencies]
-libc = "0.2"
 rpt-advanced-standalone = { path = "../standalone" }
 rptadv-file-adapter = { path = "../file-adapter" }
 rptadv-speech-adapter = { path = "../speech-adapter" }

@@ -1,5 +1,6 @@
 //! Actual store and mTLS regressions for mutable dependencies and typed response contracts.
 use super::*;
+mod native;
 mod station;
 use crate::management::ProfileInputs;
 use rpt_advanced_core::config::resources::profiles::equipment::InterfaceCapability;
@@ -21,6 +22,22 @@ fn authenticated_review_regressions() {
         "audio",
         "schemas",
         "poll",
+        "native-runtime",
+        "native-cold",
+        "native-reopen",
+        "native-two-live",
+        "native-confirm",
+        "native-confirm-failure",
+        "native-remove",
+        "native-disable",
+        "native-stop",
+        "native-inspection-registered",
+        "inspection-r1",
+        "native-bookkeeping",
+        "native-repair",
+        "native-new-fault",
+        "native-local",
+        "managed-bootstrap",
         "station-keyboard",
         "station-serial",
         "station-invalid",
@@ -166,10 +183,11 @@ fn effective(path: &str) -> String {
     path.replacen("/configuration/", "/effective/", 1)
 }
 fn operation(client: &Client<'_>, body: Value) -> Reply {
-    let boot = client.get("/api/v1/operations/").body["boot_id"]
+    let operations = client.get("/api/v1/operations/");
+    assert_eq!(operations.code, 200, "{}", operations.body);
+    let boot = operations.body["boot_id"]
         .as_str()
-        .unwrap()
-        .to_owned();
+        .expect("current boot identity");
     let uuid = rptadv_peer_support::working_files::transaction::new_identity().unwrap();
     client.send(
         "PUT",
@@ -269,6 +287,10 @@ fn recovery(s: &mut Scenario<'_>, restore: bool) {
         assert!(rt.final_inspections.load(Ordering::Acquire) > 0);
         assert_eq!(client.get(&port_path).code, 200);
         assert_eq!(client.get(&sensor_path).code, 404);
+        assert!(
+            rt.prepared_domain.lock().unwrap().upgrade().is_some(),
+            "recovery views must retain the exact prepared runtime domain"
+        );
     });
 }
 
@@ -545,7 +567,7 @@ fn schemas(client: &Client<'_>) {
         "https://node.example/status"
     );
 }
-fn poll(client: &Client<'_>, fixture: &Fixture) {
+fn poll(client: &Client<'_>, fixture: &Fixture, rt: &RuntimeFixture) {
     let count = || crate::management::FULL_PREPARATIONS.load(Ordering::Relaxed);
     let before = count();
     let fingerprint = client.get(STORAGE).body["working_fingerprint"].clone();
@@ -573,6 +595,10 @@ fn poll(client: &Client<'_>, fixture: &Fixture) {
         json!({"name":"new revision","inherit_from":null}),
     );
     assert!(count() > before);
+    assert!(
+        rt.prepared_domain.lock().unwrap().upgrade().is_some(),
+        "published views must retain the exact prepared runtime domain"
+    );
     let after = count();
     client.get("/api/v1/health/");
     assert_eq!(count(), after);
@@ -596,7 +622,24 @@ pub(super) fn run(
         "echo" => scenario.serve(inputs(), echo),
         "audio" => scenario.serve(inputs(), |c, _| audio(c)),
         "schemas" => scenario.serve(inputs(), |c, _| schemas(c)),
-        "poll" => scenario.serve(inputs(), |c, _| poll(c, fixture)),
+        "poll" => scenario.serve(inputs(), |c, rt| poll(c, fixture, rt)),
+        "asterisk-managed" => native::asterisk(&scenario),
+        "standalone-managed" => native::standalone(&scenario),
+        "managed-bootstrap" | "inspection-r1" => native::bootstrap(&scenario),
+        "native-runtime"
+        | "native-inspection-registered"
+        | "native-cold"
+        | "native-reopen"
+        | "native-two-live"
+        | "native-confirm"
+        | "native-confirm-failure"
+        | "native-remove"
+        | "native-disable"
+        | "native-stop"
+        | "native-bookkeeping"
+        | "native-repair"
+        | "native-new-fault"
+        | "native-local" => native::run(&mut scenario, case),
         "station-keyboard" => scenario.serve(inputs(), |c, _| station::keyboard(c)),
         "station-serial" => scenario.serve(inputs(), |c, _| station::serial(c)),
         "station-invalid" => scenario.serve(inputs(), station::invalid),

@@ -2,14 +2,17 @@
 Description=RPT Advanced standalone radio controller
 Wants=network-online.target
 After=network-online.target sound.target
-ConditionPathExists=/etc/rpt_advanced/rpt_advanced.conf
+ConditionPathExists=/etc/rpt_advanced/rpt_advanced.service.json
 
 [Service]
 Type=simple
 User=rpt-advanced
 Group=rpt-advanced
 SupplementaryGroups=audio
-ExecStart=/usr/bin/rpt-advanced --foreground /etc/rpt_advanced/rpt_advanced.conf
+ExecStart=/usr/bin/rpt-advanced --foreground /etc/rpt_advanced/rpt_advanced.service.json
+ExecReload=/bin/kill -HUP $MAINPID
+ImportCredential=rpt-advanced.tls.*
+ImportCredential=rpt-advanced.aead.*
 Restart=on-failure
 RestartSec=3s
 UMask=0077

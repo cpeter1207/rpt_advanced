@@ -4,12 +4,10 @@ use super::*;
 mod frontend;
 mod review;
 use crate::management::{
-    Adoption, AdoptionOutcome, Coordinator, Effect, Fault, Observed, OperationOwner, Runtime,
+    Adoption, AdoptionOutcome, Coordinator, Effect, Fault, Observed, OperationOwner,
+    PreparedConfiguration, Runtime,
 };
-use rpt_advanced_core::{
-    command_language::Invocation,
-    config::resources::candidate::{ModularCandidate, ResourceRegistry},
-};
+use rpt_advanced_core::command_language::Invocation;
 use rptadv_peer_support::https::{
     CertificateDer, Listener, OriginPolicy, PrivateKeyDer, ServerIdentity, ServiceId, ServiceTrust,
 };
@@ -39,6 +37,9 @@ struct RuntimeFixture {
     prepared_credentials: std::sync::atomic::AtomicUsize,
     final_inspections: std::sync::atomic::AtomicUsize,
     adoptions: std::sync::atomic::AtomicUsize,
+    prepared_domain: Mutex<
+        std::sync::Weak<rpt_advanced_core::config::resources::generation::RuntimeConfiguration>,
+    >,
     inhibit_history: Mutex<Vec<(Option<String>, Fault)>>,
     inhibits: std::sync::atomic::AtomicUsize,
     warnings: std::sync::atomic::AtomicUsize,
@@ -58,16 +59,19 @@ struct RuntimeFixture {
     dispatched: std::sync::atomic::AtomicUsize,
 }
 impl Runtime for RuntimeFixture {
+    fn permits_save(&self, _: &str) -> bool {
+        true
+    }
     type Prepared = String;
-    fn prepare(
-        &self,
-        candidate: &ModularCandidate<'_>,
-        r: &ResourceRegistry,
-        rev: &str,
-    ) -> Result<String, Fault> {
-        for (_, id) in r.port_keys() {
-            candidate.port_metadata(id).ok_or(Fault::Invalid)?;
+    fn prepare(&self, configuration: &PreparedConfiguration, rev: &str) -> Result<String, Fault> {
+        for (_, id) in configuration.runtime().registry.port_keys() {
+            configuration
+                .runtime()
+                .radio
+                .port(id)
+                .ok_or(Fault::Invalid)?;
         }
+        *self.prepared_domain.lock().unwrap() = Arc::downgrade(configuration.runtime());
         Ok(rev.to_owned())
     }
     fn prepare_credentials(
@@ -694,6 +698,7 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         proxy: None,
     };
     if let Ok(case) = std::env::var("RPTADV_HAL_REVIEW_CASE") {
+        drop(store); // The provisioner releases its anchored lease before a separate service starts.
         review::run(&case, &fixture, &listener, &mut inbox, &client);
         return;
     }
@@ -1577,7 +1582,7 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
             }
             assert!(Instant::now() < until, "rollback not observed");
         }
-        assert!(runtime.inhibits.load(Ordering::Acquire) > before);
+        assert_eq!(runtime.inhibits.load(Ordering::Acquire), before);
         let active_before = runtime.observed().active_revision;
         let attempts = runtime.adoptions.load(Ordering::Acquire);
         let desired_before = client.get("/api/v1/status/desired/").body["desired_revision"].clone();

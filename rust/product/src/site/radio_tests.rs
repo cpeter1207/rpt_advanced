@@ -106,8 +106,9 @@ fn public_capability_uses_exact_port_mask_and_published_pin_name() {
         key: PortKey::new("local / a"),
         property: "/gpio/pins/2".into(),
     };
-    let cached = |key: &PortKey, bank: u32| {
-        assert_eq!(key.as_str(), "local / a");
+    let port = reference.port;
+    let cached = |id, bank: u32| {
+        assert_eq!(id, port);
         assert_eq!(bank, 0);
         Some(abi::UrpAstSiteSnapshot {
             generation: 1,
@@ -134,4 +135,48 @@ fn public_capability_uses_exact_port_mask_and_published_pin_name() {
         cached_pin_capability(&reference, ResourceKind::Output, cached),
         Some(InterfaceCapability::DigitalOutput)
     );
+}
+
+#[test]
+fn modular_interface_observes_registered_uuid_and_preserves_logical_owner() {
+    use rpt_advanced_core::config::{
+        InputSettings, ResolvedSiteSettings,
+        resources::{PortKey, candidate::ResourceId, profiles::equipment::BoundInterface},
+    };
+    let hardware: ResourceId = "4ab24693-b134-4694-80ad-f7ee94dfc963".parse().unwrap();
+    let logical_site = "4031b0c6-a609-4ea0-8b9c-4a35a18f44ef";
+    let settings = ResolvedSiteSettings {
+        inputs: vec![InputSettings {
+            name: "door".into(),
+            enabled: true,
+            endpoint: None,
+            interface: Some(BoundInterface {
+                port: hardware,
+                key: PortKey::new("station / West"),
+                property: "/gpio/pins/2".into(),
+            }),
+            active_high: true,
+            debounce_ms: 0,
+            dtmf_id: None,
+            on_active: vec![],
+            on_inactive: vec![],
+        }],
+        ..Default::default()
+    };
+    let mut site = RadioSite::prepare(&std::collections::BTreeMap::from([(
+        logical_site.to_owned(),
+        settings,
+    )]))
+    .unwrap();
+    let observations = site.poll(1000, |owner, bank, operation| {
+        assert_eq!(
+            owner,
+            hardware.to_string(),
+            "physical bank must use registered port UUID"
+        );
+        assert_eq!(bank, 0);
+        assert!(matches!(operation, Operation::Snapshot));
+        Ok(Some(snapshot()))
+    });
+    assert_eq!(observations[logical_site].inputs["door"].value, Some(true));
 }

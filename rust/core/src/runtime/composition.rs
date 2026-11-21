@@ -92,6 +92,41 @@ impl MessageRecipes {
             .value
             .link_commands["link_command_site_status"]
             .len();
+        result.register_site(&site, defaults, site_prefix, node.as_str(), catalog);
+        Ok(result)
+    }
+
+    pub fn modular(
+        scope: &crate::config::resources::generation::ScopeConfiguration,
+        section: &str,
+    ) -> Result<Self, super::RuntimeError> {
+        let mut result = Self::default();
+        for (name, recipe) in &scope.messages.recipes {
+            let index = result.register(
+                MessageRecipe::Composition(Box::new(recipe.clone())),
+                recipe.settings_for(None).dtmf_id.clone(),
+                section,
+            )?;
+            result.names.insert(name.clone(), index);
+        }
+        result.register_site(
+            &scope.equipment.settings,
+            scope.messages.renderer_defaults().clone(),
+            0,
+            section,
+            &scope.messages.catalog,
+        );
+        Ok(result)
+    }
+
+    fn register_site(
+        &mut self,
+        site: &ResolvedSiteSettings,
+        defaults: ResolvedMessageSettings,
+        site_prefix: usize,
+        section: &str,
+        catalog: &MessageCatalog,
+    ) {
         for (name, source, selector, label, unit, precision) in site
             .sensors
             .iter()
@@ -120,9 +155,9 @@ impl MessageRecipes {
                 continue;
             };
             if site_prefix + selector.len() > 127 {
-                result.warnings.push(crate::config::ConfigWarning::new(
+                self.warnings.push(crate::config::ConfigWarning::new(
                     0,
-                    node.as_str(),
+                    section,
                     "dtmf_id",
                     selector,
                     "selector and effective prefix exceed the command length",
@@ -141,25 +176,24 @@ impl MessageRecipes {
                     text.insert(0, ' ');
                 }
             }
-            let index = result.items.len();
-            result.items.push(MessageRecipe::Site(Box::new(SiteReport {
+            let index = self.items.len();
+            self.items.push(MessageRecipe::Site(Box::new(SiteReport {
                 source: Some(source),
                 label,
                 unit,
                 precision,
                 settings: defaults.clone(),
             })));
-            result.site_selectors.insert(selector.clone(), index);
+            self.site_selectors.insert(selector.clone(), index);
         }
-        result.site_unavailable = result.items.len();
-        result.items.push(MessageRecipe::Site(Box::new(SiteReport {
+        self.site_unavailable = self.items.len();
+        self.items.push(MessageRecipe::Site(Box::new(SiteReport {
             source: None,
             label: forms(""),
             unit: forms(""),
             precision: 0,
             settings: defaults,
         })));
-        Ok(result)
     }
 
     /// Compile one usable source and register its selector in the shared node namespace.

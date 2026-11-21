@@ -391,6 +391,14 @@ fn echo_ring_policy_survives_prepared_generation() {
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
         host.services,
+        StationAudio::Document(
+            &host
+                .runtime
+                .settings("1000")
+                .unwrap()
+                .radio
+                .processing_configuration,
+        ),
     )
     .unwrap();
     assert_eq!(candidate.control.redirects.len(), 1);
@@ -2024,6 +2032,14 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
         host.services,
+        StationAudio::Document(
+            &host
+                .runtime
+                .settings("1000")
+                .unwrap()
+                .radio
+                .processing_configuration,
+        ),
     )
     .unwrap();
     host.runtime.replace_adapter("1000", candidate, 11).unwrap();
@@ -2111,6 +2127,14 @@ fn ended_ingress_is_omitted_and_unknown_peer_events_do_not_change_routes() {
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
         host.services,
+        StationAudio::Document(
+            &host
+                .runtime
+                .settings("1000")
+                .unwrap()
+                .radio
+                .processing_configuration,
+        ),
     )
     .unwrap();
     assert!(candidate.control.redirects.is_empty());
@@ -2244,6 +2268,8 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     assert!(second.stop(10));
 
     let lease = Arc::new(Mutex::new(Lease {
+        #[cfg(target_os = "linux")]
+        binding: Default::default(),
         quiesced: false,
         quiescing: false,
         owners: None,
@@ -2387,6 +2413,14 @@ fn saturated_media_publication_keeps_the_running_generation() {
                 media_worker(&mut host.media_workers, "1000").unwrap(),
                 &mut host.text,
                 host.services,
+                StationAudio::Document(
+                    &host
+                        .runtime
+                        .settings("1000")
+                        .unwrap()
+                        .radio
+                        .processing_configuration,
+                ),
             ) {
                 Ok(candidate) => {
                     held.push(candidate);

@@ -3181,7 +3181,7 @@ fn failed_restore_keeps_current_document_but_gates_the_unavailable_node() {
         clock(),
     )
     .unwrap();
-    let (mut rx, _tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut rx, tx) = runtime.node("1000").unwrap().register_audio().unwrap();
     assert_eq!(
         runtime.reload(
             ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
@@ -3196,7 +3196,20 @@ fn failed_restore_keeps_current_document_but_gates_the_unavailable_node() {
     assert_eq!(runtime.settings("1000").unwrap().channel, "old");
     assert!(rx.acquire().is_none());
     assert!(runtime.next_link().is_none());
+    drop((rx, tx));
     assert!(runtime.detached("1000", 1));
+    runtime.reclaim();
+    runtime
+        .reload(
+            ConfigDocument::parse("[1000]\nradio_channel=old\n").unwrap(),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
+    assert_eq!(runtime.revision(), 2);
+    assert!(runtime.node("1000").unwrap().work().is_some());
     assert!(runtime.stop(0));
 }
 
@@ -4757,7 +4770,10 @@ fn command_runtime_media_settings(
     }
     let registry = ResourceRegistry::with_members(
         site,
-        &[(port, PortKey::new("North é"))],
+        &[(
+            port,
+            PortKey::new("North ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©"),
+        )],
         &[commands, account],
         &members,
     )
@@ -6010,5 +6026,137 @@ fn registered_numeric_alias_waits_for_requester_then_fans_out_only_to_configured
         rt.peer_detached("1000", "2000", 50);
         rt.peer_detached("1000", "3000", 50);
         assert!(rt.stop(50));
+    }
+}
+
+#[test]
+fn pending_device_staging_commit_and_uncertain_reverse_retain_the_transaction() {
+    use crate::runtime::DeviceUpdate;
+    #[derive(Default)]
+    struct Progress {
+        staged: bool,
+        finish: bool,
+        reverse_failed: bool,
+        drained: bool,
+        attempts: Vec<&'static str>,
+    }
+    struct Pending(Arc<Mutex<Progress>>);
+    impl DeviceHandoff for Pending {
+        fn quiesce(&mut self) -> bool {
+            let mut state = self.0.lock().unwrap();
+            state.attempts.push("quiesce");
+            state.drained
+        }
+        fn close(&mut self) {
+            self.0.lock().unwrap().attempts.push("close");
+        }
+        fn open(&mut self, settings: &GenerationSettings) -> bool {
+            self.0.lock().unwrap().attempts.push("open");
+            settings.device != "fail"
+        }
+        fn poll_update(&mut self, _: &GenerationSettings) -> Result<DeviceUpdate, RuntimeError> {
+            let mut state = self.0.lock().unwrap();
+            state.attempts.push("stage");
+            Ok(if state.staged {
+                DeviceUpdate::Staged
+            } else {
+                DeviceUpdate::Pending
+            })
+        }
+        fn poll_finish_update(&mut self, commit: bool) -> Result<bool, RuntimeError> {
+            let mut state = self.0.lock().unwrap();
+            state
+                .attempts
+                .push(if commit { "commit" } else { "reverse" });
+            if !commit && state.reverse_failed {
+                Err(RuntimeError::Restore)
+            } else {
+                Ok(state.finish)
+            }
+        }
+    }
+    for shutdown in [true, false] {
+        let state = Arc::new(Mutex::new(Progress::default()));
+        let device = |_: &str, _: &ResolvedNodeSettings| {
+            Ok(Box::new(Pending(state.clone())) as Box<dyn DeviceHandoff>)
+        };
+        let initial = "[1000]\nradio_channel=first\n";
+        let edited = "[1000]\nradio_channel=first\n[radio 1000]\nreceive_output_gain_db=-6\n";
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(initial).unwrap(),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
+        let previous = runtime.revision();
+        runtime
+            .reload(
+                ConfigDocument::parse(edited).unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        assert!(runtime.reload_pending());
+        assert_eq!(runtime.revision(), previous);
+        state.lock().unwrap().staged = true;
+        assert_eq!(runtime.poll_reload(clock()), Ok(false));
+        assert_eq!(runtime.revision(), previous);
+        assert!(state.lock().unwrap().attempts.contains(&"commit"));
+        state.lock().unwrap().finish = true;
+        assert_eq!(runtime.poll_reload(clock()), Ok(true));
+        assert!(runtime.revision() > previous);
+        assert!(runtime.detached("1000", previous));
+        let incumbent = runtime.revision();
+        {
+            let mut steps = state.lock().unwrap();
+            steps.finish = false;
+            steps.drained = false;
+            steps.attempts.clear();
+        }
+        let mut failed = String::from(initial);
+        failed.push_str("[2000]\nradio_channel=fail\n");
+        runtime
+            .reload(
+                ConfigDocument::parse(&failed).unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        assert_eq!(runtime.revision(), incumbent);
+        assert!(runtime.reload_pending());
+        assert!(state.lock().unwrap().attempts.contains(&"reverse"));
+        state.lock().unwrap().reverse_failed = true;
+        assert_eq!(runtime.poll_reload(clock()), Ok(false));
+        assert!(runtime.reload_pending());
+        if shutdown {
+            assert!(!runtime.stop(0));
+            state.lock().unwrap().drained = true;
+            assert!(runtime.stop(0));
+            continue;
+        }
+        state.lock().unwrap().drained = true;
+        assert_eq!(runtime.poll_reload(clock()), Err(RuntimeError::Restore));
+        assert!(runtime.detached("1000", incumbent));
+        runtime.reclaim();
+        state.lock().unwrap().attempts.clear();
+        runtime
+            .reload(
+                ConfigDocument::parse(edited).unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        assert!(!runtime.reload_pending());
+        assert!(state.lock().unwrap().attempts.contains(&"open"));
+        assert!(runtime.node("1000").unwrap().work().is_some());
+        assert!(runtime.stop(0));
     }
 }

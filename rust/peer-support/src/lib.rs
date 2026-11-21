@@ -2,6 +2,7 @@
 
 pub mod control;
 pub mod echolink;
+pub mod remote_ticket;
 pub mod secrets;
 
 #[cfg(target_os = "linux")]

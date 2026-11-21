@@ -668,12 +668,19 @@ fn site_host_reload_keeps_unchanged_output_timers_and_alarm_protection_running()
 }
 
 unsafe extern "C" fn observation(
-    _: *mut c_void,
+    context: *mut c_void,
     handle: *mut c_void,
     bank: u32,
     output: *mut abi::UrpAstSiteSnapshot,
 ) -> i32 {
-    assert_eq!(unsafe { crate::fixture::radio_name(handle) }, "1000\0usb");
+    // SAFETY: both fixtures retain the expected station name and live radio handle.
+    let owner = unsafe { std::ffi::CStr::from_ptr(context.cast()) }
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        unsafe { crate::fixture::radio_name(handle) },
+        format!("{owner}\0usb")
+    );
     assert_eq!(bank, 0);
     unsafe {
         (*output).generation = 7;
@@ -832,7 +839,7 @@ fn site_host_polls_configured_owner_without_a_second_radio_reservation() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
-    table.context = ptr::without_provenance_mut(1);
+    table.context = c"1000".as_ptr().cast_mut().cast();
     table.radio_site_snapshot = Some(observation);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let document = document(
@@ -864,14 +871,15 @@ fn round_one_host_merges_cached_sensor_calibration_quality_and_original_time() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
-    table.context = ptr::without_provenance_mut(1);
+    let identity = c"929e52be-6854-4c46-85f2-000000000002";
+    let owner = identity.to_str().unwrap();
+    table.context = identity.as_ptr().cast_mut().cast();
     table.radio_site_snapshot = Some(observation);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let document = document(
-        "usb",
-        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\nactive_level=low\n",
-    );
-    let mut site = ResolvedSiteSettings::resolve(&document, &NodeId::new("1000").unwrap())
+    let document = ConfigDocument::parse(&format!(
+        "[{owner}]\nradio_channel=usb\n[input {owner} door]\nenabled=yes\nbackend=cm119\ndevice={owner}\nline=2\nactive_level=low\n"
+    )).unwrap();
+    let mut site = ResolvedSiteSettings::resolve(&document, &NodeId::new(owner).unwrap())
         .unwrap()
         .value;
     use rpt_advanced_core::{
@@ -883,7 +891,7 @@ fn round_one_host_merges_cached_sensor_calibration_quality_and_original_time() {
     };
     let declared = BoundInterface {
         key: PortKey::new("1000"),
-        port: "929e52be-6854-4c46-85f2-000000000002".parse().unwrap(),
+        port: owner.parse().unwrap(),
         property: "/gpio/pins/2".into(),
     };
     let sensor = SensorSettings {
@@ -907,12 +915,12 @@ fn round_one_host_merges_cached_sensor_calibration_quality_and_original_time() {
     };
     site.sensors.push(sensor.clone());
     let mut state = SensorState::new(sensor);
-    let radio = RadioSite::prepare(&[("1000".to_owned(), site)].into_iter().collect()).unwrap();
+    let radio = RadioSite::prepare(&[(owner.to_owned(), site)].into_iter().collect()).unwrap();
     let mut host = Host::start(document, media(), services, Instant::now(), clock()).unwrap();
     let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
     host.install_sites(Acquisition::default(), radio);
     let values = host.poll_sites(2000);
-    let raw = &values["1000"].sensors["sense"];
+    let raw = &values[owner].sensors["sense"];
     assert_eq!(
         (raw.value, raw.quality, raw.observed_at_ms),
         (Some(1.0), ReadingQuality::Valid, Some(1950))
@@ -922,9 +930,9 @@ fn round_one_host_merges_cached_sensor_calibration_quality_and_original_time() {
     assert_eq!(first.current.value, Some(20.0));
     assert_eq!(first.current.observed_at_ms, Some(1950));
     let again = host.poll_sites(2000);
-    state.observe(again["1000"].sensors["sense"].clone(), 2000);
+    state.observe(again[owner].sensors["sense"].clone(), 2000);
     assert_eq!(state.snapshot(2000), first);
-    let input = &values["1000"].inputs["door"];
+    let input = &values[owner].inputs["door"];
     assert_eq!(input.value, Some(false));
     assert_eq!(input.observed_at_ms, Some(1950));
     assert_eq!(input.quality, ReadingQuality::Valid);

@@ -91,31 +91,37 @@ Keep the signed repository enabled for other dependencies.
    sudo systemctl stop asterisk
    ```
 
-2. Edit `/etc/rpt_advanced/rpt_advanced.conf`. Use the
-   [configuration reference](configuration.md) to set your node number,
-   callsign, radio device, COS source, CTCSS, levels, and IDs. Set
-   `node_enabled = yes` for the node you want to run. The sample has no enabled
-   node. Use `device_identifier` or `usb_serial` to select the radio interface.
+2. Provision the protected JSON store for the service account. Record its store
+   UUID. Copy the packaged example from
+   `/usr/share/doc/rpt-advanced/examples/rpt_advanced.service.json` to
+   `/etc/rpt_advanced/rpt_advanced.service.json`. Set the absolute store path,
+   its actual UUID, the write key ID, loopback listening address, accepted HTTP
+   authorities, server certificate chain and authorized client identities.
+   Keep the document root- or service-owned and writable only by its owner.
 
-3. Set the AllStarLink node password and registration options before enabling
-   links. Follow the secrets-file instructions in the
-   [configuration reference](configuration.md). Do not put passwords in a
-   public example.
+3. Provision the credential names listed in that document. The TLS entries use
+   the `rpt-advanced.tls.` prefix. Supply DER certificates and a DER server
+   private key. Each admitted client has a distinct service identity and pinned
+   leaf certificate issued by a configured client CA. The store key uses
+   `rpt-advanced.aead.<write_key_id>`. The standalone unit imports these
+   namespaces into its private systemd credentials directory. Provide at least
+   the listener credentials before startup. A missing store key leaves verified
+   public configuration readable through authenticated management.
 
-4. Check the configuration and installed libraries:
-
-   ```sh
-   sudo -u rpt-advanced rpt-advanced --check-config /etc/rpt_advanced/rpt_advanced.conf
-   sudo -u rpt-advanced rpt-advanced --check-providers
-   ```
-
-5. Start the service and check its log:
+4. Start the service and check its log.
 
    ```sh
    sudo systemctl enable --now rpt-advanced
    systemctl status rpt-advanced
    sudo journalctl -u rpt-advanced -n 50 --no-pager
    ```
+
+   The authenticated management service starts with zero radio ports. Configure
+   the site, register each port, and select its radio device before enabling it.
+   A standalone preflight accepts `rpt-advanced --check-config <service-json>`
+   in a process with the service account's access to the store and the same
+   systemd credentials. It checks the selected generation without opening radio
+   hardware.
 
 The service runs as the `rpt-advanced` user. Do not run it as root.
 Speech needs Piper and a local voice model. Put the model where that user can
@@ -149,16 +155,17 @@ and transmit calibration, hardware levels, meters, processing status, and EEPROM
 tuning. Use a dummy load for transmit tests. Close the tuner when done; it
 releases its test tone and temporary PTT request.
 
-Check the configuration, then reload it without stopping the service:
+After editing the working JSON files, request a checked reload.
 
 ```sh
-sudo -u rpt-advanced rpt-advanced --check-config /etc/rpt_advanced/rpt_advanced.conf
-sudo systemctl kill --kill-whom=main --signal=HUP rpt-advanced
+sudo systemctl reload rpt-advanced
 sudo journalctl -u rpt-advanced -n 50 --no-pager
 ```
 
-A failed reload leaves the running settings in place. Check warnings as well
-as errors. Changing the radio device may briefly interrupt audio.
+The service queues the request with the current desired validator and working
+fingerprint. Check the operation receipt and the active revision through the
+authenticated management API. Restart the unit to refresh its
+systemd credentials or its listener provisioning.
 
 To upgrade standalone:
 
@@ -173,10 +180,12 @@ live links; configured permanent links will retry.
 
 ## Set up the Asterisk controller
 
-Stop standalone first. Keep `/etc/rpt_advanced/rpt_advanced.conf` for later use.
-Configure `/etc/asterisk/usbradioplus.conf` for the radio and
-`/etc/asterisk/rpt_advanced.conf` for the controller. Set `radio_channel` and
-`node_enabled = yes` for each enabled node.
+Stop standalone if it owns this store or radio. Provision the same service
+document format at `rpt_advanced.service.json` in Asterisk's configuration
+directory, usually `/etc/asterisk`. Give the Asterisk service account access
+to the protected store. Configure `ImportCredential=rpt-advanced.tls.*` and
+`ImportCredential=rpt-advanced.aead.*` in its systemd service drop-in. The
+radio driver's own `/etc/asterisk/usbradioplus.conf` remains provider-owned.
 
 In `/etc/asterisk/modules.conf`, load the radio driver before the controller:
 

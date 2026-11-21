@@ -337,7 +337,7 @@ fn shared_radio_resolution_rejects_cpu_savers_and_preserves_asymmetric_map_and_n
 }
 
 #[test]
-fn shared_radio_validation_is_transactional_even_without_a_node_visitor() {
+fn legacy_enumeration_validates_all_records_and_rejects_a_missing_visitor() {
     let source = "[1000]\n[2000]\n[radio 2000]\nreceive_signaling=ctcss\nctcss_source=disabled\n";
     let (result, output) = inspect(source, false);
     assert_eq!(result, -1);
@@ -354,8 +354,8 @@ fn shared_radio_validation_is_transactional_even_without_a_node_visitor() {
             (&mut output as *mut Collected).cast(),
         )
     };
-    assert_eq!(result, -1);
-    assert!(!output.diagnostics.is_empty());
+    assert_eq!(result, -libc::ENOTSUP);
+    assert!(output.diagnostics.is_empty());
 }
 
 #[test]
@@ -506,7 +506,7 @@ fn native_requests_copy_selected_processing_sections_and_emphasis_controls() {
 }
 
 #[test]
-fn check_only_uses_no_node_visitor_and_validates_the_shipped_example() {
+fn old_header_check_only_is_explicitly_unsupported() {
     let table = unsafe { &*rptadv_product_descriptor_v1() };
     let source = include_str!("../../../examples/rpt_advanced.conf");
     let mut output = Collected::default();
@@ -520,7 +520,7 @@ fn check_only_uses_no_node_visitor_and_validates_the_shipped_example() {
             (&mut output as *mut Collected).cast(),
         )
     };
-    assert_eq!(result, 0, "{output:?}");
+    assert_eq!(result, -libc::ENOTSUP, "{output:?}");
     assert!(output.diagnostics.is_empty());
 }
 
@@ -538,7 +538,7 @@ fn inspection_rejects_malformed_spans_and_consumer_rejection_without_partial_sec
                 api.inspect_configuration.unwrap()(
                     pointer,
                     length,
-                    None,
+                    Some(node),
                     std::ptr::null_mut(),
                     None,
                     std::ptr::null_mut(),

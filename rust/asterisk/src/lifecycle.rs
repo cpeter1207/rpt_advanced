@@ -13,6 +13,10 @@ struct State {
     product: Product,
     registration: Option<Registration>,
     services: crate::services::HostServicesOwner,
+    source: Option<LegacySource>,
+}
+
+struct LegacySource {
     configuration: String,
     path: PathBuf,
     control: EchoBackend,
@@ -23,6 +27,9 @@ struct EchoBackend(*const ffi::rptadv_control_descriptor_v1);
 // Immutable selected table/code is retained by the loader through product stop.
 unsafe impl Send for EchoBackend {}
 static STATE: Mutex<Option<State>> = Mutex::new(None);
+// A reload polls outside STATE so product callbacks can look up their owner. Keep the
+// loader's DSO and callback ownership through the final poll, including on reentry.
+static TRANSITION: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 static TEST_PRODUCT: Mutex<Option<Product>> = Mutex::new(None);
 
@@ -51,18 +58,18 @@ pub struct Descriptor {
     pub unload: Option<extern "C" fn() -> i32>,
 }
 
-fn configuration_path() -> Option<PathBuf> {
+fn configuration_path(name: &str) -> Option<PathBuf> {
     let directory = unsafe { ffi::ast_config_AST_CONFIG_DIR };
     if directory.is_null() {
         return None;
     }
     let directory = unsafe { CStr::from_ptr(directory) }.to_str().ok()?;
-    Some(Path::new(directory).join("rpt_advanced.conf"))
+    Some(Path::new(directory).join(name))
 }
 
 /// Retain the resolved path with the document read from it for one load transaction.
 fn configuration() -> Option<(PathBuf, String)> {
-    let path = configuration_path()?;
+    let path = configuration_path("rpt_advanced.conf")?;
     let document = std::fs::read_to_string(&path).ok()?;
     Some((path, document))
 }
@@ -131,6 +138,106 @@ pub(crate) fn product() -> Option<Product> {
         .map(|state| state.product)
 }
 
+unsafe fn register(module: *mut c_void) -> Result<Registration, crate::Error> {
+    // SAFETY: Asterisk keeps the module and callback code live through confirmed unload.
+    unsafe {
+        Registration::register(
+            module.cast(),
+            crate::application::callback,
+            [
+                crate::cli::link_callback,
+                crate::cli::alias_callback,
+                crate::cli::command_callback,
+                crate::cli::site_callback,
+            ],
+        )
+    }
+}
+
+/// Start from the trusted service document in Asterisk's configured directory.
+///
+/// # Safety
+/// The loader owns every descriptor and its DSO until this adapter confirms unload.
+/// The management table advertises its accessible immutable size prefix.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rptadv_asterisk_load_management_v1(
+    module: *mut c_void,
+    product: *const ffi::rptadv_product_descriptor_v1,
+    management: *const ffi::rptadv_product_management_v1,
+    control: *const ffi::rptadv_control_descriptor_v1,
+    file: *const ffi::rptadv_file_descriptor,
+    speech: *const ffi::rptadv_speech_descriptor,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut selected = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if selected.is_some()
+            || module.is_null()
+            || management.is_null()
+            || !management.is_aligned()
+        {
+            return 1;
+        }
+        // SAFETY: the loader lends at least the public length word.
+        if unsafe { std::ptr::addr_of!((*management).struct_size).read() } as usize
+            != size_of::<ffi::rptadv_product_management_v1>()
+        {
+            return 1;
+        }
+        // SAFETY: complete table was checked before borrowing its fields.
+        let management = unsafe { &*management };
+        if management.abi_version != 1 || management.capability != *b"rptadv.mgmt1\0\0\0\0" {
+            return 1;
+        }
+        let Some(start) = management.start else {
+            return 1;
+        };
+        // SAFETY: this separately versioned table belongs to the same retained product DSO.
+        let Some(product) = (unsafe { Product::open(product) }) else {
+            return 1;
+        };
+        let Some(path) = configuration_path("rpt_advanced.service.json") else {
+            return 1;
+        };
+        let Ok(bytes) = rptadv_peer_support::working_files::read_service_provisioning(&path) else {
+            return 1;
+        };
+        let services = crate::services::HostServicesOwner::new();
+        // SAFETY: input is borrowed synchronously and the live host is retained
+        // after acceptance or uncertain startup, until the product confirms stop.
+        let result = unsafe {
+            start(
+                services.descriptor(),
+                control,
+                file,
+                speech,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+            )
+        };
+        if !matches!(result, 0 | -2) {
+            return 1;
+        }
+        let registration = if result == 0 {
+            // SAFETY: these are Asterisk's current module and callbacks.
+            match unsafe { register(module) } {
+                Ok(registration) => Some(registration),
+                Err(_) if product.stop() => return 1,
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        *selected = Some(State {
+            product,
+            services,
+            registration,
+            source: None,
+        });
+        0
+    }))
+    .unwrap_or(1)
+}
+
 unsafe extern "C" fn load(
     module: *mut c_void,
     product: *const ffi::rptadv_product_descriptor_v1,
@@ -161,18 +268,7 @@ unsafe extern "C" fn load(
             return 1;
         }
         let registration = if unsafe { services.activate_echo() }.is_ok() {
-            unsafe {
-                Registration::register(
-                    module.cast(),
-                    crate::application::callback,
-                    [
-                        crate::cli::link_callback,
-                        crate::cli::alias_callback,
-                        crate::cli::command_callback,
-                        crate::cli::site_callback,
-                    ],
-                )
-            }
+            unsafe { register(module) }
         } else {
             Err(crate::Error::Admission)
         };
@@ -182,9 +278,11 @@ unsafe extern "C" fn load(
                     product,
                     registration: Some(registration),
                     services,
-                    configuration,
-                    path,
-                    control: EchoBackend(control),
+                    source: Some(LegacySource {
+                        configuration,
+                        path,
+                        control: EchoBackend(control),
+                    }),
                 });
                 0
             }
@@ -197,9 +295,11 @@ unsafe extern "C" fn load(
                         product,
                         registration: None,
                         services,
-                        configuration,
-                        path,
-                        control: EchoBackend(control),
+                        source: Some(LegacySource {
+                            configuration,
+                            path,
+                            control: EchoBackend(control),
+                        }),
                     });
                     0
                 }
@@ -211,24 +311,32 @@ unsafe extern "C" fn load(
 
 extern "C" fn reload() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
+        let Ok(_transition) = TRANSITION.try_lock() else {
+            return -1;
+        };
         let mut selected = STATE.lock().unwrap_or_else(|error| error.into_inner());
         let Some(state) = selected.as_mut() else {
             return -1;
         };
-        let Ok(configuration) = std::fs::read_to_string(&state.path) else {
+        let Some(source) = state.source.as_mut() else {
+            let product = state.product;
+            drop(selected);
+            return if product.reload_working() { 0 } else { -1 };
+        };
+        let Ok(configuration) = std::fs::read_to_string(&source.path) else {
             return -1;
         };
         let result = with_echo_preparation(
-            &state.path,
+            &source.path,
             state.product,
-            state.control,
+            source.control,
             |preparation| unsafe {
                 state.services.reload_echo(
                     state.product.descriptor(),
                     &configuration,
                     preparation,
                     || state.product.reload(&configuration),
-                    || state.product.reload(&state.configuration),
+                    || state.product.reload(&source.configuration),
                 )
             },
         );
@@ -237,7 +345,7 @@ extern "C" fn reload() -> i32 {
                 if let Some(error) = outcome.retirement {
                     echo_reload_error(error);
                 }
-                state.configuration = configuration;
+                source.configuration = configuration;
                 0
             }
             Err(error) => {
@@ -251,6 +359,9 @@ extern "C" fn reload() -> i32 {
 
 extern "C" fn unload() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
+        let Ok(_transition) = TRANSITION.try_lock() else {
+            return -1;
+        };
         let mut selected = STATE.lock().unwrap_or_else(|error| error.into_inner());
         let Some(state) = selected.as_ref() else {
             return 0;

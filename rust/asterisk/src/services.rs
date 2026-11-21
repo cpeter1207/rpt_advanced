@@ -1,5 +1,7 @@
 //! Public-Asterisk implementation of the portable product host-services table.
 
+mod station_binding;
+
 #[cfg(test)]
 #[path = "services/echo_tests.rs"]
 pub(crate) mod echo_tests;
@@ -146,6 +148,7 @@ pub(crate) fn echo_notice(message: &str) {
     });
 }
 struct ReservedRadio {
+    binding: Option<Arc<station_binding::Plan>>,
     radio: Option<Radio>,
     name: CString,
     metadata: ffi::rptadv_radio_metadata_v1,
@@ -178,6 +181,7 @@ unsafe extern "C" fn radio_open(
         match radio {
             Ok(radio) => {
                 *output = Box::into_raw(Box::new(ReservedRadio {
+                    binding: None,
                     radio: Some(radio),
                     name: channel,
                     metadata: None,
@@ -358,13 +362,35 @@ unsafe extern "C" fn radio_remote_submit(
         let code = unsafe { remote_control(radio, &mut request) };
         if code == 0 {
             let ticket = request.ticket;
+            let Some(destroy) = ticket.destroy else {
+                return -7;
+            };
+            if ticket.context.is_null() {
+                return -7;
+            }
+            let (Some(source), Some(take)) = (ticket.source, ticket.take) else {
+                // SAFETY: a partial transfer still supplied its own matching destructor.
+                unsafe { destroy(ticket.context) };
+                return -7;
+            };
+            let mut callbacks = rptadv_peer_support::remote_ticket::Ticket {
+                context: ticket.context,
+                source,
+                take,
+                destroy,
+            };
+            // SAFETY: the remote operation succeeded on this still-live serialized reservation.
+            let reserved = unsafe { &*radio.cast::<ReservedRadio>() };
+            if let Some(plan) = &reserved.binding {
+                callbacks = callbacks.retaining(plan.clone());
+            }
             *output = ffi::rptadv_remote_ticket_v1 {
                 struct_size: size_of::<ffi::rptadv_remote_ticket_v1>() as u32,
                 abi_version: ticket.abi_version,
-                context: ticket.context,
-                source: ticket.source,
-                take: ticket.take,
-                destroy: ticket.destroy,
+                context: callbacks.context,
+                source: Some(callbacks.source),
+                take: Some(callbacks.take),
+                destroy: Some(callbacks.destroy),
             };
         }
         code
@@ -1208,11 +1234,12 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v10 {
     echo_account_status: Some(echo_account_status),
     peer_processing_prepare: None,
     radio_control: Some(radio_control),
-    radio_update: None,
+    radio_update: Some(station_binding::finish),
     radio_metadata_bind: Some(radio_metadata_bind),
     radio_service: Some(radio_service),
     radio_quiesce: Some(radio_quiesce),
     radio_ready: Some(radio_ready),
+    station_binding: &station_binding::OPS.0,
     radio_remote_submit: Some(radio_remote_submit),
 });
 

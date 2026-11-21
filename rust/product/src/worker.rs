@@ -1029,6 +1029,25 @@ impl RadioWorker {
         self.radio.as_mut().ok_or(-7)?.activation_ready()
     }
 
+    /// Stage or poll this exact retained physical plan on the current radio.
+    pub(crate) fn stage_station_binding(
+        &mut self,
+        plan: &crate::services::StationBinding,
+    ) -> Result<crate::services::StationStage, i32> {
+        self.radio.as_mut().ok_or(-7)?.stage_station_binding(plan)
+    }
+
+    /// Complete or poll the current forward or reverse transition.
+    pub(crate) fn finish_station_binding(
+        &mut self,
+        commit: bool,
+    ) -> Result<crate::services::StationFinish, i32> {
+        self.radio
+            .as_mut()
+            .ok_or(-7)?
+            .finish_station_binding(commit)
+    }
+
     /// Retain the current stream while the shared native owner replaces its plan.
     pub(crate) fn configuration_update(&mut self, phase: u32) -> Result<bool, i32> {
         self.radio.as_mut().ok_or(-7)?.configuration_update(phase)

@@ -1,5 +1,6 @@
 //! Attribute effective public leaves to the declaration admitted by their profile.
 use super::*;
+use rpt_advanced_core::config::resources::candidate::ResourceRegistry;
 pub(in crate::management) enum Origin {
     BuiltIn,
     Resource(Binding),

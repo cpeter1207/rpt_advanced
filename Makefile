@@ -232,7 +232,7 @@ install: all install-jitter-development install-site-development
 		install -D -m 0644 "$$file" "$(DESTDIR)$(docdir)/$$file"; \
 	done
 	install -D -m 0644 COPYING $(DESTDIR)$(docdir)/copyright
-	install -D -m 0644 examples/rpt_advanced.conf $(DESTDIR)$(docdir)/examples/rpt_advanced.conf
+	install -D -m 0644 examples/rpt_advanced.service.json $(DESTDIR)$(docdir)/examples/rpt_advanced.service.json
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/asterisk/rpt_advanced/messages/en-US.ftl
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/rpt-advanced/messages/en-US.ftl
 
@@ -258,7 +258,7 @@ standalone-install: standalone-build install-jitter-development install-site-dev
 		install -D -m 0644 "$$file" "$(DESTDIR)$(docdir)/$$file"; \
 	done
 	install -D -m 0644 COPYING $(DESTDIR)$(docdir)/copyright
-	install -D -m 0644 examples/rpt_advanced.conf $(DESTDIR)$(docdir)/examples/rpt_advanced.conf
+	install -D -m 0644 examples/rpt_advanced.service.json $(DESTDIR)$(docdir)/examples/rpt_advanced.service.json
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/rpt-advanced/messages/en-US.ftl
 
 install-check: artifacts

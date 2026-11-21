@@ -20,11 +20,106 @@ pub struct CommandRenderers<'a> {
     pub morse: &'a crate::config::ResolvedMorseSettings,
 }
 pub(super) struct CommandMessages {
-    messages: crate::config::resources::profiles::public_messages::ScopedMessages,
-    fixed: std::collections::BTreeMap<String, crate::composition::Composition>,
+    messages: Arc<crate::config::resources::profiles::public_messages::ScopedMessages>,
+    fixed: Arc<std::collections::BTreeMap<String, crate::composition::Composition>>,
     port: super::super::MessagePortIdentity,
     selectors: std::collections::BTreeMap<String, String>,
 }
+pub(super) struct PreparedCommands {
+    profile: Arc<CommandProfile>,
+    messages: CommandMessages,
+    scheduler: EventScheduler,
+    pending: bool,
+}
+
+impl PreparedCommands {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new<A: Send, C: Send>(
+        registered: &crate::config::resources::profiles::ResolvedProtocolPort,
+        commands: &crate::config::resources::commands::ScopedCommands,
+        messages: Arc<crate::config::resources::profiles::public_messages::ScopedMessages>,
+        fixed: Arc<std::collections::BTreeMap<String, crate::composition::Composition>>,
+        events: &crate::config::resources::events::ScopedEvents,
+        previous: Option<&RuntimeNode<A, C>>,
+        generation: u64,
+        route_generation: Option<u64>,
+        clock: RuntimeClock,
+    ) -> Result<Self, RuntimeError> {
+        let owner = commands.scope;
+        let prior = previous
+            .filter(|node| node.programs.owner == Some(owner))
+            .and_then(|n| n.programs.scheduler.as_ref());
+        let generation = match prior {
+            Some(scheduler) => scheduler
+                .generation()
+                .checked_add(1)
+                .ok_or(RuntimeError::Preparation)?
+                .max(generation),
+            None => generation,
+        };
+        let mut scheduler = EventScheduler::from_profiles(generation, events, prior)
+            .map_err(|_| RuntimeError::Preparation)?;
+        scheduler.bind_warning_routes(|command| warning_route(&commands.language, &command.key));
+        let activity = previous.map_or(
+            super::super::scheduler::ReceiveActivity {
+                active: false,
+                last_active_ms: Some(clock.now_ms),
+            },
+            RuntimeNode::event_activity,
+        );
+        let pending = match scheduler.activate(clock, activity) {
+            Ok(()) => false,
+            Err(
+                super::super::scheduler::SchedulerError::Clock
+                | super::super::scheduler::SchedulerError::Calendar(_),
+            ) => true,
+            Err(_) => return Err(RuntimeError::Clock),
+        };
+        let selectors = messages
+            .effective
+            .iter()
+            .filter_map(|(name, (_, body))| {
+                body.get("dtmf_id")?
+                    .as_str()
+                    .filter(|selector| !selector.is_empty())
+                    .map(|selector| (selector.to_owned(), name.clone()))
+            })
+            .collect();
+        Ok(Self {
+            profile: Arc::new(CommandProfile {
+                owner,
+                public_key: registered.key.clone(),
+                route_generation,
+                network_node: registered
+                    .allstarlink
+                    .as_ref()
+                    .and_then(|p| p.settings.node_number)
+                    .map(|n| n.to_string()),
+                language: Arc::clone(&commands.language),
+            }),
+            messages: CommandMessages {
+                messages,
+                fixed,
+                selectors,
+                port: registered.into(),
+            },
+            scheduler,
+            pending,
+        })
+    }
+
+    pub(super) fn install<A: Send, C: Send>(self, node: &mut RuntimeNode<A, C>) {
+        let generation = self.scheduler.generation();
+        node.programs
+            .activate_scheduler(self.scheduler, self.pending);
+        node.programs.generation =
+            Some(super::super::generation::CommandGeneration::new(generation));
+        node.programs.owner = Some(self.profile.owner);
+        node.command_messages = Some(self.messages);
+        node.links.install_profile(self.profile, generation);
+    }
+}
+
 impl<A: Send, C: Send> RuntimeNode<A, C> {
     /// Obtain the current port command generation independently of its audio routing.
     pub fn command_work(&self) -> Option<Arc<GenerationWork>> {
@@ -59,7 +154,6 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
             .allstarlink
             .as_ref()
             .and_then(|p| p.settings.node_number);
-        let network_node = account.map(|n| n.to_string());
         // Numeric and UUID runtime slots have exact registry owners. Public labels are
         // only eligible when they do not name a different account or port.
         let numeric_slot = self
@@ -102,66 +196,21 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         let fixed = messages
             .command_messages(&settings)
             .map_err(|_| RuntimeError::Preparation)?;
-        let selectors = messages
-            .effective
-            .iter()
-            .filter_map(|(name, (_, body))| {
-                body.get("dtmf_id")?
-                    .as_str()
-                    .filter(|selector| !selector.is_empty())
-                    .map(|selector| (selector.to_owned(), name.clone()))
-            })
-            .collect();
-        let projections = CommandMessages {
-            messages,
-            fixed,
-            port: registered.into(),
-            selectors,
-        };
         let events = candidate
             .event_profiles(&settings, zone)
             .map_err(|_| RuntimeError::Preparation)?;
-        let generation = match self.programs.scheduler.as_ref() {
-            Some(previous) => previous
-                .generation()
-                .checked_add(1)
-                .ok_or(RuntimeError::Preparation)?
-                .max(self.control.generation),
-            None => self.control.generation,
-        };
-        let mut scheduler = EventScheduler::from_profiles(
-            generation,
+        let prepared = PreparedCommands::new(
+            registered,
+            &settings,
+            Arc::new(messages),
+            Arc::new(fixed),
             &events,
-            self.programs
-                .scheduler
-                .as_ref()
-                .filter(|_| self.programs.owner == Some(scope)),
-        )
-        .map_err(|_| RuntimeError::Preparation)?;
-        scheduler.bind_warning_routes(|command| warning_route(&settings.language, &command.key));
-        let pending = match scheduler.activate(clock, self.event_activity()) {
-            Ok(()) => false,
-            Err(
-                super::super::scheduler::SchedulerError::Clock
-                | super::super::scheduler::SchedulerError::Calendar(_),
-            ) => true,
-            Err(_) => return Err(RuntimeError::Clock),
-        };
-        self.programs.activate_scheduler(scheduler, pending);
-        self.programs.generation =
-            Some(super::super::generation::CommandGeneration::new(generation));
-        self.programs.owner = Some(scope);
-        self.command_messages = Some(projections);
-        self.links.install_profile(
-            Arc::new(CommandProfile {
-                owner: scope,
-                public_key: registered.key.clone(),
-                network_node,
-                route_generation: self.links.schedule().map(LinkScheduler::generation),
-                language: Arc::new(settings.language),
-            }),
-            generation,
-        );
+            Some(self),
+            self.control.generation,
+            self.links.schedule().map(LinkScheduler::generation),
+            clock,
+        )?;
+        prepared.install(self);
         Ok(())
     }
 }

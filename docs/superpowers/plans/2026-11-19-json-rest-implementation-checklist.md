@@ -52,6 +52,8 @@ Use test-driven development.
 [x] - Complete reviewed telemetry resources and typed HAL domain projections, per-field sources, text-only EchoLink dependencies, cached views and capability-loss recovery; pass 1,242 distinct affected host/native tests plus full host fast checks. Actual runtime adoption, live status and startup remain pending.
 [x] - Complete the reviewed registered command/macro/DTMF/mute/calendar execution foundation, physical signaling preparation and sparse HAL/schema joins; pass 1,773 distinct affected host/native tests, ten package checks and full host fast/strict documentation checks. Actual process startup, network participants, client migration and runtime cutover remain pending.
 
+[x] - Complete reviewed shared modular Engine/bootstrap and typed station handoff foundations for standalone and Asterisk, management-only/locked startup, lifetime writer ownership and confirmed recovery/TX inhibition. Pass AMD64 103 aggregate and 13 actual mTLS scenarios, ARM64 103 aggregate and eight mTLS scenarios, 38 affected lifecycle tests and the combined full workspace fast gate. Shared site runtime routing, independent protocol/phone participants, clients and final legacy removal remain pending.
+
 [x] - Record approved scheduler policies: pair a start with its next end and skip overlapping starts; ignore the in-progress occurrence when restart_recovery is false; skip missed calendar work while forcing pending monotonic deadlines; cancel without either boundary macro if nominal end arrives before start execution. Preserve existing permanent-route ownership and hold fences.
 
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.

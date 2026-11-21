@@ -80,7 +80,7 @@ impl Operands {
 pub(super) fn validate_summary(
     body: &Value,
     mask: u8,
-    actor: &super::ServiceId,
+    actor: &str,
     submitted: bool,
 ) -> Result<(), Fault> {
     let action = &body["action"];

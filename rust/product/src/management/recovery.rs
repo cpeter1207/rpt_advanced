@@ -18,16 +18,11 @@ struct Save {
     admission: Admission,
     manifest: PublicManifest,
     objects: Vec<(Id, Vec<u8>)>,
+    compiled: Box<PreparedConfiguration>,
 }
 
 impl<R: Runtime> Backend<R> {
-    pub(super) fn prepare_recovery(
-        &self,
-        tx: &Transaction<'_, '_>,
-        selected: &Selected,
-        body: &Value,
-    ) -> Result<Recovery<R::Prepared>, Fault> {
-        let snapshot = self.snapshot(selected)?;
+    pub(super) fn desired_validator(&self, snapshot: &Snapshot) -> Result<String, Fault> {
         let relative = "/status/desired/";
         let full = format!("{}{relative}", self.api.mount);
         let (route, params) = self.api.lookup(&full)?;
@@ -35,11 +30,21 @@ impl<R: Runtime> Backend<R> {
             route,
             params,
             relative,
-            Some(&snapshot),
+            Some(snapshot),
             &self.runtime.observed(),
             None,
         )?;
-        if body["desired_etag"].as_str() != Some(&validator(&full, &snapshot.revision, &doc)) {
+        Ok(validator(&full, &snapshot.revision, &doc))
+    }
+
+    pub(super) fn prepare_recovery(
+        &self,
+        tx: &Transaction<'_, '_>,
+        selected: &Selected,
+        body: &Value,
+    ) -> Result<Recovery<R::Prepared>, Fault> {
+        let snapshot = self.snapshot(selected, None)?;
+        if body["desired_etag"].as_str() != Some(&self.desired_validator(&snapshot)?) {
             return Err(Fault::PreconditionFailed);
         }
         if selected.status == StartupStatus::StorageFault
@@ -52,21 +57,14 @@ impl<R: Runtime> Backend<R> {
         }
         let name = body["action"]["action"].as_str().ok_or(Fault::Invalid)?;
         if name == "apply_configuration" {
-            for warning in &snapshot.views.result.as_ref().map_err(|e| *e)?.warnings {
+            let configuration = snapshot.views.result.as_ref().map_err(|e| *e)?;
+            for warning in &configuration.public.warnings {
                 self.runtime.diagnostic(*warning);
             }
             if selected.status == StartupStatus::ExternalEdit || selected.state.journal.is_some() {
                 return Err(Fault::Conflict);
             }
-            let candidate = selected
-                .desired
-                .assemble_candidate()
-                .map_err(|_| Fault::Invalid)?;
-            let prepared = self.runtime.prepare(
-                &candidate,
-                selected.desired.manifest().registry(),
-                &snapshot.revision,
-            )?;
+            let prepared = self.runtime.prepare(configuration, &snapshot.revision)?;
             return Ok(Recovery {
                 expected: selected.digest,
                 target: snapshot.revision,
@@ -84,7 +82,8 @@ impl<R: Runtime> Backend<R> {
             return Err(Fault::PreconditionFailed);
         }
         let target = fresh()?;
-        let (manifest, objects, admission, prepared) = if name == "restore_configuration" {
+        let (manifest, objects, admission, compiled, prepared) = if name == "restore_configuration"
+        {
             let (loaded, retained) = match body["restore"].as_str() {
                 Some("desired") => (&selected.desired, &selected.state.desired),
                 Some("last_known_good") => {
@@ -105,17 +104,9 @@ impl<R: Runtime> Backend<R> {
                 _ => return Err(Fault::Invalid),
             };
             let candidate = loaded.assemble_candidate().map_err(|_| Fault::Invalid)?;
-            Projections::prepare(
-                &candidate,
-                loaded.manifest().registry(),
-                self.zone.as_deref(),
-                &self.inputs,
-            )?;
-            let prepared = self.runtime.prepare(
-                &candidate,
-                loaded.manifest().registry(),
-                &target.to_string(),
-            )?;
+            let compiled =
+                PreparedConfiguration::prepare(&candidate, self.zone.as_deref(), &self.inputs)?;
+            let prepared = self.runtime.prepare(&compiled, &target.to_string())?;
             let m = retained_manifest(loaded.manifest(), target)?;
             (
                 m,
@@ -125,6 +116,7 @@ impl<R: Runtime> Backend<R> {
                     working,
                     retained: ManifestRef::clone(retained),
                 },
+                compiled,
                 prepared,
             )
         } else {
@@ -132,13 +124,9 @@ impl<R: Runtime> Backend<R> {
             let mut graph = Graph::import(&draft, &selected.desired)?;
             let initial = graph.manifest(target)?;
             let candidate = graph.assemble(&initial)?;
-            let validated = Projections::prepare(
-                &candidate,
-                initial.registry(),
-                self.zone.as_deref(),
-                &self.inputs,
-            )?;
-            for warning in &validated.warnings {
+            let validated =
+                PreparedConfiguration::prepare(&candidate, self.zone.as_deref(), &self.inputs)?;
+            for warning in &validated.public.warnings {
                 self.runtime.diagnostic(*warning);
             }
             for binding in initial
@@ -146,21 +134,15 @@ impl<R: Runtime> Backend<R> {
                 .bindings()
                 .filter(|b| draft.envelope(b.id).is_some())
             {
-                graph.replace(binding, validated.normalized(binding)?)?;
+                graph.replace(binding, validated.public.normalized(binding)?)?;
             }
             let manifest = graph.manifest(target)?;
             let candidate = graph.assemble(&manifest)?;
-            Projections::prepare(
-                &candidate,
-                manifest.registry(),
-                self.zone.as_deref(),
-                &self.inputs,
-            )?;
-            let prepared = self.runtime.prepare(
-                &candidate,
-                manifest.registry(),
-                manifest.revision().as_str(),
-            )?;
+            let compiled =
+                PreparedConfiguration::prepare(&candidate, self.zone.as_deref(), &self.inputs)?;
+            let prepared = self
+                .runtime
+                .prepare(&compiled, manifest.revision().as_str())?;
             let objects = graph
                 .changed()
                 .into_iter()
@@ -173,6 +155,7 @@ impl<R: Runtime> Backend<R> {
                     state: selected.digest,
                     working,
                 },
+                compiled,
                 prepared,
             )
         };
@@ -184,6 +167,7 @@ impl<R: Runtime> Backend<R> {
                 admission,
                 manifest,
                 objects,
+                compiled: Box::new(compiled),
             }),
             prepared,
         })
@@ -215,29 +199,30 @@ impl<R: Runtime> Backend<R> {
                     .iter()
                     .map(|(id, v)| (*id, v.as_slice()))
                     .collect::<Vec<_>>();
-                tx.commit_prepared(
-                    Publication {
-                        admission: save.admission,
-                        source: &save.source,
-                        manifest: &save.manifest,
-                        objects: &refs,
-                        journal_id: fresh()?,
-                        edits: &[],
-                    },
-                    |credentials| {
-                        self.runtime
-                            .prepare_credentials(&mut r.prepared, credentials)
-                            .map_err(|_| TransactionError::Conflict)
-                    },
-                )
-                .map_err(|error| {
-                    if error == TransactionError::DurabilityUnknown {
-                        self.runtime
-                            .inhibit_uncertain(Some(&r.target), Fault::DurabilityUnknown);
-                    }
-                    Fault::from(error)
-                })?;
-                self.complete_publication(&tx, &r.target)?;
+                let (receipt, _) = tx
+                    .commit_prepared(
+                        Publication {
+                            admission: save.admission,
+                            source: &save.source,
+                            manifest: &save.manifest,
+                            objects: &refs,
+                            journal_id: fresh()?,
+                            edits: &[],
+                        },
+                        |credentials| {
+                            self.runtime
+                                .prepare_credentials(&mut r.prepared, credentials)
+                                .map_err(|_| TransactionError::Conflict)
+                        },
+                    )
+                    .map_err(|error| {
+                        if error == TransactionError::DurabilityUnknown {
+                            self.runtime
+                                .inhibit_uncertain(Some(&r.target), Fault::DurabilityUnknown);
+                        }
+                        Fault::from(error)
+                    })?;
+                self.complete_publication(&tx, &receipt.desired, *save.compiled)?;
             } else {
                 if selected.status == StartupStatus::ExternalEdit
                     || selected.state.journal.is_some()
@@ -253,7 +238,13 @@ impl<R: Runtime> Backend<R> {
                 )?;
                 // Only an explicit apply can repair an already-recorded bookkeeping fault.
                 // Final private, working-tree and storage verification still applies.
-                self.admit_selected(&tx, &r.target, selected.bookkeeping_fault)?;
+                self.admit_selected(
+                    &tx,
+                    &selected.state.desired,
+                    selected.bookkeeping_fault,
+                    None,
+                    None,
+                )?;
             }
         }
         #[cfg(test)]

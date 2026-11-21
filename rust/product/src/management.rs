@@ -1,6 +1,7 @@
 //! Authenticated HAL management of the durable desired state, outside the media plane.
 mod authoring;
 mod graph;
+pub(crate) mod native;
 mod operations;
 mod recovery;
 use recovery::Recovery;
@@ -19,13 +20,12 @@ use crate::{
     },
 };
 use graph::{Graph, fresh};
-use projections::Projections;
+pub use projections::PreparedConfiguration;
 use representation::{Api, binding_id};
 use rpt_advanced_core::{
     config::resources::{
         candidate::{
-            ModularCandidate, ResourceId as Id, ResourceKind as Kind, ResourceRegistry,
-            ResourceScope as Scope,
+            ResourceId as Id, ResourceKind as Kind, ResourceRegistry, ResourceScope as Scope,
         },
         profiles::credentials::CredentialSlot,
         state::{Activation, ManifestRef},
@@ -209,11 +209,13 @@ impl Adoption {
 pub trait Runtime: Send + Sync + 'static {
     /// An owned prepared transition, independent of borrowed store/private buffers.
     type Prepared: Send;
+    /// Whether this process can authorize an ordinary save against this selected revision.
+    /// Recovery operations retain their own explicit authorization and preconditions.
+    fn permits_save(&self, revision: &str) -> bool;
     /// Validate all remaining domain relationships and prepare runtime adoption.
     fn prepare(
         &self,
-        candidate: &ModularCandidate<'_>,
-        registry: &ResourceRegistry,
+        configuration: &PreparedConfiguration,
         revision: &str,
     ) -> Result<Self::Prepared, Fault>;
     /// Adopt a durable and published desired generation. A dropped or uncertain handoff requires recovery.
@@ -273,10 +275,19 @@ pub struct ProfileInputs {
         rpt_advanced_core::config::resources::profiles::equipment::InterfaceCapability,
     >,
 }
+impl ProfileInputs {
+    pub(crate) fn installed() -> Arc<Self> {
+        Arc::new(Self {
+            messages: rpt_advanced_core::messages::InstalledMessageSources::capture(),
+            interfaces: BTreeMap::new(),
+        })
+    }
+}
+
 // Immutable inputs belong to one Backend. A fresh coordinator starts with an empty cache.
 struct PreparedViews {
     selection: ManifestRef,
-    result: Result<Projections, Fault>,
+    result: Result<PreparedConfiguration, Fault>,
     credential_slots: Vec<(Id, CredentialSlot)>,
 }
 struct Snapshot {
@@ -368,7 +379,7 @@ struct Inspection {
 struct Backend<R> {
     stopping: std::sync::atomic::AtomicBool,
     boot: Id,
-    ledger: Arc<RwLock<Option<Arc<operations::Ledger>>>>,
+    ledger: RwLock<Option<Arc<operations::Ledger>>>,
     store: WorkingFiles,
     key: KeyId,
     limits: CaptureLimits,
@@ -380,13 +391,17 @@ struct Backend<R> {
 }
 
 impl<R: Runtime> Backend<R> {
-    fn snapshot(&self, selected: &Selected) -> Result<Snapshot, Fault> {
+    fn snapshot(
+        &self,
+        selected: &Selected,
+        prepared: Option<PreparedConfiguration>,
+    ) -> Result<Snapshot, Fault> {
         let prior = self
             .cached
             .read()
             .expect("management snapshot")
             .as_ref()
-            .filter(|s| s.views.selection == selected.state.desired)
+            .filter(|s| prepared.is_none() && s.views.selection == selected.state.desired)
             .map(|s| Arc::clone(&s.views));
         let views = match prior {
             Some(views) => views,
@@ -400,11 +415,15 @@ impl<R: Runtime> Backend<R> {
                     .map_err(|_| Fault::Invalid)?
                     .into_keys()
                     .collect();
-                let result = Projections::prepare(
-                    &candidate,
-                    selected.desired.manifest().registry(),
-                    self.zone.as_deref(),
-                    &self.inputs,
+                let result = prepared.map_or_else(
+                    || {
+                        PreparedConfiguration::prepare(
+                            &candidate,
+                            self.zone.as_deref(),
+                            &self.inputs,
+                        )
+                    },
+                    Ok,
                 );
                 Arc::new(PreparedViews {
                     selection: selected.state.desired.clone(),
@@ -427,6 +446,46 @@ impl<R: Runtime> Backend<R> {
         result
     }
 
+    /// A clean historical selection is eligible for a real cold-start handoff.
+    /// Unconfirmed, externally edited or interrupted stores stay management-only.
+    fn cold_start(&self) -> Result<(), Fault> {
+        let (revision, prepared) = {
+            let guard = self.store.try_edit().map_err(lock_error)?;
+            let tx = Transaction::new(&guard, self.limits).with_write_key(&self.key);
+            let selected = tx.inspect()?;
+            if selected.status != StartupStatus::Ready
+                || selected.bookkeeping_fault
+                || selected.state.activation != Activation::Confirmed
+                || selected.state.journal.is_some()
+            {
+                return Err(Fault::Unavailable);
+            }
+            let snapshot = self.snapshot(&selected, None)?;
+            let configuration = snapshot.views.result.as_ref().map_err(|error| *error)?;
+            for warning in &configuration.public.warnings {
+                self.runtime.diagnostic(*warning);
+            }
+            let mut prepared = self.runtime.prepare(configuration, &snapshot.revision)?;
+            self.runtime.prepare_credentials(
+                &mut prepared,
+                selected
+                    .private
+                    .credentials()
+                    .map_err(|_| Fault::Unavailable)?,
+            )?;
+            self.admit_selected(
+                &tx,
+                &selected.state.desired,
+                false,
+                None,
+                Some(selected.digest),
+            )?;
+            (snapshot.revision, prepared)
+        };
+        let outcome = self.adopt(&revision, prepared);
+        self.finish_adoption(&revision, outcome)
+    }
+
     fn inspect_snapshot(&self, startup: bool) -> Result<(), Fault> {
         let guard = self.store.try_edit().map_err(lock_error)?;
         let tx = Transaction::new(&guard, self.limits).with_write_key(&self.key);
@@ -438,13 +497,22 @@ impl<R: Runtime> Backend<R> {
         tx: &Transaction<'_, '_>,
         startup: bool,
     ) -> Result<Inspection, Fault> {
-        let selected = tx.inspect()?;
-        let view = self.snapshot(&selected)?;
+        self.publish_verified(tx.inspect()?, startup, None)
+    }
+
+    fn publish_verified(
+        &self,
+        selected: Selected,
+        startup: bool,
+        prepared: Option<PreparedConfiguration>,
+    ) -> Result<Inspection, Fault> {
+        let view = self.snapshot(&selected, prepared)?;
         let projection_error = view.views.result.as_ref().err().copied();
+        // The failing bookkeeping write issued its inhibit at the point of failure.
+        // Polling that same latch must not invalidate a later explicit repair.
         let blocked = if selected.status == StartupStatus::SecretsUnavailable {
             Some(Fault::Unavailable)
         } else if selected.status == StartupStatus::StorageFault
-            || selected.bookkeeping_fault
             || startup
                 && (selected.status == StartupStatus::Interrupted
                     || selected.state.activation != Activation::Confirmed
@@ -470,15 +538,32 @@ impl<R: Runtime> Backend<R> {
     fn admit_selected(
         &self,
         tx: &Transaction<'_, '_>,
-        revision: &str,
+        expected: &ManifestRef,
         repairing_bookkeeping: bool,
+        prepared: Option<PreparedConfiguration>,
+        cold_selection: Option<rpt_advanced_core::config::resources::manifest::ContentHash>,
     ) -> Result<(), Fault> {
         #[cfg(test)]
         self.runtime.before_final_inspection();
-        let inspection = self.publish_snapshot(tx, false).map_err(|fault| {
-            self.runtime.inhibit_uncertain(Some(revision), fault);
-            Fault::Unavailable
-        })?;
+        // The receipt binds the runtime plan to the full committed manifest, including its
+        // private reference. Recheck current storage, key and working state under this guard.
+        let inspection = tx
+            .inspect()
+            .map_err(Fault::from)
+            .and_then(|selected| {
+                if selected.state.desired != *expected
+                    || cold_selection.is_some_and(|digest| digest != selected.digest)
+                {
+                    self.publish_verified(selected, false, None)?;
+                    return Err(Fault::DurabilityUnknown);
+                }
+                self.publish_verified(selected, false, prepared)
+            })
+            .map_err(|fault| {
+                self.runtime
+                    .inhibit_uncertain(Some(expected.revision.as_str()), fault);
+                Fault::Unavailable
+            })?;
         match inspection.status {
             StartupStatus::SecretsUnavailable | StartupStatus::StorageFault => {
                 Err(Fault::Unavailable)
@@ -499,7 +584,7 @@ impl<R: Runtime> Backend<R> {
         let guard = self.store.try_edit().map_err(lock_error)?;
         let transaction = Transaction::new(&guard, self.limits).with_write_key(&self.key);
         let selected = transaction.inspect()?;
-        let snapshot = self.snapshot(&selected)?;
+        let snapshot = self.snapshot(&selected, None)?;
         let prior = self.api.read(
             r,
             p,
@@ -510,6 +595,15 @@ impl<R: Runtime> Backend<R> {
         )?;
         let tag = validator(req.target.as_str(), &snapshot.revision, &prior);
         require(&req.headers, &tag)?;
+        if selected.status == StartupStatus::SecretsUnavailable {
+            return Err(Fault::Unavailable);
+        }
+        if selected.bookkeeping_fault || selected.status == StartupStatus::StorageFault {
+            return Err(Fault::Storage);
+        }
+        if !self.runtime.permits_save(&snapshot.revision) {
+            return Err(Fault::Conflict);
+        }
         let scope = p
             .port
             .map_or(Scope::Site(snapshot.registry.site_id()), Scope::Port);
@@ -596,32 +690,22 @@ impl<R: Runtime> Backend<R> {
         let mut manifest = graph.manifest(revision)?;
         if let Some(binding) = written {
             let candidate = graph.assemble(&manifest)?;
-            let projections = Projections::prepare(
-                &candidate,
-                manifest.registry(),
-                self.zone.as_deref(),
-                &self.inputs,
-            )?;
-            for warning in &projections.warnings {
+            let projections =
+                PreparedConfiguration::prepare(&candidate, self.zone.as_deref(), &self.inputs)?;
+            for warning in &projections.public.warnings {
                 self.runtime.diagnostic(*warning);
             }
-            graph.replace(binding, projections.normalized(binding)?)?;
+            graph.replace(binding, projections.public.normalized(binding)?)?;
             manifest = graph.manifest(revision)?;
         }
         let candidate = graph.assemble(&manifest)?;
-        Projections::prepare(
-            &candidate,
-            manifest.registry(),
-            self.zone.as_deref(),
-            &self.inputs,
-        )?;
-        let mut prepared = self.runtime.prepare(
-            &candidate,
-            manifest.registry(),
-            manifest.revision().as_str(),
-        )?;
+        let compiled =
+            PreparedConfiguration::prepare(&candidate, self.zone.as_deref(), &self.inputs)?;
+        let mut prepared = self
+            .runtime
+            .prepare(&compiled, manifest.revision().as_str())?;
         let source = transaction.inventory()?;
-        let (_, store_warnings) = transaction.commit_prepared(
+        let (receipt, store_warnings) = transaction.commit_prepared(
             Publication {
                 admission: Admission::Save {
                     state: selected.digest,
@@ -642,7 +726,7 @@ impl<R: Runtime> Backend<R> {
             self.runtime
                 .diagnostic(Diagnostic::PrivateSettings(store_warnings));
         }
-        self.complete_publication(&transaction, manifest.revision().as_str())?;
+        self.complete_publication(&transaction, &receipt.desired, compiled)?;
         drop(guard);
         #[cfg(test)]
         self.runtime.after_publication();
@@ -663,7 +747,13 @@ impl<R: Runtime> Backend<R> {
         ))
     }
 
-    fn complete_publication(&self, tx: &Transaction<'_, '_>, revision: &str) -> Result<(), Fault> {
+    fn complete_publication(
+        &self,
+        tx: &Transaction<'_, '_>,
+        expected: &ManifestRef,
+        prepared: PreparedConfiguration,
+    ) -> Result<(), Fault> {
+        let revision = expected.revision.as_str();
         // The selector is already durable. A failed publication can no longer be
         // reported as an ordinary pre-commit conflict or a rejected recovery.
         tx.reconcile().map_err(|_| {
@@ -671,13 +761,14 @@ impl<R: Runtime> Backend<R> {
                 .inhibit_uncertain(Some(revision), Fault::DurabilityUnknown);
             Fault::DurabilityUnknown
         })?;
-        self.admit_selected(tx, revision, false).map_err(|fault| {
-            if fault == Fault::Conflict {
-                self.runtime
-                    .inhibit_uncertain(Some(revision), Fault::DurabilityUnknown);
-            }
-            Fault::DurabilityUnknown
-        })
+        self.admit_selected(tx, expected, false, Some(prepared), None)
+            .map_err(|fault| {
+                if fault == Fault::Conflict {
+                    self.runtime
+                        .inhibit_uncertain(Some(revision), Fault::DurabilityUnknown);
+                }
+                Fault::DurabilityUnknown
+            })
     }
 
     fn adopt(&self, revision: &str, prepared: R::Prepared) -> Activation {
@@ -693,10 +784,9 @@ impl<R: Runtime> Backend<R> {
             },
         };
         match result {
-            AdoptionOutcome::Confirmed => {}
-            AdoptionOutcome::RolledBack => self
-                .runtime
-                .inhibit_uncertain(Some(revision), Fault::Conflict),
+            // A confirmed rollback has already stopped the failed candidate and
+            // restored every touched incumbent. Preserve unrelated running stations.
+            AdoptionOutcome::Confirmed | AdoptionOutcome::RolledBack => {}
             AdoptionOutcome::RecoveryRequired => self
                 .runtime
                 .inhibit_uncertain(Some(revision), Fault::DurabilityUnknown),
@@ -807,16 +897,65 @@ fn lock_error(error: CaptureError) -> Fault {
     }
 }
 
+enum WriteRequest {
+    Http(Box<AdmittedRequest>),
+    HostReload(SyncSender<Result<(), Fault>>),
+}
+
+/// Weak sender held by the native service frontend. The store worker drains on
+/// coordinator drop even if a frontend still owns its last receipt.
+pub(crate) struct HostReload {
+    writer: std::sync::Weak<SyncSender<WriteRequest>>,
+    busy: Arc<std::sync::atomic::AtomicBool>,
+    receipt: Option<mpsc::Receiver<Result<(), Fault>>>,
+}
+
+impl HostReload {
+    pub(crate) fn begin(&mut self) -> Result<(), Fault> {
+        if self.receipt.is_some() {
+            return Err(Fault::Conflict);
+        }
+        let writer = self.writer.upgrade().ok_or(Fault::Unavailable)?;
+        self.busy
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| Fault::Conflict)?;
+        let (send, receive) = mpsc::sync_channel(1);
+        if writer.try_send(WriteRequest::HostReload(send)).is_err() {
+            self.busy.store(false, std::sync::atomic::Ordering::Release);
+            return Err(Fault::Unavailable);
+        }
+        self.receipt = Some(receive);
+        Ok(())
+    }
+
+    pub(crate) fn poll(&mut self) -> Result<bool, Fault> {
+        let Some(receipt) = self.receipt.as_ref() else {
+            return Ok(true);
+        };
+        let result = match receipt.try_recv() {
+            Ok(outcome) => outcome,
+            Err(mpsc::TryRecvError::Empty) => return Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => Err(Fault::DurabilityUnknown),
+        };
+        self.receipt = None;
+        result.map(|()| true)
+    }
+}
+
 /// Bounded authenticated request consumer. Call from a management thread.
 pub struct Coordinator<R> {
     backend: Arc<Backend<R>>,
     boot: Id,
-    ledger: Arc<RwLock<Option<Arc<operations::Ledger>>>>,
     busy: Arc<std::sync::atomic::AtomicBool>,
     api: Arc<Api>,
     runtime: Arc<R>,
     cached: Arc<RwLock<Option<Arc<Snapshot>>>>,
-    send: Option<SyncSender<AdmittedRequest>>,
+    send: Option<Arc<SyncSender<WriteRequest>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl<R: Runtime> Coordinator<R> {
@@ -834,10 +973,7 @@ impl<R: Runtime> Coordinator<R> {
             limits,
             mount,
             runtime,
-            Arc::new(ProfileInputs {
-                messages: rpt_advanced_core::messages::InstalledMessageSources::capture(),
-                interfaces: BTreeMap::new(),
-            }),
+            ProfileInputs::installed(),
         )
     }
     /// Start the coordinator with the same immutable preparation inputs supplied to the runtime host.
@@ -849,6 +985,28 @@ impl<R: Runtime> Coordinator<R> {
         runtime: Arc<R>,
         inputs: Arc<ProfileInputs>,
     ) -> Result<Self, Fault> {
+        Self::start(store, key, limits, mount, runtime, inputs, false)
+    }
+
+    pub(crate) fn for_service(
+        store: WorkingFiles,
+        key: KeyId,
+        limits: CaptureLimits,
+        runtime: Arc<R>,
+        inputs: Arc<ProfileInputs>,
+    ) -> Result<Self, Fault> {
+        Self::start(store, key, limits, "/api/v1", runtime, inputs, true)
+    }
+
+    fn start(
+        store: WorkingFiles,
+        key: KeyId,
+        limits: CaptureLimits,
+        mount: &str,
+        runtime: Arc<R>,
+        inputs: Arc<ProfileInputs>,
+        cold_start: bool,
+    ) -> Result<Self, Fault> {
         let api = Arc::new(Api::new(mount)?);
         let cached = Arc::new(RwLock::new(None));
         let boot = fresh()?;
@@ -857,11 +1015,10 @@ impl<R: Runtime> Coordinator<R> {
             .ok()
             .and_then(|g| operations::Ledger::read(&g, boot).ok())
             .map(Arc::new);
-        let ledger = Arc::new(RwLock::new(initial));
         let backend = Arc::new(Backend {
             stopping: std::sync::atomic::AtomicBool::new(false),
             boot,
-            ledger: Arc::clone(&ledger),
+            ledger: RwLock::new(initial),
             store,
             key,
             limits,
@@ -872,15 +1029,26 @@ impl<R: Runtime> Coordinator<R> {
             cached: Arc::clone(&cached),
         });
         let _ = backend.refresh(true);
-        let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let busy = Arc::new(std::sync::atomic::AtomicBool::new(cold_start));
         let pending = busy.clone();
         let (send, recv) = mpsc::sync_channel(1);
         let writer = Arc::clone(&backend);
         let worker = thread::Builder::new()
             .name("rpt-management-store".into())
             .spawn(move || {
+                if cold_start {
+                    if let Err(fault) = writer.cold_start() {
+                        writer.runtime.inhibit_uncertain(None, fault);
+                    }
+                    pending.store(false, std::sync::atomic::Ordering::Release);
+                }
                 while let Ok(req) = recv.recv() {
-                    writer.process(req);
+                    match req {
+                        WriteRequest::Http(req) => writer.process(*req),
+                        WriteRequest::HostReload(reply) => {
+                            let _ = reply.send(writer.service_reload());
+                        }
+                    }
                     pending.store(false, std::sync::atomic::Ordering::Release)
                 }
             })
@@ -888,14 +1056,21 @@ impl<R: Runtime> Coordinator<R> {
         Ok(Self {
             backend,
             boot,
-            ledger,
             busy,
             api,
             runtime,
             cached,
-            send: Some(send),
+            send: Some(Arc::new(send)),
             worker: Some(worker),
         })
+    }
+
+    pub(crate) fn host_reload(&self) -> HostReload {
+        HostReload {
+            writer: Arc::downgrade(self.send.as_ref().expect("running coordinator")),
+            busy: Arc::clone(&self.busy),
+            receipt: None,
+        }
     }
 
     /// Drain coalesced listener health events and then claim at most one request.
@@ -959,12 +1134,7 @@ impl<R: Runtime> Coordinator<R> {
             let cache = self.cached.read().expect("management snapshot").clone();
             let operation = matches!(route.target, Target::Operations | Target::Operation);
             let body = if operation {
-                let ledger = self
-                    .ledger
-                    .read()
-                    .expect("operation snapshot")
-                    .clone()
-                    .ok_or(Fault::Unavailable)?;
+                let ledger = self.backend.operation_snapshot()?;
                 if route.target == Target::Operations {
                     ledger.index(&self.api, self.boot)
                 } else {
@@ -1021,11 +1191,14 @@ impl<R: Runtime> Coordinator<R> {
                     req.respond(busy);
                     return;
                 }
-                if let Err(TrySendError::Full(req) | TrySendError::Disconnected(req)) = self
+                if let Err(
+                    TrySendError::Full(WriteRequest::Http(req))
+                    | TrySendError::Disconnected(WriteRequest::Http(req)),
+                ) = self
                     .send
                     .as_ref()
                     .expect("running coordinator")
-                    .try_send(req)
+                    .try_send(WriteRequest::Http(Box::new(req)))
                 {
                     self.busy.store(false, std::sync::atomic::Ordering::Release);
                     req.respond(busy);

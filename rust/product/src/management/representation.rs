@@ -368,11 +368,12 @@ impl Api {
                 } else if r.view == Some(View::Status) {
                     body["status"] = json!({"active_revision":live.active_revision,"owner_generation":binding.and_then(|id|live.owners.get(&id))});
                 } else {
-                    let projections = snapshot
+                    let projections = &snapshot
                         .views
                         .result
                         .as_ref()
-                        .map_err(|_| Fault::Unavailable)?;
+                        .map_err(|_| Fault::Unavailable)?
+                        .public;
                     let logical = matches!(r.target, Target::Section(_));
                     let kind = match r.target {
                         Target::Section(k) | Target::Member(k) => k,
@@ -466,7 +467,7 @@ impl Api {
                 }
                 if let Some(id) = binding
                     && let Ok(projections) = &snapshot.views.result
-                    && let Some(event) = projections.event_links.get(&(scope, id))
+                    && let Some(event) = projections.public.event_links.get(&(scope, id))
                 {
                     let macro_link =
                         |b: &rpt_advanced_core::config::resources::candidate::ResourceBinding| {

@@ -40,6 +40,16 @@ use std::{
     time::Instant,
 };
 
+#[cfg(target_os = "linux")]
+#[path = "host_modular.rs"]
+mod modular;
+#[cfg(target_os = "linux")]
+#[path = "host_native.rs"]
+mod native;
+#[cfg(target_os = "linux")]
+pub(crate) use native::RadioTicket;
+pub(crate) use site::SiteBasis;
+
 #[path = "host_phone_auth.rs"]
 mod phone_auth;
 #[path = "host_remote.rs"]
@@ -52,6 +62,8 @@ pub const MAXIMUM_FRAMES: usize = 4096;
 mod site;
 
 struct Lease {
+    #[cfg(target_os = "linux")]
+    binding: native::LeaseBindings,
     quiesced: bool,
     quiescing: bool,
     owners: Option<AudioOwners>,
@@ -149,15 +161,85 @@ impl DeviceHandoff for Device {
         }
     }
     fn open(&mut self, settings: &GenerationSettings) -> bool {
+        self.open_plan(settings, false)
+    }
+
+    fn restore(&mut self, settings: &GenerationSettings) -> bool {
+        self.open_plan(settings, true)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn poll_update(
+        &mut self,
+        settings: &GenerationSettings,
+    ) -> Result<rpt_advanced_core::runtime::DeviceUpdate, RuntimeError> {
+        use rpt_advanced_core::runtime::DeviceUpdate;
+        let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(binding) = lease.binding.next.clone() {
+            let worker = lease.worker.as_mut().ok_or(RuntimeError::Device)?;
+            return Ok(
+                match worker
+                    .stage_station_binding(&binding)
+                    .map_err(|_| RuntimeError::Device)?
+                {
+                    crate::services::StationStage::Staged => DeviceUpdate::Staged,
+                    crate::services::StationStage::Handoff => DeviceUpdate::Handoff,
+                    crate::services::StationStage::Pending => DeviceUpdate::Pending,
+                },
+            );
+        }
+        if lease.binding.active.is_some() {
+            return Err(RuntimeError::Rejected);
+        }
+        drop(lease);
+        self.update(settings).map(|staged| {
+            if staged {
+                DeviceUpdate::Staged
+            } else {
+                DeviceUpdate::Handoff
+            }
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn poll_finish_update(&mut self, commit: bool) -> Result<bool, RuntimeError> {
+        let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+        if lease.binding.next.is_some() {
+            let worker = lease.worker.as_mut().ok_or(RuntimeError::Restore)?;
+            return worker
+                .finish_station_binding(commit)
+                .map(|r| r == crate::services::StationFinish::Complete)
+                .map_err(|_| RuntimeError::Restore);
+        }
+        if lease.binding.active.is_some() {
+            return Err(RuntimeError::Restore);
+        }
+        drop(lease);
+        self.finish_update(commit).map(|()| true)
+    }
+}
+
+impl Device {
+    fn open_plan(&mut self, settings: &GenerationSettings, previous: bool) -> bool {
         let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
         if lease.worker.is_some() || lease.quiesced {
             return false;
         }
-        let radio = self.services.radio(
-            &settings.node,
-            &settings.device,
-            settings.receive_maximum.max(settings.transmit_maximum),
-        );
+        let maximum = settings.receive_maximum.max(settings.transmit_maximum);
+        #[cfg(target_os = "linux")]
+        let radio = match (previous, &lease.binding.active, &lease.binding.next) {
+            (true, Some(plan), _) | (false, _, Some(plan)) => plan.open_radio(maximum),
+            (_, None, None) => self
+                .services
+                .radio(&settings.node, &settings.device, maximum),
+            _ => return false,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let radio = {
+            let _ = previous;
+            self.services
+                .radio(&settings.node, &settings.device, maximum)
+        };
         let Ok(radio) = radio else {
             return false;
         };
@@ -223,6 +305,8 @@ pub struct Host {
     reload_text: Option<TextExecutor>,
     reload_failure: Option<RuntimeError>,
     activated_revision: u64,
+    #[cfg(target_os = "linux")]
+    radio_preparation: native::RadioPreparation,
     remote_pending: Vec<remote::Pending>,
     text: TextExecutor,
     text_notice_after_ms: u64,
@@ -246,6 +330,13 @@ pub struct Host {
     epoch: Instant,
 }
 
+#[derive(Clone, Copy)]
+enum StationAudio<'a> {
+    Document(&'a str),
+    #[cfg(target_os = "linux")]
+    Modular(&'a native::RadioPlan),
+}
+
 fn prepared(
     local: &str,
     settings: &ResolvedNodeSettings,
@@ -253,15 +344,23 @@ fn prepared(
     worker: &mut MediaWorker,
     text: &mut TextExecutor,
     services: HostServices,
+    source: StationAudio<'_>,
 ) -> Result<PreparedAdapter<Audio, GenerationControl>, RuntimeError> {
-    let remote_commands = crate::configuration::radio::ResolvedRadio::resolve(
-        &settings.radio.processing_configuration,
-        local,
-        None,
-        std::ptr::null_mut(),
-    )
-    .and_then(|configuration| configuration.remote_commands())
-    .map_err(|_| RuntimeError::Preparation)?;
+    let remote_commands = match source {
+        StationAudio::Document(text) => crate::configuration::radio::ResolvedRadio::resolve(
+            text,
+            local,
+            None,
+            std::ptr::null_mut(),
+        )
+        .and_then(|configuration| configuration.remote_commands())
+        .map_err(|_| RuntimeError::Preparation)?,
+        #[cfg(target_os = "linux")]
+        StationAudio::Modular(plan) => plan
+            .station
+            .remote_commands()
+            .map_err(|_| RuntimeError::Preparation)?,
+    };
     if remote_commands.is_some() && !services.remote_control_available() {
         return Err(RuntimeError::Preparation);
     }
@@ -294,14 +393,24 @@ fn prepared(
             &peer.control.reply_target(),
         )
         .map_err(|_| RuntimeError::Preparation)?;
-        let processor = services
-            .prepare_peer_processing(
-                &settings.radio.processing_configuration,
-                local,
-                MAXIMUM_FRAMES,
-            )
-            .map_err(|_| RuntimeError::Preparation)?;
-        let input = ProcessedPeer::new(input, processor);
+        let input = match source {
+            StationAudio::Document(text) => ProcessedPeer::new(
+                input,
+                services
+                    .prepare_peer_processing(text, local, MAXIMUM_FRAMES)
+                    .map_err(|_| RuntimeError::Preparation)?,
+            ),
+            #[cfg(target_os = "linux")]
+            StationAudio::Modular(plan) if plan.process_incoming => {
+                let graph = plan
+                    .incoming
+                    .prepare_peer(snapshot.input_rate, MAXIMUM_FRAMES as u32)
+                    .map_err(|_| RuntimeError::Preparation)?;
+                ProcessedPeer::modular(input, graph, MAXIMUM_FRAMES)
+            }
+            #[cfg(target_os = "linux")]
+            StationAudio::Modular(_) => ProcessedPeer::new(input, None),
+        };
         let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
@@ -446,27 +555,25 @@ impl Host {
         epoch: Instant,
         clock: RuntimeClock,
     ) -> Result<Self, RuntimeError> {
-        let phone_calls = PhoneCalls::new(128, 16).map_err(|_| RuntimeError::Preparation)?;
-        let mut text = TextExecutor::new(document.nodes().len().max(1), media.clone())
-            .map_err(|_| RuntimeError::Preparation)?;
-        let peer_io = PeerIoWorker::start(epoch).map_err(|_| RuntimeError::Device)?;
-        let mut leases = Vec::new();
-        let mut media_workers = Vec::new();
-        let runtime = Runtime::start(
+        let mut host = Self::with_capacity(media, services, epoch, document.nodes().len().max(1))?;
+        host.runtime.reload(
             document,
-            &media,
+            &host.media,
             |name, settings| {
                 prepared(
                     name,
                     settings,
                     &[],
-                    media_worker(&mut media_workers, name)?,
-                    &mut text,
+                    media_worker(&mut host.media_workers, name)?,
+                    &mut host.text,
                     services,
+                    StationAudio::Document(&settings.radio.processing_configuration),
                 )
             },
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
+                    #[cfg(target_os = "linux")]
+                    binding: Default::default(),
                     quiesced: false,
                     quiescing: false,
                     owners: None,
@@ -474,7 +581,7 @@ impl Host {
                     epoch,
                     status: crate::worker::RadioStatus::with_epoch(epoch),
                 }));
-                leases.push((name.to_owned(), Arc::clone(&lease)));
+                host.leases.push((name.to_owned(), Arc::clone(&lease)));
                 Ok(Box::new(Device {
                     name: name.to_owned(),
                     lease,
@@ -483,18 +590,43 @@ impl Host {
             },
             clock,
         )?;
-        let mut host = Self {
+        host.advance_reload(clock)?;
+        Ok(host)
+    }
+    /// Start control, private-call and media owners with no selected station generation.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn management_only(
+        media: NativeMediaPreparer,
+        services: HostServices,
+        epoch: Instant,
+    ) -> Result<Self, RuntimeError> {
+        Self::with_capacity(media, services, epoch, 1)
+    }
+
+    fn with_capacity(
+        media: NativeMediaPreparer,
+        services: HostServices,
+        epoch: Instant,
+        ports: usize,
+    ) -> Result<Self, RuntimeError> {
+        let phone_calls = PhoneCalls::new(128, 16).map_err(|_| RuntimeError::Preparation)?;
+        let text =
+            TextExecutor::new(ports, media.clone()).map_err(|_| RuntimeError::Preparation)?;
+        let peer_io = PeerIoWorker::start(epoch).map_err(|_| RuntimeError::Device)?;
+        Ok(Self {
             reload_text: None,
             reload_failure: None,
             activated_revision: 0,
+            #[cfg(target_os = "linux")]
+            radio_preparation: Default::default(),
             remote_pending: Vec::new(),
             text,
             text_notice_after_ms: 0,
-            runtime,
+            runtime: Runtime::idle(),
             media,
             services,
-            leases,
-            media_workers,
+            leases: Vec::new(),
+            media_workers: Vec::new(),
             peer_io,
             peers: Vec::new(),
             phone_calls,
@@ -506,9 +638,7 @@ impl Host {
             site_transition: None,
             site_retired: Vec::new(),
             epoch,
-        };
-        host.advance_reload(clock)?;
-        Ok(host)
+        })
     }
     fn activate_dispatchers(&mut self, now_ms: u64) {
         for (local, status) in self.runtime.status(now_ms) {
@@ -631,6 +761,7 @@ impl Host {
                     media_worker(media_workers, name)?,
                     &mut text,
                     services,
+                    StationAudio::Document(&settings.radio.processing_configuration),
                 )?;
                 if let Some((_, delay, minimum)) = local_delays
                     .iter()
@@ -650,6 +781,8 @@ impl Host {
             },
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
+                    #[cfg(target_os = "linux")]
+                    binding: Default::default(),
                     quiesced: false,
                     quiescing: false,
                     owners: None,
@@ -675,7 +808,19 @@ impl Host {
         self.pump(clock)
     }
     fn advance_reload(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
-        if !self.runtime.poll_reload(clock)? {
+        #[cfg(target_os = "linux")]
+        if self.radio_preparation.adopting.is_some()
+            && let Some(error) = &self.reload_failure
+        {
+            return Err(error.clone());
+        }
+        let ready = self.runtime.poll_reload(clock).inspect_err(|error| {
+            #[cfg(target_os = "linux")]
+            self.core_adoption_error(error);
+            #[cfg(not(target_os = "linux"))]
+            let _ = error;
+        })?;
+        if !ready {
             return Ok(());
         }
         self.prune_leases();
@@ -690,6 +835,8 @@ impl Host {
             self.text = text;
             self.commit_sites()?;
         }
+        #[cfg(target_os = "linux")]
+        self.publish_physical_plans();
         self.activated_revision = self.runtime.revision();
         self.retire_phones();
         self.activate_dispatchers(clock.now_ms);
@@ -927,6 +1074,14 @@ impl Host {
                 .runtime
                 .settings(local)
                 .ok_or(RuntimeError::MissingNode)?;
+            #[cfg(target_os = "linux")]
+            let source = if self.runtime.modular_configuration().is_some() {
+                StationAudio::Modular(self.radio_preparation.active_plan(local)?)
+            } else {
+                StationAudio::Document(&settings.radio.processing_configuration)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let source = StationAudio::Document(&settings.radio.processing_configuration);
             let candidate = prepared(
                 local,
                 settings,
@@ -934,6 +1089,7 @@ impl Host {
                 media_worker(&mut self.media_workers, local)?,
                 &mut self.text,
                 self.services,
+                source,
             );
             let candidate = match candidate {
                 Ok(candidate) => candidate,

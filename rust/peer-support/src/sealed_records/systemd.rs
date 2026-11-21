@@ -64,11 +64,48 @@ fn load_key_with(
     key_id: &KeyId,
     read: impl FnOnce(&mut File) -> Result<Zeroizing<[u8; 32]>, KeyLoadError>,
 ) -> Result<SecretKey, KeyLoadError> {
+    let basename = format!("rpt-advanced.aead.{}", key_id.as_str());
+    let material = read_protected(directory, &basename, read)?;
+    Ok(SecretKey::from_material(key_id.clone(), material))
+}
+
+/// Read a dedicated binary TLS service credential with the same pinned-inode and
+/// permission checks as other systemd credentials. The caller owns a zeroizing buffer.
+pub fn load_systemd_tls(id: &KeyId) -> Result<Zeroizing<Vec<u8>>, KeyLoadError> {
+    let directory = std::env::var_os("CREDENTIALS_DIRECTORY");
+    read_tls(directory.as_deref().map(Path::new), id)
+}
+
+fn read_tls(directory: Option<&Path>, id: &KeyId) -> Result<Zeroizing<Vec<u8>>, KeyLoadError> {
+    read_protected(
+        directory,
+        &format!("rpt-advanced.tls.{}", id.as_str()),
+        |file| {
+            const LIMIT: usize = 64 * 1024;
+            let size = file
+                .metadata()
+                .map_err(|_| KeyLoadError::Unavailable)?
+                .len();
+            if size == 0 || size > LIMIT as u64 {
+                return Err(KeyLoadError::Invalid);
+            }
+            let mut bytes = Zeroizing::new(vec![0; size as usize]);
+            file.read_exact(&mut bytes)
+                .map_err(|_| KeyLoadError::Unavailable)?;
+            Ok(bytes)
+        },
+    )
+}
+
+fn read_protected<T>(
+    directory: Option<&Path>,
+    basename: &str,
+    read: impl FnOnce(&mut File) -> Result<T, KeyLoadError>,
+) -> Result<T, KeyLoadError> {
     let directory = directory.ok_or(KeyLoadError::Missing)?;
     let uid = geteuid().as_raw();
     let parent = open_directory(directory, uid)?;
-    let basename = format!("rpt-advanced.aead.{}", key_id.as_str());
-    let basename = Path::new(&basename);
+    let basename = Path::new(basename);
 
     let handle = path_handle(&parent, basename).map_err(capture_error)?;
     let metadata = protected_metadata(&handle, uid, 0o400, 0o640)?;
@@ -84,7 +121,7 @@ fn load_key_with(
     check_inode(&parent, &current_parent).map_err(capture_error)?;
     let current = path_handle(&current_parent, basename).map_err(capture_error)?;
     check_version(&current, &expected).map_err(capture_error)?;
-    Ok(SecretKey::from_material(key_id.clone(), material))
+    Ok(material)
 }
 
 /// Traverse from the filesystem root with a no-follow descriptor per component.

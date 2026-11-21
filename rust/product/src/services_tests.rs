@@ -706,7 +706,12 @@ fn complete_pre_remote_host_v10_prefix_has_no_remote_callbacks() {
     table.radio_quiesce = Some(service);
     table.radio_remote_submit = Some(submit);
     table.radio_ready = Some(service);
-    assert_eq!(size_of_val(&table), 400);
+    assert_eq!(size_of_val(&table), 408);
+    table.struct_size = 400;
+    // SAFETY: the advertised old table contains every field through radio_ready.
+    let prior = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(prior.0.radio_ready.is_some());
+    assert!(prior.0.station_binding.is_null());
     table.struct_size =
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind) as u32;
     assert_eq!(table.struct_size, 360);

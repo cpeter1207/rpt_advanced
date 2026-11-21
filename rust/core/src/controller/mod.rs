@@ -117,6 +117,7 @@ struct ProgramSample<'a> {
 /// Processing consumes elapsed native samples, never callback count or wall-clock time.
 /// All configured media remains allocated until this controller is dropped off the audio path.
 pub struct NodeController {
+    configuration_inhibit: Option<Arc<AtomicBool>>,
     settings: ControllerSettings,
     remote_non_fm: bool,
     remote_unqualified_open: bool,
@@ -157,6 +158,10 @@ pub struct NodeController {
 }
 
 impl NodeController {
+    pub(crate) fn bind_configuration_gate(&mut self, gate: Arc<AtomicBool>) {
+        self.configuration_inhibit = Some(gate);
+    }
+
     /// Apply the rig's non-FM policy on the TX owner. Linked input may interrupt
     /// open receive; that receiver never repeats into its own transmitter.
     pub fn set_remote_non_fm(&mut self, enabled: bool) {
@@ -259,6 +264,7 @@ impl NodeController {
         control.parrot_enabled = settings.parrot_enabled;
         Ok((
             Self {
+                configuration_inhibit: None,
                 settings,
                 remote_non_fm: false,
                 remote_unqualified_open: false,
@@ -776,7 +782,11 @@ impl NodeController {
         if source_activity && self.telemetry.parrot_pending() {
             self.telemetry.discard_pending_parrot();
         }
-        let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire);
+        let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire)
+            || self
+                .configuration_inhibit
+                .as_ref()
+                .is_some_and(|gate| gate.load(Ordering::Acquire));
         if self.timeout.blocked() {
             return self.timeout_sample(
                 receive || source_activity,

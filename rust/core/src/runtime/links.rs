@@ -412,6 +412,14 @@ impl NodeLinkControl {
             .configure_admin(unlock_hash, lock_hash, timeout_ms);
         self.peer_commands.clear();
     }
+    pub(super) fn bind_admin(
+        &mut self,
+        codes: Option<std::sync::Arc<super::dtmf::AdminCodes>>,
+        timeout_ms: u64,
+    ) {
+        self.commands.bind_admin(codes, timeout_ms);
+        self.peer_commands.clear();
+    }
     /// Bind the prepared port radio independently of the legacy digit family.
     pub fn configure_radio_owner(
         &mut self,

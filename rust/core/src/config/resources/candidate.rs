@@ -559,7 +559,8 @@ impl<'registry> ModularCandidate<'registry> {
         })
     }
 
-    pub(super) fn registry(&self) -> &ResourceRegistry {
+    /// The verified registry from which every binding in this candidate originates.
+    pub fn registry(&self) -> &ResourceRegistry {
         self.registry
     }
 

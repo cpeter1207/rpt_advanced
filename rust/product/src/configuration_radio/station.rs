@@ -76,6 +76,27 @@ impl RadioPreparationApi {
     }
 }
 impl PreparedStation {
+    /// Borrow this exact provider and prepared owner through the synchronous host call.
+    pub(crate) fn binding_request(
+        &self,
+        candidate_identity: std::num::NonZeroU64,
+    ) -> (abi::rptadv_station_request_v1, RadioPreparationApi) {
+        let request = abi::rptadv_station_request_v1 {
+            struct_size: size_of::<abi::rptadv_station_request_v1>() as u32,
+            abi_version: 1,
+            port_uuid: *self.port_id().uuid().as_bytes(),
+            candidate_identity: candidate_identity.get(),
+            product: self.product.product.as_ptr(),
+            prepared: self.resolved.raw().as_ptr(),
+        };
+        (
+            request,
+            RadioPreparationApi {
+                product: Arc::clone(&self.product),
+            },
+        )
+    }
+
     /// Stable registry UUID of the physical owner.
     pub fn port_id(&self) -> ResourceId {
         self.id

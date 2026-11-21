@@ -26,9 +26,10 @@ static int load_module(void) {
         !candidate->load || !candidate->reload || !candidate->unload) {
         return AST_MODULE_LOAD_DECLINE;
     }
-    int result = candidate->load(AST_MODULE_SELF, rptadv_product_descriptor_v1(),
-                                 rptadv_control_descriptor_v1(), rptadv_file_adapter_descriptor(),
-                                 rptadv_speech_adapter_descriptor());
+    int result = rptadv_asterisk_load_management_v1(
+        AST_MODULE_SELF, rptadv_product_descriptor_v1(), rptadv_product_management_descriptor_v1(),
+        rptadv_control_descriptor_v1(), rptadv_file_adapter_descriptor(),
+        rptadv_speech_adapter_descriptor());
     if (!result) {
         adapter = candidate;
     }

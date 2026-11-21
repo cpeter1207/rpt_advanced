@@ -13,6 +13,16 @@ use rptadv_peer_support::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// The leading @ is outside the authenticated TLS ServiceId alphabet.
+const HOST_RELOAD: &str = "@host-lifecycle";
+struct OperationInput<'a> {
+    actor: &'a str,
+    method: Method,
+    target: &'a str,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
+}
+
 const MAX_CURRENT_REQUESTS: usize = 256;
 const MAX_HISTORICAL_REQUESTS: usize = 256;
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -58,7 +68,7 @@ pub(super) struct Record {
     retry_base: Option<Arc<(Value, Operands)>>,
     // Only an admission with uncertain durability may fence its preceding draft/create.
     uncertain_predecessor: Option<Option<Id>>,
-    actor: ServiceId,
+    actor: String,
     phase: Phase,
     submitted_from: Option<String>,
     timestamp: u64,
@@ -113,8 +123,11 @@ impl Ledger {
             if key.0 != boot && timestamp.saturating_sub(time) > RETAIN_SECONDS {
                 continue;
             }
-            let actor = ServiceId::new(row["actor"].as_str().ok_or(Fault::Storage)?)
-                .map_err(|_| Fault::Storage)?;
+            let actor = row["actor"].as_str().ok_or(Fault::Storage)?;
+            if actor != HOST_RELOAD && ServiceId::new(actor).is_err() {
+                return Err(Fault::Storage);
+            }
+            let actor = actor.to_owned();
             let mut phase =
                 Phase::read(row["phase"].as_str().ok_or(Fault::Storage)?).ok_or(Fault::Storage)?;
             let body = row["configuration"].clone();
@@ -259,8 +272,11 @@ impl Ledger {
 }
 
 /// Complete action or a recognized, bounded draft. Drafts can omit action/targets until submission.
-fn validate(body: &Value, actor: &ServiceId, submitted: bool) -> Result<(), Fault> {
+fn validate(body: &Value, actor: &str, submitted: bool) -> Result<(), Fault> {
     let fields = body.as_object().ok_or(Fault::Invalid)?;
+    if actor == HOST_RELOAD && (!submitted || body["action"]["action"] != "reload_configuration") {
+        return Err(Fault::Forbidden);
+    }
     if fields.keys().any(|k| {
         ![
             "action",
@@ -341,7 +357,7 @@ fn validate(body: &Value, actor: &ServiceId, submitted: bool) -> Result<(), Faul
     } else {
         let prepared = prepare_runtime_action(action).map_err(|_| Fault::Invalid)?;
         prepared
-            .check_source(&CommandSource::Management(actor.as_str().to_owned()))
+            .check_source(&CommandSource::Management(actor.to_owned()))
             .map_err(|_| Fault::Forbidden)?;
         if ["desired_etag", "working_fingerprint", "restore"]
             .iter()
@@ -368,6 +384,21 @@ pub(super) enum Work<P> {
 }
 
 impl<R: Runtime> Backend<R> {
+    pub(super) fn operation_snapshot(&self) -> Result<Arc<Ledger>, Fault> {
+        if let Some(ledger) = self.ledger.read().expect("operation snapshot").as_ref() {
+            return Ok(Arc::clone(ledger));
+        }
+        // Startup may have found the edit lock busy. Recover the real receipts
+        // on demand without accepting a new boot identity or writing the ledger.
+        let guard = self.store.try_edit().map_err(lock_error)?;
+        let mut slot = self.ledger.write().expect("operation snapshot");
+        if let Some(current) = slot.as_ref() {
+            return Ok(Arc::clone(current));
+        }
+        let ledger = Arc::new(Ledger::read(&guard, self.boot)?);
+        *slot = Some(Arc::clone(&ledger));
+        Ok(ledger)
+    }
     fn read_ledger(&self, guard: &EditGuard<'_>) -> Result<Ledger, Fault> {
         let mut ledger = Ledger::read(guard, self.boot)?;
         let prior = self.ledger.read().expect("operation snapshot");
@@ -403,11 +434,7 @@ impl<R: Runtime> Backend<R> {
         }
         Ok(ledger)
     }
-    fn admit_domain(
-        &self,
-        actor: &ServiceId,
-        body: &Value,
-    ) -> Result<Vec<(Id, Invocation)>, Fault> {
+    fn admit_domain(&self, actor: &str, body: &Value) -> Result<Vec<(Id, Invocation)>, Fault> {
         let expected = body["expected_active_revision"]
             .as_str()
             .ok_or(Fault::Invalid)?;
@@ -430,7 +457,7 @@ impl<R: Runtime> Backend<R> {
                     owner: owner.scope,
                     generation: owner.generation,
                     requires_grant: owner.requires_grant,
-                    source: CommandSource::Management(actor.as_str().to_owned()),
+                    source: CommandSource::Management(actor.to_owned()),
                 };
                 Ok((
                     target,
@@ -449,6 +476,67 @@ impl<R: Runtime> Backend<R> {
             p.boot.ok_or(Fault::Missing)?,
             p.request.ok_or(Fault::Missing)?,
         );
+        self.edit_operation(
+            OperationInput {
+                actor: req.actor.as_str(),
+                method: req.method.clone(),
+                headers: &req.headers,
+                body: req.body.as_bytes(),
+                target: req.target.as_str(),
+            },
+            boot,
+            request,
+        )
+    }
+
+    /// Capture the validated working state before creating a normal, durable submission.
+    /// The queue accepts no paths, actors, actions or validators from the signal caller.
+    pub(super) fn service_reload(&self) -> Result<(), Fault> {
+        self.refresh(false)?;
+        let snapshot = self
+            .cached
+            .read()
+            .expect("management snapshot")
+            .clone()
+            .ok_or(Fault::Unavailable)?;
+        let tag = self.desired_validator(&snapshot)?;
+        let fingerprint = snapshot.working.as_ref().ok_or(Fault::Storage)?;
+        let body = serde_json::to_vec(&json!({"configuration":{
+            "submitted":true, "action":{"action":"reload_configuration"},
+            "desired_etag":tag, "working_fingerprint":fingerprint
+        }}))
+        .map_err(|_| Fault::Storage)?;
+        let request = fresh()?;
+        let target = format!("{}/operations/{}/{request}/", self.api.mount, self.boot);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "if-none-match",
+            "*".parse().expect("static creation precondition"),
+        );
+        let (_, receipt) = self.edit_operation(
+            OperationInput {
+                actor: HOST_RELOAD,
+                method: Method::PUT,
+                target: &target,
+                headers: &headers,
+                body: &body,
+            },
+            self.boot,
+            request,
+        )?;
+        match receipt["receipt"]["state"].as_str() {
+            Some("completed") => Ok(()),
+            Some("rejected") => Err(Fault::Conflict),
+            _ => Err(Fault::DurabilityUnknown),
+        }
+    }
+
+    fn edit_operation(
+        &self,
+        req: OperationInput<'_>,
+        boot: Id,
+        request: Id,
+    ) -> Result<(StatusCode, Value), Fault> {
         if self.boot != boot {
             return Err(Fault::Gone);
         }
@@ -459,7 +547,7 @@ impl<R: Runtime> Backend<R> {
             let mut ledger = self.read_ledger(&guard)?;
             let prior = ledger.rows.get(&key);
             if let Some(prior) = prior {
-                if prior.actor.as_str() != req.actor.as_str() {
+                if prior.actor.as_str() != req.actor {
                     return Err(Fault::Forbidden);
                 }
             } else {
@@ -481,7 +569,7 @@ impl<R: Runtime> Backend<R> {
                 (req.method == Method::PATCH
                     && r.submitted_from
                         .as_ref()
-                        .is_some_and(|tag| require(&req.headers, tag).is_ok()))
+                        .is_some_and(|tag| require(req.headers, tag).is_ok()))
                 .then_some(r.retry_base.as_deref())
                 .flatten()
             });
@@ -501,11 +589,11 @@ impl<R: Runtime> Backend<R> {
                 secret_slots: &protected::PATHS,
             };
             let staged = if req.method == Method::PUT {
-                patch::stage_replacement(req.body.as_bytes(), &policy, super::authoring::LIMITS)
+                patch::stage_replacement(req.body, &policy, super::authoring::LIMITS)
             } else {
                 patch::stage_draft_patch(
                     &json!({"configuration":current}),
-                    req.body.as_bytes(),
+                    req.body,
                     &policy,
                     super::authoring::LIMITS,
                 )
@@ -524,7 +612,7 @@ impl<R: Runtime> Backend<R> {
             fields.entry("submitted").or_insert(json!(false));
             let submitted = body["submitted"].as_bool().ok_or(Fault::Invalid)?;
             operands.apply(staged.private_edits)?;
-            operands.with_full(&body, |full| validate(full, &req.actor, submitted))?;
+            operands.with_full(&body, |full| validate(full, req.actor, submitted))?;
             let mut submitted_from = None;
             if let Some(prior) = prior {
                 let doc = ledger.document(&self.api, boot, request)?;
@@ -533,7 +621,7 @@ impl<R: Runtime> Backend<R> {
                     && prior.operands.same(&operands)
                 {
                     // A replay of an already durably frozen request cannot dispatch again.
-                    let tag = validator(req.target.as_str(), "", &doc);
+                    let tag = validator(req.target, "", &doc);
                     let same_create = req.method == Method::PUT
                         && prior.submitted_from.is_none()
                         && req.headers.get("if-none-match").is_some_and(|v| v == "*");
@@ -541,17 +629,17 @@ impl<R: Runtime> Backend<R> {
                         && prior
                             .submitted_from
                             .as_deref()
-                            .is_none_or(|t| require(&req.headers, t).is_err())
+                            .is_none_or(|t| require(req.headers, t).is_err())
                     {
-                        require(&req.headers, &tag)?;
+                        require(req.headers, &tag)?;
                     }
                     return Ok((StatusCode::OK, doc));
                 }
                 if original.is_some() {
                     return Err(Fault::Conflict);
                 }
-                let tag = validator(req.target.as_str(), "", &doc);
-                require(&req.headers, &tag)?;
+                let tag = validator(req.target, "", &doc);
+                require(req.headers, &tag)?;
                 if submitted {
                     submitted_from = Some(tag);
                 }
@@ -606,8 +694,7 @@ impl<R: Runtime> Backend<R> {
                                 .as_str()
                                 .ok_or(Fault::Invalid)?
                                 .to_owned(),
-                            operands
-                                .with_full(&body, |full| self.admit_domain(&req.actor, full))?,
+                            operands.with_full(&body, |full| self.admit_domain(req.actor, full))?,
                         ))
                     }
                 }
@@ -629,7 +716,7 @@ impl<R: Runtime> Backend<R> {
                     operands,
                     retry_base,
                     uncertain_predecessor: None,
-                    actor: req.actor.clone(),
+                    actor: req.actor.to_owned(),
                     submitted_from,
                     timestamp: now()?,
                     phase: if submitted {

@@ -30,7 +30,9 @@ impl Fixture {
         let source = format!(
             r#"
 #include "rptadv_{name}_adapter.h"
-static int32_t open_endpoint(const rptadv_{name}_endpoint_v1 *e, void **c) {{ (void)e; *c = 0; return 1; }}
+static uint32_t opens;
+uint32_t fixture_open_count(void) {{ return opens; }}
+static int32_t open_endpoint(const rptadv_{name}_endpoint_v1 *e, void **c) {{ ++opens; (void)e; *c = 0; return 1; }}
 static int32_t read_endpoint(void *c, rptadv_{name}_observation_v1 *o) {{ (void)c; (void)o; return 1; }}
 static int32_t write_endpoint(void *c, const rptadv_{name}_output_v1 *o) {{ (void)c; (void)o; return 1; }}
 static int32_t capabilities(void *c, uint32_t *o) {{ (void)c; (void)o; return 1; }}
@@ -95,6 +97,48 @@ fn site_backends_absent_unselected_is_allowed_selected_is_required() {
     assert!(SiteBackends::load_at(&output, &fixture.0).is_err());
     let iio = ConfigDocument::parse("[1000]\n[sensor 1000 volt]\nenabled=yes\nbackend=iio\ndevice=/absent\nchannel=in_voltage0\n").unwrap();
     assert!(SiteBackends::load_at(&iio, &fixture.0).is_ok());
+}
+
+#[test]
+fn modular_site_plan_admits_only_enabled_physical_owners_before_opening_devices() {
+    use rpt_advanced_core::config::{Calibration, SensorSettings, SiteEndpoint};
+    let fixture = Fixture::new();
+    let mut equipment = ResolvedSiteSettings::default();
+    equipment.sensors.push(SensorSettings {
+        name: "cabinet temperature".into(),
+        enabled: false,
+        endpoint: Some(SiteEndpoint {
+            backend: SiteBackend::Hwmon,
+            device: "/absent-device".into(),
+            channel: "temp1_input".into(),
+        }),
+        interface: None,
+        label_message_id: String::new(),
+        unit: "C".into(),
+        precision: 1,
+        poll_interval_ms: 1000,
+        stale_after_ms: 5000,
+        smoothing_ms: 0,
+        calibration: Calibration::None,
+        dtmf_id: None,
+    });
+    let old = SiteBackends::load_scopes_at([&equipment], &fixture.0).unwrap();
+    assert!(old.hwmon.is_none());
+    equipment.sensors[0].enabled = true;
+    assert!(SiteBackends::load_scopes_at([&equipment], &fixture.0).is_err());
+    fixture.provider("hwmon", "");
+    let new = SiteBackends::load_scopes_at([&equipment], &fixture.0).unwrap();
+    let loaded = new.hwmon.as_ref().unwrap();
+    // SAFETY: this fixture provides the exact function and retains its DSO while it runs.
+    let opens = unsafe {
+        loaded
+            ._library
+            .get::<unsafe extern "C" fn() -> u32>(b"fixture_open_count")
+            .unwrap()()
+    };
+    assert_eq!(opens, 0);
+    assert!(new.gpiod.is_none());
+    assert!(old.hwmon.is_none());
 }
 
 #[test]

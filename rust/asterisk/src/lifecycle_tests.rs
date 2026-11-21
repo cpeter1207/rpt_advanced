@@ -12,6 +12,7 @@ thread_local! {
     static START_RESULT: Cell<i32> = const { Cell::new(0) };
     static STOP_RESULT: Cell<i32> = const { Cell::new(0) };
     static INCOMING_RESULT: Cell<i32> = const { Cell::new(0) };
+    static REENTRANT_UNLOAD: Cell<Option<i32>> = const { Cell::new(None) };
     static RELOAD_DOCUMENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -66,6 +67,11 @@ unsafe extern "C" fn start(
 }
 
 unsafe extern "C" fn reload(configuration: *const std::ffi::c_char, length: usize) -> i32 {
+    if configuration.is_null() && length == 0 {
+        // Model an unload request while the reload receipt still owns the product table.
+        REENTRANT_UNLOAD.set(Some(super::unload()));
+        return 1;
+    }
     let text = unsafe {
         std::str::from_utf8(std::slice::from_raw_parts(
             configuration.cast::<u8>(),
@@ -486,4 +492,99 @@ fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
             String::from_utf8_lossy(&result.stderr)
         );
     }
+}
+
+#[test]
+fn managed_entry_rejects_null_and_short_groups_before_start() {
+    let module = std::ptr::NonNull::<u8>::dangling().as_ptr().cast();
+    #[repr(C, align(8))]
+    struct Prefix(u32);
+    let prefix = Prefix(4);
+    for table in [std::ptr::null(), std::ptr::from_ref(&prefix).cast()] {
+        // SAFETY: the checked entry requires a readable length word only when non-null.
+        // The missing product and control groups cannot be used by this failed admission.
+        let status = unsafe {
+            super::rptadv_asterisk_load_management_v1(
+                module,
+                std::ptr::null(),
+                table,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_ne!(status, 0);
+    }
+}
+
+#[test]
+fn managed_reload_holds_module_until_receipt_and_uncertain_boot_drains() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root = std::env::temp_dir().join(format!("rpt-managed-adapter-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("rpt_advanced.service.json");
+    std::fs::write(&path, b"{}").unwrap();
+    let directory = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+    // SAFETY: the serialized fixture retains this CString through final unload.
+    unsafe { ast_config_AST_CONFIG_DIR = directory.as_ptr() };
+    let table = ffi::rptadv_product_management_v1 {
+        struct_size: size_of::<ffi::rptadv_product_management_v1>() as u32,
+        abi_version: 1,
+        capability: *b"rptadv.mgmt1\0\0\0\0",
+        start: Some(start),
+    };
+    let load = || {
+        // SAFETY: both complete fixture tables and opaque module outlive all calls.
+        // The fixture product ignores providers and returns its selected startup disposition.
+        unsafe {
+            super::rptadv_asterisk_load_management_v1(
+                ptr::dangling_mut(),
+                &DESCRIPTOR,
+                &table,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+            )
+        }
+    };
+    crate::module::tests::fail_registration(0);
+    START_RESULT.set(-1);
+    assert_eq!(load(), 1);
+    assert!(STATE.lock().unwrap().is_none());
+    START_RESULT.set(-2);
+    STOP_RESULT.set(-1);
+    assert_eq!(load(), 0);
+    assert!(
+        STATE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .registration
+            .is_none()
+    );
+    assert_eq!(load(), 1);
+    assert_eq!(super::unload(), -1);
+    STOP_RESULT.set(0);
+    assert_eq!(super::unload(), 0);
+    START_RESULT.set(0);
+    assert_eq!(load(), 0);
+    assert_eq!(super::reload(), 0);
+    assert_eq!(REENTRANT_UNLOAD.get(), Some(-1));
+    assert!(
+        STATE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .registration
+            .is_some()
+    );
+    assert_eq!(super::unload(), 0);
+    // SAFETY: Asterisk no longer holds the test configuration directory.
+    unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(root).unwrap();
 }

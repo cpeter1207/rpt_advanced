@@ -65,8 +65,21 @@ fn spawn_dial(operation: impl FnOnce() + Send + 'static) -> std::io::Result<Join
         .spawn(operation)
 }
 
+#[cfg(target_os = "linux")]
+#[path = "lifecycle_bootstrap.rs"]
+pub(crate) mod bootstrap;
+#[cfg(target_os = "linux")]
+#[path = "lifecycle_management.rs"]
+mod management;
+#[cfg(target_os = "linux")]
+#[path = "lifecycle_native.rs"]
+mod native;
 #[path = "lifecycle_site.rs"]
 mod site;
+#[cfg(target_os = "linux")]
+pub(crate) use native::PreparedSite;
+#[cfg(test)]
+pub(crate) use site::{install_delayed_site_bank, site_bank_delay};
 
 pub(crate) struct Engine {
     executor: ControlClient,
@@ -85,6 +98,12 @@ pub(crate) struct Engine {
     jobs: Mutex<Vec<JoinHandle<()>>>,
     // Drop selected provider code only after Host and endpoint workers retire.
     site_backends: Arc<SiteBackends>,
+    // The service and its management writer both retain this Engine. A failed
+    // shutdown keeps the global owner; the last drained owner releases the lease.
+    #[cfg(target_os = "linux")]
+    _writer_lease: Option<rptadv_peer_support::working_files::WriterLease>,
+    #[cfg(target_os = "linux")]
+    management_state: management::ManagementState,
 }
 pub(crate) struct Call(Arc<Engine>);
 enum Dial {
@@ -125,6 +144,80 @@ impl Drop for Call {
     }
 }
 impl Engine {
+    fn new(
+        services: HostServices,
+        executor: ControlClient,
+        origin: Instant,
+        site_backends: Arc<SiteBackends>,
+    ) -> Self {
+        Self {
+            executor,
+            host: Mutex::new(None),
+            services,
+            origin,
+            health: SchedulerHealth::default(),
+            accepting: AtomicBool::new(true),
+            reloading: AtomicBool::new(false),
+            revision: AtomicU64::new(1),
+            lost_digits: AtomicBool::new(false),
+            event_busy: AtomicU64::new(0),
+            calls: Mutex::new(0),
+            drained: Condvar::new(),
+            ticker: Mutex::new(None),
+            jobs: Mutex::new(Vec::new()),
+            site_backends,
+            #[cfg(target_os = "linux")]
+            _writer_lease: None,
+            #[cfg(target_os = "linux")]
+            management_state: Default::default(),
+        }
+    }
+
+    /// Start the serialized control owner without selecting a radio configuration.
+    /// The process owner retains the descriptors until successful stop and drain.
+    #[cfg(target_os = "linux")]
+    pub(crate) unsafe fn start_management(
+        store: &rptadv_peer_support::working_files::WorkingFiles,
+        host: *const abi::rptadv_host_services_v10,
+        control: *const ControlDescriptor,
+        file: *const FileDescriptor,
+        speech: *const SpeechDescriptor,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        use rptadv_peer_support::working_files::CaptureError;
+        let writer = store.try_writer_lease().map_err(|error| match error {
+            CaptureError::Busy => RuntimeError::Busy,
+            _ => RuntimeError::Preparation,
+        })?;
+        // SAFETY: the caller supplies process-lifetime descriptor storage for all four owners.
+        let (services, executor, media) = unsafe { host_components(host, control, file, speech) }?;
+        let origin = Instant::now();
+        let engine = Arc::new(Self {
+            _writer_lease: Some(writer),
+            ..Self::new(
+                services,
+                executor,
+                origin,
+                Arc::new(SiteBackends::load_scopes(std::iter::empty())?),
+            )
+        });
+        let target = Arc::clone(&engine);
+        let (send, receive) = mpsc::sync_channel(1);
+        engine.enqueue(move || {
+            let result = Host::management_only(media, services, origin).map(|host| {
+                let gate = host.runtime.configuration_gate();
+                gate.store(true, Ordering::Release);
+                target.management_state.install_gate(gate);
+                *target
+                    .host
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(host);
+            });
+            let _ = send.send(result);
+        })?;
+        receive.recv().map_err(|_| RuntimeError::Rejected)??;
+        Ok(engine)
+    }
+
     pub(crate) fn execute(
         self: &Arc<Self>,
         local: String,
@@ -706,8 +799,12 @@ impl Engine {
             }
         }
     }
-    fn stop(self: &Arc<Self>) -> bool {
+    pub(crate) fn stop(self: &Arc<Self>) -> bool {
         self.accepting.store(false, Ordering::Release);
+        // Callbacks outlive control admission while site safe-output and device
+        // retirement are pending. Latch their independent TX gate before joining.
+        #[cfg(target_os = "linux")]
+        self.inhibit_modular();
         self.revision.fetch_add(1, Ordering::AcqRel);
         if let Some(ticker) = self.ticker.lock().unwrap_or_else(|e| e.into_inner()).take() {
             if ticker.join().is_err() {
@@ -869,6 +966,30 @@ unsafe fn incoming_identity(
     ))
 }
 
+/// Select the checked service, control and media owners for this product lifetime.
+unsafe fn host_components(
+    host: *const abi::rptadv_host_services_v10,
+    control: *const ControlDescriptor,
+    file: *const FileDescriptor,
+    speech: *const SpeechDescriptor,
+) -> Result<(HostServices, ControlClient, NativeMediaPreparer), RuntimeError> {
+    let services = unsafe { HostServices::open(host) }.map_err(|_| RuntimeError::Preparation)?;
+    let executor = unsafe { ControlClient::open(control, "rpt_advanced/links", 512) }
+        .map_err(|_| RuntimeError::Preparation)?;
+    let media = unsafe {
+        NativeMediaPreparer::from_descriptors(
+            file,
+            speech,
+            Path::new("/usr/bin/ffmpeg"),
+            Path::new("/usr/bin/piper"),
+            30000,
+            (services.reaper_acquire(), services.reaper_release()),
+        )
+    }
+    .map_err(|_| RuntimeError::Preparation)?;
+    Ok((services, executor, media))
+}
+
 /// Prepare and register the product using the loader's real module and mandatory capabilities.
 ///
 /// # Safety
@@ -886,21 +1007,7 @@ unsafe extern "C" fn rptadv_product_start(
         if selected.is_some() {
             return Err(RuntimeError::Busy);
         }
-        let services =
-            unsafe { HostServices::open(host) }.map_err(|_| RuntimeError::Preparation)?;
-        let executor = unsafe { ControlClient::open(control, "rpt_advanced/links", 512) }
-            .map_err(|_| RuntimeError::Preparation)?;
-        let media = unsafe {
-            NativeMediaPreparer::from_descriptors(
-                file,
-                speech,
-                Path::new("/usr/bin/ffmpeg"),
-                Path::new("/usr/bin/piper"),
-                30000,
-                (services.reaper_acquire(), services.reaper_release()),
-            )
-        }
-        .map_err(|_| RuntimeError::Preparation)?;
+        let (services, executor, media) = unsafe { host_components(host, control, file, speech) }?;
         // Mandatory released composition is validated even for a disabled configuration.
         drop(
             crate::link::ring::InboundRing::open_receiver(
@@ -918,9 +1025,9 @@ unsafe extern "C" fn rptadv_product_start(
         MessageTemplate::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         schedule::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
-        let site_backends = Arc::new(SiteBackends::load(&document)?);
-        let origin = Instant::now();
         let settings = crate::site::configured(&document)?;
+        let site_backends = Arc::new(SiteBackends::load_scopes(settings.values())?);
+        let origin = Instant::now();
         // Retain this envelope outside control: rejected tasks and failed radio
         // activation must not join dormant device workers on the station executor.
         let sites = Arc::new(Mutex::new(Some((
@@ -934,23 +1041,7 @@ unsafe extern "C" fn rptadv_product_start(
                 .map_err(|_| RuntimeError::Preparation)?,
         ))));
         let clock = capture(origin, services);
-        let engine = Arc::new(Engine {
-            executor,
-            host: Mutex::new(None),
-            services,
-            origin,
-            health: SchedulerHealth::default(),
-            accepting: AtomicBool::new(true),
-            reloading: AtomicBool::new(false),
-            revision: AtomicU64::new(1),
-            lost_digits: AtomicBool::new(false),
-            event_busy: AtomicU64::new(0),
-            calls: Mutex::new(0),
-            drained: Condvar::new(),
-            ticker: Mutex::new(None),
-            jobs: Mutex::new(Vec::new()),
-            site_backends,
-        });
+        let engine = Arc::new(Engine::new(services, executor, origin, site_backends));
         let target = Arc::clone(&engine);
         let candidate = Arc::clone(&sites);
         let (send, receive) = mpsc::sync_channel(1);
@@ -1004,8 +1095,22 @@ unsafe extern "C" fn rptadv_product_reload(
     configuration_length: usize,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| -> Result<i32, RuntimeError> {
-        let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let (engine, _call) = selected()?;
+        #[cfg(target_os = "linux")]
+        if let Some(reload) = engine
+            .management_state
+            .reload
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            if !configuration.is_null() || configuration_length != 0 {
+                return Err(RuntimeError::Rejected);
+            }
+            reload.begin().map_err(|_| RuntimeError::Rejected)?;
+            return Ok(1);
+        }
+        let document = document(unsafe { input(configuration, configuration_length) }?)?;
         engine.reload_configuration(document)?;
         Ok(i32::from(engine.reloading.load(Ordering::Acquire)))
     }))
@@ -1017,6 +1122,16 @@ unsafe extern "C" fn rptadv_product_reload(
 unsafe extern "C" fn rptadv_product_reload_poll() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let (engine, _call) = selected_reload(true)?;
+        #[cfg(target_os = "linux")]
+        if let Some(reload) = engine
+            .management_state
+            .reload
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            return reload.poll().map_err(|_| RuntimeError::Rejected);
+        }
         engine.poll_reload_configuration()
     }))
     .ok()
@@ -1024,7 +1139,7 @@ unsafe extern "C" fn rptadv_product_reload_poll() -> i32 {
     .map_or(-1, |ready| i32::from(!ready))
 }
 /// Gate admission, stop/join owners, and drain accepted tasks before releasing registrations.
-extern "C" fn rptadv_product_stop() -> i32 {
+pub(crate) extern "C" fn rptadv_product_stop() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let mut selected = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(engine) = selected.as_ref() else {
