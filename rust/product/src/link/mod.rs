@@ -3,7 +3,7 @@
 pub(crate) mod dispatcher;
 pub mod egress;
 mod outbound;
-mod regeneration;
+pub(crate) mod regeneration;
 pub mod ring;
 pub mod session;
 pub(crate) mod source_clock;

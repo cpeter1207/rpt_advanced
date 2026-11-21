@@ -68,7 +68,13 @@ struct Route {
     issued: bool,
     desired: bool,
     paused: bool,
+    event_held: bool,
     pending: Option<u64>,
+}
+impl Route {
+    fn wanted(&self) -> bool {
+        self.desired && !self.event_held
+    }
 }
 /// Stable calendar occurrence, independent of a captured monotonic deadline estimate.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -179,6 +185,10 @@ fn duplicate_routes_overlap(routes: &[RouteSpec], windows: &[ReplacementSpec]) -
 }
 
 impl LinkScheduler {
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Whether final link publication must refresh civil-time window policy.
     pub fn requires_civil_time(&self) -> bool {
         !self.windows.is_empty()
@@ -320,6 +330,7 @@ impl LinkScheduler {
                     desired: spec.permanent,
                     issued: old.is_some_and(|old| old.issued),
                     paused: old.is_some_and(|old| old.paused),
+                    event_held: old.is_some_and(|old| old.event_held),
                     spec,
                     pending: None,
                 }
@@ -333,6 +344,33 @@ impl LinkScheduler {
         })
     }
 
+    /// Apply the active event group replacements on the existing route/hold owner.
+    pub(super) fn event_groups(
+        &mut self,
+        generation: u64,
+        local: &str,
+        held: &std::collections::BTreeSet<&str>,
+    ) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        for route in self
+            .routes
+            .iter_mut()
+            .filter(|r| r.spec.local == local && r.spec.permanent)
+        {
+            let hold = route
+                .spec
+                .group_label
+                .as_deref()
+                .is_some_and(|group| held.contains(group));
+            if route.event_held != hold {
+                route.event_held = hold;
+                route.pending = None;
+            }
+        }
+        true
+    }
     /// Current immutable endpoint declarations, useful for building a reload candidate.
     pub fn route_specs(&self) -> Vec<RouteSpec> {
         self.routes.iter().map(|route| route.spec.clone()).collect()
@@ -341,8 +379,12 @@ impl LinkScheduler {
     pub(super) fn desired_routes(&self) -> impl Iterator<Item = &RouteSpec> {
         self.routes
             .iter()
-            .filter(|route| route.desired && !route.paused)
+            .filter(|route| route.wanted() && !route.paused)
             .map(|route| &route.spec)
+    }
+    /// The declared route owner retains its own hold, selection and recovery policy.
+    pub(super) fn owns_target(&self, remote: &str) -> bool {
+        self.routes.iter().any(|r| r.spec.remote == remote)
     }
     /// Whether a direct peer is managed as a member of any permanent group.
     pub fn is_group_member(&self, remote: &str) -> bool {
@@ -500,14 +542,14 @@ impl LinkScheduler {
         let withdrawal_pending = self
             .routes
             .iter()
-            .any(|route| !route.paused && route.issued && !route.desired);
+            .any(|route| !route.paused && route.issued && !route.wanted());
         let selected = self.routes.iter().enumerate().find(|(_, route)| {
             !route.paused
                 && route.pending.is_none()
                 && if withdrawal_pending {
-                    route.issued && !route.desired
+                    route.issued && !route.wanted()
                 } else {
-                    !route.issued && route.desired
+                    !route.issued && route.wanted()
                 }
         });
         let (index, _) = selected?;
@@ -537,7 +579,7 @@ impl LinkScheduler {
         self.reserved(reservation)
             && self.routes.get(reservation.index).is_some_and(|route| {
                 // Pausing clears the nonce, so `reserved` already excludes paused work.
-                route.desired == (reservation.action == LinkTransition::Attach)
+                route.wanted() == (reservation.action == LinkTransition::Attach)
             })
     }
     /// Settle exactly one reservation; stale completion cannot consume a replacement token.
@@ -578,7 +620,7 @@ impl LinkScheduler {
     pub(super) fn withdraw_undesired(&mut self) -> Vec<String> {
         self.routes
             .iter_mut()
-            .filter(|route| !route.desired && route.issued)
+            .filter(|route| !route.wanted() && route.issued)
             .map(|route| {
                 route.issued = false;
                 route.pending = None;

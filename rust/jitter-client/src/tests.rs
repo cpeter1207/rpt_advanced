@@ -405,3 +405,85 @@ fn failed_operations_and_truncated_observations_do_not_look_successful() {
     assert_eq!(jitter.reset(), Err(Error::OperationFailed));
     assert!(matches!(jitter.observe(), Err(Error::OperationFailed)));
 }
+
+#[test]
+fn configured_phone_jitter_preserves_sample_units_and_rejects_unrepresentable_delays() {
+    let api = descriptor();
+    let descriptor = ptr::from_ref(&api).cast();
+    let jitter =
+        unsafe { Jitter::with_delays(descriptor, 16000, 320, 160, [30, 70, 140]) }.unwrap();
+    let config = unsafe { &*jitter.context.as_ptr().cast::<State>() }.config;
+    assert_eq!(
+        [
+            config.minimum_delay,
+            config.initial_delay,
+            config.maximum_delay
+        ],
+        [480, 1120, 2240]
+    );
+    for invalid in [[70, 30, 140], [30, 140, 70], [30, 70, u32::MAX]] {
+        assert!(matches!(
+            unsafe { Jitter::with_delays(descriptor, 16000, 320, 160, invalid) },
+            Err(Error::InvalidDescriptor)
+        ));
+    }
+}
+
+#[test]
+fn released_prefix_and_partial_or_null_policy_suffix_do_not_admit_an_edit() {
+    #[repr(C)]
+    struct Table {
+        prefix: Descriptor,
+        policy: Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32) -> i32>,
+    }
+    for extent in [
+        size_of::<Descriptor>(),
+        size_of::<Table>() - 1,
+        size_of::<Table>(),
+    ] {
+        let mut table = Table {
+            prefix: descriptor(),
+            policy: None,
+        };
+        table.prefix.struct_size = extent as u32;
+        let mut jitter = unsafe { Jitter::phone(ptr::from_ref(&table).cast()) }.unwrap();
+        assert!(!jitter.supports_delay_update());
+        assert_eq!(jitter.set_delays([20, 40, 100]), Ok(()));
+        assert_eq!(
+            jitter.set_delays([30, 85, 140]),
+            Err(Error::InvalidDescriptor)
+        );
+    }
+}
+
+#[test]
+fn short_unit_policy_edits_use_the_same_conversion_as_creation() {
+    #[repr(C)]
+    struct Table {
+        prefix: Descriptor,
+        policy: Option<UpdateDelays>,
+    }
+    unsafe extern "C" fn update(context: *mut c_void, min: u32, initial: u32, max: u32) -> i32 {
+        let state = unsafe { &mut *context.cast::<State>() };
+        state.config.minimum_delay = min;
+        state.config.initial_delay = initial;
+        state.config.maximum_delay = max;
+        0
+    }
+    let mut table = Table {
+        prefix: descriptor(),
+        policy: Some(update),
+    };
+    table.prefix.struct_size = size_of::<Table>() as u32;
+    let mut jitter =
+        unsafe { Jitter::with_delays(ptr::from_ref(&table).cast(), 8000, 80, 160, [10, 10, 10]) }
+            .unwrap();
+    for (policy, expected) in [([10, 20, 40], [80, 160, 320]), ([10, 10, 10], [80, 80, 80])] {
+        jitter.set_delays(policy).unwrap();
+        let cfg = unsafe { &(*jitter.context.as_ptr().cast::<State>()).config };
+        assert_eq!(
+            [cfg.minimum_delay, cfg.initial_delay, cfg.maximum_delay],
+            expected
+        );
+    }
+}

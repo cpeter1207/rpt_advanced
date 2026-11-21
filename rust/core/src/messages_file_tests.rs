@@ -74,6 +74,10 @@ fn composition_catalog_admin_translation_keeps_package_attributes() {
     )
     .unwrap();
     assert_eq!(catalog.format(&Message::NoLinks).unwrap().tts, "PACKAGE");
+    let (projected, _) = catalog
+        .project_locales(&"fr-CA".parse().unwrap(), &Default::default())
+        .unwrap();
+    assert_eq!(projected.format(&Message::NoLinks).unwrap().tts, "PACKAGE");
 }
 
 struct TemporaryCatalogs(PathBuf);

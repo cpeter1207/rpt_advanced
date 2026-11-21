@@ -1,0 +1,587 @@
+{
+  "source_commit": "8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9",
+  "notes": [
+    "Request-shape examples, not an execution script. IDs/selectors and provider availability are illustrative.",
+    "Codes/PINs are dummy examples for ephemeral request-only actions. They must not be stored in macro configuration or returned by the service.",
+    "Host/call-only and inert phone-foundation entries remain restricted/unavailable as documented."
+  ],
+  "actions": [
+    {
+      "action": "disconnect",
+      "parameter": "2001"
+    },
+    {
+      "action": "select_command_target",
+      "parameter": "2001"
+    },
+    {
+      "action": "link_status"
+    },
+    {
+      "action": "disconnect_all"
+    },
+    {
+      "action": "pause_permanent_links"
+    },
+    {
+      "action": "last_keyed"
+    },
+    {
+      "action": "disconnect_permanent",
+      "parameter": "2001"
+    },
+    {
+      "action": "network_status"
+    },
+    {
+      "action": "reconnect_all"
+    },
+    {
+      "action": "resume_permanent_links"
+    },
+    {
+      "action": "disconnect_nonpermanent_all"
+    },
+    {
+      "action": "announce_time"
+    },
+    {
+      "action": "set_parrot",
+      "enabled": true
+    },
+    {
+      "action": "set_parrot",
+      "enabled": false
+    },
+    {
+      "action": "site_status",
+      "selector": "1"
+    },
+    {
+      "action": "cancel_message"
+    },
+    {
+      "action": "set_echo_telemetry",
+      "mode": "off"
+    },
+    {
+      "action": "connect",
+      "mode": "transceive",
+      "parameter": "2001"
+    },
+    {
+      "action": "connect_permanent",
+      "mode": "transceive",
+      "parameter": "2001"
+    },
+    {
+      "action": "exit_command_mode"
+    },
+    {
+      "action": "send_command_digit",
+      "digit": "1",
+      "parameter": "2001"
+    },
+    {
+      "action": "radio",
+      "operation": "recall_memory",
+      "selector": 1
+    },
+    {
+      "action": "radio",
+      "operation": "set_frequency",
+      "frequency_mhz": 146.52,
+      "offset_direction": "minus"
+    },
+    {
+      "action": "radio",
+      "operation": "set_tone",
+      "direction": "rx",
+      "frequency_hz": 100
+    },
+    {
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "rx",
+      "enabled": true
+    },
+    {
+      "action": "radio",
+      "operation": "set_power_preset",
+      "preset": "low"
+    },
+    {
+      "action": "radio",
+      "operation": "status",
+      "detail": "short"
+    },
+    {
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 1
+    },
+    {
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": 0.005
+    },
+    {
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "down",
+      "preset": "slow"
+    },
+    {
+      "action": "radio",
+      "operation": "tune"
+    },
+    {
+      "action": "radio",
+      "operation": "get_setting",
+      "selector": 1
+    },
+    {
+      "action": "radio",
+      "operation": "set_setting",
+      "selector": 1,
+      "value": 0.5,
+      "units": "MHz"
+    },
+    {
+      "action": "radio",
+      "operation": "start_scan",
+      "selector": 1
+    },
+    {
+      "action": "radio",
+      "operation": "pause_scan"
+    },
+    {
+      "action": "radio",
+      "operation": "resume_scan"
+    },
+    {
+      "action": "radio",
+      "operation": "stop_scan"
+    },
+    {
+      "action": "radio",
+      "operation": "set_scan_direction",
+      "direction": "down"
+    },
+    {
+      "action": "radio",
+      "operation": "skip"
+    },
+    {
+      "action": "radio",
+      "operation": "get_memory",
+      "selector": 1
+    },
+    {
+      "action": "radio",
+      "operation": "catalog",
+      "kind": "capabilities",
+      "page": 1
+    },
+    {
+      "action": "radio",
+      "operation": "scan_status",
+      "selector": 1
+    },
+    {
+      "action": "radio",
+      "operation": "set_inhibit",
+      "enabled": true
+    },
+    {
+      "action": "radio",
+      "operation": "set_scan_dwell",
+      "timing": {
+        "duration_ms": 1000
+      }
+    },
+    {
+      "action": "radio",
+      "operation": "set_scan_resume_delay",
+      "timing": {
+        "duration_ms": 1000
+      }
+    },
+    {
+      "action": "radio",
+      "operation": "set_scan_priority",
+      "selector": 1
+    },
+    {
+      "action": "radio",
+      "operation": "current_status"
+    },
+    {
+      "action": "radio",
+      "operation": "invoke",
+      "selector": 1
+    },
+    {
+      "action": "radio",
+      "operation": "set",
+      "state": {
+        "mode": "FM",
+        "rx_frequency_mhz": 146.52,
+        "offset_mhz": -0.6
+      }
+    },
+    {
+      "action": "set_output",
+      "name": "example",
+      "state": "on"
+    },
+    {
+      "action": "acknowledge_alarm",
+      "name": "example"
+    },
+    {
+      "action": "reset_alarm",
+      "name": "example"
+    },
+    {
+      "action": "reset_extrema",
+      "name": "example"
+    },
+    {
+      "action": "set_fan",
+      "name": "example",
+      "duty": 0.5
+    },
+    {
+      "action": "set_transmit_inhibit",
+      "enabled": true
+    },
+    {
+      "action": "call_macro",
+      "macro": "permanent_links"
+    },
+    {
+      "action": "execute_dtmf",
+      "digits": "*70#"
+    },
+    {
+      "action": "message",
+      "message": "{ status_message }",
+      "destination": "local"
+    },
+    {
+      "action": "pause"
+    },
+    {
+      "action": "unlock_administration",
+      "code": "000000"
+    },
+    {
+      "action": "lock_administration",
+      "code": "000000"
+    },
+    {
+      "action": "start_pad_test"
+    },
+    {
+      "action": "controller_query",
+      "operation": "nodes"
+    },
+    {
+      "action": "controller_query",
+      "operation": "configuration_path"
+    },
+    {
+      "action": "controller_query",
+      "operation": "status"
+    },
+    {
+      "action": "controller_query",
+      "operation": "help"
+    },
+    {
+      "action": "controller_query",
+      "operation": "link_status"
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "status"
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "processing_status"
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "active_configuration"
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "get_mixer",
+      "target": "receive"
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "set_mixer",
+      "target": "receive",
+      "level": 500
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "set_test_tone",
+      "enabled": true
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "read_eeprom"
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "write_eeprom",
+      "words": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "set_ctcss_inhibit",
+      "enabled": true
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "set_subaudible_override",
+      "enabled": true
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "save_tuning_eeprom"
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "transmit",
+      "keyed": true,
+      "ctcss_frequency_hz": 100
+    },
+    {
+      "action": "radio_maintenance",
+      "operation": "clear_manual"
+    },
+    {
+      "action": "controller_management",
+      "operation": "reload"
+    },
+    {
+      "action": "controller_management",
+      "operation": "validate_configuration"
+    },
+    {
+      "action": "controller_management",
+      "operation": "validate_secrets"
+    },
+    {
+      "action": "controller_management",
+      "operation": "validate_providers"
+    },
+    {
+      "action": "controller_lifecycle",
+      "operation": "start"
+    },
+    {
+      "action": "controller_lifecycle",
+      "operation": "stop"
+    },
+    {
+      "action": "controller_lifecycle",
+      "operation": "reload_poll"
+    },
+    {
+      "action": "radio_host_query",
+      "operation": "receive_policy"
+    },
+    {
+      "action": "feed_dtmf_symbol",
+      "digit": "1"
+    },
+    {
+      "action": "actual_receiver_unkey"
+    },
+    {
+      "action": "phone_attach",
+      "parameter": "2001"
+    },
+    {
+      "action": "phone_select_command_target",
+      "parameter": "2001"
+    },
+    {
+      "action": "phone_send_node_digit",
+      "digit": "1",
+      "parameter": "2001"
+    },
+    {
+      "action": "phone_send_telephone_digit",
+      "digit": "1"
+    },
+    {
+      "action": "phone_exit_command_mode"
+    },
+    {
+      "action": "phone_manual_key"
+    },
+    {
+      "action": "phone_manual_unkey"
+    },
+    {
+      "action": "phone_session",
+      "operation": "authenticate",
+      "mailbox": "001",
+      "pin": "0000"
+    },
+    {
+      "action": "phone_session",
+      "operation": "retire"
+    },
+    {
+      "action": "controller_admission",
+      "operation": "authorize_incoming"
+    },
+    {
+      "action": "controller_admission",
+      "operation": "admit_incoming"
+    },
+    {
+      "action": "interface_control",
+      "operation": "set_channel",
+      "channel": 1
+    },
+    {
+      "action": "interface_control",
+      "operation": "set_receive_ctcss",
+      "enabled": true
+    },
+    {
+      "action": "interface_control",
+      "operation": "set_transmit_ctcss",
+      "enabled": true
+    },
+    {
+      "action": "interface_control",
+      "operation": "write_pin",
+      "pin": {
+        "domain": "sound_gpio",
+        "pin": 1
+      },
+      "state": "pulse",
+      "timing": {
+        "duration_ms": 1000
+      }
+    },
+    {
+      "action": "interface_control",
+      "operation": "set_frequencies",
+      "rx_frequency_mhz": 146.52,
+      "tx_frequency_mhz": 145.92,
+      "power": "low"
+    },
+    {
+      "action": "interface_control",
+      "operation": "get_echo"
+    },
+    {
+      "action": "interface_control",
+      "operation": "set_echo",
+      "enabled": true
+    },
+    {
+      "action": "controller_input",
+      "operation": "dtmf",
+      "digits": "*70#"
+    },
+    {
+      "action": "rx_mute_toggle",
+      "target": "port"
+    },
+    {
+      "action": "rx_mute_toggle",
+      "target": "peer",
+      "parameter": "2001"
+    },
+    {
+      "action": "rx_mute_toggle",
+      "target": "peers"
+    },
+    {
+      "action": "rx_mute_toggle",
+      "target": "peers",
+      "link_type": "echolink"
+    },
+    {
+      "action": "rx_mute_toggle",
+      "target": "phone_patch"
+    }
+  ]
+}

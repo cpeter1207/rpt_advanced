@@ -99,6 +99,7 @@ fn echo_binding_rejects_a_quiesced_radio_reservation() {
     assert_eq!(crate::fixture::host(|state| state.channels), 1);
     unsafe { radio_destroy(ptr::null_mut(), live) };
     let mut reservation = ReservedRadio {
+        binding: None,
         metadata: None,
         radio: None,
         name: CString::new("quiesced fixture").unwrap(),

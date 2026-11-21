@@ -45,6 +45,8 @@ pub enum PlaybackDestination {
     Local,
     /// Local transmitter and eligible connected peers.
     LocalAndLinks,
+    /// Eligible connected peer outputs only.
+    Peers,
 }
 
 /// Traffic and routing policy retained for an entire message attempt.
@@ -146,6 +148,7 @@ impl MessageOccurrence {
 /// Output routing behavior attached to prepared playback.
 pub(super) enum MediaKind {
     Status,
+    StatusAfterPeerUnkey,
     Parrot,
 }
 
@@ -167,10 +170,22 @@ impl PreparedMedia {
 
     /// Retain the originating endpoint through playback and control-side reclamation.
     pub fn reply_to(mut self, peer: Option<crate::link::PeerReply>) -> Self {
+        if self.2 == MediaKind::StatusAfterPeerUnkey {
+            self.2 = MediaKind::Status
+        }
         self.3 = peer;
         self
     }
 
+    /// Preserve the configured audience while waiting for the exact caller to unkey.
+    pub(crate) fn wait_for_unkey(mut self, peer: Option<crate::link::PeerReply>) -> Self {
+        self.2 = MediaKind::StatusAfterPeerUnkey;
+        self.3 = peer;
+        self
+    }
+    pub(super) fn private_reply(&self) -> bool {
+        self.3.is_some() && self.2 != MediaKind::StatusAfterPeerUnkey
+    }
     /// Stop a superseded notice at the next sample without reclaiming it on audio.
     pub fn cancel_when(mut self, cancelled: Arc<AtomicBool>) -> Self {
         self.4 = Some(cancelled);
@@ -350,6 +365,8 @@ impl ActivitySnapshot {
 /// Sole status producer and completed-media reclaimer; retain until audio stops.
 pub struct ControllerControl {
     site_inhibit: Arc<AtomicBool>,
+    rx_muted: Arc<AtomicU64>,
+    rx_qualified: Arc<AtomicBool>,
     cancel_message: Arc<AtomicBool>,
     messages: Option<super::MessagePreparation>,
     pending: Producer<PreparedMedia>,
@@ -370,9 +387,16 @@ pub struct ControllerControl {
 }
 
 impl ControllerControl {
+    pub(crate) fn qualified_receive(&self) -> bool {
+        self.rx_qualified.load(Ordering::Acquire)
+    }
     /// Request cancellation of the active attempt without reclaiming media on audio.
     pub fn cancel_message(&self) {
         self.cancel_message.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn rx_mute(&self) -> &Arc<AtomicU64> {
+        &self.rx_muted
     }
 
     /// Set station protection independently of telemetry admission and physical interlocks.
@@ -655,6 +679,8 @@ pub(super) enum Source {
 
 pub(super) struct TelemetryPlanner {
     pub site_inhibit: Arc<AtomicBool>,
+    pub rx_muted: Arc<AtomicU64>,
+    pub rx_qualified: Arc<AtomicBool>,
     pub cancel_message: Arc<AtomicBool>,
     pub active: Option<Source>,
     pub status: Option<PreparedMedia>,
@@ -678,11 +704,15 @@ impl TelemetryPlanner {
         let (parrot_pending, parrot_consumer) = RingBuffer::new(1);
         let (parrot_completed, parrot_reclaimer) = RingBuffer::new(1);
         let parrot_busy = Arc::new(AtomicBool::new(false));
+        let rx_muted = Arc::new(AtomicU64::new(0));
+        let rx_qualified = Arc::new(AtomicBool::new(false));
         let site_inhibit = Arc::new(AtomicBool::new(false));
         let cancel_message = Arc::new(AtomicBool::new(false));
         (
             Self {
                 site_inhibit: site_inhibit.clone(),
+                rx_muted: rx_muted.clone(),
+                rx_qualified: rx_qualified.clone(),
                 cancel_message: cancel_message.clone(),
                 active: None,
                 status: None,
@@ -696,6 +726,8 @@ impl TelemetryPlanner {
                 duck_gain: 10_f32.powf(f32::from(duck_db) / 20.0),
             },
             ControllerControl {
+                rx_muted,
+                rx_qualified,
                 site_inhibit,
                 cancel_message,
                 messages: None,

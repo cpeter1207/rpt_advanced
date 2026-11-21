@@ -1,5 +1,7 @@
 //! Controller-facing civil scheduling backed by the released schedule ABI.
 
+pub mod recurrence;
+
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt;
 use std::ptr::{self, NonNull};

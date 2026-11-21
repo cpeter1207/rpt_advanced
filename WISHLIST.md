@@ -28,6 +28,28 @@ qualification are distinct from software implementation and passive node health.
 
 ## Entries
 
+### Modular JSON configuration and authenticated HAL management
+
+**Status: Implementation started 2026-11-19; runtime cutover pending.** Follow
+[ADR 0045](doc/architecture/decisions/0045-modular-json-and-hal-management.md), the
+[design](docs/superpowers/specs/2026-11-18-json-rest-configuration-design.md) and
+[updated checklist](docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md).
+The decoder/metadata, registry/candidate, registered capture, immutable public
+storage, public manifest/readback, sealed-record/key-loader and typed private
+artifact I/O milestones are verified on the development host and native node.
+Public accepted-state/journal transactions and bounded mTLS/HTTPS transport
+passed 1,005 integrated tests on both the development host and native node. Private account
+graph adoption now passed scoped review and the integrated host checkpoint;
+its native checkpoint is next. HAL/runtime joins and full domain validation
+remain pending. Typed modular protocol profiles and resource-local JSON Patch staging passed
+focused, core and affected-host checks plus their native home-workspace checkpoint.
+Subsequent private/store/runtime joins remain tracked. These control-plane foundations do not replace the running INI path.
+Remove controller INI during the coordinated store/provider cutover and retain
+USBRadioPlus INI. Keep remaining resource, storage, API, provider, scheduler,
+action, message and native milestone verification items unchecked until tested.
+Unknown JSON keys and unsupported values warn and fall back; do not add a
+strict unknown-field rejection policy.
+
 ### Remove legacy VOX in favor of VAD
 
 **Status: Planned; requested 2026-11-17.** Earshot VAD supersedes the legacy

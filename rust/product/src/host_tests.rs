@@ -1,4 +1,7 @@
 use super::*;
+use crate::link::ring::InboundPolicy;
+#[path = "host_command_review_tests.rs"]
+pub(crate) mod commands;
 #[path = "egress_load_tests.rs"]
 mod egress_load;
 #[path = "native_maintenance_host_tests.rs"]
@@ -373,6 +376,7 @@ fn echo_ring_policy_survives_prepared_generation() {
     let (_, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
     let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     host.peers.push(PeerOwner {
+        superseded: false,
         local: "1000".into(),
         remote: "2000".into(),
         mode: Mode::TRANSCEIVE,
@@ -387,6 +391,14 @@ fn echo_ring_policy_survives_prepared_generation() {
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
         host.services,
+        StationAudio::Document(
+            &host
+                .runtime
+                .settings("1000")
+                .unwrap()
+                .radio
+                .processing_configuration,
+        ),
     )
     .unwrap();
     assert_eq!(candidate.control.redirects.len(), 1);
@@ -628,6 +640,75 @@ fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
             1
         );
     }
+    let surviving = host
+        .peers
+        .iter()
+        .find(|p| p.control.connection_generation() == origins[1])
+        .unwrap()
+        .control
+        .reply_target();
+    host.detach_connection("1000", "2000", Some(origins[0]), clock().now_ms);
+    assert!(!surviving.ended());
+    assert!(
+        matches!(host.runtime.node("1000").unwrap().links().peer_digit("2000",'6',clock().now_ms,surviving),Some(DigitOutcome::ReceivedDigit('6',origin)) if origin.current())
+    );
+    assert!(host.stop(20));
+}
+
+#[test]
+fn registered_control_digit_and_logical_disconnect_choose_current_transport() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let old = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    host.runtime
+        .command(
+            "1000",
+            operation(LinkAction::Disconnect, "2000"),
+            clock(),
+            false,
+        )
+        .unwrap();
+    host.runtime.incoming("1000", "2000", true).unwrap();
+    let (io, current) = peer(48000);
+    host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+        .unwrap();
+    let logical = host
+        .peers
+        .iter()
+        .find(|p| !p.superseded && p.remote == "2000")
+        .unwrap()
+        .control
+        .reply_target();
+    host.immediate(
+        "1000",
+        LinkEffect::ForwardDigits(vec![("2000".into(), "D 2000 1000 1 5".into())]),
+        clock(),
+    )
+    .unwrap();
+    pump_until(&mut host, |_| {
+        current
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|t| t == b"D 2000 1000 1 5")
+    });
+    assert!(
+        !old.lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|t| t == b"D 2000 1000 1 5")
+    );
+    host.detach("1000", "2000", clock().now_ms);
+    assert!(logical.ended());
+    assert!(
+        host.peers
+            .iter()
+            .all(|p| p.remote != "2000" || p.superseded)
+    );
     assert!(host.stop(20));
 }
 
@@ -963,9 +1044,8 @@ fn remote_selection_precedes_the_next_digit_in_one_host_batch() {
                     "{outcomes:?}"
                 );
             } else {
-                assert_eq!(
-                    outcomes,
-                    vec![("1000".into(), DigitOutcome::Regenerate('5'))]
+                assert!(
+                    matches!(outcomes.as_slice(),[(name,DigitOutcome::ReceivedDigit('5',origin))] if name=="1000" && origin.current())
                 );
             }
             assert!(host.stop(20));
@@ -1002,9 +1082,8 @@ fn remote_digits_use_shared_policy_for_polling_and_async_hosts() {
                     .iter()
                     .any(|text| text == b"D 3000 4000 11 9")
         });
-        assert_eq!(
-            host.take_operations(),
-            vec![("1000".into(), DigitOutcome::Regenerate('5'))]
+        assert!(
+            matches!(host.take_operations().as_slice(),[(name,DigitOutcome::ReceivedDigit('5',origin))] if name=="1000" && origin.current())
         );
         assert!(
             !state
@@ -1953,6 +2032,14 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
         host.services,
+        StationAudio::Document(
+            &host
+                .runtime
+                .settings("1000")
+                .unwrap()
+                .radio
+                .processing_configuration,
+        ),
     )
     .unwrap();
     host.runtime.replace_adapter("1000", candidate, 11).unwrap();
@@ -2040,6 +2127,14 @@ fn ended_ingress_is_omitted_and_unknown_peer_events_do_not_change_routes() {
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
         host.services,
+        StationAudio::Document(
+            &host
+                .runtime
+                .settings("1000")
+                .unwrap()
+                .radio
+                .processing_configuration,
+        ),
     )
     .unwrap();
     assert!(candidate.control.redirects.is_empty());
@@ -2173,6 +2268,8 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     assert!(second.stop(10));
 
     let lease = Arc::new(Mutex::new(Lease {
+        #[cfg(target_os = "linux")]
+        binding: Default::default(),
         quiesced: false,
         quiescing: false,
         owners: None,
@@ -2316,6 +2413,14 @@ fn saturated_media_publication_keeps_the_running_generation() {
                 media_worker(&mut host.media_workers, "1000").unwrap(),
                 &mut host.text,
                 host.services,
+                StationAudio::Document(
+                    &host
+                        .runtime
+                        .settings("1000")
+                        .unwrap()
+                        .radio
+                        .processing_configuration,
+                ),
             ) {
                 Ok(candidate) => {
                     held.push(candidate);
@@ -2744,8 +2849,13 @@ fn peer_ending_before_refresh_is_reaped_without_a_connected_announcement() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut host = host();
-    let (io, state) = peer(48000);
-    state.lock().unwrap().fail_ready = true;
+    let (io, state) = peer_with_async(48000, true);
+    {
+        // This case requires an ended session before the first station refresh.
+        let mut provider = state.lock().unwrap();
+        provider.fail_ready = true;
+        provider.finish_first_step_before_registration = true;
+    }
     assert_eq!(
         host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock()),
         Ok(())
@@ -2964,5 +3074,120 @@ fn radio_maintenance_rejects_a_quiesced_device_lease() {
     request.abi_version = 1;
     request.operation = 1;
     assert!(matches!(host.radio_control("1000", request), Err(-7)));
+    assert!(host.stop(20));
+}
+
+// Install an actual registered command owner on the native host used by the media race.
+pub(crate) fn with_ingress_mute(
+    run: impl FnOnce(
+        &rpt_advanced_core::link::PeerSignals,
+        &mut Host,
+        rpt_advanced_core::config::resources::candidate::ResourceId,
+        RuntimeClock,
+        [DigitOutcome; 2],
+    ),
+) {
+    use rpt_advanced_core::{
+        config::resources::{PortKey, candidate::*},
+        link::{PeerIdentity, PeerSignals},
+    };
+    use serde_json::json;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let site = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".parse().unwrap();
+    let port = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    let scope = ResourceScope::Port(port);
+    let account = ResourceBinding {
+        scope,
+        kind: ResourceKind::Allstarlink,
+        id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd".parse().unwrap(),
+    };
+    let registry =
+        ResourceRegistry::with_members(site, &[(port, PortKey::new("North"))], &[account], &[])
+            .unwrap();
+    let resources = [
+        (
+            ResourceBinding {
+                scope: ResourceScope::Site(site),
+                id: site,
+                kind: ResourceKind::Metadata,
+            },
+            "metadata",
+            json!({"name":"Station","inherit_from":null}),
+        ),
+        (
+            ResourceBinding {
+                scope,
+                id: port,
+                kind: ResourceKind::Metadata,
+            },
+            "metadata",
+            json!({"name":"North","inherit_from":"site"}),
+        ),
+        (account, "allstarlink", json!({"node_number":1000})),
+    ];
+    let json: Vec<_> = resources
+        .iter()
+        .map(|(b, k, v)| {
+            serde_json::to_vec(&json!({"kind":k,"id":b.id.to_string(),"configuration":v})).unwrap()
+        })
+        .collect();
+    let captures: Vec<_> = resources
+        .iter()
+        .zip(&json)
+        .map(|((b, _, _), v)| CapturedResource {
+            binding: *b,
+            json: v,
+        })
+        .collect();
+    let candidate = ModularCandidate::assemble(&registry, &captures).unwrap();
+    let signals = PeerSignals::new();
+    host.runtime.incoming("1000", "2000", true).unwrap();
+    host.runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .attach_ingress(
+            PeerIdentity::from_operator("2000").unwrap(),
+            signals.reply_target(),
+        )
+        .unwrap();
+    // Capture the two eligible OOB symbols before enabling the whole-buffer language.
+    let received = ['5', '5'].map(|symbol| {
+        host.runtime
+            .node("1000")
+            .unwrap()
+            .links()
+            .peer_digit("2000", symbol, clock().now_ms, signals.reply_target())
+            .unwrap()
+    });
+    let node = rpt_advanced_core::config::NodeId::new("1000").unwrap();
+    let doc = host.runtime.document();
+    let speech = rpt_advanced_core::config::ResolvedSpeechSettings::resolve(doc, &node)
+        .unwrap()
+        .value;
+    let morse = rpt_advanced_core::config::ResolvedMorseSettings::resolve(doc, &node)
+        .unwrap()
+        .value;
+    host.runtime
+        .node("1000")
+        .unwrap()
+        .install_command_profile(
+            &candidate,
+            port,
+            Some("UTC"),
+            clock(),
+            rpt_advanced_core::runtime::CommandRenderers {
+                catalog: rpt_advanced_core::messages::MessageCatalog::load("en-US").unwrap(),
+                language: &"en-US".parse().unwrap(),
+                speech: &speech,
+                morse: &morse,
+            },
+        )
+        .unwrap();
+    run(&signals, &mut host, port, clock(), received);
+    host.runtime.peer_detached("1000", "2000", clock().now_ms);
     assert!(host.stop(20));
 }

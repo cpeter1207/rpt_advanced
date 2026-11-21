@@ -33,6 +33,7 @@ TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDI
 MANUALS := README.md QUALITY.md AGENTS.md WISHLIST.md COPYING $(wildcard doc/*.md doc/architecture/*.md doc/architecture/decisions/*.md)
 DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore .github/dependencies.json Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c tests/test_radio_interlock.c examples doc debian messages README.md QUALITY.md WISHLIST.md
 DIST_FILES += tests/test_site_gpio_abi.c tests/test_site_hwmon_abi.c
+DIST_FILES += repeater-management.schema.json
 
 .PHONY: all rust-build standalone-build standalone-check standalone-install artifacts quality lint static-analysis docs dependency-boundary product-surface product-abi-check rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
 # The small loader must reflect directory overrides even when Rust DSOs are unchanged.
@@ -231,7 +232,7 @@ install: all install-jitter-development install-site-development
 		install -D -m 0644 "$$file" "$(DESTDIR)$(docdir)/$$file"; \
 	done
 	install -D -m 0644 COPYING $(DESTDIR)$(docdir)/copyright
-	install -D -m 0644 examples/rpt_advanced.conf $(DESTDIR)$(docdir)/examples/rpt_advanced.conf
+	install -D -m 0644 examples/rpt_advanced.service.json $(DESTDIR)$(docdir)/examples/rpt_advanced.service.json
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/asterisk/rpt_advanced/messages/en-US.ftl
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/rpt-advanced/messages/en-US.ftl
 
@@ -257,7 +258,7 @@ standalone-install: standalone-build install-jitter-development install-site-dev
 		install -D -m 0644 "$$file" "$(DESTDIR)$(docdir)/$$file"; \
 	done
 	install -D -m 0644 COPYING $(DESTDIR)$(docdir)/copyright
-	install -D -m 0644 examples/rpt_advanced.conf $(DESTDIR)$(docdir)/examples/rpt_advanced.conf
+	install -D -m 0644 examples/rpt_advanced.service.json $(DESTDIR)$(docdir)/examples/rpt_advanced.service.json
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/rpt-advanced/messages/en-US.ftl
 
 install-check: artifacts

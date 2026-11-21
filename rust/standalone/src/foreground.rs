@@ -58,6 +58,48 @@ impl std::fmt::Display for ForegroundError {
 
 impl std::error::Error for ForegroundError {}
 
+/// Run the modular service until signal shutdown, retaining all owners while stop is pending.
+#[cfg(target_os = "linux")]
+pub fn run_managed(path: &Path) -> Result<(), ForegroundError> {
+    // SAFETY: geteuid takes no arguments and returns the process identity.
+    if unsafe { libc::geteuid() } == 0 {
+        return Err(ForegroundError::RootUser);
+    }
+    let provisioning = rptadv_peer_support::working_files::read_service_provisioning(path)
+        .map_err(|e| ForegroundError::Configuration(e.to_string()))?;
+    install_signal_handlers()?;
+    let (mut runtime, started) = crate::runtime::ProductRuntime::start_management(&provisioning)
+        .map_err(ForegroundError::Runtime)?;
+    if started {
+        eprintln!("rpt-advanced management service started");
+        let mut pending = false;
+        while !STOP.load(Ordering::Acquire) {
+            if pending || RELOAD.swap(false, Ordering::AcqRel) {
+                match runtime.working_reload(pending) {
+                    Ok(next) => pending = next,
+                    Err(error) => {
+                        pending = false;
+                        eprintln!("working configuration reload rejected ({error})");
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    // The product may have accepted callbacks before an unconfirmed startup
+    // failure. DSO/context ownership survives each unsuccessful drain attempt.
+    while runtime.stop().is_err() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if started {
+        Ok(())
+    } else {
+        Err(ForegroundError::Runtime(
+            crate::runtime::RuntimeError::Start,
+        ))
+    }
+}
+
 /// Run the product until SIGINT/SIGTERM; SIGHUP validates and replaces its configuration.
 pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), ForegroundError> {
     #[cfg(not(unix))]
@@ -71,7 +113,6 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
             return Err(ForegroundError::RootUser);
         }
         let text = read_configuration(configuration)?;
-        validate_configuration(&text)?;
         let radios = resolve_radios(&text)?;
         let secrets = read_secrets(secrets_path)?;
         let registrations = crate::registration::targets(&text, &secrets)
@@ -145,7 +186,6 @@ impl ForegroundControl<'_> {
     /// Signal reload and tuner reload use exactly the same foreground transaction.
     fn reload(&mut self) -> Result<(), ForegroundError> {
         let updated = read_configuration(self.configuration)?;
-        validate_configuration(&updated)?;
         let radios = resolve_radios(&updated)?;
         let nodes = resolve_listener_nodes(&radios);
         update_iax_listeners(self.listeners, nodes, self.client, |candidates| {
@@ -358,16 +398,6 @@ fn read_configuration(path: &Path) -> Result<String, ForegroundError> {
         .map_err(|error| ForegroundError::Configuration(format!("{}: {error}", path.display())))
 }
 
-fn validate_configuration(text: &str) -> Result<(), ForegroundError> {
-    crate::check_config(text)
-        .map(|warnings| {
-            for warning in warnings {
-                eprintln!("warning: {warning}");
-            }
-        })
-        .map_err(|error| ForegroundError::Configuration(error.to_string()))
-}
-
 fn registration_targets(
     configuration: &str,
     secrets: &crate::secrets::SecretsFile,
@@ -504,9 +534,8 @@ mod tests {
     #[test]
     fn configuration_helpers_report_valid_invalid_and_missing_inputs() {
         let text = "[general]\nnode_enabled=no\n";
-        super::validate_configuration(text).unwrap();
-        super::validate_configuration("[524950]\nunknown_setting=value\n").unwrap();
-        assert!(super::validate_configuration("[general\n").is_err());
+        super::resolve_radios(text).unwrap();
+        super::resolve_radios("[524950]\nunknown_setting=value\n").unwrap();
         assert!(super::resolve_radios("[general\n").is_err());
 
         let path =
@@ -1250,7 +1279,6 @@ mod tests {
         let candidate = format!(
             "[general]\nnode_enabled=yes\niax_local_port={port}\n[524950]\nradio_channel=fixture\n"
         );
-        super::validate_configuration(&candidate).unwrap();
         assert_eq!(super::resolve_radios(&candidate).unwrap()[0].iax_port, port);
         fs::write(&path, candidate).unwrap();
         assert_eq!(

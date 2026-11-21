@@ -31,9 +31,27 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[path = "command_dispatch.rs"]
+mod command_dispatch;
+#[path = "command_program.rs"]
+mod command_program;
+pub use command_dispatch::CommandRenderers;
+use command_program::CommandPrograms;
+pub use command_program::{CommandCompletion, CommandReceipt, CommandResponse};
+
 #[path = "reload.rs"]
 mod reload;
+use crate::config::resources::generation::RuntimeConfiguration;
 use reload::ReloadTransaction;
+
+#[path = "aggregate_modular.rs"]
+mod modular;
+pub use modular::PreparedConfigurationTransition;
+
+enum ConfigurationSource {
+    Document(ConfigDocument),
+    Modular(Arc<RuntimeConfiguration>),
+}
 
 fn queue_status_media(
     telemetry: &mut ControllerControl,
@@ -66,7 +84,7 @@ fn queue_status_media(
 }
 
 /// One externally captured tick; core never reads host clocks or time-zone services.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeClock {
     /// Monotonic milliseconds.
     pub now_ms: u64,
@@ -116,7 +134,7 @@ struct ControlState<C: Send> {
     activity: ActivitySnapshot,
     started_ms: u64,
     prior_activity_ms: Option<u64>,
-    catalog: MessageCatalog,
+    catalog: Arc<MessageCatalog>,
     messages: super::composition::MessageRecipes,
 }
 struct GroupAnnouncement {
@@ -159,12 +177,15 @@ impl<C: Send> Drop for ControlState<C> {
 /// Stable per-node control identity, retained across successful generation swaps.
 pub struct RuntimeNode<A: Send, C: Send = ()> {
     name: String,
+    programs: CommandPrograms,
+    command_messages: Option<command_dispatch::CommandMessages>,
     site: crate::site::SiteController,
     settings: ResolvedNodeSettings,
     bounds: GenerationSettings,
     host: NodeHost<DtmfWorker, RuntimeTransmit<A>>,
     device: Box<dyn DeviceHandoff>,
     device_open: bool,
+    failed_station_replacement: bool,
     pending_peer_cleanup: bool,
     links: NodeLinkControl,
     control: ControlState<C>,
@@ -173,8 +194,88 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     time_format: u64,
     group_announcements: Vec<GroupAnnouncement>,
     echo_telemetry: crate::link::EchoTelemetryPolicy,
+    echo_announcement: crate::config::EchoLinkAnnouncement,
 }
 impl<A: Send, C: Send> RuntimeNode<A, C> {
+    /// Reconcile event group holds before reserving any route operation. Verify this node's
+    /// exact registered port key and link generation at the existing route owner.
+    pub fn apply_event_groups(&mut self, events: &EventScheduler) -> bool {
+        self.links.apply_event_groups(&self.name, events)
+    }
+    fn message_values(
+        &self,
+        clock: RuntimeClock,
+        catalog: &MessageCatalog,
+        public_key: &str,
+        port: super::MessagePortIdentity,
+    ) -> Result<super::MessageValueSnapshot, RuntimeError> {
+        let (civil, _) = clock.civil.ok_or(RuntimeError::Clock)?;
+        let site = self.site.snapshot(clock.now_ms);
+        let (mut links, identity) = render::direct_status(self.links.manager(), catalog)?;
+        links.tts = render::telemetry_speech(&links.tts, &[&identity]);
+        Ok::<_, RuntimeError>(super::MessageValueSnapshot {
+            civil,
+            time_format: TimeFormat::try_from(self.time_format)
+                .map_err(|_| RuntimeError::Preparation)?,
+            node: public_key.to_owned(),
+            callsign: self.settings.callsign.clone(),
+            port,
+            event: None,
+            builtin: Default::default(),
+            links,
+            sensors: site
+                .sensors
+                .into_iter()
+                .map(|(name, sensor)| {
+                    (
+                        name,
+                        crate::site::Observation {
+                            value: sensor.current.value.map(MessageArgument::Number),
+                            observed_at_ms: sensor.current.observed_at_ms,
+                            quality: sensor.current.quality,
+                        },
+                    )
+                })
+                .collect(),
+            inputs: site
+                .inputs
+                .into_iter()
+                .map(|(name, input)| {
+                    (
+                        name,
+                        crate::site::Observation {
+                            value: input
+                                .value
+                                .map(|value| MessageArgument::Number(f64::from(value))),
+                            observed_at_ms: input.observed_at_ms,
+                            quality: input.quality,
+                        },
+                    )
+                })
+                .collect(),
+            time_remaining: None,
+        })
+    }
+    /// Capture the local receiver separately from link and telemetry activity.
+    pub fn radio_receive_status(&self) -> super::links::ReceiveStatus {
+        let telemetry = &self.control.telemetry;
+        let muted = telemetry.rx_mute().load(Ordering::Acquire) & 1 != 0;
+        super::links::ReceiveStatus {
+            muted,
+            active: !muted && telemetry.qualified_receive(),
+        }
+    }
+    /// Continuous receive activity for calendar politeness in the same runtime monotonic epoch.
+    pub fn event_activity(&self) -> super::scheduler::ReceiveActivity {
+        super::scheduler::ReceiveActivity {
+            active: self.control.activity.is_active(),
+            last_active_ms: Some(
+                self.control
+                    .activity_ms()
+                    .unwrap_or(self.control.started_ms),
+            ),
+        }
+    }
     /// Station-owned site policy; callers deliver observations/effects off audio.
     pub fn site(&mut self) -> &mut crate::site::SiteController {
         &mut self.site
@@ -187,9 +288,7 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         now_ms: u64,
     ) -> Result<Vec<crate::site::SiteEffect>, crate::site::SiteError> {
         let result = self.site.command(command, now_ms);
-        self.control
-            .telemetry
-            .set_site_inhibit(self.site.transmit_inhibited());
+        self.publish_rf_inhibit();
         result
     }
     /// Advance station protection and publish its RF gate independently of media admission.
@@ -197,14 +296,18 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         &mut self,
         now_ms: u64,
         observations: &crate::site::SiteObservations,
-        ptt: &std::collections::BTreeMap<NodeId, bool>,
+        ptt: &std::collections::BTreeMap<crate::config::resources::PortKey, bool>,
     ) -> Vec<crate::site::SiteEffect> {
         let effects = self.site.advance(now_ms, observations, ptt);
-        self.control
-            .telemetry
-            .set_site_inhibit(self.site.transmit_inhibited());
+        self.publish_rf_inhibit();
         effects
     }
+    fn publish_rf_inhibit(&self) {
+        self.control
+            .telemetry
+            .set_site_inhibit(self.failed_station_replacement || self.site.transmit_inhibited());
+    }
+
     /// Borrow a current/retiring adapter dispatcher only on control. Once exposed, its generation
     /// requires an explicit `detached` acknowledgment after dispatcher stop/drain before reclaim.
     pub fn adapter_control_mut(&mut self, generation: u64) -> Option<&mut C> {
@@ -318,9 +421,12 @@ impl RuntimeDispatch {
 }
 
 struct Candidate<A: Send, C: Send> {
+    scope: Option<crate::config::resources::candidate::ResourceId>,
+    commands: Option<command_dispatch::PreparedCommands>,
+    admin: Option<Arc<super::dtmf::AdminCodes>>,
     dtmf_macros: Vec<crate::dtmf_macro::CompiledDtmfMacro>,
     dtmf_macro_limits: crate::dtmf_macro::DtmfMacroLimits,
-    remote_commands: crate::remote_base_command::RemoteCommandConfiguration,
+    remote_commands: Option<crate::remote_base_command::RemoteCommandConfiguration>,
     name: String,
     settings: ResolvedNodeSettings,
     site: ResolvedSiteSettings,
@@ -329,6 +435,9 @@ struct Candidate<A: Send, C: Send> {
     control: ControlState<C>,
     status: ResolvedIdentifierSettings,
     time_format: u64,
+    station_changed: bool,
+    echo_telemetry: crate::link::EchoTelemetryPolicy,
+    echo_announcement: crate::config::EchoLinkAnnouncement,
     links: LinkScheduler,
     device: Option<Box<dyn DeviceHandoff>>,
 }
@@ -346,6 +455,8 @@ pub struct Runtime<A: Send = (), C: Send = ()> {
     revision: u64,
     generation: u64,
     document: ConfigDocument,
+    modular: Option<Arc<RuntimeConfiguration>>,
+    configuration_gate: Arc<AtomicBool>,
     warnings: Vec<ConfigWarning>,
     nodes: Vec<RuntimeNode<A, C>>,
     retired: Vec<RuntimeNode<A, C>>,
@@ -358,20 +469,15 @@ pub struct Runtime<A: Send = (), C: Send = ()> {
     pending_reload: Option<ReloadTransaction<A, C>>,
 }
 impl<A: Send, C: Send> Runtime<A, C> {
-    /// Prepare every enabled node and schedule before opening/publishing any candidate.
-    /// Pending devices retain revision zero; the control owner must poll_reload
-    /// until activation completes before exposing initial registrations.
-    pub fn start(
-        document: ConfigDocument,
-        media: &dyn NativeMediaPreparer,
-        adapter: impl FnMut(&str, &ResolvedNodeSettings) -> Result<PreparedAdapter<A, C>, RuntimeError>,
-        device: impl FnMut(&str, &ResolvedNodeSettings) -> Result<Box<dyn DeviceHandoff>, RuntimeError>,
-        clock: RuntimeClock,
-    ) -> Result<Self, RuntimeError> {
-        let mut runtime = Self {
+    /// Start with no selected configuration, active generation or radio.
+    /// The first successful adoption uses the ordinary runtime publication path.
+    pub fn idle() -> Self {
+        Self {
             revision: 0,
             generation: 0,
             document: ConfigDocument::default(),
+            modular: None,
+            configuration_gate: Arc::new(AtomicBool::new(false)),
             warnings: Vec::new(),
             nodes: Vec::new(),
             retired: Vec::new(),
@@ -382,7 +488,26 @@ impl<A: Send, C: Send> Runtime<A, C> {
             disconnect_notices: Vec::new(),
             stopping: false,
             pending_reload: None,
-        };
+        }
+    }
+
+    /// Share this aggregate's fail-closed transmit interlock with its service owner.
+    /// Site policy retains an independent gate for each station.
+    pub fn configuration_gate(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.configuration_gate)
+    }
+
+    /// Prepare every enabled node and schedule before opening/publishing any candidate.
+    /// Pending devices retain revision zero; the control owner must poll_reload
+    /// until activation completes before exposing initial registrations.
+    pub fn start(
+        document: ConfigDocument,
+        media: &dyn NativeMediaPreparer,
+        adapter: impl FnMut(&str, &ResolvedNodeSettings) -> Result<PreparedAdapter<A, C>, RuntimeError>,
+        device: impl FnMut(&str, &ResolvedNodeSettings) -> Result<Box<dyn DeviceHandoff>, RuntimeError>,
+        clock: RuntimeClock,
+    ) -> Result<Self, RuntimeError> {
+        let mut runtime = Self::idle();
         runtime.reload(document, media, adapter, device, clock)?;
         Ok(runtime)
     }
@@ -400,7 +525,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         now_ms: u64,
     ) -> Result<u64, RuntimeError> {
         self.reclaim();
-        if self.stopping {
+        if self.stopping || self.reload_pending() {
             return Err(RuntimeError::Busy);
         }
         let generation = self
@@ -454,8 +579,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             activity,
             started_ms: now_ms,
             prior_activity_ms: None,
-            catalog: MessageCatalog::load(&node.settings.language)
-                .map_err(|_| RuntimeError::Preparation)?,
+            catalog: Arc::clone(&node.control.catalog),
             messages: super::composition::MessageRecipes::default(),
         };
         std::mem::swap(&mut next.telemetry, &mut node.control.telemetry);
@@ -469,6 +593,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &mut node.control.prior_activity_ms,
         );
         node.retired_control = Some(std::mem::replace(&mut node.control, next));
+
         self.generation = generation;
         Ok(generation)
     }
@@ -483,6 +608,19 @@ impl<A: Send, C: Send> Runtime<A, C> {
     /// Enabled nodes in configuration order.
     pub fn node_names(&self) -> Vec<&str> {
         self.nodes.iter().map(|node| node.name.as_str()).collect()
+    }
+    /// Resolve the single running port which owns an incoming ASL account.
+    pub fn network_owner(&self, account: &str) -> Option<&str> {
+        if account.is_empty() || !account.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let account = account.trim_start_matches('0');
+        let mut owners = self.nodes.iter().filter(|node| {
+            node.network_account()
+                .is_some_and(|wire| wire.trim_start_matches('0') == account)
+        });
+        let owner = owners.next()?;
+        owners.next().is_none().then_some(owner.name.as_str())
     }
     /// Exact current settings lookup, excluding removed/disabled nodes.
     pub fn settings(&self, name: &str) -> Option<&ResolvedNodeSettings> {
@@ -544,6 +682,33 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .collect()
     }
 
+    fn next_configuration(&mut self, clock: RuntimeClock) -> Result<(u64, u64), RuntimeError> {
+        self.reclaim();
+        if self.stopping || self.pending_reload.is_some() || !self.retired.is_empty() {
+            return Err(RuntimeError::Busy);
+        }
+        // A failed handoff can stop an incumbent permanently. Keep it reachable
+        // through physical stop and detachment, then prepare a fresh owner.
+        self.nodes.retain_mut(|node| {
+            node.device_open || node.status(clock.now_ms).state != LifecycleState::Stopped
+        });
+        if self.nodes.iter_mut().any(|node| {
+            let status = node.status(clock.now_ms);
+            status.active.is_none() || status.retiring.is_some()
+        }) {
+            return Err(RuntimeError::Busy);
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(RuntimeError::Preparation)?;
+        let generation_id = self
+            .generation
+            .checked_add(1)
+            .ok_or(RuntimeError::Preparation)?;
+        Ok((revision, generation_id))
+    }
+
     /// Fully prepare a candidate, switch changed devices with rollback, then publish all nodes.
     /// Success may leave reload_pending true while hardware opens or rolls back.
     /// Poll on control without discarding the prior configuration or device contexts.
@@ -562,25 +727,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         ) -> Result<Box<dyn DeviceHandoff>, RuntimeError>,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
-        self.reclaim();
-        if self.stopping
-            || self.pending_reload.is_some()
-            || !self.retired.is_empty()
-            || self
-                .nodes
-                .iter_mut()
-                .any(|node| node.status(clock.now_ms).retiring.is_some())
-        {
-            return Err(RuntimeError::Busy);
-        }
-        let revision = self
-            .revision
-            .checked_add(1)
-            .ok_or(RuntimeError::Preparation)?;
-        let generation_id = self
-            .generation
-            .checked_add(1)
-            .ok_or(RuntimeError::Preparation)?;
+        let (revision, generation_id) = self.next_configuration(clock)?;
         let mut warnings = Schema::validate(&document)?.warnings;
         let mut candidates = Vec::new();
         let mut events = Vec::new();
@@ -623,23 +770,19 @@ impl<A: Send, C: Send> Runtime<A, C> {
             )?;
             warnings.append(&mut messages.warnings);
             let activity = controller.activity();
-            let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting)
+            let (mut receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting)
                 .map_err(|_| RuntimeError::Preparation)?;
+            receive.bind_receive_mute(telemetry.rx_mute().clone());
             let prepared = adapter(name, &settings)?;
-            let mut remote_commands = prepared.remote_commands.unwrap_or(
-                crate::remote_base_command::RemoteCommandConfiguration {
-                    prefix: String::new(),
-                    access: crate::remote_base_command::RemoteDtmfAccess::Disabled,
-                },
-            );
-            if !remote_commands.prefix.is_empty() {
-                if let Some(prefix) = settings
+            let mut remote_commands = prepared.remote_commands;
+            if let Some(radio) = &mut remote_commands
+                && !radio.prefix.is_empty()
+                && let Some(prefix) = settings
                     .link_commands
                     .get("link_command_remote_base")
                     .filter(|prefix| !prefix.is_empty())
-                {
-                    remote_commands.prefix.clone_from(prefix);
-                }
+            {
+                radio.prefix.clone_from(prefix);
             }
             let mut commands = super::dtmf::DtmfCommands::new(
                 settings
@@ -647,7 +790,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     .map_err(|_| RuntimeError::Preparation)?,
             );
             commands
-                .configure_remote(&remote_commands.prefix, remote_commands.access)
+                .configure_radio_owner(remote_commands.as_ref())
                 .map_err(|_| RuntimeError::Preparation)?;
             let mut dtmf_macros =
                 crate::config::compile_macros(&document, &id, commands.command_map())?;
@@ -688,10 +831,23 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 activity,
                 started_ms: clock.now_ms,
                 prior_activity_ms: existing.and_then(|node| node.control.activity_ms()),
-                catalog,
+                catalog: Arc::new(catalog),
                 messages,
             };
+            let echo = crate::config::EchoLinkSettings::resolve(&document, &id)?.value;
             candidates.push(Candidate {
+                scope: None,
+                commands: None,
+                admin: super::dtmf::AdminCodes::checked(
+                    &settings.dtmf_admin_unlock_hash,
+                    &settings.dtmf_admin_lock_hash,
+                ),
+                station_changed: existing.is_some_and(|old| old.settings.radio != settings.radio),
+                echo_telemetry: crate::link::EchoTelemetryPolicy::new(
+                    echo.telemetry,
+                    echo.telemetry_dynamic,
+                ),
+                echo_announcement: echo.announcement,
                 dtmf_macros: dtmf_macros.value,
                 dtmf_macro_limits,
                 remote_commands,
@@ -727,7 +883,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .map_err(|_| RuntimeError::Preparation)?;
         }
         self.pending_reload = Some(ReloadTransaction::new(
-            document,
+            ConfigurationSource::Document(document),
             warnings,
             candidates,
             events,
@@ -764,51 +920,20 @@ impl<A: Send, C: Send> Runtime<A, C> {
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
         let ReloadTransaction {
-            document,
+            source,
             warnings,
-            mut candidates,
+            candidates,
             events,
             scheduler,
             revision,
             generation_id,
-            changed,
             updated,
-            opened,
             ..
         } = transaction;
-        // Accepted native updates retain their reverse until every device is ready.
-        for name in &updated {
-            let node = self
-                .nodes
-                .iter_mut()
-                .find(|node| &node.name == name)
-                .expect("updated lease");
-            if node.device.finish_update(true).is_err() {
-                // Commit has no remaining preparation or device I/O. A broken
-                // host contract degrades safely instead of publishing mixed state.
-                for (index, node) in self.nodes.iter_mut().enumerate() {
-                    if changed.contains(&index) || updated.contains(&node.name) {
-                        stop_node(node, clock.now_ms, &mut self.effects);
-                    }
-                }
-                for &index in opened.iter().rev() {
-                    candidates[index]
-                        .device
-                        .iter_mut()
-                        .for_each(|device| device.close());
-                }
-                return Err(RuntimeError::Restore);
-            }
-        }
         // No fallible preparation remains: external registration is still gated to these stable hosts.
         let mut next = Vec::with_capacity(candidates.len());
         for mut candidate in candidates {
-            let identity = NodeId::new(&candidate.name).expect("configured station");
-            let echo = crate::config::EchoLinkSettings::resolve(&document, &identity)
-                .expect("validated account settings")
-                .value;
-            let echo_telemetry =
-                crate::link::EchoTelemetryPolicy::new(echo.telemetry, echo.telemetry_dynamic);
+            let command_owner = candidate.commands.take();
             let policy = AccessPolicy::new(
                 &candidate.settings.link_allow_nodes,
                 &candidate.settings.link_deny_nodes,
@@ -831,8 +956,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     .active
                     .expect("active node");
                 let handoff = old.bounds.device != candidate.bounds.device
-                    || (old.settings.radio != candidate.settings.radio
-                        && !updated.contains(&candidate.name));
+                    || (candidate.station_changed && !updated.contains(&candidate.name));
                 let removed = old.links.withdraw_removed(&candidate.links);
                 if !removed.is_empty() {
                     self.effects
@@ -840,10 +964,13 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 }
                 // Seed retained protection before a callback can acquire the replacement.
                 old.site.reconfigure(candidate.site);
-                candidate
-                    .control
-                    .telemetry
-                    .set_site_inhibit(old.site.transmit_inhibited());
+                candidate.control.telemetry.rx_mute().store(
+                    old.control.telemetry.rx_mute().load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+                candidate.control.telemetry.set_site_inhibit(
+                    old.failed_station_replacement || old.site.transmit_inhibited(),
+                );
                 old.host
                     .control()
                     .publish_prepared(candidate.generation, clock.now_ms)
@@ -856,18 +983,14 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 }
                 candidate.control.prior_activity_ms = old.control.activity_ms();
                 old.retired_control = Some(std::mem::replace(&mut old.control, candidate.control));
+                old.programs.retire_profile();
+                old.command_messages = None;
                 old.links
                     .reconfigure(policy, commands, Some(candidate.links));
-                old.links.configure_admin(
-                    &candidate.settings.dtmf_admin_unlock_hash,
-                    &candidate.settings.dtmf_admin_lock_hash,
-                    candidate.settings.dtmf_admin_timeout_ms,
-                );
                 old.links
-                    .configure_remote(
-                        &candidate.remote_commands.prefix,
-                        candidate.remote_commands.access,
-                    )
+                    .bind_admin(candidate.admin, candidate.settings.dtmf_admin_timeout_ms);
+                old.links
+                    .configure_radio_owner(candidate.remote_commands.as_ref())
                     .expect("prevalidated remote command family");
                 old.links
                     .configure_macros(candidate.dtmf_macros, candidate.dtmf_macro_limits)
@@ -876,27 +999,23 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 old.bounds = candidate.bounds;
                 old.status = candidate.status;
                 old.time_format = candidate.time_format;
-                old.echo_telemetry = echo_telemetry;
+                old.echo_telemetry = candidate.echo_telemetry;
+                old.echo_announcement = candidate.echo_announcement;
                 next.push(old);
             } else {
                 let mut links =
                     NodeLinkControl::new(&candidate.name, policy, commands, Some(candidate.links))
                         .expect("validated node identity");
-                links.configure_admin(
-                    &candidate.settings.dtmf_admin_unlock_hash,
-                    &candidate.settings.dtmf_admin_lock_hash,
-                    candidate.settings.dtmf_admin_timeout_ms,
-                );
+                links.bind_admin(candidate.admin, candidate.settings.dtmf_admin_timeout_ms);
                 links
-                    .configure_remote(
-                        &candidate.remote_commands.prefix,
-                        candidate.remote_commands.access,
-                    )
+                    .configure_radio_owner(candidate.remote_commands.as_ref())
                     .expect("prevalidated remote command family");
                 links
                     .configure_macros(candidate.dtmf_macros, candidate.dtmf_macro_limits)
                     .expect("prevalidated macro namespace");
                 next.push(RuntimeNode {
+                    programs: Default::default(),
+                    command_messages: None,
                     name: candidate.name,
                     site: crate::site::SiteController::new(candidate.site),
                     settings: candidate.settings,
@@ -904,6 +1023,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     host: NodeHost::new(candidate.generation),
                     device: candidate.device.expect("prepared new lease"),
                     device_open: true,
+                    failed_station_replacement: false,
                     pending_peer_cleanup: false,
                     links,
                     control: candidate.control,
@@ -911,8 +1031,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     status: candidate.status,
                     time_format: candidate.time_format,
                     group_announcements: Vec::new(),
-                    echo_telemetry,
+                    echo_telemetry: candidate.echo_telemetry,
+                    echo_announcement: candidate.echo_announcement,
                 });
+            }
+            if let Some(commands) = command_owner {
+                commands.install(next.last_mut().expect("published candidate"));
             }
         }
         for mut removed in self.nodes.drain(..) {
@@ -922,7 +1046,16 @@ impl<A: Send, C: Send> Runtime<A, C> {
         self.nodes = next;
         self.events = events;
         self.scheduler = Some(scheduler);
-        self.document = document;
+        match source {
+            ConfigurationSource::Document(document) => {
+                self.document = document;
+                self.modular = None;
+            }
+            ConfigurationSource::Modular(configuration) => {
+                self.document = ConfigDocument::default();
+                self.modular = Some(configuration);
+            }
+        }
         self.warnings = warnings;
         self.revision = revision;
         self.generation = generation_id;
@@ -1193,52 +1326,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
             let Some(first) = node.control.telemetry.take_message_request() else {
                 continue;
             };
-            let values = (|| {
-                let (civil, _) = clock.civil.ok_or(RuntimeError::Clock)?;
-                let site = node.site.snapshot(clock.now_ms);
-                let (mut links, identity) =
-                    render::direct_status(node.links.manager(), &node.control.catalog)?;
-                links.tts = render::telemetry_speech(&links.tts, &[&identity]);
-                Ok::<_, RuntimeError>(super::MessageValueSnapshot {
-                    civil,
-                    time_format: TimeFormat::try_from(node.time_format)
-                        .map_err(|_| RuntimeError::Preparation)?,
-                    node: node.name.clone(),
-                    callsign: node.settings.callsign.clone(),
-                    links,
-                    sensors: site
-                        .sensors
-                        .into_iter()
-                        .map(|(name, sensor)| {
-                            (
-                                name,
-                                crate::site::Observation {
-                                    value: sensor.current.value.map(MessageArgument::Number),
-                                    observed_at_ms: sensor.current.observed_at_ms,
-                                    quality: sensor.current.quality,
-                                },
-                            )
-                        })
-                        .collect(),
-                    inputs: site
-                        .inputs
-                        .into_iter()
-                        .map(|(name, input)| {
-                            (
-                                name,
-                                crate::site::Observation {
-                                    value: input
-                                        .value
-                                        .map(|value| MessageArgument::Number(f64::from(value))),
-                                    observed_at_ms: input.observed_at_ms,
-                                    quality: input.quality,
-                                },
-                            )
-                        })
-                        .collect(),
-                    time_remaining: None,
-                })
-            })();
+            let values =
+                node.message_values(clock, &node.control.catalog, &node.name, Default::default());
             let mut first = Some(first);
             // At most one visit per configured recipe per pump. Fast failed retries
             // cannot monopolize the host's other control work.
@@ -1358,6 +1447,14 @@ impl<A: Send, C: Send> Runtime<A, C> {
         index: usize,
         reply: Option<crate::link::PeerReply>,
     ) -> Result<(), RuntimeError> {
+        Self::queue_routed_message(node, index, reply, None)
+    }
+    fn queue_routed_message(
+        node: &mut RuntimeNode<A, C>,
+        index: usize,
+        reply: Option<crate::link::PeerReply>,
+        destination: Option<crate::controller::PlaybackDestination>,
+    ) -> Result<(), RuntimeError> {
         node.control.telemetry.reclaim().for_each(drop);
         if reply.as_ref().is_some_and(crate::link::PeerReply::ended)
             || !node.control.telemetry.can_queue_status()
@@ -1368,9 +1465,11 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .control
             .telemetry
             .prepare_message(index)
-            .map_err(|_| RuntimeError::Preparation)?
-            .reply_to(reply);
-        if let Some((policy, delivery)) = node.control.messages.items[index].playback() {
+            .map_err(|_| RuntimeError::Preparation)?;
+        if let Some((mut policy, delivery)) = node.control.messages.items[index].playback() {
+            if let Some(destination) = destination {
+                policy.destination = destination;
+            }
             let deadline = node
                 .control
                 .activity
@@ -1378,7 +1477,17 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 .saturating_add(delivery.maximum_wait_ms.saturating_mul(48));
             prepared = prepared
                 .with_playback_policy(policy)
-                .with_delivery(deadline, delivery);
+                .with_delivery(deadline, delivery)
+                .wait_for_unkey(reply);
+        } else if let Some(destination) = destination {
+            prepared = prepared
+                .with_playback_policy(crate::controller::PlaybackPolicy {
+                    destination,
+                    ..Default::default()
+                })
+                .wait_for_unkey(reply);
+        } else {
+            prepared = prepared.reply_to(reply);
         }
         // Only this serialized producer can consume the capacity admitted above.
         assert!(node.control.telemetry.queue_prepared_status(prepared));
@@ -1705,12 +1814,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 Message::PeerDisconnectedThirdParty { first, second }
             };
             let forms = if let Some((number, callsign)) = echo {
-                let identity = NodeId::new(&node.name).expect("configured station");
-                let account = crate::config::EchoLinkSettings::resolve(&self.document, &identity)
-                    .expect("validated account settings")
-                    .value;
                 node.control.catalog.format_echo_peer(
-                    account.announcement,
+                    node.echo_announcement,
                     number,
                     callsign,
                     &message,
@@ -1837,9 +1942,10 @@ impl<A: Send, C: Send> Runtime<A, C> {
         operation: &DigitOperation,
         now_ms: u64,
     ) {
-        if !operation
-            .remote
-            .is_some_and(|request| request.administrative())
+        if !operation.audible_source()
+            || !operation
+                .remote
+                .is_some_and(|request| request.administrative())
         {
             return;
         }
@@ -1931,7 +2037,10 @@ impl<A: Send, C: Send> Runtime<A, C> {
             self.tick_links(clock);
         }
         let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
-        let work = node.work().ok_or(RuntimeError::Rejected)?;
+        let work = match &operation.action_permit {
+            Some(permit) => permit.generation.reserve(),
+            None => node.work().ok_or(RuntimeError::Rejected)?,
+        };
         let reply = operation.reply.clone();
         let origin = operation.origin.clone();
         let mut effect = node
@@ -2149,6 +2258,7 @@ fn stop_node<A: Send, C: Send>(
     now_ms: u64,
     effects: &mut Vec<(String, LinkEffect)>,
 ) {
+    node.programs = Default::default();
     let before = node.status(now_ms);
     node.host.control().stop(now_ms).ok();
     let peers = node.links.close();

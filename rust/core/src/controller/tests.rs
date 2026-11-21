@@ -3752,3 +3752,19 @@ fn empty_courtesy_override_falls_back_to_generic_media() {
     node.process_audio(false, false, &[], &mut output);
     assert_eq!(output, [0.4]);
 }
+
+#[test]
+fn nonselected_qualified_peer_resets_scheduler_continuous_idle_without_keying() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.process_audio_outputs(false, false, true, &[], &mut [0.0; 48], None);
+    assert!(node.activity().is_active());
+    node.process_audio(false, false, &[], &mut [0.0; 48]);
+    assert!(!node.activity().is_active());
+    assert_eq!(node.activity().last_sample(), Some(47));
+}

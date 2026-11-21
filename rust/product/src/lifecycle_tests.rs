@@ -10,6 +10,25 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
+impl Engine {
+    /// Inspect a published generation once the core reload has left its publication fence.
+    pub(crate) fn fixture_published_generation(&self, revision: &str, port: &str) -> Option<u64> {
+        if self.reloading.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut host = self.host.lock().unwrap();
+        let host = host.as_mut()?;
+        if !host.modular_revision_matches(revision) {
+            return None;
+        }
+        Some(host.runtime.node(port)?.command_work()?.id())
+    }
+
+    pub(crate) fn start_fixture_ticker(self: &Arc<Self>) {
+        self.start_ticker().unwrap();
+    }
+}
+
 fn descriptor() -> &'static abi::rptadv_product_descriptor_v1 {
     unsafe { &*rptadv_product_descriptor_v1() }
 }
@@ -1432,7 +1451,7 @@ fn incoming_identity_rejects_foreign_headers_and_limits_before_borrowing_spans()
 #[test]
 fn phone_local_binding_request_preserves_configured_names_and_the_63_byte_limit() {
     let long = "a".repeat(63);
-    for local in ["local-repeater", long.as_str(), "répéteur"] {
+    for local in ["local-repeater", long.as_str(), "rÃƒÆ’Ã‚Â©pÃƒÆ’Ã‚Â©teur"] {
         let mut request = crate::fixture::incoming_request(
             local.as_ptr().cast(),
             local.len(),
@@ -2057,4 +2076,289 @@ fn ticker_route_and_peer_digits_drive_serialized_background_work() {
     drop(call);
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
     crate::fixture::RADIO_READY.store(0, Ordering::Release);
+}
+
+#[test]
+fn registered_uuid_engine_uses_account_at_native_dial_and_preauthorization_boundary() {
+    use std::sync::Mutex;
+    static LOCAL: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+    unsafe extern "C" fn capture(
+        _: *mut c_void,
+        _: *const std::ffi::c_char,
+        _: usize,
+        local: *const std::ffi::c_char,
+        n: usize,
+        _: usize,
+        _: abi::rptadv_current_v1,
+        _: *mut c_void,
+        out: *mut *mut c_void,
+    ) -> i32 {
+        *LOCAL.lock().unwrap() = unsafe { std::slice::from_raw_parts(local.cast(), n) }.to_vec();
+        unsafe { *out = std::ptr::null_mut() };
+        -1
+    }
+    const SLOT: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    let cfg =
+        format!("[{SLOT}]\nradio_channel=usb\nduplex=full\nlink_static_directory_file=fixture\n");
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.peer_dial = Some(capture);
+    assert_eq!(
+        unsafe {
+            descriptor().start.unwrap()(
+                &table,
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                cfg.as_ptr().cast(),
+                cfg.len(),
+            )
+        },
+        0
+    );
+    let (engine, call) = selected().unwrap();
+    for account in [Some(1000), None] {
+        engine
+            .run(move |h| {
+                crate::host::tests::commands::install(
+                    h,
+                    SLOT,
+                    "North ÃƒÆ’Ã‚Â©",
+                    account,
+                    serde_json::json!({}),
+                    &[],
+                );
+                Ok(())
+            })
+            .unwrap();
+        let authorization = unsafe {
+            descriptor().authorize_incoming.unwrap()(
+                &crate::fixture::incoming_request(
+                    c"1000".as_ptr(),
+                    4,
+                    c"2000".as_ptr(),
+                    4,
+                    c"127.0.0.1".as_ptr(),
+                    9,
+                ),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(authorization == 0, account.is_some());
+        LOCAL.lock().unwrap().clear();
+        let effect = engine
+            .operation(SLOT, operation(LinkAction::Transceive, "3000"))
+            .unwrap();
+        assert!(matches!(&effect, LinkEffect::Connect(_)));
+        let _ = engine.effect(SLOT.into(), effect, engine.revision.load(Ordering::Acquire));
+        assert_eq!(
+            LOCAL.lock().unwrap().as_slice(),
+            if account.is_some() {
+                b"1000".as_slice()
+            } else {
+                b""
+            }
+        );
+    }
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn modular_radio_preparation_survives_serial_executor_migration_and_expires_with_its_ticket() {
+    use rpt_advanced_core::config::resources::{
+        PortKey,
+        candidate::{
+            CapturedResource, ModularCandidate, ResourceBinding, ResourceId, ResourceKind,
+            ResourceRegistry, ResourceScope,
+        },
+    };
+    use serde_json::json;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let site: ResourceId = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+    let port: ResourceId = "00000000-0000-4000-8000-000000000002".parse().unwrap();
+    let interface = ResourceBinding {
+        id: "00000000-0000-4000-8000-000000000003".parse().unwrap(),
+        scope: ResourceScope::Port(port),
+        kind: ResourceKind::Interface,
+    };
+    let identifier = ResourceBinding {
+        id: "00000000-0000-4000-8000-000000000004".parse().unwrap(),
+        scope: ResourceScope::Site(site),
+        kind: ResourceKind::Identifier,
+    };
+    let registry = ResourceRegistry::with_members(
+        site,
+        &[(port, PortKey::new("back room"))],
+        &[interface],
+        &[(identifier, PortKey::new("station-id"))],
+    )
+    .unwrap();
+    let rows: Vec<_> = registry
+        .bindings()
+        .map(|binding| {
+            let mut row = json!({"id":binding.id.to_string(), "kind":binding.kind.as_str(),
+            "configuration":{"name":"Site","inherit_from":null}});
+            if binding.id == port {
+                row["key"] = json!("back room");
+                row["configuration"] = json!({"name":"Local","inherit_from":"site","enabled":true});
+            }
+            if binding == interface {
+                row["configuration"] =
+                    json!({"audio":{"device_identifier":"test-only missing device"}});
+            }
+            if binding == identifier {
+                row["key"] = json!("station-id");
+                row["configuration"] = json!({
+                    "morse":{"text":"CQ TEST"}, "timing":{"interval_ms":10},
+                    "regardless_of_activity":true
+                });
+            }
+            (binding, serde_json::to_vec(&row).unwrap())
+        })
+        .collect();
+    let capture: Vec<_> = rows
+        .iter()
+        .map(|(binding, json)| CapturedResource {
+            binding: *binding,
+            json,
+        })
+        .collect();
+    let candidate = ModularCandidate::assemble(&registry, &capture).unwrap();
+    let inputs = Arc::new(crate::management::ProfileInputs {
+        messages: rpt_advanced_core::messages::InstalledMessageSources::capture(),
+        interfaces: Default::default(),
+    });
+    let configuration =
+        crate::management::PreparedConfiguration::prepare(&candidate, Some("UTC"), &inputs)
+            .unwrap();
+
+    let domain = configuration.runtime();
+    {
+        use rpt_advanced_core::config::resources::profiles::equipment::{
+            BoundInterface, InterfaceCapability,
+        };
+        let station = domain.radio.port(port).unwrap();
+        let declared = |id, property: &str, kind| {
+            crate::site::radio::declared_pin_capability(
+                station,
+                &BoundInterface {
+                    port: id,
+                    key: PortKey::new("back room"),
+                    property: property.into(),
+                },
+                kind,
+            )
+        };
+        assert_eq!(
+            declared(port, "/gpio/pins/2", ResourceKind::Input),
+            Some(InterfaceCapability::Boolean)
+        );
+        assert_eq!(declared(port, "/gpio/pins/2", ResourceKind::Output), None);
+        assert_eq!(declared(port, "/gpio/pins/3", ResourceKind::Input), None);
+        assert_eq!(declared(site, "/gpio/pins/2", ResourceKind::Input), None);
+        assert_eq!(declared(port, "/gpio/pins/02", ResourceKind::Input), None);
+    }
+
+    let node = domain.station_settings(port).unwrap();
+    assert_eq!(node.channel, port.to_string());
+    assert_eq!(
+        node.language,
+        domain.scopes[&ResourceScope::Port(port)].metadata.language
+    );
+    assert_eq!(
+        node.hang_ms,
+        u64::from(domain.radio.port(port).unwrap().signals.tx.hang_ms)
+    );
+    assert!(node.iax_registration_url.is_empty() && node.statpost_url.is_empty());
+    assert!(node.link_commands.is_empty());
+    assert!(node.dtmf_admin_unlock_hash.is_empty() && node.dtmf_admin_lock_hash.is_empty());
+    assert!(domain.station_settings(site).is_err());
+    let derived = &domain.scopes[&ResourceScope::Port(port)].media;
+    let original = &derived.recipes[&("identifiers", "station-id".into())];
+    let mut count = 0;
+    let (mut controller, mut controls) = domain
+        .prepare_station_controller(port, 7, |binding, name, recipe| {
+            assert_eq!(binding, identifier);
+            assert_eq!(name, "station-id");
+            assert!(std::ptr::eq(recipe, original));
+            count += 1;
+            Ok(27)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+    controller.process_audio(false, false, &[], &mut [0.0; 960]);
+    let attempt = controls
+        .take_message_request()
+        .expect("scheduled station ID reached the control owner");
+    assert_eq!(attempt.attempt.generation, 7);
+    assert_eq!(attempt.content_index, 27);
+    assert!(
+        domain
+            .prepare_station_controller(site, 7, |_, _, _| unreachable!())
+            .is_err()
+    );
+
+    assert_eq!(rptadv_product_stop(), 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start("[1000]\nnode_enabled=no\n") }, 0);
+    let (engine, call) = selected().unwrap();
+    drop(call);
+    let opens = crate::fixture::RADIO_OPENS.load(Ordering::Acquire);
+    let stage =
+        |engine: &Arc<Engine>| engine.prepare_radio_plans(Arc::clone(configuration.runtime()));
+    crate::fixture::CONTROL_SUBMIT_MODE.store(1, Ordering::Release);
+    assert!(matches!(stage(&engine), Err(RuntimeError::Rejected)));
+    crate::fixture::CONTROL_REVISION.store(
+        ptr::from_ref(&engine.revision).cast_mut(),
+        Ordering::Release,
+    );
+    crate::fixture::CONTROL_SUBMIT_MODE.store(3, Ordering::Release);
+    assert!(matches!(stage(&engine), Err(RuntimeError::Rejected)));
+    let ticket = stage(&engine).unwrap();
+    assert!(matches!(stage(&engine), Err(RuntimeError::Busy)));
+    std::thread::scope(|threads| {
+        let engine = engine.clone();
+        let key = ticket.clone();
+        threads
+            .spawn(move || {
+                engine.run(move |host| {
+                    let plan = host.staged_radio(&key, port)?;
+                    let station = &plan.station;
+                    assert_eq!(station.port_id(), port);
+                    assert!(station.inspect().is_ok());
+                    let mut peer = plan.incoming.prepare_peer(8000, 160).unwrap();
+                    let mut pcm = [100i16; 160];
+                    peer.process(&mut pcm).unwrap();
+                    assert_eq!(pcm, [100i16; 160]);
+                    Ok(())
+                })
+            })
+            .join()
+            .unwrap()
+            .unwrap();
+    });
+    drop(ticket);
+    let replacement = stage(&engine).unwrap();
+    let site: PreparedSite = engine
+        .prepare_modular_sites(configuration.runtime(), &replacement)
+        .unwrap();
+    engine.begin_modular_sites(site).unwrap();
+    let retired = engine
+        .run(|host| {
+            assert!(host.site_barrier(0)?);
+            Ok(host.abort_sites())
+        })
+        .unwrap();
+    drop(retired);
+    assert_eq!(crate::fixture::RADIO_OPENS.load(Ordering::Acquire), opens);
+    assert_eq!(rptadv_product_stop(), 0);
+    drop(replacement);
 }

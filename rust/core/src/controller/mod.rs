@@ -117,6 +117,7 @@ struct ProgramSample<'a> {
 /// Processing consumes elapsed native samples, never callback count or wall-clock time.
 /// All configured media remains allocated until this controller is dropped off the audio path.
 pub struct NodeController {
+    configuration_inhibit: Option<Arc<AtomicBool>>,
     settings: ControllerSettings,
     remote_non_fm: bool,
     remote_unqualified_open: bool,
@@ -157,6 +158,10 @@ pub struct NodeController {
 }
 
 impl NodeController {
+    pub(crate) fn bind_configuration_gate(&mut self, gate: Arc<AtomicBool>) {
+        self.configuration_inhibit = Some(gate);
+    }
+
     /// Apply the rig's non-FM policy on the TX owner. Linked input may interrupt
     /// open receive; that receiver never repeats into its own transmitter.
     pub fn set_remote_non_fm(&mut self, enabled: bool) {
@@ -259,6 +264,7 @@ impl NodeController {
         control.parrot_enabled = settings.parrot_enabled;
         Ok((
             Self {
+                configuration_inhibit: None,
                 settings,
                 remote_non_fm: false,
                 remote_unqualified_open: false,
@@ -365,8 +371,20 @@ impl NodeController {
         }
     }
 
+    /// Qualify local audio/keying without changing the receiver/digit detector's raw input.
+    pub fn admits_local_receive(&self, qualified: bool) -> bool {
+        self.telemetry
+            .rx_qualified
+            .store(qualified, Ordering::Release);
+        qualified && self.receive_epoch() & 1 == 0
+    }
+    /// Epoch of the actual local operational receive gate.
+    pub fn receive_epoch(&self) -> u64 {
+        self.telemetry.rx_muted.load(Ordering::Acquire)
+    }
     /// Apply a sample-free receive edge without advancing playback or elapsed time.
     pub fn process_event(&mut self, receiving: bool, linked: bool) -> bool {
+        let receiving = self.admits_local_receive(receiving);
         self.process_event_with_activity(receiving, linked, receiving || linked)
     }
 
@@ -403,6 +421,7 @@ impl NodeController {
         link_audio: &[f32],
         audio: &mut [f32],
     ) -> bool {
+        let receiving = self.admits_local_receive(receiving);
         self.process_audio_outputs(
             receiving,
             linked,
@@ -702,6 +721,10 @@ impl NodeController {
             self.telemetry.held_status = true;
         }
         let idle = self.now.saturating_sub(self.last_activity);
+        // Include every qualified peer, even when group priority selects another for TX.
+        if receive || source_activity {
+            self.activity.publish(self.now);
+        }
         if receive {
             self.ctcss_hang_until = self
                 .now
@@ -712,7 +735,6 @@ impl NodeController {
                 self.suppress_release = false;
             }
             self.last_activity = self.now;
-            self.activity.publish(self.now);
             self.identifiers.activity();
         }
         if receiving && !self.receiver {
@@ -760,7 +782,11 @@ impl NodeController {
         if source_activity && self.telemetry.parrot_pending() {
             self.telemetry.discard_pending_parrot();
         }
-        let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire);
+        let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire)
+            || self
+                .configuration_inhibit
+                .as_ref()
+                .is_some_and(|gate| gate.load(Ordering::Acquire));
         if self.timeout.blocked() {
             return self.timeout_sample(
                 receive || source_activity,
@@ -784,7 +810,7 @@ impl NodeController {
                 .telemetry
                 .status
                 .as_ref()
-                .is_some_and(|media| media.3.is_some() && media.7.is_none());
+                .is_some_and(PreparedMedia::private_reply);
         if receive
             || (!peer_before && matches!(active_before, Some(Source::Status | Source::Courtesy(_))))
         {
@@ -844,8 +870,15 @@ impl NodeController {
                 .telemetry
                 .status
                 .as_ref()
-                .is_some_and(|media| media.3.is_some() && media.7.is_none());
-        let local_telemetry = self.telemetry.active.is_some() && !peer_status;
+                .is_some_and(PreparedMedia::private_reply);
+        let peers_only = self.telemetry.active == Some(Source::Status)
+            && self
+                .telemetry
+                .status
+                .as_ref()
+                .and_then(|m| m.7)
+                .is_some_and(|p| p.destination == PlaybackDestination::Peers);
+        let local_telemetry = self.telemetry.active.is_some() && !peer_status && !peers_only;
         let busy = receive
             || source_activity
             || pending_status
@@ -1004,8 +1037,9 @@ impl NodeController {
         {
             self.release_pending = false;
         }
-        let telemetry_audio = made != 0 && !peer_status;
-        let message_audio = exempt && (telemetry_audio || (continuing_media && !peer_status));
+        let local_output = !peer_status && !peers_only;
+        let telemetry_audio = made != 0 && local_output;
+        let message_audio = exempt && (telemetry_audio || (continuing_media && local_output));
         let suppress_repeat = policy.is_some_and(|policy| !policy.repeat_during_playback)
             && (made != 0 || continuing_media);
         let short_tail = matches!(
@@ -1119,7 +1153,7 @@ impl NodeController {
         } else {
             0.0
         };
-        let telemetry = if peer_status {
+        let telemetry = if !local_output {
             0.0
         } else {
             telemetry_sample[0] * gain
@@ -1137,8 +1171,9 @@ impl NodeController {
                 *reply = PeerReplySample {
                     suppress_repeat,
                     broadcast: (made != 0
+                        && !peer_status
                         && policy.is_some_and(|policy| {
-                            policy.destination == PlaybackDestination::LocalAndLinks
+                            policy.destination != PlaybackDestination::Local
                         }))
                     .then_some(telemetry_sample[0] * gain),
                     ..Default::default()

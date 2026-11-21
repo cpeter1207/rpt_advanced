@@ -1,0 +1,48 @@
+{
+  "operation": "set",
+  "site": {
+    "command": {
+      "terminator": "#",
+      "inactivity_timeout_ms": 3000,
+      "mappings": {
+        "permanent_transceive": {
+          "command": "*813",
+          "protected": true,
+          "action": "connect_permanent",
+          "mode": "transceive"
+        },
+        "restore_permanent": {
+          "command": "*903",
+          "protected": true,
+          "action": "call_macro",
+          "macro": "permanent_links"
+        },
+        "status": {
+          "command": "*70",
+          "protected": false,
+          "action": "link_status"
+        },
+        "rx_mute_toggle": {
+          "command": "*99",
+          "protected": false,
+          "action": "rx_mute_toggle",
+          "target": "phone_patch"
+        }
+      },
+      "macros": {
+        "permanent_links": {
+          "actions": [
+            {
+              "action": "resume_permanent_links"
+            },
+            {
+              "action": "connect_permanent",
+              "mode": "transceive",
+              "parameter": "2001"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

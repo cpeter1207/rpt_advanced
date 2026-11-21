@@ -8,4 +8,5 @@
 #include <rate_adjusting_pcm_ring3/rate_adjusting_pcm_ring3.h>
 #include <rptadv_samplerate_adapter/rptadv_samplerate_adapter.h>
 #include <rptadvradio/rptadvradio.h>
+#include <rptadv_ffmpeg_adapter/rptadv_ffmpeg_adapter.h>
 #include <usbradioplus_product.h>

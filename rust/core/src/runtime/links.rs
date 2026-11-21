@@ -75,15 +75,35 @@ impl ConnectAttempt {
 
 fn pending_source_current(source: Option<&DigitOperation>, now_ms: Option<u64>) -> bool {
     source.is_none_or(|source| {
-        source.reply.as_ref().is_none_or(|reply| !reply.ended())
+        source
+            .action_permit
+            .as_ref()
+            .is_none_or(|p| p.current(now_ms))
+            && source.reply.as_ref().is_none_or(|reply| !reply.ended())
             && source.macro_permit.as_ref().is_none_or(|permit| {
                 now_ms.map_or_else(|| permit.active(), |now| permit.current_at(now))
             })
     })
 }
 
+/// Effective per-ingress receive state, sampled without altering its raw qualifiers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReceiveStatus {
+    /// Operator mute on this exact source.
+    pub muted: bool,
+    /// Healthy qualified reception after applying this source's mute.
+    pub active: bool,
+}
 /// Adapter-facing consequence of one serialized existing link command.
 pub enum LinkEffect {
+    /// The actual command owner can retain and poll this individual macro's result.
+    CommandQueued(super::CommandResponse),
+    /// Prepared reply for one authenticated caller, without controller TX or peer fanout.
+    PrivatePhoneMedia(PeerReply, Box<dyn crate::audio::PcmStreamReader>),
+    /// Complete source-owned command mode selection using the host's actual directory.
+    VerifyCommandTarget(DigitOperation),
+    /// Apply through the existing station site controller and its physical submission owner.
+    SiteCommand(crate::site::SiteCommand, super::dtmf::ActionPermit),
     /// Dial outside the serialized owner, then return the token before attaching resources.
     Connect(ConnectAttempt),
     /// Unpublished identities whose external channels/readers must be stopped and drained.
@@ -131,6 +151,7 @@ pub struct NodeLinkControl {
     policy: AccessPolicy,
     commands: DtmfCommands,
     peer_commands: Vec<(String, PeerReply, DtmfCommands)>,
+    ingress: Vec<(PeerIdentity, PeerReply)>,
     pending_source_retries: Vec<(String, DigitOperation)>,
     digit_sequence: i32,
     schedule: Option<LinkScheduler>,
@@ -208,6 +229,7 @@ impl NodeLinkControl {
             policy,
             commands: DtmfCommands::new(commands),
             peer_commands: Vec::new(),
+            ingress: Vec::new(),
             pending_source_retries: Vec::new(),
             digit_sequence: 0,
             schedule,
@@ -234,11 +256,180 @@ impl NodeLinkControl {
         self.peer_commands.clear();
         self.schedule = schedule;
     }
+    pub(super) fn install_profile(
+        &mut self,
+        profile: std::sync::Arc<super::dtmf::CommandProfile>,
+        generation: u64,
+    ) {
+        self.manager
+            .configure_wire_node(profile.network_node.as_deref());
+        self.commands.install_profile(profile, generation);
+        self.peer_commands.clear();
+    }
+    pub(super) fn radio_commands_enabled(&self) -> bool {
+        self.commands.radio_enabled()
+    }
+    pub(super) fn command_profile(&self) -> Option<&std::sync::Arc<super::dtmf::CommandProfile>> {
+        self.commands.profile()
+    }
+    pub(super) fn command_source(
+        &mut self,
+        source: &crate::command_language::CommandSource,
+    ) -> Option<&mut DtmfCommands> {
+        use crate::command_language::CommandSource;
+        match source {
+            CommandSource::Receiver => Some(&mut self.commands),
+            CommandSource::Connection { origin, reply } if !reply.ended() => self
+                .peer_commands
+                .iter_mut()
+                .find(|(name, token, _)| name == origin && token == reply)
+                .map(|(_, _, commands)| commands),
+            _ => None,
+        }
+    }
+    /// Observe only currently attached incarnations, including private callers on this port.
+    pub fn ingress_receive_status(&self) -> impl Iterator<Item = (&PeerIdentity, ReceiveStatus)> {
+        self.ingress
+            .iter()
+            .filter(|(_, token)| !token.ended())
+            .map(|(id, token)| {
+                let muted = token.rx_muted();
+                (
+                    id,
+                    ReceiveStatus {
+                        muted,
+                        active: !muted && token.active(),
+                    },
+                )
+            })
+    }
+    /// Register the confirmed transport endpoint after attachment or an acknowledged ring redirect.
+    /// Numeric peers must already be admitted. Only the phone attachment owner registers callers.
+    pub fn attach_ingress(
+        &mut self,
+        identity: PeerIdentity,
+        reply: PeerReply,
+    ) -> Result<(), AdmissionError> {
+        if !self.admitting || reply.ended() {
+            return Err(AdmissionError::Stale);
+        }
+        if let Some(call) = identity.call_id() {
+            if !reply.phone_authenticated()
+                || reply.phone_source().is_none_or(|p| p.call_id() != call)
+            {
+                return Err(AdmissionError::Denied);
+            }
+        } else if reply.phone_source().is_some()
+            || !identity.operator_alias().is_some_and(|alias| {
+                self.manager
+                    .snapshot()
+                    .iter()
+                    .any(|p| p.name == alias && !p.ended && !p.retrying)
+            })
+        {
+            return Err(AdmissionError::Denied);
+        }
+        self.ingress.retain(|(_, r)| !r.ended());
+        if let Some((_, r)) = self.ingress.iter().find(|(id, _)| id == &identity) {
+            return if *r == reply {
+                Ok(())
+            } else {
+                Err(AdmissionError::Stale)
+            };
+        }
+        self.ingress.push((identity, reply));
+        Ok(())
+    }
+    pub(super) fn toggle_ingress(
+        &mut self,
+        target: &crate::command_language::MuteTarget,
+        source: &crate::command_language::CommandSource,
+    ) -> Result<(), AdmissionError> {
+        use crate::command_language::{CommandSource, MuteTarget as T};
+        self.ingress.retain(|(_, r)| !r.ended());
+        let select = |s: &PeerReply| {
+            s.set_rx_muted(!s.rx_muted());
+            Ok(())
+        };
+        match target {
+            T::Port => Err(AdmissionError::Invalid),
+            T::Peer(input) => {
+                let id =
+                    PeerIdentity::from_operator(input).map_err(|_| AdmissionError::Identity)?;
+                select(
+                    &self
+                        .ingress
+                        .iter()
+                        .find(|(i, _)| i == &id)
+                        .ok_or(AdmissionError::Denied)?
+                        .1,
+                )
+            }
+            T::Peers(protocol) => {
+                let selected = || {
+                    self.ingress.iter().filter(|(i, _)| {
+                        i.protocol() != ProtocolId::Phone
+                            && protocol.is_none_or(|p| p == i.protocol())
+                    })
+                };
+                let muted = !selected().all(|(_, r)| r.rx_muted());
+                for (_, r) in selected() {
+                    r.set_rx_muted(muted);
+                }
+                Ok(())
+            }
+            T::PhonePatch(call) => {
+                if let CommandSource::Connection { reply, .. } = source
+                    && let Some(actual) = reply.phone_source()
+                {
+                    if !reply.phone_authenticated()
+                        || call
+                            .as_ref()
+                            .is_some_and(|p| p.as_str() != actual.call_id().to_string())
+                    {
+                        return Err(AdmissionError::Denied);
+                    }
+                    return select(reply);
+                }
+                let mut callers = self.ingress.iter().filter(|(i, r)| {
+                    r.phone_authenticated()
+                        && i.call_id().is_some_and(|id| {
+                            call.as_ref().is_none_or(|p| p.as_str() == id.to_string())
+                        })
+                });
+                let (_, reply) = callers.next().ok_or(AdmissionError::Denied)?;
+                if callers.next().is_some() {
+                    Err(AdmissionError::Denied)
+                } else {
+                    select(reply)
+                }
+            }
+        }
+    }
     /// Configure per-node Argon2id credentials; missing either digest disables admin DTMF.
     pub fn configure_admin(&mut self, unlock_hash: &str, lock_hash: &str, timeout_ms: u64) {
         self.commands
             .configure_admin(unlock_hash, lock_hash, timeout_ms);
         self.peer_commands.clear();
+    }
+    pub(super) fn bind_admin(
+        &mut self,
+        codes: Option<std::sync::Arc<super::dtmf::AdminCodes>>,
+        timeout_ms: u64,
+    ) {
+        self.commands.bind_admin(codes, timeout_ms);
+        self.peer_commands.clear();
+    }
+    /// Bind the prepared port radio independently of the legacy digit family.
+    pub fn configure_radio_owner(
+        &mut self,
+        owner: Option<&crate::remote_base_command::RemoteCommandConfiguration>,
+    ) -> Result<(), crate::command::CommandMapError> {
+        self.commands.configure_radio_owner(owner)?;
+        for (_, _, commands) in &mut self.peer_commands {
+            commands.configure_radio_owner(owner)?;
+        }
+        Ok(())
     }
     /// Install the shared radio's resolved DTMF family on every source collector.
     pub fn configure_remote(
@@ -299,6 +490,13 @@ impl NodeLinkControl {
     }
 
     fn macro_operation_current(&mut self, operation: &DigitOperation, now_ms: u64) -> bool {
+        if operation
+            .action_permit
+            .as_ref()
+            .is_some_and(|p| !p.current(Some(now_ms)))
+        {
+            return false;
+        }
         if operation.macro_permit.is_none() {
             return true;
         }
@@ -490,10 +688,12 @@ impl NodeLinkControl {
                 digit,
                 ..
             } => {
-                if !self.manager.remote_digit(remote, *digit, &self.policy) {
+                if !self.admits_digit_source(remote, &reply)
+                    || !self.manager.remote_digit(remote, *digit, &self.policy)
+                {
                     return Err(AdmissionError::Denied);
                 }
-                return Ok(if destination == &self.local {
+                return Ok(if self.manager.wire_node() == Some(destination.as_str()) {
                     self.source_digit(source, *digit, now_ms, reply)
                         .map_or(LinkEffect::None, LinkEffect::Digit)
                 } else {
@@ -552,6 +752,28 @@ impl NodeLinkControl {
             self.group_member(&remote),
         )
     }
+    pub(super) fn apply_event_groups(
+        &mut self,
+        local: &str,
+        events: &super::scheduler::EventScheduler,
+    ) -> bool {
+        let Some(links) = self.schedule.as_mut() else {
+            return false;
+        };
+        if let Some(profile) = self.commands.profile() {
+            profile.route_generation.is_some_and(|generation| {
+                events.apply_owned_group_holds(
+                    profile.public_key.as_str(),
+                    local,
+                    Some(profile.owner),
+                    generation,
+                    links,
+                )
+            })
+        } else {
+            events.apply_group_holds(local, links)
+        }
+    }
     pub(super) fn schedule(&self) -> Option<&LinkScheduler> {
         self.schedule.as_ref()
     }
@@ -581,6 +803,25 @@ impl NodeLinkControl {
             commands.feed(DigitEvent::Lost);
         }
     }
+    /// Adapt the legacy session timer only for legacy command profiles.
+    pub fn legacy_peer_boundary(
+        &mut self,
+        remote: &str,
+        now_ms: u64,
+        reply: PeerReply,
+    ) -> Option<DigitOutcome> {
+        if self.command_profile().is_some() {
+            return None;
+        }
+        self.peer_digit(remote, '#', now_ms, reply)
+    }
+    fn admits_digit_source(&self, remote: &str, reply: &PeerReply) -> bool {
+        !reply.ended()
+            && (self.command_profile().is_none()
+                || self.ingress.iter().any(|(id, token)| {
+                    id.operator_alias().as_deref() == Some(remote) && token == reply
+                }))
+    }
     /// Interpret a peer digit only while its direct connection and current policy allow it.
     pub fn peer_digit(
         &mut self,
@@ -589,7 +830,9 @@ impl NodeLinkControl {
         now_ms: u64,
         reply: PeerReply,
     ) -> Option<DigitOutcome> {
-        if reply.ended() || !self.manager.remote_digit(remote, digit, &self.policy) {
+        if !self.admits_digit_source(remote, &reply)
+            || !self.manager.remote_digit(remote, digit, &self.policy)
+        {
             return None;
         }
         self.source_digit(remote, digit, now_ms, reply)
@@ -612,7 +855,12 @@ impl NodeLinkControl {
             return None;
         }
         self.source_digit(&source.call_id().to_string(), digit, now_ms, reply)
-            .filter(|outcome| !matches!(outcome, DigitOutcome::Regenerate(_)))
+            .filter(|outcome| {
+                !matches!(
+                    outcome,
+                    DigitOutcome::Regenerate(_) | DigitOutcome::ReceivedDigit(..)
+                )
+            })
     }
     /// Retire an actual private ingress before reclaiming its collectors and grants.
     /// Already queued work retains this ended token and fails its dispatch fence.
@@ -637,8 +885,10 @@ impl NodeLinkControl {
         } else {
             // Idle link digits need no collector. Bound claimed origins per ingress
             // without evicting another source's command, selection or admin state.
-            if digit != '*' {
-                return Some(DigitOutcome::Regenerate(digit));
+            if self.commands.profile().is_none() && digit != '*' {
+                return reply
+                    .regeneration_origin()
+                    .map(|origin| DigitOutcome::ReceivedDigit(digit, origin));
             }
             if self
                 .peer_commands
@@ -653,13 +903,20 @@ impl NodeLinkControl {
                 .push((origin.into(), reply.clone(), self.commands.for_source()));
             self.peer_commands.len() - 1
         };
-        self.peer_commands[index]
-            .2
-            .feed(DigitEvent::Digit { digit, now_ms })
-            .map(|outcome| Self::source_outcome(outcome, origin, reply))
+        let commands = &mut self.peer_commands[index].2;
+        let outcome = commands.feed(DigitEvent::Digit { digit, now_ms });
+        match outcome {
+            Some(DigitOutcome::Regenerate(symbol)) => reply
+                .regeneration_origin()
+                .map(|token| DigitOutcome::ReceivedDigit(symbol, token)),
+            other => other.map(|o| Self::source_outcome(o, origin, reply)),
+        }
     }
     /// Attach source identity only to outcomes that carry a command.
     fn source_outcome(mut outcome: DigitOutcome, origin: &str, reply: PeerReply) -> DigitOutcome {
+        if let DigitOutcome::Mapped(input) = &mut outcome {
+            input.connection = Some((origin.to_owned(), reply.clone()));
+        }
         if let DigitOutcome::MacroStopped { reply: target } = &mut outcome {
             *target = Some(reply.clone());
         }
@@ -676,10 +933,30 @@ impl NodeLinkControl {
         self.peer_commands
             .retain(|(_, source, commands)| !source.ended() && commands.retains_state(now_ms));
     }
+    /// Complete overdue local modular input before collecting the next RF event.
+    pub fn expire_receiver_digits(&mut self, at: u64) -> Option<DigitOutcome> {
+        self.commands.profile()?;
+        self.commands.expire(at)
+    }
+    /// Complete overdue candidates on this exact transport before feeding its next received symbol.
+    pub fn expire_connection_digits(&mut self, source: &PeerReply, at: u64) -> Vec<DigitOutcome> {
+        if source.ended() {
+            return Vec::new();
+        }
+        self.peer_commands
+            .iter_mut()
+            .filter(|(_, r, _)| r == source)
+            .filter_map(|(name, reply, commands)| {
+                commands
+                    .expire(at)
+                    .map(|o| Self::source_outcome(o, name, reply.clone()))
+            })
+            .collect()
+    }
     /// Expire peer commands independently, preserving their exact reply connection.
     pub fn expire_peer_digits(&mut self, now_ms: u64) -> Vec<DigitOutcome> {
         self.peer_commands.retain(|(_, source, _)| !source.ended());
-        let outcomes = self
+        let mut outcomes: Vec<_> = self
             .peer_commands
             .iter_mut()
             .filter_map(|(origin, reply, commands)| {
@@ -688,6 +965,9 @@ impl NodeLinkControl {
                     .map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
             })
             .collect();
+        if self.commands.profile().is_some() {
+            outcomes.extend(self.commands.expire(now_ms));
+        }
         self.retain_peer_commands(now_ms);
         outcomes
     }
@@ -790,7 +1070,7 @@ impl NodeLinkControl {
                 if !self.policy.allows(&remote, true) {
                     return Err(AdmissionError::Denied);
                 }
-                if remote == self.local {
+                if self.manager.is_wire_self(&remote) {
                     return Err(AdmissionError::Loop);
                 }
                 let mode = match operation.command.action {
@@ -806,6 +1086,18 @@ impl NodeLinkControl {
                         | LinkAction::PermanentLocalMonitor
                         | LinkAction::PermanentTransceive
                 );
+                if permanent && operation.action_permit.is_some() {
+                    if self
+                        .schedule
+                        .as_ref()
+                        .is_some_and(|s| s.owns_target(&remote))
+                    {
+                        return Err(AdmissionError::Loop);
+                    }
+                    if self.manager.active_permanent(&remote, mode) {
+                        return Ok(LinkEffect::None);
+                    }
+                }
                 if permanent
                     && !self.manager.reaches(&remote, false)
                     && self.manager.resume_permanent_retry(&remote, mode, now_ms)
@@ -816,7 +1108,8 @@ impl NodeLinkControl {
                     return Err(AdmissionError::Loop);
                 }
                 LinkEffect::Connect(ConnectAttempt {
-                    pending_source: (operation.macro_permit.is_some()
+                    pending_source: (operation.action_permit.is_some()
+                        || operation.macro_permit.is_some()
                         || operation
                             .reply
                             .as_ref()
@@ -908,7 +1201,7 @@ impl NodeLinkControl {
                 {
                     return Err(AdmissionError::UnsupportedRoute);
                 }
-                if remote == self.local
+                if self.manager.is_wire_self(&remote)
                     || !self.policy.allows(&remote, true)
                     || (operation.digit.is_none() && !directory_verified)
                 {
@@ -916,7 +1209,11 @@ impl NodeLinkControl {
                 }
                 let message = Protocol::RemoteDigit {
                     destination: remote.clone(),
-                    source: self.local.clone(),
+                    source: self
+                        .manager
+                        .wire_node()
+                        .ok_or(AdmissionError::Denied)?
+                        .to_owned(),
                     sequence: self.digit_sequence.wrapping_add(1),
                     digit: operation.digit.unwrap_or('*'),
                 };
@@ -1218,6 +1515,7 @@ impl NodeLinkControl {
     /// Gate old dials and return every external identity to stop/drain before host reclamation.
     pub fn close(&mut self) -> Vec<String> {
         self.admitting = false;
+        self.ingress.clear();
         self.commands.cancel_macro();
         for (_, _, commands) in &mut self.peer_commands {
             commands.cancel_macro();

@@ -3,7 +3,7 @@ use crate::{Error, services::PeerIo};
 use rpt_advanced_core::{
     audio::{PcmStreamReader, Playback, PlaybackOutcome},
     config::PhoneMailbox,
-    link::{PeerReply, PeerSignals, PhoneCallId, PhoneSource},
+    link::{MailboxId, PeerReply, PeerSignals, PhoneCallId, PhoneSource},
 };
 use std::{
     collections::VecDeque,
@@ -59,11 +59,21 @@ impl PrivatePhoneReply {
     }
 }
 
+/// Public mailbox identity retained by one authenticated private call.
+pub struct CallerMailbox {
+    /// Exact configured number, including leading zeros.
+    pub id: MailboxId,
+    /// Configured first name.
+    pub first_name: String,
+    /// Configured callsign.
+    pub callsign: String,
+}
+
 struct Call {
     _io: PeerIo,
     source: PhoneSource,
     signals: PeerSignals,
-    mailbox: Option<PhoneMailbox>,
+    mailbox: Option<CallerMailbox>,
     attempts: u8,
     login_deadline_ms: u64,
     replies: VecDeque<PrivatePhoneReply>,
@@ -187,6 +197,53 @@ impl PhoneCalls {
         pin: &str,
         now_ms: u64,
     ) -> Result<PhoneLogin, Error> {
+        self.authenticate_with(source, reply, now_ms, || {
+            let record = mailboxes
+                .iter()
+                .find(|record| record.id.as_str() == mailbox)?;
+            record.verify_pin(pin).then(|| CallerMailbox {
+                id: record.id.clone(),
+                first_name: record.first_name.clone(),
+                callsign: record.callsign.clone(),
+            })
+        })
+    }
+
+    /// Verify against the effective whole mailbox and its declaring private slot.
+    /// The borrowed verifier is the current generation's authenticated credential owner.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn authenticate_scoped<'s>(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        mailboxes: &rpt_advanced_core::config::resources::profiles::mailbox::ScopedMailboxes,
+        selected_pin: impl FnOnce(
+            rpt_advanced_core::config::resources::candidate::ResourceId,
+        )
+            -> Option<&'s rptadv_peer_support::sealed_records::SecretBytes>,
+        (number, pin): (&str, &str),
+        now_ms: u64,
+    ) -> Result<PhoneLogin, Error> {
+        use rpt_advanced_core::config::verify_mailbox_pin;
+        self.authenticate_with(source, reply, now_ms, || {
+            let record = mailboxes.effective.get(number)?;
+            let secret = selected_pin(record.binding.id)?;
+            let phc = std::str::from_utf8(secret.expose_bytes()).ok()?;
+            verify_mailbox_pin(phc, pin).then(|| CallerMailbox {
+                id: record.number.clone(),
+                first_name: record.first_name.clone(),
+                callsign: record.callsign.clone(),
+            })
+        })
+    }
+
+    fn authenticate_with(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        now_ms: u64,
+        verify: impl FnOnce() -> Option<CallerMailbox>,
+    ) -> Result<PhoneLogin, Error> {
         let call = self.current(source, reply)?;
         if call.mailbox.is_some() {
             return Err(Error::Admission);
@@ -196,11 +253,7 @@ impl PhoneCalls {
             return Ok(PhoneLogin::Closed);
         }
         call.attempts += 1;
-        let record = mailboxes
-            .iter()
-            .find(|record| record.id.as_str() == mailbox)
-            .filter(|record| record.verify_pin(pin));
-        let Some(record) = record else {
+        let Some(record) = verify() else {
             if call.attempts >= 3 {
                 call.signals.end();
                 return Ok(PhoneLogin::Closed);
@@ -212,11 +265,11 @@ impl PhoneCalls {
         if !call.signals.authenticate_phone() {
             return Err(Error::Admission);
         }
-        call.mailbox = Some(record.clone());
+        call.mailbox = Some(record);
         Ok(PhoneLogin::Authenticated)
     }
     /// The configured profile is visible only for the same authenticated call.
-    pub fn mailbox(&self, source: &PhoneSource, reply: &PeerReply) -> Option<&PhoneMailbox> {
+    pub fn mailbox(&self, source: &PhoneSource, reply: &PeerReply) -> Option<&CallerMailbox> {
         self.calls
             .iter()
             .find(|call| {

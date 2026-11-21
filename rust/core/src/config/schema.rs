@@ -433,6 +433,15 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
     }
 }
 
+/// Check a secret-free ASL web endpoint for registration or statistics.
+pub(super) fn protocol_web_url(value: &str, https_only: bool) -> Option<url::Url> {
+    url::Url::parse(value).ok().filter(|url| {
+        (url.scheme() == "https" || !https_only && url.scheme() == "http")
+            && url.username().is_empty()
+            && url.password().is_none()
+    })
+}
+
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
     if kind == ScopeKind::Mailbox {
         return super::phone_mailboxes::value_valid(key, value);
@@ -498,25 +507,9 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         return parse::unsigned(value, 0, u64::MAX / 48).is_some();
     }
     match key {
-        "statpost_url" => {
-            if value.is_empty() {
-                return true;
-            }
-            url::Url::parse(value).is_ok_and(|url| {
-                matches!(url.scheme(), "http" | "https")
-                    && url.username().is_empty()
-                    && url.password().is_none()
-            })
-        }
+        "statpost_url" => value.is_empty() || protocol_web_url(value, false).is_some(),
         "statpost_time" => parse::unsigned(value, 30, 600).is_some(),
-        "iax_registration_url" => {
-            if value.is_empty() {
-                return true;
-            }
-            url::Url::parse(value).is_ok_and(|url| {
-                url.scheme() == "https" && url.username().is_empty() && url.password().is_none()
-            })
-        }
+        "iax_registration_url" => value.is_empty() || protocol_web_url(value, true).is_some(),
         "iax_registration_interval_s" => parse::unsigned(value, 30, 600).is_some(),
         "iax_local_port" => parse::unsigned(value, 1, u16::MAX as u64).is_some(),
         "dtmf_admin_unlock_hash" | "dtmf_admin_lock_hash" => {

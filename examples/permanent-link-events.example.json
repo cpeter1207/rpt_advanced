@@ -1,0 +1,108 @@
+{
+  "operation": "set",
+  "site": {
+    "schedule": {
+      "events": {
+        "startup_links": {
+          "sequence_number": 0,
+          "restart_recovery": false,
+          "start": {
+            "at": "controller_start",
+            "politeness_minutes": 0,
+            "macro": "permanent_links",
+            "warnings": []
+          }
+        },
+        "first_net": {
+          "sequence_number": 10,
+          "restart_recovery": true,
+          "start": {
+            "at": "every weekday at 19:00",
+            "politeness_minutes": 2,
+            "macro": "start_first_net",
+            "warnings": []
+          },
+          "end": {
+            "at": "every weekday at 20:00",
+            "politeness_minutes": 2,
+            "macro": "end_first_net",
+            "warnings": []
+          }
+        },
+        "second_net": {
+          "sequence_number": 20,
+          "restart_recovery": true,
+          "start": {
+            "at": "every weekday at 20:00",
+            "politeness_minutes": 2,
+            "macro": "start_second_net",
+            "warnings": []
+          },
+          "end": {
+            "at": "every weekday at 21:00",
+            "politeness_minutes": 2,
+            "macro": "end_second_net",
+            "warnings": []
+          }
+        }
+      }
+    },
+    "command": {
+      "macros": {
+        "permanent_links": {
+          "actions": [
+            {
+              "action": "resume_permanent_links"
+            },
+            {
+              "action": "connect_permanent",
+              "parameter": "2001"
+            }
+          ]
+        },
+        "start_first_net": {
+          "actions": [
+            {
+              "action": "pause_permanent_links"
+            },
+            {
+              "action": "connect",
+              "parameter": "2002"
+            }
+          ]
+        },
+        "end_first_net": {
+          "actions": [
+            {
+              "action": "disconnect",
+              "parameter": "2002"
+            }
+          ]
+        },
+        "start_second_net": {
+          "actions": [
+            {
+              "action": "pause_permanent_links"
+            },
+            {
+              "action": "connect",
+              "parameter": "2003"
+            }
+          ]
+        },
+        "end_second_net": {
+          "actions": [
+            {
+              "action": "disconnect",
+              "parameter": "2003"
+            },
+            {
+              "action": "call_macro",
+              "macro": "permanent_links"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

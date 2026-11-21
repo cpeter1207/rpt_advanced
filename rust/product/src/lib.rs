@@ -8,15 +8,30 @@ pub(crate) mod abi {
 }
 
 mod configuration;
+#[cfg(target_os = "linux")]
+pub mod configuration_capture;
+#[cfg(target_os = "linux")]
+pub mod configuration_manifest;
+#[cfg(target_os = "linux")]
+/// Account-bound encrypted credentials selected by the configuration transaction.
+pub mod configuration_private;
+#[cfg(target_os = "linux")]
+#[path = "configuration_radio/typed.rs"]
+pub mod configuration_radio;
+#[cfg(target_os = "linux")]
+pub mod configuration_transaction;
 pub mod control;
 pub mod directory;
 pub mod host;
 pub mod lifecycle;
 pub mod link;
+#[cfg(target_os = "linux")]
+pub mod management;
 pub mod media;
 pub mod phone;
 mod radio_control;
 mod remote_reply;
+pub mod schedule_zone;
 mod scheduler_health;
 pub mod services;
 pub mod site;

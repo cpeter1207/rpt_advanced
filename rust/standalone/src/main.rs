@@ -1,6 +1,6 @@
 #![deny(warnings)]
 
-use std::{env, fs, path::Path, path::PathBuf, process::ExitCode};
+use std::{env, path::Path, process::ExitCode};
 
 fn main() -> ExitCode {
     let mut arguments = env::args_os().skip(1);
@@ -14,12 +14,26 @@ fn main() -> ExitCode {
                 eprintln!("usage: rpt-advanced --check-config <FILE>");
                 return ExitCode::from(2);
             }
-            let text = match fs::read_to_string(&path) {
-                Ok(text) => text,
+            #[cfg(target_os = "linux")]
+            let text = match rptadv_peer_support::working_files::read_service_provisioning(
+                Path::new(&path),
+            ) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        eprintln!("service provisioning is not UTF-8");
+                        return ExitCode::FAILURE;
+                    }
+                },
                 Err(error) => {
-                    eprintln!("{}: {error}", path.to_string_lossy());
+                    eprintln!("cannot read service provisioning ({error})");
                     return ExitCode::FAILURE;
                 }
+            };
+            #[cfg(not(target_os = "linux"))]
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(_) => return ExitCode::FAILURE,
             };
             match rpt_advanced_standalone::check_config(&text) {
                 Ok(warnings) => {
@@ -39,37 +53,20 @@ fn main() -> ExitCode {
             let Some(configuration) = arguments.next() else {
                 return usage();
             };
-            let secrets = match arguments.next() {
-                None => None,
-                Some(option) if option == "--secrets-file" => match arguments.next() {
-                    Some(path) if arguments.next().is_none() => Some(PathBuf::from(path)),
-                    _ => return usage(),
-                },
-                _ => return usage(),
-            };
-            foreground_exit_code(rpt_advanced_standalone::foreground::run(
-                Path::new(&configuration),
-                secrets.as_deref().map(Path::new),
-            ))
-        }
-        Some(command) if command == "--check-secrets-file" => {
-            let Some(path) = arguments.next() else {
-                eprintln!("usage: rpt-advanced --check-secrets-file <FILE>");
-                return ExitCode::from(2);
-            };
             if arguments.next().is_some() {
-                eprintln!("usage: rpt-advanced --check-secrets-file <FILE>");
-                return ExitCode::from(2);
+                return usage();
             }
-            match rpt_advanced_standalone::secrets::SecretsFile::load(path.as_ref()) {
-                Ok(_) => {
-                    println!("secrets file valid");
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("secrets file invalid: {error}");
-                    ExitCode::FAILURE
-                }
+            #[cfg(target_os = "linux")]
+            {
+                foreground_exit_code(rpt_advanced_standalone::foreground::run_managed(Path::new(
+                    &configuration,
+                )))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                foreground_exit_code(Err(
+                    rpt_advanced_standalone::foreground::ForegroundError::UnsupportedPlatform,
+                ))
             }
         }
         Some(command) if command == "--check-providers" => {
@@ -84,7 +81,7 @@ fn main() -> ExitCode {
         }
         Some(command) if command == "--help" => {
             println!(
-                "Usage: rpt-advanced --check-config <FILE>\n       rpt-advanced --check-secrets-file <FILE>\n       rpt-advanced --check-providers\n       rpt-advanced --foreground <CONFIG> [--secrets-file <FILE>]\nRun the standalone controller in the foreground; SIGHUP reloads configuration."
+                "Usage: rpt-advanced --check-config <FILE>\n       rpt-advanced --check-providers\n       rpt-advanced --foreground <SERVICE-JSON>\nRun the standalone controller in the foreground; SIGHUP requests a checked reload of the working JSON store."
             );
             ExitCode::SUCCESS
         }
@@ -94,7 +91,7 @@ fn main() -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: rpt-advanced --check-config <FILE> | --check-secrets-file <FILE> | --check-providers | --foreground <CONFIG> [--secrets-file <FILE>]"
+        "usage: rpt-advanced --check-config <FILE> | --check-providers | --foreground <SERVICE-JSON>"
     );
     ExitCode::from(2)
 }

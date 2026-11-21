@@ -779,3 +779,58 @@ fn forced_native_insertion_counts_output_without_advancing_media() {
     assert_eq!(jitter.get(70, 160).1, [7]);
     jitter.advance(70);
 }
+
+#[test]
+fn invalid_live_bounds_leave_native_state_and_pending_release_unchanged() {
+    let update = descriptor().set_delays.unwrap();
+    assert!(unsafe { update(ptr::null_mut(), 80, 160, 320) } < 0);
+    let mut jitter = Jitter::new(config());
+    assert_eq!(jitter.put(320, 160, 0, &[19]), 0);
+    assert_eq!(jitter.get(60, 160).1, [19]);
+    let native = unsafe { (*jitter.0.cast::<Context>()).native };
+    let initial = jitter.observe().delay;
+    for bounds in [
+        [0, 160, 320],
+        [240, 160, 320],
+        [80, 400, 320],
+        [10, 20, 40],
+        [80, 160, 32768],
+    ] {
+        let [minimum, initial, maximum] = bounds;
+        assert!(unsafe { update(jitter.0, minimum, initial, maximum) } < 0);
+    }
+    assert_eq!(jitter.observe().delay, initial);
+    assert_eq!(unsafe { (*jitter.0.cast::<Context>()).native }, native);
+    jitter.advance(60);
+    assert_eq!(unsafe { descriptor().reset.unwrap()(jitter.0) }, 0);
+    assert_eq!(jitter.observe().delay, config().initial_delay);
+}
+
+#[test]
+fn live_ceiling_accounts_for_an_insertion_already_returned_to_the_owner() {
+    let mut jitter = Jitter::new(config());
+    assert_eq!(jitter.put(0, 160, 0, &[19]), 0);
+    native_calls::get_response(abi::JITTER_BUFFER_INSERTION as i32, 80);
+    let (issued, _) = jitter.get(60, 160);
+    assert_eq!(issued.kind, abi::RPTADV_JITTER_INSERTION);
+    let update = descriptor().set_delays.unwrap();
+    assert_eq!(unsafe { update(jitter.0, 80, 320, 520) }, 0);
+    // The visible delay is 480 samples. The already-issued 80-sample insertion
+    // will bring it to 560, whatever portion the owner retains as lookahead.
+    assert_eq!(jitter.observe().delay, 480);
+    assert_eq!(
+        unsafe { &*jitter.0.cast::<Context>() }.draining_maximum,
+        Some(config().maximum_delay)
+    );
+    assert_eq!(unsafe { update(jitter.0, 80, 320, 600) }, 0);
+    assert_eq!(
+        unsafe { &*jitter.0.cast::<Context>() }.draining_maximum,
+        None
+    );
+    assert_eq!(
+        unsafe { descriptor().advance.unwrap()(jitter.0, 60_000_000, 80) },
+        0
+    );
+    assert_eq!(jitter.observe().delay, 560);
+    assert_eq!(jitter.observe().limit_resets, 0);
+}

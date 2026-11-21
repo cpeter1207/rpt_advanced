@@ -318,6 +318,7 @@ fn egress_full_path_load() {
         session.bind_clock(source_clock.clone());
         assert!(host.peer_io.attach(session).is_ok());
         host.peers.push(PeerOwner {
+            superseded: false,
             local: "1000".into(),
             remote,
             mode: Mode::TRANSCEIVE,

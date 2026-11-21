@@ -92,6 +92,7 @@ fn bad_requests_never_reach_backend_and_oversized_frames_close() {
     let (mut server, mut client, mut backend) = setup();
     for request in [
         json!({"version":2,"operation":"nodes"}),
+        json!({"version":{"$serde_json::private::Number":"1"},"operation":"nodes"}),
         json!({"version":1,"operation":"shell","command":"x"}),
         json!({"version":1,"operation":"status","node":42}),
     ] {

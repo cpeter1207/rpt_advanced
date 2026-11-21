@@ -29,13 +29,14 @@ GPIOD = "librptadv_gpiod_adapter.so.1"
 HWMON = "librptadv_hwmon_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
 PRODUCT = "librptadv_product.so.2"
-RING_MINIMUM_VERSION = "3.0.0~alpha5"
+RING_MINIMUM_VERSION = "3.0.0~alpha6"
 SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha3"
 TONE_MINIMUM_VERSION = "0.1.0~alpha1"
 MORSE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 DTMF_MINIMUM_VERSION = "0.1.0~alpha3-1"
 TEMPLATE_MINIMUM_VERSION = "0.1.0~alpha1-1"
-SCHEDULE_MINIMUM_VERSION = "0.1.0~alpha2-1"
+SCHEDULE_MINIMUM_VERSION = "0.1.0~alpha3-1"
+USBRADIO_MINIMUM_VERSION = "0.1.0~alpha38-1"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
@@ -276,7 +277,9 @@ def staged(
     doc = Path("usr/share/doc/rpt-advanced")
     documents = {doc / path: root / path for path in MANUALS}
     documents[doc / "copyright"] = root / "COPYING"
-    documents[doc / "examples/rpt_advanced.conf"] = root / "examples/rpt_advanced.conf"
+    documents[doc / "examples/rpt_advanced.service.json"] = (
+        root / "examples/rpt_advanced.service.json"
+    )
     for destination, source in documents.items():
         expected.add(destination)
         assert (stage / destination).read_bytes() == source.read_bytes(), str(
@@ -352,8 +355,8 @@ def package(control: Path) -> None:
         assert token in contents, f"missing package dependency: {token}"
     for token in (
         f"librate-adjusting-pcm-ring3-dev (>= {RING_MINIMUM_VERSION})",
-        "libusbradioplus-product-dev (>= 0.1.0~alpha34-1)",
-        "libusbradioplus-product1 (>= 0.1.0~alpha34-1)",
+        f"libusbradioplus-product-dev (>= {USBRADIO_MINIMUM_VERSION})",
+        f"libusbradioplus-product1 (>= {USBRADIO_MINIMUM_VERSION})",
         f"librate-adjusting-pcm-ring3 (>= {RING_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter-dev (>= {SAMPLERATE_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter2 (>= {SAMPLERATE_MINIMUM_VERSION})",
@@ -1138,7 +1141,10 @@ def verify_stage_policy() -> None:
         for source, destination in (
             *((path, path) for path in MANUALS),
             ("COPYING", "copyright"),
-            ("examples/rpt_advanced.conf", "examples/rpt_advanced.conf"),
+            (
+                "examples/rpt_advanced.service.json",
+                "examples/rpt_advanced.service.json",
+            ),
         ):
             write(root, source)
             write(stage, f"usr/share/doc/rpt-advanced/{destination}")
@@ -1240,6 +1246,7 @@ def main() -> None:
         coverage(args.coverage)
     else:
         check(root)
+        package(root / "debian/control")
     print("Rust product-surface checks passed")
 
 

@@ -4,6 +4,73 @@ This directory is the maintained architecture source for rpt_advanced. Read it
 before designing a feature or structural change. Update it, the applicable ADR,
 and the affected configuration and test documentation in the same change.
 
+## Modular JSON/REST implementation
+
+[ADR 0045](decisions/0045-modular-json-and-hal-management.md) records the approved
+JSON-only controller store and mTLS loopback HAL API. Implementation follows the
+[updated checklist](../../docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md).
+The initial resource-model slice is control-plane only. The pure internal
+`rptadv-json` decoder is shared by configuration and existing wire consumers to
+preserve JSON types; the deployed INI path
+described below is removed at the coordinated store/provider cutover.
+USBRadioPlus retains its own public INI loader. Unknown JSON keys and unusable
+setting values warn and fall back through inheritance/defaults.
+
+The core model now adds UUID-backed resource identities and explicit
+scope/kind ownership to in-memory candidates. Typed metadata is resolved
+separately from opaque unvalidated section bodies. Site defaults apply to all
+ordinary sections; protocol presence is established only by port documents.
+Protocol profile resolution now produces owned sparse public and typed effective
+AllStarLink, EchoLink and phone-patch settings independently. Shared jitter
+retains per-field source candidates for later provider-capability fallback.
+Checked account projections carry stable configured identity only; encrypted
+payload adoption and actual runtime preparation are subsequent boundaries.
+The separate peer-audio binding does not require an AllStarLink instance.
+
+The pure management patch stage uses RFC 6901 pointers and RFC 6902 operations
+on one disposable sparse authoring view. Exact decimal comparisons preserve
+numeric test semantics. A shared borrowed JSON traversal rejects duplicates
+without owning credential scalar values; neutral write-only slots and opaque
+zeroizing explicit edits avoid exposing hidden-record presence. Route policy,
+final resource validation and persistence remain coordinator responsibilities.
+
+The host layer, `rptadv_peer_support::working_files`, captures an explicit
+registered path selection under the preprovisioned `edit.lock`. Protected,
+no-follow descriptor access and caller-supplied limits produce owned bytes plus
+a content fingerprint for guarded rechecks. The product adapter maps UUID/kind
+bindings to fixed paths and assembles the candidate from those exact bytes.
+This is not discovery of new resources or a complete working-tree reload.
+The host storage unit installs immutable public object/manifest bytes
+under the same edit guard. Typed targets, exclusive private staging, file sync,
+no-replace rename and parent sync protect existing artifacts. Equal retries
+verify bytes and confirm durability; a post-rename sync failure remains an
+explicit uncertain outcome. Protected parent directories are preprovisioned.
+Installing an artifact does not accept a configuration. The full working catalog now has
+a separate bounded discovery/import path. Product's accepted-state transaction
+checks the complete inventory, installs verified objects and journal, and
+compares and replaces the desired-state pointer. Reconciliation verifies each
+working change and the final inventory. Late owner-bookkeeping failures retain
+the observed outcome and inhibit further saves until a successful explicit
+bookkeeping retry. Domain preparation and runtime adoption remain separate.
+
+The public-manifest layer stores only IDs, exact key bindings and immutable
+object references/hashes. The product loader takes an explicit trusted manifest
+selection, reads through the guarded host boundary and owns its verified bytes.
+It assembles the existing borrowed candidate on demand. Format/ownership/hash
+validation is separate from complete domain profiles and state selection.
+
+The host private-record layer uses XChaCha20-Poly1305 with explicit format,
+purpose, store/record/version and key-ID authentication. Each seal creates an
+independent object-version UUID and nonce. Opaque zeroizing owners protect key
+and plaintext buffers. An env-only systemd loader reads exactly 32 raw bytes
+through pinned no-follow descriptors and accepts the real credential ACL mask.
+The typed private-artifact bridge prepares ciphertext once, then reuses
+the shared no-replace/durability machinery under private UUID paths. Readback
+verifies exact ciphertext bytes, decodes, loads the delivered key and authenticates
+before returning zeroizing plaintext. Raw-byte callers cannot construct private
+targets. This does not yet implement the account payload schema or private state
+graph.
+
 ## System boundary
 
 [ADR 0044](decisions/0044-phone-peers-and-rf-presentation-pacing.md) records the

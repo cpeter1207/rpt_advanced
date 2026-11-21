@@ -2,7 +2,7 @@
 use super::*;
 use crate::site::{acquisition::Acquisition, radio::RadioSite};
 use rpt_advanced_core::{
-    config::NodeId,
+    config::resources::PortKey,
     runtime::dtmf::DigitOperation,
     site::{SiteEffect, SiteError, SiteObservations},
 };
@@ -157,7 +157,7 @@ impl Host {
                     .unwrap_or_else(|error| error.into_inner())
                     .status
                     .transmit_keyed();
-                (NodeId::new(name).expect("configured node"), keyed)
+                (PortKey::new(name.as_str()), keyed)
             })
             .collect();
         let names: Vec<_> = self
@@ -257,6 +257,9 @@ impl Host {
                 self.site_delivery.faults.remove(&key);
             }
         }
+    }
+    pub(super) fn defer_link(&mut self, local: &str, effect: LinkEffect) {
+        self.site_delivery.links.push((local.to_owned(), effect));
     }
     /// Transfer generation-protected dials to the existing off-control dispatcher.
     pub(crate) fn take_site_links(&mut self) -> Vec<(String, LinkEffect)> {
@@ -444,6 +447,7 @@ impl Host {
         });
         for (node, values) in radio {
             let entry = readings.entry(node).or_default();
+            entry.sensors.extend(values.sensors);
             entry.inputs.extend(values.inputs);
             entry.outputs.extend(values.outputs);
         }

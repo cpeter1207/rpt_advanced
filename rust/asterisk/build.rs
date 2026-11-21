@@ -35,6 +35,7 @@ fn main() {
         .allowlist_type("rptadv_.*")
         .allowlist_var("RPTADV_SITE_.*")
         .allowlist_type("UrpAstSite.*")
+        .allowlist_type("UrpAstStationBindingDescriptor")
         .allowlist_type("Urp(AstRemoteControl|RemoteOperation|RemoteTicket)")
         .allowlist_var("URP_AST_(REMOTE_.*|OPTION_REMOTE_CONTROL)")
         .allowlist_var("URP_AST_(SITE_.*|OPTION_SITE_IO)")

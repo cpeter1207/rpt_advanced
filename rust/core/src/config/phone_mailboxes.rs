@@ -29,21 +29,32 @@ impl PhoneMailbox {
     /// Verify 4–32 telephone digits against the prepared salted digest.
     /// This memory-hard operation belongs only to serialized control, never audio.
     pub fn verify_pin(&self, pin: &str) -> bool {
-        (4..=32).contains(&pin.len())
-            && pin.bytes().all(|byte| byte.is_ascii_digit())
-            && PasswordHash::new(&self.pin_hash).is_ok_and(|hash| {
-                Argon2::default()
-                    .verify_password(pin.as_bytes(), &hash)
-                    .is_ok()
-            })
+        verify_mailbox_pin(&self.pin_hash, pin)
     }
 }
 
-fn valid_hash(value: &str) -> bool {
+/// Verify bounded telephone digits against the selected Argon2id PHC.
+/// Only the private owner supplies the PHC; neither value is retained.
+pub fn verify_mailbox_pin(encoded: &str, pin: &str) -> bool {
+    (4..=32).contains(&pin.len())
+        && pin.bytes().all(|byte| byte.is_ascii_digit())
+        && bounded_hash(encoded).is_some_and(|hash| {
+            Argon2::default()
+                .verify_password(pin.as_bytes(), &hash)
+                .is_ok()
+        })
+}
+
+/// Check the bounded salted Argon2id PHC contract before retaining a mailbox PIN digest.
+pub fn valid_mailbox_pin_hash(value: &str) -> bool {
+    bounded_hash(value).is_some()
+}
+
+fn bounded_hash(value: &str) -> Option<PasswordHash<'_>> {
     if value.len() > 256 {
-        return false;
+        return None;
     }
-    PasswordHash::new(value).is_ok_and(|hash| {
+    PasswordHash::new(value).ok().filter(|hash| {
         hash.algorithm.as_str() == "argon2id"
             && hash.version == Some(19)
             && hash.salt.is_some_and(|salt| {
@@ -52,7 +63,7 @@ fn valid_hash(value: &str) -> bool {
                     .is_ok_and(|salt| salt.len() >= 16)
             })
             && hash.hash.is_some_and(|output| output.len() == 32)
-            && Params::try_from(&hash).is_ok_and(|params| {
+            && Params::try_from(hash).is_ok_and(|params| {
                 (19_456..=65_536).contains(&params.m_cost())
                     && (2..=5).contains(&params.t_cost())
                     && (1..=4).contains(&params.p_cost())
@@ -64,7 +75,7 @@ fn valid_hash(value: &str) -> bool {
 // only first_name, callsign and pin_hash; the remaining known case is first_name.
 pub(super) fn value_valid(key: &str, value: &str) -> bool {
     match key {
-        "pin_hash" => valid_hash(value),
+        "pin_hash" => valid_mailbox_pin_hash(value),
         "callsign" => {
             !value.is_empty()
                 && value.len() <= 16

@@ -1116,9 +1116,8 @@ fn remote_origin_reclamation_preserves_last_node_redial() {
             }]
         );
     }
-    assert_eq!(
-        links.peer_digit("2000", '5', 2, reply),
-        Some(DigitOutcome::Regenerate('5'))
+    assert!(
+        matches!(links.peer_digit("2000",'5',2,reply),Some(DigitOutcome::ReceivedDigit('5',origin)) if origin.current())
     );
 }
 
@@ -1132,7 +1131,7 @@ fn remote_origin_state_is_bounded_and_idle_collectors_are_reclaimed() {
         let text = format!("D 524950 {origin} 1 5");
         assert!(matches!(
             links.peer_text("2000", text.as_bytes(), reply.clone(), false, 0, 1),
-            Ok(LinkEffect::Digit(DigitOutcome::Regenerate('5')))
+            Ok(LinkEffect::Digit(DigitOutcome::ReceivedDigit('5', _)))
         ));
     }
     assert!(
@@ -1205,7 +1204,7 @@ fn remote_command_origins_do_not_share_authorization() {
     ));
     assert!(matches!(
         links.peer_text("2000", b"D 524950 4000 4 5", reply.clone(), false, 0, 4),
-        Ok(LinkEffect::Digit(DigitOutcome::Regenerate('5')))
+        Ok(LinkEffect::Digit(DigitOutcome::ReceivedDigit('5', _)))
     ));
     signals.end();
     assert!(

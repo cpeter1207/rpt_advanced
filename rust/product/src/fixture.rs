@@ -13,6 +13,10 @@ use std::{
     },
 };
 
+thread_local! {
+    pub(crate) static ALLOCATION_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
 thread_local! { static FAIL_BYTES: Cell<usize> = const { Cell::new(0) }; }
 thread_local! {
     pub(crate) static ERROR_LOGS: std::cell::RefCell<Vec<(i32, String)>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -26,6 +30,11 @@ pub(crate) fn error_log(priority: i32, message: &str) {
 struct Allocator;
 
 fn reject(bytes: usize) -> bool {
+    let _ = ALLOCATION_COUNT.try_with(|slot| {
+        if let Some(n) = slot.get() {
+            slot.set(Some(n + 1));
+        }
+    });
     FAIL_BYTES
         .try_with(|slot| {
             if slot.get() == bytes {
@@ -64,6 +73,38 @@ unsafe impl GlobalAlloc for Allocator {
 static ALLOCATOR: Allocator = Allocator;
 
 pub static LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static REVIEW_CARRIER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+pub(crate) static REVIEW_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static REVIEW_OUTPUT: AtomicUsize = AtomicUsize::new(0);
+/// Raw measurements from one registered station's deterministic radio callbacks.
+pub(crate) struct ReviewOutput {
+    pub value: AtomicUsize,
+    pub keyed: AtomicUsize,
+    pub dekeyed: AtomicUsize,
+    pub audible: AtomicUsize,
+}
+
+static WATCHED_OUTPUTS: std::sync::Mutex<
+    std::collections::BTreeMap<String, std::sync::Arc<ReviewOutput>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+pub(crate) fn watch_output(name: &str) -> std::sync::Arc<ReviewOutput> {
+    WATCHED_OUTPUTS
+        .lock()
+        .unwrap()
+        .entry(name.to_owned())
+        .or_insert_with(|| {
+            std::sync::Arc::new(ReviewOutput {
+                value: AtomicUsize::new(usize::MAX),
+                keyed: AtomicUsize::new(0),
+                dekeyed: AtomicUsize::new(0),
+                audible: AtomicUsize::new(0),
+            })
+        })
+        .clone()
+}
+
 pub static RADIO_DROPS: AtomicUsize = AtomicUsize::new(0);
 pub static RADIO_OPENS: AtomicUsize = AtomicUsize::new(0);
 pub static RADIO_VAD_MODE: AtomicUsize = AtomicUsize::new(0);
@@ -236,6 +277,7 @@ unsafe extern "C" fn radio_activate(
         return -1;
     };
     let radio = unsafe { &mut *handle.cast::<FakeRadio>() };
+    let observed = WATCHED_OUTPUTS.lock().unwrap().get(&radio.name).cloned();
     let stop = radio.stop.clone();
     let contexts = (receive_context as usize, transmit_context as usize);
     let always = !host_context.is_null();
@@ -243,13 +285,14 @@ unsafe extern "C" fn radio_activate(
         let mut first = 0;
         while !stop.load(Ordering::Acquire) {
             if always || RADIO_READY.load(Ordering::Acquire) != 0 {
-                let mut samples = [0.0; 8];
+                let carrier = REVIEW_CARRIER.load(Ordering::Acquire);
+                let mut samples = [if carrier { 0.3 } else { 0.0 }; 8];
                 let mut keyed = 0;
                 let mut ctcss_enabled = 0;
                 unsafe {
                     receive(
                         contexts.0 as *mut c_void,
-                        &receive_metadata(false, first, 8),
+                        &receive_metadata(carrier, first, 8),
                         samples.as_mut_ptr(),
                         8,
                     );
@@ -261,6 +304,24 @@ unsafe extern "C" fn radio_activate(
                         &mut keyed,
                         &mut ctcss_enabled,
                     );
+                    if carrier {
+                        let output = usize::from(keyed != 0)
+                            | (usize::from(samples.iter().any(|v| v.abs() > 0.01)) << 1);
+                        if let Some(observed) = &observed {
+                            if output & 2 != 0 {
+                                observed.audible.fetch_add(1, Ordering::AcqRel);
+                            }
+                            if keyed != 0 {
+                                &observed.keyed
+                            } else {
+                                &observed.dekeyed
+                            }
+                            .fetch_add(1, Ordering::AcqRel);
+                            observed.value.store(output, Ordering::Release);
+                        }
+                        REVIEW_OUTPUT.store(output, Ordering::Release);
+                        REVIEW_CALLBACKS.fetch_add(1, Ordering::Release);
+                    }
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -492,6 +553,7 @@ static mut HOST: crate::abi::rptadv_host_services_v10 = crate::abi::rptadv_host_
     radio_quiesce: None,
     radio_remote_submit: None,
     radio_ready: None,
+    station_binding: std::ptr::null(),
 };
 
 pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v10 {

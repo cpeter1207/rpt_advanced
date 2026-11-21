@@ -388,6 +388,25 @@ fn pending_phone_has_no_handshake_topology_or_radio_attachment_and_queues_only_p
     let prepared = host.take_phone_reply(&source, &reply).unwrap().unwrap();
     assert_eq!(prepared.source(), &source);
     assert!(prepared.current());
+    let private_stream = host
+        .runtime
+        .prepare_phone_status("1000", LinkAction::Status, None, clock(), &reply)
+        .unwrap();
+    host.immediate(
+        "1000",
+        LinkEffect::PrivatePhoneMedia(reply.clone(), private_stream),
+        clock(),
+    )
+    .unwrap();
+    let command_message = host.take_phone_reply(&source, &reply).unwrap().unwrap();
+    assert_eq!(command_message.source(), &source);
+    assert!(command_message.current());
+    assert!(
+        host.status_text("1000")
+            .unwrap()
+            .contains("radio.rx.muted=false active=false")
+    );
+
     assert!(
         host.immediate(
             "1000",
@@ -409,6 +428,7 @@ fn pending_phone_has_no_handshake_topology_or_radio_attachment_and_queues_only_p
     assert!(host.retire_phone(&source));
     assert!(reply.ended());
     assert!(!prepared.current());
+    assert!(!command_message.current());
     assert!(host.phone_source(call).is_none());
     assert!(!host.retire_phone(&source));
     let state = state.lock().unwrap();

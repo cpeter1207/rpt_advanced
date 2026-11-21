@@ -2,7 +2,7 @@
 use crate::abi::{rptadv_gpiod_descriptor_v1, rptadv_hwmon_descriptor_v1};
 use libloading::Library;
 use rpt_advanced_core::{
-    config::{ConfigDocument, NodeId, ResolvedNodeSettings, ResolvedSiteSettings, SiteBackend},
+    config::{ConfigDocument, ResolvedSiteSettings, SiteBackend},
     runtime::RuntimeError,
 };
 use std::{collections::BTreeSet, mem::size_of, path::Path};
@@ -64,10 +64,22 @@ pub struct SiteBackends {
 impl SiteBackends {
     /// Load only capabilities used by enabled site definitions.
     pub fn load(document: &ConfigDocument) -> Result<Self, RuntimeError> {
-        Self::load_at(document, Path::new(env!("RPT_ADVANCED_LIBDIR")))
+        Self::load_scopes(crate::site::configured(document)?.values())
     }
+    pub(crate) fn load_scopes<'a>(
+        scopes: impl IntoIterator<Item = &'a ResolvedSiteSettings>,
+    ) -> Result<Self, RuntimeError> {
+        Self::load_scopes_at(scopes, Path::new(env!("RPT_ADVANCED_LIBDIR")))
+    }
+    #[cfg(test)]
     fn load_at(document: &ConfigDocument, directory: &Path) -> Result<Self, RuntimeError> {
-        let selected = required(document)?;
+        Self::load_scopes_at(crate::site::configured(document)?.values(), directory)
+    }
+    fn load_scopes_at<'a>(
+        scopes: impl IntoIterator<Item = &'a ResolvedSiteSettings>,
+        directory: &Path,
+    ) -> Result<Self, RuntimeError> {
+        let selected = required(scopes);
         let providers = Self {
             gpiod: if selected.contains(&SiteBackend::Gpiod) {
                 Some(unsafe { Provider::open(directory, "gpiod")? })
@@ -80,12 +92,21 @@ impl SiteBackends {
                 None
             },
         };
-        providers.validate(document)?;
+        providers.validate_required(selected)?;
         Ok(providers)
     }
     /// Reject reloads requiring a provider not retained by this composition.
     pub fn validate(&self, document: &ConfigDocument) -> Result<(), RuntimeError> {
-        for backend in required(document)? {
+        self.validate_scopes(crate::site::configured(document)?.values())
+    }
+    pub(crate) fn validate_scopes<'a>(
+        &self,
+        scopes: impl IntoIterator<Item = &'a ResolvedSiteSettings>,
+    ) -> Result<(), RuntimeError> {
+        self.validate_required(required(scopes))
+    }
+    fn validate_required(&self, selected: BTreeSet<SiteBackend>) -> Result<(), RuntimeError> {
+        for backend in selected {
             let valid = match backend {
                 SiteBackend::Gpiod => self
                     .gpiod
@@ -107,17 +128,11 @@ impl SiteBackends {
 }
 
 /// Defaults do not instantiate devices, and disabled nodes select no providers.
-fn required(document: &ConfigDocument) -> Result<BTreeSet<SiteBackend>, RuntimeError> {
+fn required<'a>(
+    scopes: impl IntoIterator<Item = &'a ResolvedSiteSettings>,
+) -> BTreeSet<SiteBackend> {
     let mut selected = BTreeSet::new();
-    for name in document.nodes() {
-        let node = NodeId::new(name)?;
-        if !ResolvedNodeSettings::resolve(document, &node)?
-            .value
-            .enabled
-        {
-            continue;
-        }
-        let settings = ResolvedSiteSettings::resolve(document, &node)?.value;
+    for settings in scopes {
         for endpoint in settings
             .sensors
             .iter()
@@ -141,7 +156,7 @@ fn required(document: &ConfigDocument) -> Result<BTreeSet<SiteBackend>, RuntimeE
             selected.insert(endpoint.backend);
         }
     }
-    Ok(selected)
+    selected
 }
 
 #[cfg(test)]

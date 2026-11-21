@@ -37,7 +37,12 @@ NON_CODE = re.compile(
 )
 ## @brief Removes C comments while retaining quoted include paths.
 COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
-RUST_FFI = re.compile(r'\bextern\s*"C"|#\s*\[\s*link\s*\(')
+RUST_LINK_ATTRIBUTE = r"#\s*\[\s*link\s*\("
+RUST_FFI = re.compile(rf'\bextern\s*"C"|{RUST_LINK_ATTRIBUTE}')
+# Exempt the function pointer spelling and detect foreign items at their keyword.
+RUST_DYNAMIC_CLIENT_FFI = re.compile(
+    rf'\bextern\b(?!\s*"C"\s*fn\s*\()|{RUST_LINK_ATTRIBUTE}'
+)
 RUST_IMPORT_BLOCK = re.compile(r'\bextern\s*"C"\s*\{([^{}]*)\}', re.DOTALL)
 PORTABLE_DESCRIPTOR_CLIENTS = {
     "rust/core/src/audio/tone.rs": "rptadv_tone_descriptor",
@@ -45,6 +50,8 @@ PORTABLE_DESCRIPTOR_CLIENTS = {
     "rust/core/src/audio/dtmf.rs": "rptadv_dtmf_descriptor",
     "rust/core/src/template.rs": "rptadv_template_descriptor",
     "rust/core/src/schedule.rs": "rptadv_schedule_descriptor",
+    # The optional recurrence getter is resolved from the schedule DSO at runtime.
+    "rust/core/src/schedule/recurrence.rs": None,
 }
 PORTABLE_CALLBACK_TESTS = {
     "rust/core/src/audio/tone_tests.rs",
@@ -149,6 +156,10 @@ def check_rust_source(root: Path) -> list[str]:
                     violations.append(f"{relative} imports a C ABI")
                 continue
             expected = PORTABLE_DESCRIPTOR_CLIENTS.get(relative)
+            if relative in PORTABLE_DESCRIPTOR_CLIENTS and expected is None:
+                if RUST_DYNAMIC_CLIENT_FFI.search(contents):
+                    violations.append(f"{relative} imports a C ABI")
+                continue
             for body in RUST_IMPORT_BLOCK.findall(contents):
                 declaration = (
                     rf"\s*fn\s+{expected}\s*\(\s*\)\s*"
@@ -158,7 +169,7 @@ def check_rust_source(root: Path) -> list[str]:
                 )
                 if not expected or re.fullmatch(declaration, body) is None:
                     violations.append(f"{relative} imports a C ABI")
-            if re.search(r"#\s*\[\s*link\s*\(", contents):
+            if re.search(RUST_LINK_ATTRIBUTE, contents):
                 violations.append(f"{relative} imports a C ABI")
         manifest = (core / "Cargo.toml").read_text(encoding="utf-8")
         if FORBIDDEN_RUST_ADAPTER.search(manifest):
@@ -277,6 +288,11 @@ def verify_examples() -> None:
             "rust/core/src/schedule.rs",
             'unsafe extern "C" { fn rptadv_schedule_descriptor(); }\n',
         )
+        recurrence = "rust/core/src/schedule/recurrence.rs"
+        getter_type = (
+            'type RecurrenceGetter = unsafe extern "C" fn() -> *const Descriptor;\n'
+        )
+        write(root, recurrence, getter_type)
         for name in ("tone_tests", "morse_tests"):
             write(
                 root,
@@ -369,6 +385,26 @@ def verify_examples() -> None:
             "rust/core/src/schedule/tests.rs",
             'unsafe extern "C" fn fake_callback() {}\n',
         )
+
+        for addition, diagnostic in (
+            ("fn radio() { ast_radio_get_state(); }\n", "imports host API"),
+            (
+                'unsafe extern "C" { fn rptadv_recurrence_descriptor(); }\n',
+                "imports a C ABI",
+            ),
+            (
+                'unsafe extern "C" /* getter */ { fn rptadv_recurrence_descriptor(); }\n',
+                "imports a C ABI",
+            ),
+            (
+                'unsafe extern "C" { #[doc = "{}"] fn arbitrary(); }\n',
+                "imports a C ABI",
+            ),
+            ('#[link(name = "rptadvschedule")]\n', "imports a C ABI"),
+        ):
+            write(root, recurrence, getter_type + addition)
+            expect_violation(root, f"{recurrence} {diagnostic}")
+        write(root, recurrence, getter_type)
 
         write(
             root,

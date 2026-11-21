@@ -144,6 +144,82 @@ impl ProductRuntime {
         })
     }
 
+    /// Start the managed process without opening any radio or network account here.
+    /// On -2 the product still owns callbacks; the foreground retains and drains
+    /// this host and its libraries before returning the startup failure.
+    pub(crate) fn start_management(provisioning: &[u8]) -> Result<(Self, bool), RuntimeError> {
+        let providers = Box::new(
+            crate::providers::ProviderSet::load_management().map_err(RuntimeError::Provider)?,
+        );
+        // SAFETY: moving the Box does not move its ProviderSet. ProductRuntime
+        // releases the host and confirmed product before releasing the boxed DSO owners.
+        let retained = unsafe { &*(providers.as_ref() as *const crate::providers::ProviderSet) };
+        let descriptors = retained
+            .product_runtime_descriptors()
+            .map_err(RuntimeError::Provider)?;
+        let start = retained
+            .management_descriptor()
+            .map_err(RuntimeError::Provider)?
+            .start
+            .ok_or(RuntimeError::InvalidDescriptor)?;
+        let host = HostServicesOwner::new(Vec::new(), None, Default::default())
+            .map_err(RuntimeError::Provider)?;
+        let reload = descriptors
+            .product
+            .reload
+            .ok_or(RuntimeError::InvalidDescriptor)?;
+        let stop = descriptors
+            .product
+            .stop
+            .ok_or(RuntimeError::InvalidDescriptor)?;
+        // SAFETY: the host/provider owners survive success and an unconfirmed failure.
+        // Provisioning bytes remain readable until the synchronous entry returns.
+        let status = unsafe {
+            start(
+                host.descriptor(),
+                descriptors.control,
+                descriptors.file,
+                descriptors.speech,
+                provisioning.as_ptr().cast(),
+                provisioning.len(),
+            )
+        };
+        if !matches!(status, 0 | -2) {
+            return Err(RuntimeError::Start);
+        }
+        Ok((
+            Self {
+                product: descriptors.product,
+                stop,
+                reload,
+                host: Some(host),
+                providers: Some(providers),
+                composition: Some(descriptors),
+                configuration: Mutex::new(String::new()),
+                configuration_path: None,
+            },
+            status == 0,
+        ))
+    }
+
+    /// Begin or poll the bounded trusted-host submission without blocking signal handling.
+    pub(crate) fn working_reload(&self, pending: bool) -> Result<bool, RuntimeError> {
+        // SAFETY: both callbacks belong to the retained product. Empty input
+        // submits the checked working store, never a path or editable document.
+        let status = unsafe {
+            if pending {
+                self.product.reload_poll.expect("checked reload group")()
+            } else {
+                (self.reload)(std::ptr::null(), 0)
+            }
+        };
+        match status {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(RuntimeError::Reload),
+        }
+    }
+
     /// Load and start the full released-provider composition for one standalone process.
     pub fn start_with_providers(
         configuration_path: &std::path::Path,

@@ -26,6 +26,10 @@ impl Drop for Frame {
 }
 
 impl Radio {
+    pub(crate) fn owner(&self) -> *mut std::ffi::c_void {
+        self.connection.channel.pointer.as_ptr().cast()
+    }
+
     /// Query resolved receive policy before call(), rejecting unknown-option success.
     pub(crate) fn receive_policy(&mut self, command: &mut ffi::UrpAstChannelCommand) -> i32 {
         command.value = -1;

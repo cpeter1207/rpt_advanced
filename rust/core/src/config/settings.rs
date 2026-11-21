@@ -10,6 +10,10 @@ use std::collections::BTreeMap;
 #[path = "settings_tests.rs"]
 mod tests;
 
+pub(super) const DEFAULT_ASL_REGISTRATION_URL: &str = "https://register.allstarlink.org/";
+pub(super) const DEFAULT_ASL_INTERVAL_S: u16 = 60;
+pub(super) const DEFAULT_IAX_LOCAL_PORT: u16 = 4569;
+
 /// Directory lookup source selected after the local static directory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LinkLookupMethod {
@@ -1329,12 +1333,7 @@ impl ResolvedNodeSettings {
             if raw.is_empty() {
                 return Some(String::new());
             }
-            url::Url::parse(raw)
-                .ok()
-                .filter(|url| {
-                    url.scheme() == "https" && url.username().is_empty() && url.password().is_none()
-                })
-                .map(|_| raw.to_owned())
+            super::schema::protocol_web_url(raw, true).map(|_| raw.to_owned())
         }) {
             value.iax_registration_url = url;
         }
@@ -1427,10 +1426,10 @@ impl ResolvedNodeSettings {
             language: "en-US".to_owned(),
             callsign: String::new(),
             statpost_url: String::new(),
-            statpost_time: 60,
-            iax_registration_url: "https://register.allstarlink.org/".to_owned(),
-            iax_registration_interval_s: 60,
-            iax_local_port: 4569,
+            statpost_time: u64::from(DEFAULT_ASL_INTERVAL_S),
+            iax_registration_url: DEFAULT_ASL_REGISTRATION_URL.to_owned(),
+            iax_registration_interval_s: u64::from(DEFAULT_ASL_INTERVAL_S),
+            iax_local_port: DEFAULT_IAX_LOCAL_PORT,
             link_allow_nodes: String::new(),
             link_deny_nodes: String::new(),
             link_static_directory_file: String::new(),
@@ -1529,10 +1528,14 @@ fn default_command(key: &str) -> String {
     .to_owned()
 }
 
+/// Existing DTMF administrator PHC policy, independent of mailbox PIN cost limits.
+pub fn valid_admin_hash(value: &str) -> bool {
+    argon2::password_hash::PasswordHash::new(value)
+        .is_ok_and(|hash| hash.algorithm.as_str() == "argon2id")
+}
+
 fn valid_argon2id(value: &str) -> Option<String> {
-    use argon2::password_hash::PasswordHash;
-    let hash = PasswordHash::new(value).ok()?;
-    (hash.algorithm.as_str() == "argon2id").then(|| value.to_owned())
+    valid_admin_hash(value).then(|| value.to_owned())
 }
 
 pub(super) fn command_action(key: &str) -> Option<LinkAction> {

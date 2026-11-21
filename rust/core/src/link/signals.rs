@@ -8,8 +8,10 @@ use std::sync::{
 struct ReplyState {
     phone: Option<super::PhoneSource>,
     phone_authenticated: AtomicBool,
+    rx_muted: Arc<AtomicU64>,
     ended: AtomicBool,
     radio_keyed: AtomicBool,
+    radio_key_epoch: AtomicU64,
     edge: AtomicU64,
     telemetry_allowed: AtomicBool,
     telemetry_until_ms: AtomicU64,
@@ -24,7 +26,40 @@ impl PartialEq for PeerReply {
     }
 }
 impl Eq for PeerReply {}
+/// Non-secret revocable provenance for received DTMF. A subsequent unmute cannot
+/// restore already queued signaling from a previous mute epoch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegenerationOrigin {
+    source: PeerReply,
+    epoch: u64,
+}
+impl RegenerationOrigin {
+    /// Recheck immediately before any audible sample or signaling key demand.
+    pub fn current(&self) -> bool {
+        !self.source.ended() && self.source.0.rx_muted.load(Ordering::Acquire) == self.epoch
+    }
+}
 impl PeerReply {
+    /// Capture receipt-time identity before the outcome leaves its actual ingress.
+    pub fn regeneration_origin(&self) -> Option<RegenerationOrigin> {
+        let epoch = self.0.rx_muted.load(Ordering::Acquire);
+        (!self.ended() && epoch & 1 == 0).then(|| RegenerationOrigin {
+            source: self.clone(),
+            epoch,
+        })
+    }
+    /// Current operational mute of this connection, independent of raw receive/digit state.
+    pub fn rx_muted(&self) -> bool {
+        self.0.rx_muted.load(Ordering::Acquire) & 1 != 0
+    }
+    pub(crate) fn set_rx_muted(&self, muted: bool) {
+        let _ = self
+            .0
+            .rx_muted
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                ((old & 1 != 0) != muted).then(|| old.wrapping_add(1))
+            });
+    }
     /// Exact private call source, absent for ordinary node peers.
     pub fn phone_source(&self) -> Option<&super::PhoneSource> {
         self.0.phone.as_ref()
@@ -81,15 +116,28 @@ impl PeerSignals {
     pub fn for_phone(source: super::PhoneSource) -> Self {
         Self::with_phone(Some(source))
     }
+    /// Prepare a fresh media endpoint for the same surviving connection. Reply/edge tokens
+    /// remain generation-specific while its operator mute follows the transport.
+    pub fn redirected(previous: &PeerReply) -> Self {
+        Self::with_mute(
+            previous.phone_source().cloned(),
+            previous.0.rx_muted.clone(),
+        )
+    }
     fn with_phone(phone: Option<super::PhoneSource>) -> Self {
+        Self::with_mute(phone, Arc::new(AtomicU64::new(0)))
+    }
+    fn with_mute(phone: Option<super::PhoneSource>, rx_muted: Arc<AtomicU64>) -> Self {
         Self {
             pcm: AtomicU64::new(0),
             dtmf_muted: AtomicBool::new(false),
             reply: PeerReply(Arc::new(ReplyState {
                 phone,
                 phone_authenticated: AtomicBool::new(false),
+                rx_muted,
                 ended: AtomicBool::new(false),
                 radio_keyed: AtomicBool::new(false),
+                radio_key_epoch: AtomicU64::new(0),
                 edge: AtomicU64::new(0),
                 telemetry_allowed: AtomicBool::new(true),
                 telemetry_until_ms: AtomicU64::new(0),
@@ -127,6 +175,14 @@ impl PeerSignals {
     pub fn dtmf_muted(&self) -> bool {
         self.dtmf_muted.load(Ordering::Acquire)
     }
+    /// Read the current source mute without cloning the connection token on audio.
+    pub fn receive_epoch(&self) -> u64 {
+        self.reply.0.rx_muted.load(Ordering::Acquire)
+    }
+    /// Whether the source is operationally muted.
+    pub fn rx_muted(&self) -> bool {
+        self.reply.rx_muted()
+    }
     /// Control publishes protocol telemetry eligibility independently of voice.
     pub fn set_telemetry_allowed(&self, allowed: bool) {
         self.reply
@@ -148,7 +204,20 @@ impl PeerSignals {
     }
     /// Publish a transport radio-key edge independently of decoded PCM arrival.
     pub fn set_radio_keyed(&self, keyed: bool) {
+        self.set_radio_keyed_at(keyed, self.receive_epoch());
+    }
+    /// Publish the key edge with the receive epoch captured before the provider handoff.
+    pub fn set_radio_keyed_at(&self, keyed: bool, epoch: u64) {
+        if keyed {
+            self.reply.0.radio_key_epoch.store(epoch, Ordering::Relaxed);
+        }
         self.reply.0.radio_keyed.store(keyed, Ordering::Release);
+    }
+    /// A raw carrier or a finite burst can remain active while its output key is revoked.
+    pub fn output_radio_keyed(&self, epoch: u64) -> bool {
+        epoch & 1 == 0
+            && self.radio_keyed()
+            && self.reply.0.radio_key_epoch.load(Ordering::Relaxed) == epoch
     }
     /// Read the latest transport radio-key state without waiting for the peer owner.
     pub fn radio_keyed(&self) -> bool {

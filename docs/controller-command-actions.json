@@ -1,0 +1,2571 @@
+{
+  "repository": "cpeter1207/rpt_advanced",
+  "commit": "8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9",
+  "dependency": {
+    "repository": "cpeter1207/USBRadioPlus",
+    "revision": "b7dc3d35a242c4bdfea7166b6f959539d500a363",
+    "note": "Current public main inspected because controller includes usbradioplus_product.h; the controller .github/dependencies.json does not pin USBRadioPlus. Pin compatibility or version-check before promising external SDK coverage."
+  },
+  "schema": "../repeater-management.schema.json#/$defs/controllerAction",
+  "categories": [
+    {
+      "definition": "linkCommandAction",
+      "variants": 21
+    },
+    {
+      "definition": "radioCommand",
+      "variants": 28
+    },
+    {
+      "definition": "siteRuntimeCommand",
+      "variants": 6
+    },
+    {
+      "definition": "macroControlAction",
+      "variants": 4
+    },
+    {
+      "definition": "interactiveCommandAction",
+      "variants": 3
+    },
+    {
+      "definition": "controllerQueryAction",
+      "variants": 5
+    },
+    {
+      "definition": "radioMaintenanceAction",
+      "variants": 13
+    },
+    {
+      "definition": "controllerManagementAction",
+      "variants": 4
+    },
+    {
+      "definition": "controllerLifecycleAction",
+      "variants": 3
+    },
+    {
+      "definition": "hostQueryAction",
+      "variants": 1
+    },
+    {
+      "definition": "sourceIngressAction",
+      "variants": 2
+    },
+    {
+      "definition": "phoneCommandAction",
+      "variants": 7
+    },
+    {
+      "definition": "phoneSessionAction",
+      "variants": 2
+    },
+    {
+      "definition": "controllerAdmissionAction",
+      "variants": 2
+    },
+    {
+      "definition": "interfaceCommandAction",
+      "variants": 7
+    },
+    {
+      "definition": "controllerInputAction",
+      "variants": 1
+    },
+    {
+      "definition": "receiveControlAction",
+      "variants": 4
+    }
+  ],
+  "link_commands": [
+    {
+      "source_variant": "Disconnect",
+      "proposed_action": "disconnect",
+      "default_dtmf_prefix": "1",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        }
+      },
+      "semantics": "Disconnect one nonpermanent direct peer. Does not cancel permanent recovery.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "disconnect"
+    },
+    {
+      "source_variant": "Monitor",
+      "proposed_action": "connect",
+      "default_dtmf_prefix": "2",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        },
+        "mode": {
+          "const": "monitor"
+        }
+      },
+      "semantics": "Temporary monitor.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "connect"
+    },
+    {
+      "source_variant": "Transceive",
+      "proposed_action": "connect",
+      "default_dtmf_prefix": "3",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        },
+        "mode": {
+          "const": "transceive"
+        }
+      },
+      "semantics": "Temporary transceive.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "connect"
+    },
+    {
+      "source_variant": "Command",
+      "proposed_action": "select_command_target",
+      "default_dtmf_prefix": "4",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        }
+      },
+      "semantics": "Select source-local remote destination after exact directory verification; no media attachment; subsequent digits separately forwarded. # clears selection locally. EchoLink unsupported. Overload send_command_digit {target_node,digit} forwards one addressed D envelope.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "select_command_target"
+    },
+    {
+      "source_variant": "Status",
+      "proposed_action": "link_status",
+      "default_dtmf_prefix": "70",
+      "required_fields": {},
+      "semantics": "Source-scoped current direct links telemetry.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "link_status"
+    },
+    {
+      "source_variant": "DisconnectAll",
+      "proposed_action": "disconnect_all",
+      "default_dtmf_prefix": null,
+      "required_fields": {},
+      "semantics": "Typed-only all-current-link disconnection; retains paused original modes/permanence including temporary peers. Do not confuse DTMF *806.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "existing typed scheduled macro / trusted controller operation; no configured DTMF mapping for this enum variant"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "disconnect_all"
+    },
+    {
+      "source_variant": "DisconnectPermanentAll",
+      "proposed_action": "pause_permanent_links",
+      "default_dtmf_prefix": "806",
+      "required_fields": {},
+      "semantics": "All permanent peers/retries/configured-route intent on invoking local node. Disconnects active permanent peers; pauses recovery, invalidates scheduled reservations. Temporary peers remain.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "pause_permanent_links"
+    },
+    {
+      "source_variant": "LastKeyed",
+      "proposed_action": "last_keyed",
+      "default_dtmf_prefix": "72",
+      "required_fields": {},
+      "semantics": "Source-scoped last transmitting direct node report.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "last_keyed"
+    },
+    {
+      "source_variant": "LocalMonitor",
+      "proposed_action": "connect",
+      "default_dtmf_prefix": "75",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        },
+        "mode": {
+          "const": "local-monitor"
+        }
+      },
+      "semantics": "Temporary local-monitor.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "connect"
+    },
+    {
+      "source_variant": "DisconnectPermanent",
+      "proposed_action": "disconnect_permanent",
+      "default_dtmf_prefix": "811",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        }
+      },
+      "semantics": "Cancels exact permanent manual recovery and detaches permanent peer. Configured-route policy may recreate it next reconciliation; not a hold.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "disconnect_permanent"
+    },
+    {
+      "source_variant": "PermanentMonitor",
+      "proposed_action": "connect_permanent",
+      "default_dtmf_prefix": "812",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        },
+        "mode": {
+          "const": "monitor"
+        }
+      },
+      "semantics": "Permanent monitor. Can resume one paused retry directly; duplicate active/nonpaused local ownership is Loop in raw current handler.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "connect_permanent"
+    },
+    {
+      "source_variant": "PermanentTransceive",
+      "proposed_action": "connect_permanent",
+      "default_dtmf_prefix": "813",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        },
+        "mode": {
+          "const": "transceive"
+        }
+      },
+      "semantics": "Permanent transceive. Can resume one paused retry directly; duplicate active/nonpaused local ownership is Loop in raw current handler.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "connect_permanent"
+    },
+    {
+      "source_variant": "FullStatus",
+      "proposed_action": "network_status",
+      "default_dtmf_prefix": "73",
+      "required_fields": {},
+      "semantics": "Source-scoped topology/status telemetry plus known-route log.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "network_status"
+    },
+    {
+      "source_variant": "ReconnectAll",
+      "proposed_action": "reconnect_all",
+      "default_dtmf_prefix": null,
+      "required_fields": {},
+      "semantics": "Typed-only resumes all retained temporary/permanent retry records under current configured-route policy.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "existing typed scheduled macro / trusted controller operation; no configured DTMF mapping for this enum variant"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "reconnect_all"
+    },
+    {
+      "source_variant": "ReconnectPermanentAll",
+      "proposed_action": "resume_permanent_links",
+      "default_dtmf_prefix": "816",
+      "required_fields": {},
+      "semantics": "All automatic permanent retries/configured-route intent on invoking local node; current schedule is rechecked. Temporary links/retries unchanged.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "resume_permanent_links"
+    },
+    {
+      "source_variant": "PermanentLocalMonitor",
+      "proposed_action": "connect_permanent",
+      "default_dtmf_prefix": "818",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        },
+        "mode": {
+          "const": "local-monitor"
+        }
+      },
+      "semantics": "Permanent local monitor; same retry semantics as permanent transceive.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "connect_permanent"
+    },
+    {
+      "source_variant": "DisconnectNonPermanentAll",
+      "proposed_action": "disconnect_nonpermanent_all",
+      "default_dtmf_prefix": "10",
+      "required_fields": {},
+      "semantics": "Fixed DTMF *10; disconnects every active nonpermanent direct peer without creating reconnect state.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "disconnect_nonpermanent_all"
+    },
+    {
+      "source_variant": "Time",
+      "proposed_action": "announce_time",
+      "default_dtmf_prefix": "722",
+      "required_fields": {},
+      "semantics": "Fixed DTMF *722; current time telemetry.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "announce_time"
+    },
+    {
+      "source_variant": "AdminUnlock",
+      "proposed_action": "unlock_administration",
+      "default_dtmf_prefix": "800",
+      "required_fields": {
+        "code": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "writeOnly": true
+        }
+      },
+      "semantics": "Collector-only human interactive authentication; both configured code hashes required. Never permits credentials in authored macros; raw typed handler rejects. New transport adapter required.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "human DTMF collector with source-specific grant state"
+      ],
+      "current_macro_eligibility": "Forbidden in existing macro expansion; raw typed NodeLinkControl.command denies",
+      "schema_action": "unlock_administration"
+    },
+    {
+      "source_variant": "AdminLock",
+      "proposed_action": "lock_administration",
+      "default_dtmf_prefix": "801",
+      "required_fields": {
+        "code": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "writeOnly": true
+        }
+      },
+      "semantics": "Collector-only human lock-code authentication; raw typed handler rejects. Existing macro-only bare lock prefix has no code and revokes source grant directly. Do not persist secret in macro.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "human DTMF collector with source-specific grant state"
+      ],
+      "current_macro_eligibility": "Credential-bearing lock forbidden; bare configured lock prefix allowed to revoke this invocation source grant",
+      "schema_action": "lock_administration"
+    },
+    {
+      "source_variant": "ParrotEnable",
+      "proposed_action": "set_parrot",
+      "default_dtmf_prefix": "804",
+      "required_fields": {
+        "enabled": {
+          "const": true
+        }
+      },
+      "semantics": "Live enable until reload; active exact-source administration grant rechecked at dispatch.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "Requires exact live DTMF source administrative grant; trusted management requires separately authorized adapter, not forged admin_authorized bool",
+      "schema_action": "set_parrot"
+    },
+    {
+      "source_variant": "ParrotDisable",
+      "proposed_action": "set_parrot",
+      "default_dtmf_prefix": "805",
+      "required_fields": {
+        "enabled": {
+          "const": false
+        }
+      },
+      "semantics": "Live disable until reload; active exact-source administration grant rechecked at dispatch.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "Requires exact live DTMF source administrative grant; trusted management requires separately authorized adapter, not forged admin_authorized bool",
+      "schema_action": "set_parrot"
+    },
+    {
+      "source_variant": "PadTest",
+      "proposed_action": "start_pad_test",
+      "default_dtmf_prefix": "82",
+      "required_fields": {},
+      "semantics": "Interactive local-RF only; captures16symbols until actual receiver unkey, first127symbols; not a macro action or peer capture. Raw typed handler rejects.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "human local RF collector only"
+      ],
+      "current_macro_eligibility": "Forbidden in existing macro expansion; raw typed NodeLinkControl.command denies",
+      "schema_action": "start_pad_test"
+    },
+    {
+      "source_variant": "Message",
+      "proposed_action": "play_configured_message",
+      "default_dtmf_prefix": "77",
+      "required_fields": {
+        "selector": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,126}$"
+        }
+      },
+      "semantics": "Configured message/id/tail/event-media selector; public read-only, cannot invoke action macro; configured audience retained. Zero is not last-target alias.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "message"
+    },
+    {
+      "source_variant": "SiteStatus",
+      "proposed_action": "site_status",
+      "default_dtmf_prefix": "76",
+      "required_fields": {
+        "selector": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,126}$"
+        }
+      },
+      "semantics": "Read configured sensor/input by dtmf_id; source-scoped reply; no site mutation authority. Zero is not last-target alias.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "site_status"
+    },
+    {
+      "source_variant": "CancelMessage",
+      "proposed_action": "cancel_message",
+      "default_dtmf_prefix": "78",
+      "required_fields": {},
+      "semantics": "Cancel current configured-message attempt and repeat gate; preserve future triggers; public operation on the invoking controller.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "No DTMF administrative grant required for this domain variant; ordinary source lifecycle, access and handler policy apply",
+      "schema_action": "cancel_message"
+    },
+    {
+      "source_variant": "EchoTelemetry",
+      "proposed_action": "set_echo_telemetry",
+      "default_dtmf_prefix": null,
+      "required_fields": {
+        "mode": {
+          "enum": [
+            "off",
+            "on",
+            "follow",
+            "demand"
+          ]
+        }
+      },
+      "semantics": "DTMF mapping disabled by default, append0..3. Exact source admin grant + telemetry_dynamic required at product effect. Does not affect peers lacking EchoLink.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "authorization": "Requires exact live DTMF source administrative grant; trusted management requires separately authorized adapter, not forged admin_authorized bool",
+      "schema_action": "set_echo_telemetry"
+    },
+    {
+      "source_variant": "RemoteBase",
+      "proposed_action": "radio",
+      "default_dtmf_prefix": null,
+      "required_fields": {
+        "operation": {
+          "description": "One of27RemoteCommand variants in remote_commands"
+        }
+      },
+      "semantics": "Family installed from configured shared-radio owner (normally prefix6); read queries public, mutations follow remote_dtmf_access open/locked/disabled.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L7-L64",
+      "handler": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L710-L989",
+      "scope": "Invoking local controller/port; source-session state remains exact-source owned",
+      "current_sources": [
+        "local RF DTMF",
+        "IAX/addressed remote DTMF",
+        "trusted controller typed path where domain handler supports it"
+      ],
+      "current_macro_eligibility": "Existing DTMF macro compiler supports ordinary complete local commands under same permissions; future canonical typed macro executor must retain normal action permissions",
+      "schema_action": "radio"
+    }
+  ],
+  "radio_commands": [
+    {
+      "source_variant": "Recall",
+      "wire_operation": 1,
+      "proposed_action": "radio",
+      "proposed_operation": "recall_memory",
+      "required_fields": {
+        "selector": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "dtmf_payload": "0<selector>",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Recall configured memory, no editing.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Frequency",
+      "wire_operation": 2,
+      "proposed_action": "radio",
+      "proposed_operation": "set_frequency",
+      "required_fields": {
+        "frequency_mhz": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "multipleOf": 0.000001
+        },
+        "offset": {
+          "enum": [
+            "minus",
+            "simplex",
+            "plus"
+          ]
+        }
+      },
+      "dtmf_payload": "1<MHz>*<fraction>*<offset>",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Raw hertz positive u64; exact MHz conversion. DTMF fraction1..5digits (10Hz), offset1/2/3 selects configured magnitude.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Tone",
+      "wire_operation": 3,
+      "proposed_action": "radio",
+      "proposed_operation": "set_tone",
+      "required_fields": {
+        "direction": {
+          "enum": [
+            "rx",
+            "tx"
+          ]
+        },
+        "frequency_hz": {
+          "type": "number",
+          "minimum": 50,
+          "maximum": 300,
+          "multipleOf": 0.1
+        }
+      },
+      "dtmf_payload": "2<whole>*<tenth>RX;3<whole>*<tenth>TX",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Core encode bool + tenths_hz; parser500..3000tenthsHz.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "ToneEnabled",
+      "wire_operation": 4,
+      "proposed_action": "radio",
+      "proposed_operation": "set_tone_enabled",
+      "required_fields": {
+        "direction": {
+          "enum": [
+            "rx",
+            "tx"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "dtmf_payload": "40RXoff;41RXon;42TXoff;43TXon",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Arm/disarm selected direction.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "PowerPreset",
+      "wire_operation": 5,
+      "proposed_action": "radio",
+      "proposed_operation": "set_power_preset",
+      "required_fields": {
+        "preset": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        }
+      },
+      "dtmf_payload": "44/45/46",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Raw preset0..2; configuration determines physical values.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Status",
+      "wire_operation": 6,
+      "proposed_action": "radio",
+      "proposed_operation": "status",
+      "required_fields": {
+        "detail": {
+          "enum": [
+            "short",
+            "long"
+          ]
+        }
+      },
+      "dtmf_payload": "52short/51long",
+      "permissions": "public read-only query",
+      "semantics": "Public query.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Mode",
+      "wire_operation": 7,
+      "proposed_action": "radio",
+      "proposed_operation": "set_mode",
+      "required_fields": {
+        "selector": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "dtmf_payload": "61FM;62USB;63LSB;64AM",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Stable selector1FM,2AM,3USB,4LSB in familiar parser; provider capability selectors authoritative.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Step",
+      "wire_operation": 8,
+      "proposed_action": "radio",
+      "proposed_operation": "step",
+      "required_fields": {
+        "step_mhz": {
+          "type": "number",
+          "multipleOf": 0.000001
+        }
+      },
+      "dtmf_payload": "711-20Hz;714-100;717-500;713+20;716+100;719+500",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Exact conversion to raw i64 signed hertz.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "ScanPreset",
+      "wire_operation": 9,
+      "proposed_action": "radio",
+      "proposed_operation": "scan_preset",
+      "required_fields": {
+        "direction": {
+          "enum": [
+            "down",
+            "up"
+          ]
+        },
+        "preset": {
+          "enum": [
+            "slow",
+            "medium",
+            "fast"
+          ]
+        }
+      },
+      "dtmf_payload": "721/724/727down;723/726/729up",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Run selected list with configured preset0..2.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Tune",
+      "wire_operation": 10,
+      "proposed_action": "radio",
+      "proposed_operation": "tune",
+      "required_fields": {},
+      "dtmf_payload": "79",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Configuration-bounded manual tune; no unchecked duration/PTT bypass.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "GetSetting",
+      "wire_operation": 11,
+      "proposed_action": "radio",
+      "proposed_operation": "get_setting",
+      "required_fields": {
+        "selector": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "dtmf_payload": "90<selector>",
+      "permissions": "public read-only query",
+      "semantics": "Public declared-setting query.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "SetSetting",
+      "wire_operation": 12,
+      "proposed_action": "radio",
+      "proposed_operation": "set_setting",
+      "required_fields": {
+        "selector": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "value": {
+          "type": "object",
+          "properties": {
+            "negative": {
+              "type": "boolean"
+            },
+            "magnitude": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": "18446744073709551615"
+            },
+            "decimal_places": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 6
+            }
+          },
+          "required": [
+            "negative",
+            "magnitude",
+            "decimal_places"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "dtmf_payload": "91<selector>*<sign0positive1negative>*<digits>*<places>",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Raw DecimalValue tuple: signed magnitude must fit i64; preserve explicit negative zero. Physical metadata validates bool/enum/scalar type, units, range and precision. Arbitrarystring/units in current draft are future projections, not raw wire format.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "StartScan",
+      "wire_operation": 13,
+      "proposed_action": "radio",
+      "proposed_operation": "start_scan",
+      "required_fields": {
+        "selector": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "dtmf_payload": "92<selector>",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Start configured scan list.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "PauseScan",
+      "wire_operation": 14,
+      "proposed_action": "radio",
+      "proposed_operation": "pause_scan",
+      "required_fields": {},
+      "dtmf_payload": "93",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Pause on current member.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "ResumeScan",
+      "wire_operation": 15,
+      "proposed_action": "radio",
+      "proposed_operation": "resume_scan",
+      "required_fields": {},
+      "dtmf_payload": "94",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Resume paused scan.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "StopScan",
+      "wire_operation": 16,
+      "proposed_action": "radio",
+      "proposed_operation": "stop_scan",
+      "required_fields": {},
+      "dtmf_payload": "95",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Stop, retaining applied member.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "ScanDirection",
+      "wire_operation": 17,
+      "proposed_action": "radio",
+      "proposed_operation": "set_scan_direction",
+      "required_fields": {
+        "direction": {
+          "enum": [
+            "down",
+            "up"
+          ]
+        }
+      },
+      "dtmf_payload": "960down/961up",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Raw bool trueforward.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Skip",
+      "wire_operation": 18,
+      "proposed_action": "radio",
+      "proposed_operation": "skip",
+      "required_fields": {},
+      "dtmf_payload": "97",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Skip current member for this run.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Memory",
+      "wire_operation": 19,
+      "proposed_action": "radio",
+      "proposed_operation": "get_memory",
+      "required_fields": {
+        "selector": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "dtmf_payload": "98<selector>",
+      "permissions": "public read-only query",
+      "semantics": "Public configured memory query, distinct from recall.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Catalog",
+      "wire_operation": 20,
+      "proposed_action": "radio",
+      "proposed_operation": "catalog",
+      "required_fields": {
+        "kind": {
+          "enum": [
+            "capabilities",
+            "memories",
+            "scan_lists"
+          ]
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "dtmf_payload": "990<page>capabilities;991memories;992scanlists",
+      "permissions": "public read-only query",
+      "semantics": "Public bounded catalog at most5entries/page.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "ScanStatus",
+      "wire_operation": 21,
+      "proposed_action": "radio",
+      "proposed_operation": "scan_status",
+      "required_fields": {
+        "selector": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "dtmf_payload": "993<selector>",
+      "permissions": "public read-only query",
+      "semantics": "Public configured-list/live-state query.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Inhibit",
+      "wire_operation": 22,
+      "proposed_action": "radio",
+      "proposed_operation": "set_inhibit",
+      "required_fields": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "dtmf_payload": "9940clear/9941set",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Administrative remote TX inhibit; clearing cannot clear independent safety inhibit. Preserve owner distinction from site inhibit.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Dwell",
+      "wire_operation": 23,
+      "proposed_action": "radio",
+      "proposed_operation": "set_scan_dwell",
+      "required_fields": {
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": "18446744073709551615"
+        }
+      },
+      "dtmf_payload": "995<positive_ms>",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Live scan dwell. Runtime configuration/provider may narrow.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "ResumeDelay",
+      "wire_operation": 24,
+      "proposed_action": "radio",
+      "proposed_operation": "set_scan_resume_delay",
+      "required_fields": {
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": "18446744073709551615"
+        }
+      },
+      "dtmf_payload": "996<nonnegative_ms>",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Live scan quiet hold.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Priority",
+      "wire_operation": 25,
+      "proposed_action": "radio",
+      "proposed_operation": "set_scan_priority",
+      "required_fields": {
+        "selector": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "dtmf_payload": "997<selector>;0off",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Positive configured member selector orNone/off.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "CurrentStatus",
+      "wire_operation": 26,
+      "proposed_action": "radio",
+      "proposed_operation": "current_status",
+      "required_fields": {},
+      "dtmf_payload": "998",
+      "permissions": "public read-only query",
+      "semantics": "Public complete radio/scan status; distinct source variant from Status.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    },
+    {
+      "source_variant": "Invoke",
+      "wire_operation": 27,
+      "proposed_action": "radio",
+      "proposed_operation": "invoke",
+      "required_fields": {
+        "selector": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "dtmf_payload": "999<selector>",
+      "permissions": "administrative mutation under remote_dtmf_access + provider capability/RF safety",
+      "semantics": "Declared argument-free provider action only; metadata/safety validated.",
+      "scope": "Invoking local controller's shared physical radio owner",
+      "current_sources": [
+        "configured *6-family DTMF from local or exact peer source",
+        "existing compiled local DTMF macro (same source rights)",
+        "shared remote-operation adapter capability; direct management projection may require adapter"
+      ],
+      "runtime_bounds": "Source field representation bounds only. Actual hardware capabilities, configured RX/TX/mode/power policy, TX admission and tune/scan ownership narrow valid inputs."
+    }
+  ],
+  "site_commands": [
+    {
+      "proposed_action": "set_output",
+      "source_variant": "SiteCommand::Output { name: String, request: OutputRequest }",
+      "fields": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "semantics": "Exact configured effective identity; current authored site-action names also reject whitespace and []:. Bound is UTF-8 bytes in Rust; JSON maxLength counts code points."
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off",
+            "pulse"
+          ]
+        }
+      },
+      "variant_mapping": {
+        "on": "OutputRequest::On",
+        "off": "OutputRequest::Off",
+        "pulse": "OutputRequest::Pulse"
+      },
+      "x-source-restrictions": [
+        "Core command API assumes caller already authorized.",
+        "Targets effective configured output under owning local controller/site owner.",
+        "Reject unknown, disabled, unavailable/faulted outputs; reject direct writes to outputs claimed by enabled fans.",
+        "No new acquisition, direction or polarity changes."
+      ],
+      "semantics": [
+        "On/off cancel any pulse.",
+        "Pulse uses configured output.pulse_ms; no duration argument. Current pulse_ms config bound 1..u64::MAX milliseconds, default 500.",
+        "First pulse retains prior logical requested state; retrigger extends deadline from this command time; expiry restores prior state.",
+        "Backend fault immediately selects safe demand and cancels old pulse; request acceptance is not electrical readback."
+      ],
+      "sources": [
+        {
+          "path": "rust/core/src/site/controller.rs",
+          "line": 465,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/controller.rs#L465"
+        },
+        {
+          "path": "rust/core/src/site/output.rs",
+          "line": 59,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/output.rs#L59"
+        },
+        {
+          "path": "rust/core/src/config/site.rs",
+          "line": 333,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/site.rs#L333"
+        }
+      ]
+    },
+    {
+      "proposed_action": "acknowledge_alarm",
+      "source_variant": "SiteCommand::AlarmAcknowledge(String)",
+      "fields": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "semantics": "Exact configured effective identity; current authored site-action names also reject whitespace and []:. Bound is UTF-8 bytes in Rust; JSON maxLength counts code points."
+        }
+      },
+      "x-source-restrictions": [
+        "Already-authorized caller; exact configured alarm name."
+      ],
+      "semantics": [
+        "Silences repeat notifications only; does not clear condition, alarm active state, equipment actions, or protective inhibits."
+      ],
+      "sources": [
+        {
+          "path": "rust/core/src/site/controller.rs",
+          "line": 567,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/controller.rs#L567"
+        },
+        {
+          "path": "rust/core/src/site/alarm.rs",
+          "line": 133,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/alarm.rs#L133"
+        }
+      ]
+    },
+    {
+      "proposed_action": "reset_alarm",
+      "source_variant": "SiteCommand::AlarmReset(String)",
+      "fields": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "semantics": "Exact configured effective identity; current authored site-action names also reject whitespace and []:. Bound is UTF-8 bytes in Rust; JSON maxLength counts code points."
+        }
+      },
+      "x-source-restrictions": [
+        "Already-authorized caller; exact configured alarm name.",
+        "Active alarm must be reset_ready after safe recovery and configured recovery delay; unsafe/unknown state rejects reset."
+      ],
+      "semantics": [
+        "Inactive alarm returns no effect.",
+        "Successful active reset emits clear event, including its configured on_clear actions/clear message.",
+        "Never resets physical interlocks."
+      ],
+      "sources": [
+        {
+          "path": "rust/core/src/site/controller.rs",
+          "line": 572,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/controller.rs#L572"
+        },
+        {
+          "path": "rust/core/src/site/alarm.rs",
+          "line": 137,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/alarm.rs#L137"
+        }
+      ]
+    },
+    {
+      "proposed_action": "reset_extrema",
+      "source_variant": "SiteCommand::ResetExtrema(String)",
+      "fields": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "semantics": "Exact configured effective identity; current authored site-action names also reject whitespace and []:. Bound is UTF-8 bytes in Rust; JSON maxLength counts code points."
+        }
+      },
+      "x-source-restrictions": [
+        "Already-authorized caller; exact configured analog sensor name."
+      ],
+      "semantics": [
+        "Clears retained measurement extrema only; current reading unchanged."
+      ],
+      "sources": [
+        {
+          "path": "rust/core/src/site/controller.rs",
+          "line": 588,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/controller.rs#L588"
+        }
+      ]
+    },
+    {
+      "proposed_action": "set_fan",
+      "source_variant": "SiteCommand::Fan { name: String, duty: Option<f64> }",
+      "fields": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "semantics": "Exact configured effective identity; current authored site-action names also reject whitespace and []:. Bound is UTF-8 bytes in Rust; JSON maxLength counts code points."
+        },
+        "duty": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "finite": true
+            },
+            {
+              "const": "auto"
+            }
+          ]
+        }
+      },
+      "variant_mapping": {
+        "auto": "None",
+        "number": "Some(finite normalized value)"
+      },
+      "x-source-restrictions": [
+        "Already-authorized caller; effective enabled configured fan.",
+        "Apply through fan's exclusively owned configured output; do not grant direct raw-output override."
+      ],
+      "semantics": [
+        "Numeric duty is additional cooling demand. Effective duty=max(PTT/run-on demand, thermal demand, manual demand).",
+        "0 does not force an automatically demanded fan off; auto removes additional demand.",
+        "Missing required temperature produces full cooling with visible fault; backend/PWM/tachometer capabilities remain checked."
+      ],
+      "sources": [
+        {
+          "path": "rust/core/src/site/controller.rs",
+          "line": 536,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/controller.rs#L536"
+        },
+        {
+          "path": "rust/core/src/site/fan.rs",
+          "line": 49,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/fan.rs#L49"
+        },
+        {
+          "path": "rust/core/src/site/fan.rs",
+          "line": 124,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/fan.rs#L124"
+        }
+      ]
+    },
+    {
+      "proposed_action": "set_transmit_inhibit",
+      "source_variant": "SiteCommand::Inhibit(bool)",
+      "fields": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "x-source-restrictions": [
+        "Already-authorized caller.",
+        "This command owns only the manual protective inhibit source; it cannot release input/alarm/physical-interlock or failed-activation inhibits."
+      ],
+      "semantics": [
+        "Aggregate policy inhibit is OR of independent sources.",
+        "Gate publication occurs before equipment effects are delivered."
+      ],
+      "sources": [
+        {
+          "path": "rust/core/src/site/controller.rs",
+          "line": 556,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/controller.rs#L556"
+        },
+        {
+          "path": "rust/core/src/site/controller.rs",
+          "line": 408,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/controller.rs#L408"
+        },
+        {
+          "path": "rust/core/src/runtime/aggregate.rs",
+          "line": 184,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/aggregate.rs#L184"
+        }
+      ]
+    }
+  ],
+  "socket_commands": [
+    {
+      "wire": "nodes",
+      "normalized": {
+        "action": "controller_query",
+        "operation": "nodes"
+      },
+      "kind": "query",
+      "result": "enabled configured local radio node identities",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/local_radio.rs#L14",
+      "native_arguments": {}
+    },
+    {
+      "wire": "configuration-path",
+      "normalized": {
+        "action": "controller_query",
+        "operation": "configuration_path"
+      },
+      "kind": "query",
+      "result": "canonical configured foreground file path; never a client-selected path",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/local_radio.rs#L25",
+      "native_arguments": {}
+    },
+    {
+      "wire": "status",
+      "normalized": {
+        "action": "radio_maintenance",
+        "operation": "status"
+      },
+      "kind": "query",
+      "result": "physical measurements, mixer values, carrier/subaudible/keyed/PTT state",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/local_radio.rs#L121",
+      "native_arguments": {}
+    },
+    {
+      "wire": "processing-stats",
+      "normalized": {
+        "action": "radio_maintenance",
+        "operation": "processing_status"
+      },
+      "kind": "query",
+      "result": "RX/TX/link callback processing statistics and loudness meters",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/local_radio.rs#L125",
+      "native_arguments": {}
+    },
+    {
+      "wire": "active-configuration",
+      "normalized": {
+        "action": "radio_maintenance",
+        "operation": "active_configuration"
+      },
+      "kind": "query",
+      "result": "source configuration text; sanitize before management API response",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/radio_host.rs#L291",
+      "native_arguments": {}
+    },
+    {
+      "wire": "command",
+      "kind": "query_or_mutation",
+      "note": "Normalize supported cases below; do not expose unconstrained numbers or arbitrary text.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/local_radio.rs#L132",
+      "classification": "dispatch_container",
+      "schema_mapping": [
+        {
+          "action": "radio_maintenance",
+          "operation": "get_mixer"
+        },
+        {
+          "action": "radio_maintenance",
+          "operation": "set_mixer"
+        },
+        {
+          "action": "radio_maintenance",
+          "operation": "set_test_tone"
+        },
+        {
+          "action": "radio_maintenance",
+          "operation": "read_eeprom"
+        },
+        {
+          "action": "radio_maintenance",
+          "operation": "write_eeprom"
+        },
+        {
+          "action": "radio_maintenance",
+          "operation": "set_ctcss_inhibit"
+        },
+        {
+          "action": "radio_maintenance",
+          "operation": "set_subaudible_override"
+        },
+        {
+          "action": "radio_maintenance",
+          "operation": "save_tuning_eeprom"
+        }
+      ],
+      "native_arguments": {
+        "command": "uint32 numeric SDK enum",
+        "target": "uint32",
+        "value": "int64",
+        "flags": "uint32",
+        "eeprom_words": "optional array exactly64 uint16"
+      }
+    },
+    {
+      "wire": "transmit",
+      "normalized": {
+        "action": "radio_maintenance",
+        "operation": "transmit"
+      },
+      "kind": "temporary_mutation",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/local_radio.rs#L153",
+      "providerSource": "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/product/src/native.rs#L582",
+      "native_arguments": {
+        "keyed": "boolean",
+        "forcedCtcssHz": "optional number50..300,multipleOf0.1; only when keyed=true in normalized contract. Socket provider currently accepts tone even keyed=false, Asterisk CLI rejects."
+      }
+    },
+    {
+      "wire": "reload",
+      "normalized": {
+        "action": "controller_management",
+        "operation": "reload"
+      },
+      "kind": "lifecycle_mutation",
+      "note": "Socket validator requires node:string but backend ignores it and reloads service-wide fixed configured path; cannot choose filesystem path.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/foreground.rs#L169",
+      "native_arguments": {}
+    }
+  ],
+  "maintenance_commands": [
+    {
+      "code": 1,
+      "operation": "get_mixer",
+      "kind": "query",
+      "arguments": {
+        "target": {
+          "enum": [
+            "receive",
+            "transmit_a",
+            "transmit_b"
+          ]
+        }
+      },
+      "result": "integer0..999",
+      "source": "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/product/src/maintenance.rs#L379"
+    },
+    {
+      "code": 2,
+      "operation": "set_mixer",
+      "kind": "mutation",
+      "arguments": {
+        "target": {
+          "enum": [
+            "receive",
+            "transmit_a",
+            "transmit_b"
+          ]
+        },
+        "level": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        }
+      },
+      "source": "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/product/src/maintenance.rs#L379"
+    },
+    {
+      "code": 3,
+      "operation": "set_test_tone",
+      "kind": "temporary_mutation",
+      "arguments": {
+        "enabled": "boolean=>wire value0|1"
+      },
+      "source": "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/product/src/maintenance.rs#L379"
+    },
+    {
+      "code": 4,
+      "operation": "read_eeprom",
+      "kind": "query",
+      "arguments": {},
+      "result": {
+        "words": "array64 uint16",
+        "checksumValid": "boolean",
+        "magicValid": "boolean"
+      },
+      "source": "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/product/src/maintenance.rs#L379"
+    },
+    {
+      "code": 5,
+      "operation": "write_eeprom",
+      "kind": "persistent_mutation",
+      "arguments": {
+        "words": "array exactly64 integer0..65535"
+      },
+      "result": {
+        "words": "array64 uint16, with refreshed magic and checksum words",
+        "checksumValid": "read-only boolean",
+        "magicValid": "read-only boolean"
+      },
+      "note": "Raw flags accepted/forwarded but underlying pinned GPIO adapter ignores input flags, recomputes magic/checksum, writes established tuning region words51..63 only and returns validity true; normalize wire flags0. Full64-word image is retained for wire compatibility; only provider-defined region is programmed.",
+      "sources": [
+        "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/product/src/maintenance.rs#L403",
+        "https://github.com/cpeter1207/rptadv-gpio-adapter/blob/a5bd54f310bbc98447c97d8f139d4fa503b2241a/src/lib.rs#L861"
+      ]
+    },
+    {
+      "code": 7,
+      "operation": "set_ctcss_inhibit",
+      "kind": "temporary_mutation",
+      "arguments": {
+        "enabled": "boolean=>wire value0|1"
+      },
+      "source": "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/product/src/maintenance.rs#L379"
+    },
+    {
+      "code": 8,
+      "operation": "set_subaudible_override",
+      "kind": "temporary_mutation",
+      "arguments": {
+        "enabled": "boolean=>wire value0|1"
+      },
+      "source": "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/product/src/maintenance.rs#L379"
+    },
+    {
+      "code": 9,
+      "operation": "save_tuning_eeprom",
+      "kind": "persistent_mutation",
+      "arguments": {},
+      "result": "value1 means saved",
+      "note": "Persists current live mixers/CTCSS/squelch; provider availability/configuration controls support.",
+      "source": "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/product/src/maintenance.rs#L379"
+    }
+  ],
+  "abi_only": [
+    {
+      "operation": 4,
+      "normalized": {
+        "action": "radio_maintenance",
+        "operation": "clear_manual"
+      },
+      "kind": "temporary_mutation",
+      "arguments": {},
+      "availability": "product public radio_control permits operation4; local socket validator/decode has no corresponding public spelling. Socket server invokes automatically on lease cleanup.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/local_radio.rs#L53"
+    },
+    {
+      "operation": 7,
+      "normalized": {
+        "action": "radio_host_query",
+        "operation": "receive_policy"
+      },
+      "nestedCommand": 10,
+      "kind": "internal_query",
+      "arguments": {
+        "target": "must0"
+      },
+      "result": {
+        "vadMode": {
+          "enum": [
+            "off",
+            "kerchunk",
+            "on"
+          ]
+        },
+        "minPrerollFrames": {
+          "enum": [
+            0,
+            7680
+          ]
+        }
+      },
+      "availability": "host-only before activation. Product radio_control rejects operation7 (copy_request1..6); generic maintenance execute rejects nested command10. Do not advertise public socket support.",
+      "sources": [
+        "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/radio_host.rs#L273",
+        "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/radio_control.rs#L72"
+      ]
+    }
+  ],
+  "asterisk": [
+    {
+      "syntax": "rpt_advanced link {connect|monitor|local-monitor|disconnect} <local-node> <remote-node>",
+      "alias": "rpt link ...",
+      "normalized": "shared link action1=transceive,2=monitor,3=local_monitor,4=disconnect",
+      "kind": "mutation",
+      "arguments": {
+        "remote": "node peer identity subject to current shared admission policy"
+      },
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/asterisk/src/cli.rs#L237"
+    },
+    {
+      "syntax": "rpt_advanced link status <local-node>",
+      "alias": "rpt link status ...",
+      "normalized": {
+        "action": "controller_query",
+        "operation": "link_status"
+      },
+      "kind": "query",
+      "arguments": {},
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/asterisk/src/cli.rs#L254"
+    },
+    {
+      "syntax": "rpt_advanced command <local-node> <DTMF>",
+      "normalized": {
+        "action": "controller_input",
+        "operation": "dtmf"
+      },
+      "kind": "input",
+      "arguments": {
+        "digits": "nonempty ASCII matching^[0-9ABCD*#]+$; appends# if missing"
+      },
+      "note": "Validates complete string before mutation, then feeds collector one digit at a time. Stops on first error; may contain multiple operations. Prefer typed core semantics for macros but preserve explicit input operation if every original mechanism must be represented.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/asterisk/src/cli.rs#L288"
+    },
+    {
+      "syntax": "rpt_advanced site ...",
+      "normalized": "shared site action inventory owned by event_order_review",
+      "kind": "mutation",
+      "operations": [
+        "output_on",
+        "output_off",
+        "output_pulse",
+        "alarm_acknowledge",
+        "alarm_reset",
+        "sensor_reset_extrema",
+        "fan_automatic",
+        "fan_duty",
+        "inhibit_on",
+        "inhibit_off"
+      ],
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/asterisk/src/cli_site.rs#L39"
+    },
+    {
+      "syntax": "RptAdvanced(node)",
+      "normalized": "incoming peer handoff; adapter lifecycle operation",
+      "kind": "admission",
+      "arguments": {
+        "remote": "caller ID number",
+        "sourceAddress": "CHANNEL(peerip)",
+        "local": "dialplan argument"
+      },
+      "note": "Only IAX2 channels. Authorizes before answer/handoff, revalidates admission after handoff. Requires live peer handle not serializable from JSON; represent in operation inventory, not macro lane.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/asterisk/src/application.rs#L55"
+    }
+  ],
+  "lifecycle_and_offline": [
+    {
+      "operation": "start",
+      "normalized": {
+        "action": "controller_lifecycle",
+        "operation": "start"
+      },
+      "kind": "internal_lifecycle_mutation",
+      "arguments": {
+        "configuration": "copied configuration document",
+        "providers": "validated host/control/file/speech descriptor handles"
+      },
+      "note": "Cannot serialize provider handles as arbitrary schema arguments. Expose host/service owner action with known configured providers if needed.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/include/rptadv_product.h#L588"
+    },
+    {
+      "operation": "reload",
+      "normalized": {
+        "action": "controller_management",
+        "operation": "reload"
+      },
+      "kind": "lifecycle_mutation",
+      "arguments": {
+        "configuration": "candidate configuration document supplied to product ABI; socket instead reloads fixed host path"
+      },
+      "note": "zero complete,one pending,negative failed; retain previous generation and candidate settings until completed.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/include/rptadv_product.h#L598"
+    },
+    {
+      "operation": "reload_poll",
+      "normalized": {
+        "action": "controller_lifecycle",
+        "operation": "reload_poll"
+      },
+      "kind": "internal_lifecycle_query",
+      "arguments": {},
+      "result": "complete|pending|failed",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/include/rptadv_product.h#L639"
+    },
+    {
+      "operation": "stop",
+      "normalized": {
+        "action": "controller_lifecycle",
+        "operation": "stop"
+      },
+      "kind": "lifecycle_mutation",
+      "arguments": {},
+      "note": "Stop/admission gate/drain/quiesce all owners. External lifecycle owner only, never from scheduled task executing on same executor.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/include/rptadv_product.h#L601"
+    },
+    {
+      "operation": "inspect_configuration",
+      "normalized": {
+        "action": "controller_management",
+        "operation": "validate_configuration"
+      },
+      "kind": "query",
+      "arguments": {
+        "configuration": "candidate document; API should use existing structured config body"
+      },
+      "note": "No workers/hardware open, validates full document before emitting records.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/include/rptadv_product.h#L614"
+    },
+    {
+      "operation": "inspect_secrets",
+      "normalized": {
+        "action": "controller_management",
+        "operation": "validate_secrets"
+      },
+      "kind": "query_with_secret_input",
+      "arguments": {
+        "secrets": "write-only secret document or refs; no echo/result credentials"
+      },
+      "note": "No file I/O. Host enforces file ownership/mode0600 separately; public API encrypts write-only inputs.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/include/rptadv_product.h#L620"
+    },
+    {
+      "operation": "authorize_incoming",
+      "normalized": {
+        "action": "controller_admission",
+        "operation": "authorize_incoming"
+      },
+      "kind": "internal_query",
+      "arguments": {
+        "protocol": "allstarlink|echolink|phone",
+        "remote": "identity",
+        "source": "IP or provider-defined source",
+        "peer": "live provider handle required for phone/Echo metadata"
+      },
+      "note": "Provider-authenticated metadata and current policy required; not arbitrary user-authorized JSON peer attachment.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/lifecycle.rs#L984"
+    },
+    {
+      "operation": "incoming",
+      "normalized": {
+        "action": "controller_admission",
+        "operation": "admit_incoming"
+      },
+      "kind": "internal_lifecycle_mutation",
+      "arguments": {
+        "protocol": "allstarlink|echolink|phone",
+        "remote": "identity",
+        "source": "provider source",
+        "peer": "unique already-inspected live provider handle"
+      },
+      "note": "Live peer ownership transfers; identity consistency checked. Not macro-appropriate.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/lifecycle.rs#L1023"
+    },
+    {
+      "syntax": "rpt-advanced --check-config <FILE>",
+      "normalized": "validate_configuration",
+      "kind": "offline_query",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/main.rs#L8"
+    },
+    {
+      "syntax": "rpt-advanced --check-secrets-file <FILE>",
+      "normalized": "validate_secrets",
+      "kind": "offline_query",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/main.rs#L55"
+    },
+    {
+      "syntax": "rpt-advanced --check-providers",
+      "normalized": {
+        "action": "controller_management",
+        "operation": "validate_providers"
+      },
+      "kind": "offline_query",
+      "arguments": {},
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/main.rs#L75"
+    },
+    {
+      "syntax": "rpt-advanced --foreground <CONFIG> [--secrets-file <FILE>]",
+      "normalized": "start",
+      "kind": "process_lifecycle",
+      "note": "Unix only; refuses effective uid0.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/foreground.rs#L61"
+    },
+    {
+      "syntax": "SIGHUP",
+      "normalized": "reload",
+      "kind": "signal_lifecycle_mutation",
+      "note": "Closes maintenance session then runs same foreground reload transaction.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/foreground.rs#L109"
+    },
+    {
+      "syntax": "SIGINT|SIGTERM",
+      "normalized": "stop",
+      "kind": "signal_lifecycle_mutation",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/foreground.rs#L61"
+    },
+    {
+      "syntax": "rpt-advanced --help",
+      "normalized": {
+        "action": "controller_query",
+        "operation": "help"
+      },
+      "kind": "offline_query",
+      "note": "Presentation-only CLI output; inventory entry usually does not require reusable macro action.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/standalone/src/main.rs#L85"
+    }
+  ],
+  "interface_compatibility": [
+    {
+      "operation": "SETCHAN",
+      "kind": "external_adapter_mutation",
+      "arguments": {
+        "channel": "uint8 0..255 parser bound; backend validates supported hardware channels"
+      },
+      "note": "Driver compatibility channel text, not rpt_advanced local socket operation."
+    },
+    {
+      "operation": "RXCTCSS",
+      "kind": "external_adapter_mutation",
+      "arguments": {
+        "enabled": "boolean; wire0|1"
+      },
+      "note": "Equivalent receive subaudible override must preserve inverse semantic if mapped."
+    },
+    {
+      "operation": "TXCTCSS",
+      "kind": "external_adapter_mutation",
+      "arguments": {
+        "enabled": "boolean; wire0|1"
+      },
+      "note": "Equivalent CTCSS inhibit must preserve inverse semantic if mapped."
+    },
+    {
+      "operation": "GPIO",
+      "kind": "external_adapter_mutation",
+      "arguments": {
+        "pin": "integer1..8",
+        "state": "inactive|active|pulse",
+        "pulseTicks100ms": "positive integer1..4294967294; wire ticks+1; wire0/1 are levels"
+      },
+      "note": "Use configured site output refs wherever controller owns site pin claims; no bypass of PTT/site ownership."
+    },
+    {
+      "operation": "PP",
+      "kind": "external_adapter_mutation",
+      "arguments": {
+        "pin": "integer2..9",
+        "state": "inactive|active|pulse",
+        "pulseTicks100ms": "positive integer1..4294967294; wire ticks+1"
+      },
+      "note": "Capability and pin ownership restricted; not rpt socket exposed."
+    },
+    {
+      "operation": "SETFREQ",
+      "kind": "external_adapter_mutation",
+      "arguments": {
+        "receiveMHz": "positive <=4294.967295, at most1Hz precision",
+        "transmitMHz": "same",
+        "receiveCtcssHz": "optional50..300 multipleOf0.1",
+        "transmitCtcssHz": "optional50..300 multipleOf0.1",
+        "power": "high|low"
+      },
+      "note": "Legacy parallel RTX backend does not implement receive tone/high-power advertised behavior. Prefer existing typed remote-base operations with actual capabilities."
+    },
+    {
+      "operation": "TransmitKey|TransmitUnkey",
+      "kind": "external_adapter_mutation",
+      "arguments": {
+        "keyed": "boolean",
+        "forcedCtcssHz": "optional50..300 multipleOf0.1"
+      },
+      "note": "Controller callback demand and manual maintenance demand are independent. Do not expose provider handle functions as macros."
+    }
+  ],
+  "interactive_and_phone_foundations": [
+    {
+      "operation": "exit_command_mode",
+      "required_fields": {},
+      "source": "rust/core/src/runtime/dtmf.rs:524-527",
+      "semantics": "Actual# clears selected source-local destination; no forwarded#; RF unkey does not clear."
+    },
+    {
+      "operation": "send_command_digit",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        },
+        "digit": {
+          "type": "string",
+          "pattern": "^[0-9A-D*#]$"
+        }
+      },
+      "source": "rust/core/src/runtime/links.rs:905-947",
+      "semantics": "LinkAction::Command overload with Some(digit); addressed sequence/source generated internally; directory/policy/connection semantics retained."
+    },
+    {
+      "operation": "feed_dtmf_symbol",
+      "required_fields": {
+        "digit": {
+          "type": "string",
+          "pattern": "^[0-9A-D*#]$"
+        }
+      },
+      "source": "rust/core/src/runtime/dtmf.rs:487-591",
+      "semantics": "Source ingress event, not fabricated scheduler identity."
+    },
+    {
+      "operation": "actual_receiver_unkey",
+      "required_fields": {},
+      "source": "rust/core/src/runtime/dtmf.rs:504-522",
+      "semantics": "Source lifecycle event terminates PadTest and ordinary command collection; not arbitrary macro control.",
+      "contract_override": "Eligible actual RF unkey completes ordinary commands; preserve pad-test/selected-remote/peer scope. Use a completion reason, not literal#."
+    },
+    {
+      "operation": "phone_attach",
+      "required_fields": {
+        "target_node": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9]{1,63}$",
+              "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "source": "rust/core/src/phone_dtmf.rs:32-55",
+      "semantics": "Inert grammar outcome only;Noneuses configureddefault; no routing authority."
+    },
+    {
+      "operation": "phone_select_command_target",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        }
+      },
+      "source": "rust/core/src/phone_dtmf.rs:32-55",
+      "semantics": "Inert foundation, no media attachment."
+    },
+    {
+      "operation": "phone_send_node_digit",
+      "required_fields": {
+        "target_node": {
+          "type": "string",
+          "pattern": "^[0-9]{1,63}$",
+          "description": "Operator dial alias. Reserved 3+at-least6digits range resolves to EchoLink; canonicalization before policy/retry. Raw typed target 0 is a literal; DTMF collector resolves 0 to its last remembered destination."
+        },
+        "digit": {
+          "type": "string",
+          "pattern": "^[0-9A-D*#]$"
+        }
+      },
+      "source": "rust/core/src/phone_dtmf.rs:32-55",
+      "semantics": "Inert foundation; destination unchanged parser/auth; never log/regenerate credentials."
+    },
+    {
+      "operation": "phone_send_telephone_digit",
+      "required_fields": {
+        "digit": {
+          "type": "string",
+          "pattern": "^[0-9A-D*#]$"
+        }
+      },
+      "source": "rust/core/src/phone_dtmf.rs:32-55",
+      "semantics": "Inert foundation; existing separate telephone egress only, never self-echo."
+    },
+    {
+      "operation": "phone_exit_command_mode",
+      "required_fields": {},
+      "source": "rust/core/src/phone_dtmf.rs:145-149",
+      "semantics": "Inert foundation; call-local#."
+    },
+    {
+      "operation": "phone_manual_key",
+      "required_fields": {},
+      "source": "rust/core/src/phone_dtmf.rs:271-281",
+      "semantics": "Inert foundation; call-local admitted manual TX request; unavailable under VAD; default91 onlywhiletargetselected."
+    },
+    {
+      "operation": "phone_manual_unkey",
+      "required_fields": {},
+      "source": "rust/core/src/phone_dtmf.rs:271-281",
+      "semantics": "Inert foundation; call-local release; default90."
+    }
+  ],
+  "mailbox_and_phone_sessions": [
+    {
+      "operation": "authenticate_phone",
+      "source_api": "Host::authenticate_phone(source, reply, mailbox, pin, clock) -> PhoneLogin",
+      "fields": {
+        "source": {
+          "type": "opaque PhoneSource",
+          "parts": [
+            "PhoneAccountId",
+            "account_generation:u64>0",
+            "PhoneCallId nonzero128-bit token",
+            "call_generation:u64>0",
+            "actual product-assigned ingress:u64>0"
+          ]
+        },
+        "reply": {
+          "type": "opaque exact live PeerReply"
+        },
+        "mailbox": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "minLength": 1,
+          "maxLength": 32,
+          "preserveLeadingZeros": true
+        },
+        "pin": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "minLength": 4,
+          "maxLength": 32,
+          "secret": true
+        }
+      },
+      "x-source-restrictions": [
+        "One exact current admitted private phone call and its reply token, serialized control only.",
+        "Not a generic node command or schedule macro: no ordinary clock/local invocation can manufacture PhoneSource or call-private reply context.",
+        "PIN borrowed, unlogged, absent from replies/node command parsers/grants.",
+        "Provider authentication does not substitute for mailbox PIN; successful mailbox authentication grants no node administration unlock.",
+        "Already authenticated call rejects another login attempt."
+      ],
+      "bounds": {
+        "failures": 3,
+        "login_deadline_ms": 60000,
+        "deadline_origin": "Original call admission; input never renews"
+      },
+      "result_enum": [
+        "PhoneLogin::Authenticated",
+        "PhoneLogin::Retry",
+        "PhoneLogin::Closed"
+      ],
+      "effects": [
+        "Authenticated/Retry prompt goes only to same call; Closed retires call.",
+        "Login prompt families: PhoneAuthenticationPrompt::{Login,Retry,Authenticated}."
+      ],
+      "sources": [
+        {
+          "path": "rust/product/src/host_phone_auth.rs",
+          "line": 9,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/host_phone_auth.rs#L9"
+        },
+        {
+          "path": "rust/product/src/phone.rs",
+          "line": 178,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/phone.rs#L178"
+        },
+        {
+          "path": "rust/core/src/config/phone_mailboxes.rs",
+          "line": 28,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/phone_mailboxes.rs#L28"
+        },
+        {
+          "path": "rust/core/src/link/phone.rs",
+          "line": 76,
+          "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/link/phone.rs#L76"
+        }
+      ]
+    },
+    {
+      "operation": "retire_phone",
+      "source_api": "Host::retire_phone(&PhoneSource) -> bool",
+      "fields": {
+        "source": {
+          "type": "opaque exact PhoneSource"
+        }
+      },
+      "x-source-restrictions": [
+        "Existing private call owner only, not a public remote-node alias.",
+        "Revokes exact call and each hosted node's source collector/grant before reclamation."
+      ],
+      "source": {
+        "path": "rust/product/src/host.rs",
+        "line": 1678,
+        "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/host.rs#L1678"
+      }
+    }
+  ],
+  "source_notes": [
+    "All port actions require explicit invoking local owner, active generation and normal runtime admission. Do not trust caller-supplied source/origin text.",
+    "DTMF status replies go to the exact local RF or peer connection source; CLI/REST responses stay on request interface. Recheck source/grant/generation across async work. Source loss retires stale work.",
+    "All remote state-changing commands are administrative(); radio Status/GetSetting/Memory/Catalog/ScanStatus/CurrentStatus remain public even when DTMF mutations disabled.",
+    "remote_dtmf_access Open allows mutation without code; Locked requires the exact source's live grant; Disabled denies mutation. The physical provider still validates capabilities, RF limits and safety, regardless of source authorization.",
+    "Administrative DTMF grants require both salted unlock/lock hashes and expire under configured timeout; only successful administrative completion renews. Credential strings are not authored macro actions.",
+    "Link targets use inbound/outbound allow/deny and topology admission. Permanent connection does not implicitly wait until remote transport establishes. Outage retry belongs to existing LinkManager.",
+    "DTMF Command has select-vs-forward overload and collector-local # exit; those are separate source-session concerns, not a single persistent destination configuration.",
+    "Existing baseline DTMF macros forbid credential-bearing operations, PadTest, nested named macros and unverified cross-host targets; future call_macro is an explicit extension. Bare AdminLock prefix is allowed to revoke the source grant.",
+    "DTMF prefix length <=63, collector complete payload length <=127, allowed prefix characters0-9A-D. Actual human input permits16DTMFsymbols. Node-destination args1..63decimaldigits; configured message/site selectors canonical positive decimal up to127digits.",
+    "Default DTMF keys named disconnect_all/reconnect_all mean permanent-only operations; typed actions with the same all-link spellings retain true all-link semantics.",
+    {
+      "path": "rust/core/src/config/site_policy.rs",
+      "line": 9,
+      "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/site_policy.rs#L9"
+    },
+    [
+      "InputSettings.on_active",
+      "InputSettings.on_inactive",
+      "AlarmSettings.on_trip",
+      "AlarmSettings.on_clear"
+    ],
+    "SiteController executes actions in list order; per-action faults become SiteEffect::Fault and later site actions still run. Preserve this domain-specific behavior; new command macros instead stop remaining actions on failure.",
+    "Alarm trip/clear/repeat message is a named local-only telemetry notification. Equipment effects run once independent of notification queue space; notifications coalesce by (local,name) and retry admission without rerunning equipment actions.",
+    [
+      {
+        "path": "rust/core/src/site/controller.rs",
+        "line": 417,
+        "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/controller.rs#L417"
+      },
+      {
+        "path": "rust/core/src/site/controller.rs",
+        "line": 440,
+        "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/site/controller.rs#L440"
+      },
+      {
+        "path": "rust/product/src/host_site.rs",
+        "line": 200,
+        "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/host_site.rs#L200"
+      }
+    ]
+  ],
+  "provider_plumbing": {
+    "reason": "Callbacks and opaque-handle lifecycle mechanisms are not new operator command semantics; represented above through lifecycle/admission or typed remote/site/maintenance commands.",
+    "operations": [
+      "radio_open/activate/deactivate/close",
+      "radio_update prepare/begin/accept/finish/rollback",
+      "radio_metadata_bind controls bits0..3 remote enabled/RX/TX/non-FM",
+      "programme_fence_bind/programme_retire and transmit completion callbacks",
+      "radio_site_bind/publish/snapshot",
+      "peer_dial/bind/read/write/send_text/send_digit/encoder/deadline",
+      "file/speech/resolver/control-executor descriptor open/submit/drain/close"
+    ]
+  },
+  "coverage_note": "Operator commands map to typed actions; internal callbacks/lifecycle and inert phone grammar are classified, not advertised as ordinary public macro verbs. Native source fields are retained for audit; canonical schema normalizes timers into timing and RF units to MHz.",
+  "external_tuner": {
+    "note": "USBRadioPlus operator tooling, not an additional rpt_advanced public command surface. Normalize primitives to shared typed actions; preserve backend availability.",
+    "commands": [
+      {
+        "syntax": "radioplus active [channel-name]",
+        "meaning": "query/select UI tuning target",
+        "controllerMapping": "owning port is implicit; selection stays client state"
+      },
+      {
+        "syntax": "radioplus channel list",
+        "meaning": "query configured radio identities",
+        "controllerMapping": "controller_query.nodes"
+      },
+      {
+        "syntax": "radioplus channel status [follow]",
+        "meaning": "query one or continuous physical snapshot",
+        "controllerMapping": "radio_maintenance.status; follow is subscription/presentation"
+      },
+      {
+        "syntax": "radioplus channel echo [0|1]",
+        "meaning": "query/set legacy Asterisk radio-channel echo",
+        "controllerMapping": "external backend capability only; standalone returns unavailable"
+      },
+      {
+        "syntax": "radioplus channel transmit <0|1> [ctcss-tenths-hz]",
+        "meaning": "manual physical PTT and optional tone",
+        "controllerMapping": "radio_maintenance.transmit; no forced tone when unkeyed"
+      },
+      {
+        "syntax": "radioplus channel flash",
+        "meaning": "three 1000ms test-tone/transmit bursts separated by 1500ms gaps, always cleanup",
+        "controllerMapping": "bounded tuner composition of maintenance primitives; no standalone socket verb"
+      },
+      {
+        "syntax": "radioplus channel command get-mixer <receive|transmit-a|transmit-b>",
+        "controllerMapping": "radio_maintenance.get_mixer"
+      },
+      {
+        "syntax": "radioplus channel command set-mixer <receive|transmit-a|transmit-b> <0-999>",
+        "controllerMapping": "radio_maintenance.set_mixer"
+      },
+      {
+        "syntax": "radioplus channel command test-tone <0|1>",
+        "controllerMapping": "radio_maintenance.set_test_tone"
+      },
+      {
+        "syntax": "radioplus channel command eeprom-read",
+        "controllerMapping": "radio_maintenance.read_eeprom"
+      },
+      {
+        "syntax": "radioplus channel command eeprom-write <flags0..3> <64-comma-separated-words>",
+        "controllerMapping": "radio_maintenance.write_eeprom; flags become read-only result metadata"
+      },
+      {
+        "syntax": "radioplus channel command eeprom-save-tuning",
+        "controllerMapping": "radio_maintenance.save_tuning_eeprom"
+      },
+      {
+        "syntax": "radioplus channel command ctcss-inhibit <0|1>",
+        "controllerMapping": "radio_maintenance.set_ctcss_inhibit"
+      },
+      {
+        "syntax": "radioplus channel command subaudible-override <0|1>",
+        "controllerMapping": "radio_maintenance.set_subaudible_override"
+      },
+      {
+        "syntax": "radioplus processing stats",
+        "controllerMapping": "radio_maintenance.processing_status"
+      },
+      {
+        "syntax": "radioplus processing reload",
+        "controllerMapping": "backend-specific configuration reload"
+      }
+    ],
+    "workflowNames": [
+      "FlashTransmitter",
+      "ContinuousRadioMeters",
+      "CalibrateReceiveNoise",
+      "CalibrateReceiveVoice",
+      "CalibrateReceiveCtcss"
+    ],
+    "workflowSemantics": "Tuner composes these workflows from typed controls and local waits; backend perform explicitly rejects them as single operations. Preserve in command inventory as compositions, not fictitious controller verbs.",
+    "applyModes": {
+      "reload": "Asterisk processing reload; standalone fixed configuration reload",
+      "restart": "Asterisk tuner invokes systemctl restart asterisk and module health check; standalone ignores apply mode and reloads",
+      "restore": "No public product/socket restore verb. Config file backup/restore is tuner file workflow; failed reload rollback is internal."
+    },
+    "source": "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/asterisk/src/host/cli.rs#L26"
+  },
+  "normalization_notes": [
+    "LinkAction::Message resolves its numeric dtmf_id to a named message/template and actual configured audience, then uses message; public JSON never substitutes a DTMF numeric alias for message identity.",
+    "Radio Frequency.offset maps to offset_direction; explicit offset magnitude/state is MHz through radio/set.",
+    "Dwell/ResumeDelay.duration_ms is nested under timing in public action JSON.",
+    "SetSetting uses normalized capability values and optional declared units; exact native DecimalValue conversion is an adapter requirement.",
+    "EEPROM validity input flags are ignored by the native tuning adapter and become result-only metadata.",
+    "Asterisk batch DTMF historically appends #; the new user contract instead requires an actual configured termination event and forbids implicit terminator injection.",
+    "Tuner active selection/follow are client presentation; flash/calibration are compositions of existing primitives. Host callbacks and provider handles are not serializable operator arguments.",
+    "Exact matching permanent intent is idempotent in the new connect_permanent adapter; the current raw handler still reports Loop for an already unpaused duplicate.",
+    "socket_commands.command is explicitly a dispatch container with schema_mapping entries, not an accepted raw typed_nested_command operation. Native argument spellings are labeled native_arguments.",
+    "Canonical action target_node is renamed parameter. Every action exposes generic parameter text; source/native fields retain their original names for audit. DTMF raw tail supplies parameter at invocation; fixed parameters belong to macros/runtime, not persisted DTMF mappings.",
+    "Unkey/inactivity are retained completion causes. Replace hardcoded3000ms and synthetic# completion with configured per-source deadlines and explicit completion reasons."
+  ],
+  "dtmf_mapping_contract": {
+    "shape": "Canonical action fields plus command and protected; named keys are arbitrary.",
+    "schema": "../repeater-management.schema.json#/$defs/effectiveDtmfMapping",
+    "raw_tail": "Handler-owned; no interpolation or implicit termination.",
+    "macro_alias": {
+      "command": "*903",
+      "protected": true,
+      "action": "call_macro",
+      "macro": "permanent_links"
+    },
+    "macro_fields_removed": [
+      "trigger",
+      "protected"
+    ],
+    "parameter": "Runtime-only raw extra digits including empty/leading zeros; each handler interprets. Not persisted in bindings.",
+    "terminator": {
+      "property": "command.terminator",
+      "type": "one DTMF symbol",
+      "default": "#",
+      "semantics": "Literal terminator, eligible actual source unkey and inactivity complete/clear prior buffer. Literal delimiter is excluded; unkey/timeout inject no symbol. Noncommands are silent."
+    },
+    "inactivity_timeout_ms": {
+      "default": 3000,
+      "minimum": 1,
+      "native": "Currently hardcoded, not an existing public setting.",
+      "contract": "Scalar beside terminator and mappings; rearm per source and complete the old candidate once when due."
+    }
+  },
+  "dtmf_mapping_reconciliation": {
+    "source_commit": "8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9",
+    "core_entries": 26,
+    "explicit_radio_entries": 51,
+    "radio_fixed": 35,
+    "radio_parameterized": 16,
+    "details": "dtmf-mapping-inventory.json",
+    "inactivity_timeout_ms": 3000,
+    "authorization": "Parrot/Echo live grant; radio retains provider Open/Locked/Disabled policy and public queries.",
+    "code_derived_default_mappings": 77,
+    "default_mappings": 78,
+    "new_design_mappings": 1
+  },
+  "design_only_actions": [
+    {
+      "action": "rx_mute_toggle",
+      "schema": "#/$defs/receiveControlAction",
+      "default_mapping": {
+        "command": "*99",
+        "protected": false,
+        "action": "rx_mute_toggle",
+        "target": "phone_patch"
+      },
+      "availability": "new implementation required",
+      "semantics": "Per-ingress audio+keying gate; DTMF/control retained; targets port/peer/peers(type filter)/phonecaller."
+    }
+  ]
+}

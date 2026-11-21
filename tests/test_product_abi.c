@@ -27,7 +27,11 @@ _Static_assert(offsetof(struct rptadv_host_services_v10, radio_remote_submit) ==
                "preserve remote callback order");
 _Static_assert(offsetof(struct rptadv_host_services_v10, radio_ready) == 392,
                "preserve the complete remote tail");
-_Static_assert(sizeof(struct rptadv_host_services_v10) == 400,
+_Static_assert(offsetof(struct rptadv_host_services_v10, station_binding) == 400,
+               "complete old host services prefix");
+_Static_assert(sizeof(struct rptadv_station_request_v1) == 48, "station request");
+_Static_assert(sizeof(struct rptadv_station_binding_v1) == 48, "station binding operations");
+_Static_assert(sizeof(struct rptadv_host_services_v10) == 408,
                "update the complete ABI-10 size deliberately");
 
 static int node(void *context, const struct rptadv_node_host_configuration *record) {
@@ -49,6 +53,27 @@ int main(int argc, char **argv) {
     assert(descriptor);
     const struct rptadv_product_descriptor_v1 *product = descriptor();
     assert(product);
+    _Static_assert(sizeof(struct rptadv_product_descriptor_v1) == 128,
+                   "frozen legacy product table");
+    _Static_assert(sizeof(struct rptadv_product_management_v1) == 32, "management startup table");
+    _Static_assert(sizeof(struct rptadv_product_inspection_v1) == 32, "managed read-only table");
+    const struct rptadv_product_inspection_v1 *(*inspection_getter)(void) =
+        dlsym(library, "rptadv_product_inspection_descriptor_v1");
+    assert(inspection_getter);
+    const struct rptadv_product_inspection_v1 *inspection = inspection_getter();
+    assert(inspection && inspection->abi_version == 1 &&
+           inspection->struct_size == sizeof(*inspection));
+    assert(!memcmp(inspection->capability, "rptadv.inspect1", sizeof(inspection->capability)));
+    assert(inspection->inspect);
+
+    const struct rptadv_product_management_v1 *(*management_getter)(void) =
+        dlsym(library, "rptadv_product_management_descriptor_v1");
+    assert(management_getter);
+    const struct rptadv_product_management_v1 *management = management_getter();
+    assert(management && management->struct_size == sizeof(*management));
+    const unsigned char management_capability[16] = "rptadv.mgmt1";
+    assert(management->abi_version == 1 && management->start);
+    assert(!memcmp(management->capability, management_capability, sizeof(management_capability)));
     assert(product->struct_size == sizeof(*product));
     assert(product->abi_version == RPTADV_PRODUCT_ABI_VERSION);
     const unsigned char capability[16] = RPTADV_PRODUCT_CAPABILITY;

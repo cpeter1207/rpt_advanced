@@ -1,0 +1,11 @@
+{
+  "key": "startup_links",
+  "sequence_number": 0,
+  "restart_recovery": false,
+  "start": {
+    "at": "controller_start",
+    "politeness_minutes": 0,
+    "macro": "permanent_links",
+    "warnings": []
+  }
+}

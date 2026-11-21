@@ -53,10 +53,26 @@ impl PeerIdentity {
     }
     /// Resolve the reserved EchoLink dial range before any AllStar directory lookup.
     pub fn from_operator(alias: &str) -> Result<Self, IdentityError> {
+        let address = Self::operator_target(alias)?;
+        Ok(match address {
+            Some(echo) => Self {
+                protocol: ProtocolId::EchoLink,
+                address: PeerAddress::Node(echo.to_string()),
+            },
+            None => Self {
+                protocol: ProtocolId::AllStarLink,
+                address: PeerAddress::Node(alias.to_owned()),
+            },
+        })
+    }
+    /// Validate a borrowed operator operand without allocating a copy of its spelling.
+    pub(crate) fn operator_target(alias: &str) -> Result<Option<u32>, IdentityError> {
         if alias.starts_with('3') && alias.len() >= 7 {
-            Self::parse(ProtocolId::EchoLink, &EchoAlias::parse(alias)?.to_string())
+            EchoAlias::parse(alias).map(Some)
+        } else if super::decimal_identity(alias) {
+            Ok(None)
         } else {
-            Self::parse(ProtocolId::AllStarLink, alias)
+            Err(IdentityError)
         }
     }
     /// Canonical control/configuration key before duplicate, access or retry

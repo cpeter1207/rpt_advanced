@@ -29,19 +29,19 @@ impl Default for PhoneDtmfOptions {
 
 /// A syntax result for the future call owner; none executes routing or policy.
 #[derive(PartialEq, Eq)]
-pub enum PhoneDtmfAction {
+pub enum PhoneDtmfAction<S = String, D = char> {
     /// One literal symbol for an existing telephone egress, never self-echo.
-    TelephoneDigit(char),
+    TelephoneDigit(D),
     /// Request attachment to a decimal target or the configured default.
-    Attach(Option<String>),
+    Attach(Option<S>),
     /// Request an addressed command target without attaching media.
-    SelectTarget(String),
+    SelectTarget(S),
     /// One symbol for the selected target's unchanged parser and authorization.
     NodeDigit {
         /// Selected decimal node; selection is not permission.
-        target: String,
+        target: S,
         /// Raw destination input; never log or regenerate credential symbols.
-        digit: char,
+        digit: D,
     },
     /// A bare pound left addressed command mode locally.
     ExitCommandMode,
@@ -55,7 +55,7 @@ pub enum PhoneDtmfAction {
     CollectionDiscarded,
 }
 
-impl fmt::Debug for PhoneDtmfAction {
+impl<S, D> fmt::Debug for PhoneDtmfAction<S, D> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         output.write_str(match self {
             Self::TelephoneDigit(_) => "TelephoneDigit([redacted])",

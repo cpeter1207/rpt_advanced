@@ -1,12 +1,12 @@
 [
   {
     "repository": "librptadvradio",
-    "sha": "581eec7bc938ea8642fc270d54a1f6255aa9544f",
+    "sha": "83c715249516b176fca0297bffb2b145e98c8d27",
     "packages": ["librptadvradio5", "librptadvradio-dev"]
   },
   {
     "repository": "rptadv-gpio-adapter",
-    "sha": "a5bd54f310bbc98447c97d8f139d4fa503b2241a",
+    "sha": "66726ead2d43945d9e6e090d369288d950bba754",
     "packages": ["librptadv-gpio-adapter1", "librptadv-gpio-adapter-dev"]
   },
   {
@@ -50,13 +50,18 @@
   },
   {
     "repository": "rate_adjusting_pcm_ring",
-    "sha": "c8f32d5eb98f20f1be67230a43a76966ef8aa930",
+    "sha": "360e7312a4a367418ddac04bd81b8996d8a0ae80",
     "packages": ["librate-adjusting-pcm-ring3", "librate-adjusting-pcm-ring3-dev"]
   },
   {
     "repository": "librptadvschedule",
-    "sha": "9f4c39c2f1f0956c2c8ae3afbb34edf9dd30edc9",
+    "sha": "238811360fc34908a8ea9d4174bfe49d874d2a0e",
     "packages": ["librptadvschedule1", "librptadvschedule-dev"]
+  },
+  {
+    "repository": "USBRadioPlus",
+    "sha": "91f175c56a0b62c7dc84e24064f67ff49f142d8d",
+    "packages": ["libusbradioplus-product1", "libusbradioplus-product-dev"]
   },
   {
     "repository": "librptadvecholink",

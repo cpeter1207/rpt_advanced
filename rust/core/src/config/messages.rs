@@ -14,6 +14,8 @@ pub enum BindingSource {
     Callsign,
     /// Node identity, spoken as individual digits.
     Node,
+    /// One approved identity from the port profile or immutable triggering event.
+    Identity(IdentitySource),
     /// Local civil date.
     Date,
     /// Local civil time using the node's clock format.
@@ -32,7 +34,116 @@ pub enum BindingSource {
     TimeRemaining,
 }
 
+/// Public identity values accepted by native Fluent bindings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentitySource {
+    /// Exact local management key.
+    NodeKey,
+    /// Local display name.
+    NodeName,
+    /// Local AllStarLink number.
+    AllstarlinkNumber,
+    /// Local AllStarLink callsign.
+    AllstarlinkCallsign,
+    /// Local EchoLink number.
+    EcholinkNumber,
+    /// Local EchoLink callsign.
+    EcholinkCallsign,
+    /// Protocol of the triggering peer.
+    PeerProtocol,
+    /// Number of the triggering peer.
+    PeerNumber,
+    /// Callsign of the triggering peer.
+    PeerCallsign,
+    /// Kind of the triggering event.
+    EventKind,
+}
+
+use IdentitySource::*;
+const STANDARD: &[(&str, &str, BindingSource)] = &[
+    ("node-key", "node.key", BindingSource::Identity(NodeKey)),
+    ("node-name", "node.name", BindingSource::Identity(NodeName)),
+    ("node-callsign", "node.callsign", BindingSource::Callsign),
+    (
+        "allstarlink-node-number",
+        "allstarlink.node_number",
+        BindingSource::Identity(AllstarlinkNumber),
+    ),
+    (
+        "allstarlink-callsign",
+        "allstarlink.callsign",
+        BindingSource::Identity(AllstarlinkCallsign),
+    ),
+    (
+        "echolink-node-number",
+        "echolink.node_number",
+        BindingSource::Identity(EcholinkNumber),
+    ),
+    (
+        "echolink-callsign",
+        "echolink.callsign",
+        BindingSource::Identity(EcholinkCallsign),
+    ),
+    (
+        "peer-node-number",
+        "event.peer.node_number",
+        BindingSource::Identity(PeerNumber),
+    ),
+    (
+        "peer-callsign",
+        "event.peer.callsign",
+        BindingSource::Identity(PeerCallsign),
+    ),
+    (
+        "peer-protocol",
+        "event.peer.protocol",
+        BindingSource::Identity(PeerProtocol),
+    ),
+    (
+        "event-kind",
+        "event.kind",
+        BindingSource::Identity(EventKind),
+    ),
+    ("date", "date", BindingSource::Date),
+    ("time", "time", BindingSource::Time),
+    ("day-of-week", "day_of_week", BindingSource::DayOfWeek),
+    ("greeting", "greeting", BindingSource::Greeting),
+    ("link-status", "link_status", BindingSource::LinkStatus),
+    (
+        "time-remaining",
+        "time_remaining",
+        BindingSource::TimeRemaining,
+    ),
+];
+
 impl BindingSource {
+    /// Resolve a fixed flat argument without permitting a different source under its name.
+    pub fn standard_argument(name: &str) -> Option<Self> {
+        STANDARD
+            .iter()
+            .find(|(alias, _, _)| *alias == name)
+            .map(|(_, _, source)| source.clone())
+    }
+
+    /// Decode one approved JSON source path, retaining exact sensor/input member keys.
+    pub fn from_public_path(path: &str) -> Option<Self> {
+        if let Some((_, _, source)) = STANDARD.iter().find(|(_, name, _)| *name == path) {
+            return Some(source.clone());
+        }
+        let (kind, name) = path.split_once(':')?;
+        if name.is_empty()
+            || name.chars().count() > 63
+            || name.chars().any(|c| c.is_whitespace() || "[]:".contains(c))
+        {
+            return None;
+        }
+        match kind {
+            "sensor" => Some(Self::Sensor(name.into())),
+            "input" => Some(Self::Input(name.into())),
+            _ => None,
+        }
+    }
+
     /// Reject deadline bindings at callers without a deadline; no invented zero.
     pub fn available_in_context(&self, has_deadline: bool) -> bool {
         !matches!(self, Self::TimeRemaining) || has_deadline

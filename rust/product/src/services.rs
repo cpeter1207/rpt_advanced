@@ -16,6 +16,9 @@ use std::{
 #[path = "services_remote.rs"]
 mod remote;
 pub use remote::RemoteTicket;
+#[path = "services_station.rs"]
+mod station;
+pub(crate) use station::{StationBinding, StationFinish, StationStage};
 
 /// Borrowed peer event delivered synchronously by the host owner.
 pub enum PeerInput<'a> {
@@ -127,18 +130,38 @@ impl Drop for PcmProcessor {
     }
 }
 
+#[path = "peer_processor.rs"]
+mod peer_processor;
+
 /// One generation-owned peer ring followed by its optional native-rate graph.
 /// Local receive, telemetry and regeneration do not select this peer graph.
 /// Current DTMF muting gates its output after stateful processing as well as the ring.
 /// Idle native blocks advance only the graph with silence, retaining its gain history.
 pub struct ProcessedPeer<P> {
     input: P,
-    processor: Option<PcmProcessor>,
+    processor: Option<peer_processor::Processor>,
 }
 impl<P> ProcessedPeer<P> {
     /// Retain preallocated processing alongside this unique ring consumer.
     pub fn new(input: P, processor: Option<PcmProcessor>) -> Self {
-        Self { input, processor }
+        Self {
+            input,
+            processor: processor.map(peer_processor::Processor::Host),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn modular(
+        input: P,
+        graph: crate::configuration_radio::PreparedPeer,
+        maximum: usize,
+    ) -> Self {
+        Self {
+            input,
+            processor: Some(peer_processor::Processor::Prepared {
+                graph,
+                samples: vec![0; maximum].into_boxed_slice(),
+            }),
+        }
     }
 }
 impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
@@ -149,6 +172,12 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     }
     fn receive_policy(&self) -> rpt_advanced_core::link::ReceivePolicy {
         self.input.receive_policy()
+    }
+    fn receive_audio_current(&self) -> bool {
+        self.input.receive_audio_current()
+    }
+    fn native_real_count(&self, audible: usize) -> usize {
+        self.input.native_real_count(audible)
     }
     fn source_timing_available(&self) -> bool {
         self.processor.is_none() && self.input.source_timing_available()
@@ -399,6 +428,7 @@ impl HostServices {
         let metadata_tail = offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind);
         let remote_tail = offset_of!(abi::rptadv_host_services_v10, radio_service);
         let ready_tail = offset_of!(abi::rptadv_host_services_v10, radio_ready);
+        let station_tail = offset_of!(abi::rptadv_host_services_v10, station_binding);
         if size < table_size
             && ![
                 required,
@@ -407,6 +437,7 @@ impl HostServices {
                 metadata_tail,
                 remote_tail,
                 ready_tail,
+                station_tail,
             ]
             .contains(&size)
         {

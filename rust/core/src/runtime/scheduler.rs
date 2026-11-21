@@ -1,5 +1,11 @@
 //! Serialized civil-event reservations and configuration-owned link intent.
 
+#[path = "calendar.rs"]
+mod calendar;
+pub use calendar::{
+    BeginDecision, EventOrigin, EventTicket, EventWork, MacroAdmission, ReceiveActivity,
+};
+
 use crate::{
     command::Command,
     controller::MessageOccurrence,
@@ -23,6 +29,10 @@ pub struct EventSpec {
 /// Scheduler preparation or bounded rendering failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulerError {
+    /// Captured wall time is unavailable.
+    Clock,
+    /// A bounded recurrence query failed.
+    Calendar(crate::schedule::recurrence::Error),
     /// Invalid identity, duplicated event, or generation regression.
     Invalid,
     /// The current occurrence could not render within its prepared bounds.
@@ -89,11 +99,15 @@ impl ScheduledDispatch {
 
 /// Control-owned zero-time event scheduler preserving configuration order and reload state.
 pub struct EventScheduler {
+    calendar: Option<calendar::Calendar>,
     generation: u64,
     events: Vec<EventState>,
     last_tick: Option<i64>,
 }
 impl EventScheduler {
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
     /// Construct all event state before publication; unchanged names/triggers retain progress.
     pub fn new(
         generation: u64,
@@ -141,6 +155,7 @@ impl EventScheduler {
             })
             .collect();
         Ok(Self {
+            calendar: None,
             generation,
             events,
             last_tick: previous.and_then(|old| old.last_tick),

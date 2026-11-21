@@ -3,7 +3,7 @@
 use super::{
     ConfigDocument, ConfigError, Fields, NodeId, ResolvedSiteSettings, SiteKind, finite, parse,
 };
-use crate::site::OutputRequest;
+use crate::{config::resources::PortKey, site::OutputRequest};
 use std::collections::BTreeSet;
 
 /// Bounded site action syntax. References are resolved at reload, never interpreted as scripts.
@@ -45,33 +45,36 @@ pub(super) fn actions(value: &str) -> Option<Vec<SiteAction>> {
     }
     value
         .split(',')
-        .map(|item| {
-            let parts: Vec<_> = item.trim().split(':').collect();
-            match parts.as_slice() {
-                ["macro", name] if name_valid(name) => Some(SiteAction::Macro((*name).into())),
-                ["output", name, command] if name_valid(name) => Some(SiteAction::Output {
-                    name: (*name).into(),
-                    request: match *command {
-                        "on" => OutputRequest::On,
-                        "off" => OutputRequest::Off,
-                        "pulse" => OutputRequest::Pulse,
-                        _ => return None,
-                    },
-                }),
-                ["fan", name, value] if name_valid(name) => Some(SiteAction::Fan {
-                    name: (*name).into(),
-                    duty: if *value == "auto" {
-                        None
-                    } else {
-                        Some(finite(value).filter(|value| (0.0..=1.0).contains(value))?)
-                    },
-                }),
-                ["inhibit", "on"] => Some(SiteAction::Inhibit(true)),
-                ["inhibit", "off"] => Some(SiteAction::Inhibit(false)),
-                _ => None,
-            }
-        })
+        .map(|item| parse_action(item.trim()))
         .collect()
+}
+
+/// Parse one site action element without conflating punctuation inside a JSON array member.
+pub(crate) fn parse_action(value: &str) -> Option<SiteAction> {
+    let parts: Vec<_> = value.split(':').collect();
+    match parts.as_slice() {
+        ["macro", name] if name_valid(name) => Some(SiteAction::Macro((*name).into())),
+        ["output", name, command] if name_valid(name) => Some(SiteAction::Output {
+            name: (*name).into(),
+            request: match *command {
+                "on" => OutputRequest::On,
+                "off" => OutputRequest::Off,
+                "pulse" => OutputRequest::Pulse,
+                _ => return None,
+            },
+        }),
+        ["fan", name, value] if name_valid(name) => Some(SiteAction::Fan {
+            name: (*name).into(),
+            duty: if *value == "auto" {
+                None
+            } else {
+                Some(finite(value).filter(|value| (0.0..=1.0).contains(value))?)
+            },
+        }),
+        ["inhibit", "on"] => Some(SiteAction::Inhibit(true)),
+        ["inhibit", "off"] => Some(SiteAction::Inhibit(false)),
+        _ => None,
+    }
 }
 
 /// Evaluated condition; analog thresholds have explicit recovery hysteresis.
@@ -171,7 +174,7 @@ pub struct FanSettings {
     /// Active demand sources.
     pub mode: FanMode,
     /// Local transmitter identities contributing to PTT demand.
-    pub ptt_nodes: Vec<NodeId>,
+    pub ptt_nodes: Vec<PortKey>,
     /// Run-on after the last selected PTT releases.
     pub run_on_ms: u64,
     /// Named temperature sensor, when selected.
@@ -201,11 +204,18 @@ fn curve(value: &str) -> Option<Vec<(f64, f64)>> {
             ))
         })
         .collect::<Option<_>>()?;
-    (points.len() >= 2
-        && points.windows(2).all(|pair| {
-            pair[0].0 < pair[1].0 && pair[0].1 <= pair[1].1 && (pair[1].0 - pair[0].0).is_finite()
-        }))
-    .then_some(points)
+    curve_valid(&points).then_some(points)
+}
+
+/// Accept a finite monotonic temperature/duty response with at least two distinct points.
+pub(crate) fn curve_valid(points: &[(f64, f64)]) -> bool {
+    points.len() >= 2
+        && points
+            .iter()
+            .all(|(t, d)| t.is_finite() && (0.0..=1.0).contains(d))
+        && points
+            .windows(2)
+            .all(|p| p[0].0 < p[1].0 && p[0].1 <= p[1].1 && (p[1].0 - p[0].0).is_finite())
 }
 
 pub(super) fn value_valid(_kind: SiteKind, key: &str, value: &str) -> bool {
@@ -319,10 +329,10 @@ pub(super) fn resolve(
             .map(|value| {
                 value
                     .split(',')
-                    .map(|node| NodeId::new(node.trim()).unwrap())
+                    .map(|node| PortKey::new(node.trim()))
                     .collect()
             })
-            .unwrap_or_else(|| vec![node.clone()]);
+            .unwrap_or_else(|| vec![PortKey::new(node.as_str())]);
         let valid = result
             .outputs
             .iter()

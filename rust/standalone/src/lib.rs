@@ -31,6 +31,7 @@ pub mod registration;
 pub mod runtime;
 /// Secure IAX credentials loaded separately from the ordinary node configuration.
 pub mod secrets;
+mod station_plan;
 
 /// Copied configuration records supplied by the shared controller product.
 pub mod configuration;

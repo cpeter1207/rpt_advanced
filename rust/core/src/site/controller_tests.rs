@@ -67,7 +67,7 @@ fn site_reload_preserves_pulse_fan_alarm_and_measurement_state() {
         "[output 1000 cooling]\nenabled=yes\nbackend=gpiod\ndevice=chip\nline=fan\n[fan 1000 cooling]\nenabled=yes\noutput=cooling\nmode=ptt\nrun_on_ms=1000\n[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=14\nclear_value=13\nlatched=yes\non_trip=inhibit:on\n",
     );
     let mut site = SiteController::new(policy.clone());
-    let node = NodeId::new("1000").unwrap();
+    let node = crate::config::resources::PortKey::new("1000");
     let mut readings = observations(15.0, 1000);
     readings.outputs.insert(
         "cooling".into(),

@@ -1,0 +1,3209 @@
+{
+  "repository": "cpeter1207/rpt_advanced",
+  "commit": "8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9",
+  "main_head_verified": true,
+  "verification": "GitHub GET /repos/cpeter1207/rpt_advanced/branches/main on 2026-11-19 confirmed this exact SHA",
+  "configured_core_count": 26,
+  "radio_payload_variant_count": 27,
+  "radio_explicit_mapping_count": 51,
+  "radio_fixed_count": 35,
+  "radio_parameterized_count": 16,
+  "core_mappings": [
+    {
+      "name": "disconnect",
+      "native_key": "link_command_disconnect",
+      "source_variant": "Disconnect",
+      "canonical_mapping": {
+        "command": "*1",
+        "protected": false,
+        "action": "disconnect"
+      },
+      "native_default_digits": "1",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "monitor",
+      "native_key": "link_command_monitor",
+      "source_variant": "Monitor",
+      "canonical_mapping": {
+        "command": "*2",
+        "protected": false,
+        "action": "connect",
+        "mode": "monitor"
+      },
+      "native_default_digits": "2",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "transceive",
+      "native_key": "link_command_transceive",
+      "source_variant": "Transceive",
+      "canonical_mapping": {
+        "command": "*3",
+        "protected": false,
+        "action": "connect",
+        "mode": "transceive"
+      },
+      "native_default_digits": "3",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "remote",
+      "native_key": "link_command_remote",
+      "source_variant": "Command",
+      "canonical_mapping": {
+        "command": "*4",
+        "protected": false,
+        "action": "select_command_target"
+      },
+      "native_default_digits": "4",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "status",
+      "native_key": "link_command_status",
+      "source_variant": "Status",
+      "canonical_mapping": {
+        "command": "*70",
+        "protected": false,
+        "action": "link_status"
+      },
+      "native_default_digits": "70",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "disconnect_all",
+      "native_key": "link_command_disconnect_all",
+      "source_variant": "DisconnectPermanentAll",
+      "canonical_mapping": {
+        "command": "*806",
+        "protected": false,
+        "action": "pause_permanent_links"
+      },
+      "native_default_digits": "806",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "last_keyed",
+      "native_key": "link_command_last_keyed",
+      "source_variant": "LastKeyed",
+      "canonical_mapping": {
+        "command": "*72",
+        "protected": false,
+        "action": "last_keyed"
+      },
+      "native_default_digits": "72",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "local_monitor",
+      "native_key": "link_command_local_monitor",
+      "source_variant": "LocalMonitor",
+      "canonical_mapping": {
+        "command": "*75",
+        "protected": false,
+        "action": "connect",
+        "mode": "local-monitor"
+      },
+      "native_default_digits": "75",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "disconnect_permanent",
+      "native_key": "link_command_disconnect_permanent",
+      "source_variant": "DisconnectPermanent",
+      "canonical_mapping": {
+        "command": "*811",
+        "protected": false,
+        "action": "disconnect_permanent"
+      },
+      "native_default_digits": "811",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "permanent_monitor",
+      "native_key": "link_command_permanent_monitor",
+      "source_variant": "PermanentMonitor",
+      "canonical_mapping": {
+        "command": "*812",
+        "protected": false,
+        "action": "connect_permanent",
+        "mode": "monitor"
+      },
+      "native_default_digits": "812",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "permanent_transceive",
+      "native_key": "link_command_permanent_transceive",
+      "source_variant": "PermanentTransceive",
+      "canonical_mapping": {
+        "command": "*813",
+        "protected": false,
+        "action": "connect_permanent",
+        "mode": "transceive"
+      },
+      "native_default_digits": "813",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "full_status",
+      "native_key": "link_command_full_status",
+      "source_variant": "FullStatus",
+      "canonical_mapping": {
+        "command": "*73",
+        "protected": false,
+        "action": "network_status"
+      },
+      "native_default_digits": "73",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "reconnect_all",
+      "native_key": "link_command_reconnect_all",
+      "source_variant": "ReconnectPermanentAll",
+      "canonical_mapping": {
+        "command": "*816",
+        "protected": false,
+        "action": "resume_permanent_links"
+      },
+      "native_default_digits": "816",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "permanent_local_monitor",
+      "native_key": "link_command_permanent_local_monitor",
+      "source_variant": "PermanentLocalMonitor",
+      "canonical_mapping": {
+        "command": "*818",
+        "protected": false,
+        "action": "connect_permanent",
+        "mode": "local-monitor"
+      },
+      "native_default_digits": "818",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "disconnect_nonpermanent_all",
+      "native_key": "fixed_10",
+      "source_variant": "DisconnectNonPermanentAll",
+      "canonical_mapping": {
+        "command": "*10",
+        "protected": false,
+        "action": "disconnect_nonpermanent_all"
+      },
+      "native_default_digits": "10",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "time",
+      "native_key": "fixed_722",
+      "source_variant": "Time",
+      "canonical_mapping": {
+        "command": "*722",
+        "protected": false,
+        "action": "announce_time"
+      },
+      "native_default_digits": "722",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "admin_unlock",
+      "native_key": "link_command_admin_unlock",
+      "source_variant": "AdminUnlock",
+      "canonical_mapping": {
+        "command": "*800",
+        "protected": false,
+        "action": "unlock_administration"
+      },
+      "native_default_digits": "800",
+      "authorization": "human-only credential operation; verifies supplied decimal code against configured Argon2id hash",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "admin_lock",
+      "native_key": "link_command_admin_lock",
+      "source_variant": "AdminLock",
+      "canonical_mapping": {
+        "command": "*801",
+        "protected": false,
+        "action": "lock_administration"
+      },
+      "native_default_digits": "801",
+      "authorization": "human-only credential operation; verifies supplied decimal code against configured Argon2id hash",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "parrot_enable",
+      "native_key": "link_command_parrot_enable",
+      "source_variant": "ParrotEnable",
+      "canonical_mapping": {
+        "command": "*804",
+        "protected": true,
+        "action": "set_parrot",
+        "enabled": true
+      },
+      "native_default_digits": "804",
+      "authorization": "intrinsic exact-source live administrative grant; canonical default uses protected=true to mirror this requirement",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "parrot_disable",
+      "native_key": "link_command_parrot_disable",
+      "source_variant": "ParrotDisable",
+      "canonical_mapping": {
+        "command": "*805",
+        "protected": true,
+        "action": "set_parrot",
+        "enabled": false
+      },
+      "native_default_digits": "805",
+      "authorization": "intrinsic exact-source live administrative grant; canonical default uses protected=true to mirror this requirement",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "pad_test",
+      "native_key": "link_command_pad_test",
+      "source_variant": "PadTest",
+      "canonical_mapping": {
+        "command": "*82",
+        "protected": false,
+        "action": "start_pad_test"
+      },
+      "native_default_digits": "82",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "message",
+      "native_key": "link_command_message",
+      "source_variant": "Message",
+      "canonical_mapping": {
+        "command": "*77",
+        "protected": false,
+        "action": "message"
+      },
+      "native_default_digits": "77",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "site_status",
+      "native_key": "link_command_site_status",
+      "source_variant": "SiteStatus",
+      "canonical_mapping": {
+        "command": "*76",
+        "protected": false,
+        "action": "site_status"
+      },
+      "native_default_digits": "76",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "cancel_message",
+      "native_key": "link_command_cancel_message",
+      "source_variant": "CancelMessage",
+      "canonical_mapping": {
+        "command": "*78",
+        "protected": false,
+        "action": "cancel_message"
+      },
+      "native_default_digits": "78",
+      "authorization": "ordinary action/source policy; no intrinsic administration grant",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "echo_telemetry",
+      "native_key": "link_command_echo_telemetry",
+      "source_variant": "EchoTelemetry",
+      "canonical_mapping": {
+        "command": "",
+        "protected": true,
+        "action": "set_echo_telemetry"
+      },
+      "native_default_digits": "",
+      "authorization": "intrinsic exact-source live administrative grant; canonical default uses protected=true to mirror this requirement",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    },
+    {
+      "name": "radio",
+      "native_key": "link_command_remote_base",
+      "source_variant": "RemoteBase",
+      "canonical_mapping": {
+        "command": "*6",
+        "protected": false,
+        "action": "radio"
+      },
+      "native_default_digits": "",
+      "authorization": "provider policy per operation; read-only public, mutations Open/Locked/Disabled",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1470"
+    }
+  ],
+  "radio_mappings": [
+    {
+      "name": "radio_recall_memory_0",
+      "suffix": "0",
+      "command": "*60",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "recall_memory",
+      "static_args": {},
+      "parameter_grammar": "<selector>: decimal u32 1..4294967295",
+      "source_variant": "Recall",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L329"
+    },
+    {
+      "name": "radio_set_frequency_1",
+      "suffix": "1",
+      "command": "*61",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "set_frequency",
+      "static_args": {},
+      "parameter_grammar": "<whole_mhz>*<fraction>*<offset>: whole decimal u64; fraction exactly 1..5 decimal digits scaled to MHz; offset 1=minus,2=simplex,3=plus; resulting hertz positive and within u64",
+      "source_variant": "Frequency",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L330"
+    },
+    {
+      "name": "radio_set_tone_2",
+      "suffix": "2",
+      "command": "*62",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "set_tone",
+      "static_args": {
+        "direction": "rx"
+      },
+      "parameter_grammar": "<whole_hz>*<tenth>: exactly one fractional decimal digit; resulting frequency 50.0..300.0 Hz",
+      "source_variant": "Tone",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L365"
+    },
+    {
+      "name": "radio_set_tone_3",
+      "suffix": "3",
+      "command": "*63",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "set_tone",
+      "static_args": {
+        "direction": "tx"
+      },
+      "parameter_grammar": "<whole_hz>*<tenth>: exactly one fractional decimal digit; resulting frequency 50.0..300.0 Hz",
+      "source_variant": "Tone",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L366"
+    },
+    {
+      "name": "radio_set_tone_enabled_40",
+      "suffix": "40",
+      "command": "*640",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "static_args": {
+        "direction": "rx",
+        "enabled": false
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ToneEnabled",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L220"
+    },
+    {
+      "name": "radio_set_tone_enabled_41",
+      "suffix": "41",
+      "command": "*641",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "static_args": {
+        "direction": "rx",
+        "enabled": true
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ToneEnabled",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L224"
+    },
+    {
+      "name": "radio_set_tone_enabled_42",
+      "suffix": "42",
+      "command": "*642",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "static_args": {
+        "direction": "tx",
+        "enabled": false
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ToneEnabled",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L228"
+    },
+    {
+      "name": "radio_set_tone_enabled_43",
+      "suffix": "43",
+      "command": "*643",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "static_args": {
+        "direction": "tx",
+        "enabled": true
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ToneEnabled",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L232"
+    },
+    {
+      "name": "radio_set_power_preset_44",
+      "suffix": "44",
+      "command": "*644",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_power_preset",
+      "static_args": {
+        "preset": "low"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "PowerPreset",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L236"
+    },
+    {
+      "name": "radio_set_power_preset_45",
+      "suffix": "45",
+      "command": "*645",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_power_preset",
+      "static_args": {
+        "preset": "medium"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "PowerPreset",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L237"
+    },
+    {
+      "name": "radio_set_power_preset_46",
+      "suffix": "46",
+      "command": "*646",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_power_preset",
+      "static_args": {
+        "preset": "high"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "PowerPreset",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L238"
+    },
+    {
+      "name": "radio_status_51",
+      "suffix": "51",
+      "command": "*651",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "status",
+      "static_args": {
+        "detail": "long"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Status",
+      "public_read_only": true,
+      "protected": false,
+      "authorization": "public read-only; independent source/provider policy remains",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L239"
+    },
+    {
+      "name": "radio_status_52",
+      "suffix": "52",
+      "command": "*652",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "status",
+      "static_args": {
+        "detail": "short"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Status",
+      "public_read_only": true,
+      "protected": false,
+      "authorization": "public read-only; independent source/provider policy remains",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L240"
+    },
+    {
+      "name": "radio_mode_fm",
+      "suffix": "61",
+      "command": "*661",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_mode",
+      "static_args": {
+        "selector": 1
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Mode",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L241"
+    },
+    {
+      "name": "radio_mode_usb",
+      "suffix": "62",
+      "command": "*662",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_mode",
+      "static_args": {
+        "selector": 3
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Mode",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L242"
+    },
+    {
+      "name": "radio_mode_lsb",
+      "suffix": "63",
+      "command": "*663",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_mode",
+      "static_args": {
+        "selector": 4
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Mode",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L243"
+    },
+    {
+      "name": "radio_mode_am",
+      "suffix": "64",
+      "command": "*664",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_mode",
+      "static_args": {
+        "selector": 2
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Mode",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L244"
+    },
+    {
+      "name": "radio_step_711",
+      "suffix": "711",
+      "command": "*6711",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "step",
+      "static_args": {
+        "step_mhz": -0.00002
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Step",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L245"
+    },
+    {
+      "name": "radio_step_714",
+      "suffix": "714",
+      "command": "*6714",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "step",
+      "static_args": {
+        "step_mhz": -0.0001
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Step",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L246"
+    },
+    {
+      "name": "radio_step_717",
+      "suffix": "717",
+      "command": "*6717",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "step",
+      "static_args": {
+        "step_mhz": -0.0005
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Step",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L247"
+    },
+    {
+      "name": "radio_step_713",
+      "suffix": "713",
+      "command": "*6713",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "step",
+      "static_args": {
+        "step_mhz": 0.00002
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Step",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L248"
+    },
+    {
+      "name": "radio_step_716",
+      "suffix": "716",
+      "command": "*6716",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "step",
+      "static_args": {
+        "step_mhz": 0.0001
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Step",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L249"
+    },
+    {
+      "name": "radio_step_719",
+      "suffix": "719",
+      "command": "*6719",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "step",
+      "static_args": {
+        "step_mhz": 0.0005
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Step",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L250"
+    },
+    {
+      "name": "radio_scan_preset_721",
+      "suffix": "721",
+      "command": "*6721",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "scan_preset",
+      "static_args": {
+        "direction": "down",
+        "preset": "slow"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ScanPreset",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L251"
+    },
+    {
+      "name": "radio_scan_preset_724",
+      "suffix": "724",
+      "command": "*6724",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "scan_preset",
+      "static_args": {
+        "direction": "down",
+        "preset": "medium"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ScanPreset",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L255"
+    },
+    {
+      "name": "radio_scan_preset_727",
+      "suffix": "727",
+      "command": "*6727",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "scan_preset",
+      "static_args": {
+        "direction": "down",
+        "preset": "fast"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ScanPreset",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L259"
+    },
+    {
+      "name": "radio_scan_preset_723",
+      "suffix": "723",
+      "command": "*6723",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "scan_preset",
+      "static_args": {
+        "direction": "up",
+        "preset": "slow"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ScanPreset",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L263"
+    },
+    {
+      "name": "radio_scan_preset_726",
+      "suffix": "726",
+      "command": "*6726",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "scan_preset",
+      "static_args": {
+        "direction": "up",
+        "preset": "medium"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ScanPreset",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L267"
+    },
+    {
+      "name": "radio_scan_preset_729",
+      "suffix": "729",
+      "command": "*6729",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "scan_preset",
+      "static_args": {
+        "direction": "up",
+        "preset": "fast"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ScanPreset",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L271"
+    },
+    {
+      "name": "radio_tune_79",
+      "suffix": "79",
+      "command": "*679",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "tune",
+      "static_args": {},
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Tune",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L275"
+    },
+    {
+      "name": "radio_get_setting_90",
+      "suffix": "90",
+      "command": "*690",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "get_setting",
+      "static_args": {},
+      "parameter_grammar": "<selector>: decimal u32 1..4294967295",
+      "source_variant": "GetSetting",
+      "public_read_only": true,
+      "protected": false,
+      "authorization": "public read-only; independent source/provider policy remains",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L324"
+    },
+    {
+      "name": "radio_set_setting_91",
+      "suffix": "91",
+      "command": "*691",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "set_setting",
+      "static_args": {},
+      "parameter_grammar": "<selector>*<sign>*<digits>*<places>: selector decimal u32 1..4294967295; sign exactly 0=nonnegative or 1=negative; magnitude decimal u64; places decimal 0..6; signed magnitude fits i64; preserve negative zero until capability validation; decoder supplies selector/value in capability units",
+      "source_variant": "SetSetting",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L325"
+    },
+    {
+      "name": "radio_start_scan_92",
+      "suffix": "92",
+      "command": "*692",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "start_scan",
+      "static_args": {},
+      "parameter_grammar": "<selector>: decimal u32 1..4294967295",
+      "source_variant": "StartScan",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L342"
+    },
+    {
+      "name": "radio_pause_scan_93",
+      "suffix": "93",
+      "command": "*693",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "pause_scan",
+      "static_args": {},
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "PauseScan",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L276"
+    },
+    {
+      "name": "radio_resume_scan_94",
+      "suffix": "94",
+      "command": "*694",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "resume_scan",
+      "static_args": {},
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ResumeScan",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L277"
+    },
+    {
+      "name": "radio_stop_scan_95",
+      "suffix": "95",
+      "command": "*695",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "stop_scan",
+      "static_args": {},
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "StopScan",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L278"
+    },
+    {
+      "name": "radio_set_scan_direction_960",
+      "suffix": "960",
+      "command": "*6960",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_scan_direction",
+      "static_args": {
+        "direction": "down"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ScanDirection",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L279"
+    },
+    {
+      "name": "radio_set_scan_direction_961",
+      "suffix": "961",
+      "command": "*6961",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_scan_direction",
+      "static_args": {
+        "direction": "up"
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "ScanDirection",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L280"
+    },
+    {
+      "name": "radio_skip_97",
+      "suffix": "97",
+      "command": "*697",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "skip",
+      "static_args": {},
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Skip",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L281"
+    },
+    {
+      "name": "radio_get_memory_98",
+      "suffix": "98",
+      "command": "*698",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "get_memory",
+      "static_args": {},
+      "parameter_grammar": "<selector>: decimal u32 1..4294967295",
+      "source_variant": "Memory",
+      "public_read_only": true,
+      "protected": false,
+      "authorization": "public read-only; independent source/provider policy remains",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L343"
+    },
+    {
+      "name": "radio_catalog_990",
+      "suffix": "990",
+      "command": "*6990",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "catalog",
+      "static_args": {
+        "kind": "capabilities"
+      },
+      "parameter_grammar": "<page>: decimal u32 1..4294967295; provider returns at most five entries",
+      "source_variant": "Catalog",
+      "public_read_only": true,
+      "protected": false,
+      "authorization": "public read-only; independent source/provider policy remains",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L292"
+    },
+    {
+      "name": "radio_catalog_991",
+      "suffix": "991",
+      "command": "*6991",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "catalog",
+      "static_args": {
+        "kind": "memories"
+      },
+      "parameter_grammar": "<page>: decimal u32 1..4294967295; provider returns at most five entries",
+      "source_variant": "Catalog",
+      "public_read_only": true,
+      "protected": false,
+      "authorization": "public read-only; independent source/provider policy remains",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L298"
+    },
+    {
+      "name": "radio_catalog_992",
+      "suffix": "992",
+      "command": "*6992",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "catalog",
+      "static_args": {
+        "kind": "scan_lists"
+      },
+      "parameter_grammar": "<page>: decimal u32 1..4294967295; provider returns at most five entries",
+      "source_variant": "Catalog",
+      "public_read_only": true,
+      "protected": false,
+      "authorization": "public read-only; independent source/provider policy remains",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L304"
+    },
+    {
+      "name": "radio_scan_status_993",
+      "suffix": "993",
+      "command": "*6993",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "scan_status",
+      "static_args": {},
+      "parameter_grammar": "<selector>: decimal u32 1..4294967295",
+      "source_variant": "ScanStatus",
+      "public_read_only": true,
+      "protected": false,
+      "authorization": "public read-only; independent source/provider policy remains",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L310"
+    },
+    {
+      "name": "radio_set_inhibit_9940",
+      "suffix": "9940",
+      "command": "*69940",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_inhibit",
+      "static_args": {
+        "enabled": false
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Inhibit",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L282"
+    },
+    {
+      "name": "radio_set_inhibit_9941",
+      "suffix": "9941",
+      "command": "*69941",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "set_inhibit",
+      "static_args": {
+        "enabled": true
+      },
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "Inhibit",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L283"
+    },
+    {
+      "name": "radio_set_scan_dwell_995",
+      "suffix": "995",
+      "command": "*6995",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "set_scan_dwell",
+      "static_args": {},
+      "parameter_grammar": "<milliseconds>: decimal u64 1..18446744073709551615; decoder supplies timing.duration_ms",
+      "source_variant": "Dwell",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L311"
+    },
+    {
+      "name": "radio_set_scan_resume_delay_996",
+      "suffix": "996",
+      "command": "*6996",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "set_scan_resume_delay",
+      "static_args": {},
+      "parameter_grammar": "<milliseconds>: decimal u64 0..18446744073709551615; decoder supplies timing.duration_ms",
+      "source_variant": "ResumeDelay",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L312"
+    },
+    {
+      "name": "radio_set_scan_priority_997",
+      "suffix": "997",
+      "command": "*6997",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "set_scan_priority",
+      "static_args": {},
+      "parameter_grammar": "<selector>: decimal u32 0..4294967295; every zero spelling (0,00,...) disables priority (selector=null); positive selects configured member",
+      "source_variant": "Priority",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L313"
+    },
+    {
+      "name": "radio_current_status_998",
+      "suffix": "998",
+      "command": "*6998",
+      "match_kind": "fixed",
+      "action": "radio",
+      "operation": "current_status",
+      "static_args": {},
+      "parameter_grammar": "empty; reject every nonempty raw tail",
+      "source_variant": "CurrentStatus",
+      "public_read_only": true,
+      "protected": false,
+      "authorization": "public read-only; independent source/provider policy remains",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L284"
+    },
+    {
+      "name": "radio_invoke_999",
+      "suffix": "999",
+      "command": "*6999",
+      "match_kind": "parameterized",
+      "action": "radio",
+      "operation": "invoke",
+      "static_args": {},
+      "parameter_grammar": "<selector>: decimal u32 1..4294967295; declared argument-free provider action",
+      "source_variant": "Invoke",
+      "public_read_only": false,
+      "protected": false,
+      "authorization": "remote_dtmf_access Open/Locked/Disabled plus capabilities and RF safety; protected=false adds no extra gate",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/remote_base_command.rs#L318"
+    }
+  ],
+  "recommended_radio_mappings": {
+    "radio_recall_memory_0": {
+      "command": "*60",
+      "protected": false,
+      "action": "radio",
+      "operation": "recall_memory"
+    },
+    "radio_set_frequency_1": {
+      "command": "*61",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_frequency"
+    },
+    "radio_set_tone_2": {
+      "command": "*62",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone",
+      "direction": "rx"
+    },
+    "radio_set_tone_3": {
+      "command": "*63",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone",
+      "direction": "tx"
+    },
+    "radio_set_tone_enabled_40": {
+      "command": "*640",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "rx",
+      "enabled": false
+    },
+    "radio_set_tone_enabled_41": {
+      "command": "*641",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "rx",
+      "enabled": true
+    },
+    "radio_set_tone_enabled_42": {
+      "command": "*642",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "tx",
+      "enabled": false
+    },
+    "radio_set_tone_enabled_43": {
+      "command": "*643",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "tx",
+      "enabled": true
+    },
+    "radio_set_power_preset_44": {
+      "command": "*644",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_power_preset",
+      "preset": "low"
+    },
+    "radio_set_power_preset_45": {
+      "command": "*645",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_power_preset",
+      "preset": "medium"
+    },
+    "radio_set_power_preset_46": {
+      "command": "*646",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_power_preset",
+      "preset": "high"
+    },
+    "radio_status_51": {
+      "command": "*651",
+      "protected": false,
+      "action": "radio",
+      "operation": "status",
+      "detail": "long"
+    },
+    "radio_status_52": {
+      "command": "*652",
+      "protected": false,
+      "action": "radio",
+      "operation": "status",
+      "detail": "short"
+    },
+    "radio_mode_fm": {
+      "command": "*661",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 1
+    },
+    "radio_mode_usb": {
+      "command": "*662",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 3
+    },
+    "radio_mode_lsb": {
+      "command": "*663",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 4
+    },
+    "radio_mode_am": {
+      "command": "*664",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 2
+    },
+    "radio_step_711": {
+      "command": "*6711",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": -0.00002
+    },
+    "radio_step_714": {
+      "command": "*6714",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": -0.0001
+    },
+    "radio_step_717": {
+      "command": "*6717",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": -0.0005
+    },
+    "radio_step_713": {
+      "command": "*6713",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": 0.00002
+    },
+    "radio_step_716": {
+      "command": "*6716",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": 0.0001
+    },
+    "radio_step_719": {
+      "command": "*6719",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": 0.0005
+    },
+    "radio_scan_preset_721": {
+      "command": "*6721",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "down",
+      "preset": "slow"
+    },
+    "radio_scan_preset_724": {
+      "command": "*6724",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "down",
+      "preset": "medium"
+    },
+    "radio_scan_preset_727": {
+      "command": "*6727",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "down",
+      "preset": "fast"
+    },
+    "radio_scan_preset_723": {
+      "command": "*6723",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "up",
+      "preset": "slow"
+    },
+    "radio_scan_preset_726": {
+      "command": "*6726",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "up",
+      "preset": "medium"
+    },
+    "radio_scan_preset_729": {
+      "command": "*6729",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "up",
+      "preset": "fast"
+    },
+    "radio_tune_79": {
+      "command": "*679",
+      "protected": false,
+      "action": "radio",
+      "operation": "tune"
+    },
+    "radio_get_setting_90": {
+      "command": "*690",
+      "protected": false,
+      "action": "radio",
+      "operation": "get_setting"
+    },
+    "radio_set_setting_91": {
+      "command": "*691",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_setting"
+    },
+    "radio_start_scan_92": {
+      "command": "*692",
+      "protected": false,
+      "action": "radio",
+      "operation": "start_scan"
+    },
+    "radio_pause_scan_93": {
+      "command": "*693",
+      "protected": false,
+      "action": "radio",
+      "operation": "pause_scan"
+    },
+    "radio_resume_scan_94": {
+      "command": "*694",
+      "protected": false,
+      "action": "radio",
+      "operation": "resume_scan"
+    },
+    "radio_stop_scan_95": {
+      "command": "*695",
+      "protected": false,
+      "action": "radio",
+      "operation": "stop_scan"
+    },
+    "radio_set_scan_direction_960": {
+      "command": "*6960",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_direction",
+      "direction": "down"
+    },
+    "radio_set_scan_direction_961": {
+      "command": "*6961",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_direction",
+      "direction": "up"
+    },
+    "radio_skip_97": {
+      "command": "*697",
+      "protected": false,
+      "action": "radio",
+      "operation": "skip"
+    },
+    "radio_get_memory_98": {
+      "command": "*698",
+      "protected": false,
+      "action": "radio",
+      "operation": "get_memory"
+    },
+    "radio_catalog_990": {
+      "command": "*6990",
+      "protected": false,
+      "action": "radio",
+      "operation": "catalog",
+      "kind": "capabilities"
+    },
+    "radio_catalog_991": {
+      "command": "*6991",
+      "protected": false,
+      "action": "radio",
+      "operation": "catalog",
+      "kind": "memories"
+    },
+    "radio_catalog_992": {
+      "command": "*6992",
+      "protected": false,
+      "action": "radio",
+      "operation": "catalog",
+      "kind": "scan_lists"
+    },
+    "radio_scan_status_993": {
+      "command": "*6993",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_status"
+    },
+    "radio_set_inhibit_9940": {
+      "command": "*69940",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_inhibit",
+      "enabled": false
+    },
+    "radio_set_inhibit_9941": {
+      "command": "*69941",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_inhibit",
+      "enabled": true
+    },
+    "radio_set_scan_dwell_995": {
+      "command": "*6995",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_dwell"
+    },
+    "radio_set_scan_resume_delay_996": {
+      "command": "*6996",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_resume_delay"
+    },
+    "radio_set_scan_priority_997": {
+      "command": "*6997",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_priority"
+    },
+    "radio_current_status_998": {
+      "command": "*6998",
+      "protected": false,
+      "action": "radio",
+      "operation": "current_status"
+    },
+    "radio_invoke_999": {
+      "command": "*6999",
+      "protected": false,
+      "action": "radio",
+      "operation": "invoke"
+    }
+  },
+  "radio_family": {
+    "generic_fallback": {
+      "command": "*6",
+      "protected": false,
+      "action": "radio"
+    },
+    "native_core_default": "disabled empty prefix; provider configuration installs family only when remote base enabled",
+    "provider_default_digits": "6",
+    "provider_default_access": "locked",
+    "provider_repository": "cpeter1207/USBRadioPlus",
+    "provider_commit": "b7dc3d35a242c4bdfea7166b6f959539d500a363",
+    "provider_source": "https://github.com/cpeter1207/USBRadioPlus/blob/b7dc3d35a242c4bdfea7166b6f959539d500a363/rust/core/src/remote_configuration.rs#L720",
+    "binding_rule": "Use the effective provider prefix in place of *6 for every expanded alias; no radio operating action when owner absent/disabled. Generic family fallback preserves source handler handling of malformed/unknown payloads. Explicit fixed forms require an empty raw parameter."
+  },
+  "unmapped_link_variants": [
+    "DisconnectAll",
+    "ReconnectAll"
+  ],
+  "unmapped_link_variants_note": "These two of 28 LinkAction variants have no command-table mapping; do not invent default codes. Current 806/816 map permanent-only pause/resume variants.",
+  "interactive_source_rules": [
+    {
+      "code": "#",
+      "when": "selected addressed remote command target",
+      "behavior": "Clear exact-source selected target; consume locally and never forward this symbol",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L524"
+    },
+    {
+      "code": "0 tail",
+      "when": "node-taking command after ordinary parser",
+      "behavior": "Resolve exact tail 0 to remembered source-local target; Message and SiteStatus return before substitution. Do not apply generic parameter-wide substitution. Current EchoTelemetry also falls through this branch, so telemetry off 0 is a source quirk/bug to avoid silently generalizing.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L615"
+    },
+    {
+      "code": "arbitrary configured macro trigger",
+      "when": "exact configured trigger after initiating star",
+      "behavior": "Map through call_macro; no built-in code exists; macro protection is independent per trigger. Native triggers fire immediately when exact.",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L570"
+    },
+    {
+      "code": "unkey",
+      "when": "ordinary source has no selected remote target",
+      "behavior": "Completes partial collection by actual receive falling edge; also sole completion of PadTest; selected remote target survives unkey",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L504"
+    },
+    {
+      "code": "inactivity 3000 ms",
+      "when": "ordinary active collection",
+      "behavior": "NUL timeout tick completes candidate at >=3000 ms since last digit; not end-of-string",
+      "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L325"
+    }
+  ],
+  "phone_foundation": {
+    "status": "inert parser requests for future call owner; not functioning repeater DTMF commands and not ordinary core defaults",
+    "source": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/phone_dtmf.rs#L1",
+    "forms": [
+      {
+        "code": "*3<target> or *3",
+        "meaning": "configured Transceive prefix requests Attach(target) or Attach(default); explicit finish/three-second timeout"
+      },
+      {
+        "code": "*4<target>",
+        "meaning": "configured Command prefix selects call-local addressed command target"
+      },
+      {
+        "code": "#",
+        "meaning": "leave selected command mode except quoted symbol"
+      },
+      {
+        "code": "**<symbol>",
+        "meaning": "quote one literal symbol to selected target or permitted telephone egress"
+      },
+      {
+        "code": "*91",
+        "meaning": "configured manual key prefix, recognized only while target selected; default manual admission disabled"
+      },
+      {
+        "code": "*90",
+        "meaning": "configured manual unkey prefix, recognized only while target selected; default manual admission disabled"
+      }
+    ]
+  },
+  "contract_reconciliation": [
+    "Final schema defaults cover all26core entries, including fixed10/722, and all51explicit radio forms while retaining the generic family fallback.",
+    "Parrot_enable/parrot_disable/echo_telemetry defaults now use protected=true to mirror their intrinsic admin requirement. Native core has no per-mapping protected field; false is only absence of additional mapping gate.",
+    "Keep radio aliases protected=false because native radio access policy is dynamic and six query variants public. Never gate the entire family or all mutations using a blanket true that breaks Open policy.",
+    "Parameters belong only to dispatch runtime. Persist no parameter field in mappings. Each parameterized radio decoder supplies the missing canonical typed fields using the documented raw tail grammar.",
+    "All exact radio spellings reject nonempty parameter. Variable selectors preserve leading zero spelling; 9970,99700,etc all mean priority off, so do not add a separate9970 prefix alias.",
+    "No code-defined ordinary mapping exists beyond26 table entries plus remote payloads, source-local escape/target semantics and configured macro triggers. Phone grammar forms are classified separately as inert foundation."
+  ],
+  "completion_audit": {
+    "repository": "cpeter1207/rpt_advanced",
+    "ref": "main",
+    "verified_head": "8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9",
+    "verified_via": "GitHub connector fetch_commit(main)",
+    "audit_scope": "Read-only native-code reconciliation; no design/schema edits.",
+    "summary": {
+      "inactivity_timeout_ms": 3000,
+      "inactivity_config_key": null,
+      "inactivity_config_bounds": null,
+      "inactivity_is_configurable": false,
+      "proposed_contract_scalar": "command.inactivity_timeout_ms",
+      "proposed_scalar_status": "New user-requested configurability; 3000 preserves the current hardcoded duration. Positive integer minimum 1 is a new contract decision, not existing native parser bounds.",
+      "unkey_completion": "Already implemented for ordinary local RF commands; source-specific peer exceptions remain.",
+      "literal_terminator": "# hardcoded; no current configurable terminator",
+      "admin_timeout_ms": 300000,
+      "admin_timeout_config_key": "dtmf_admin_timeout_ms",
+      "admin_timeout_config_bounds": {
+        "minimum": 1,
+        "maximum": "u64::MAX"
+      }
+    },
+    "findings": [
+      {
+        "id": "inactivity-completes",
+        "detail": "CommandCollector finishes a nonempty active buffer on NUL only when wrapping(now_ms-last_ms)>=3000. This yields command text, then DtmfCommands.complete_command parses/authorizes it; unknown/invalid/incomplete handlers yield no operation.",
+        "evidence": [
+          {
+            "path": "rust/core/src/command.rs",
+            "line": 309,
+            "end_line": 344,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L309-L344",
+            "meaning": "Three-second collector completion"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 555,
+            "end_line": 592,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L555-L592",
+            "meaning": "Collector text dispatch"
+          }
+        ]
+      },
+      {
+        "id": "inactivity-timer-sites",
+        "detail": "All duration sites are hardcoded 3000, so configurability must reach all relevant owners, not only one collector. RF publisher emits one NUL after quiet time. DtmfCommands maintains per-source digit deadlines. PeerLink tracks its own deadline and PeerSession injects '#' on expiry. PhoneDtmfGrammar has a separate three-second tick.",
+        "evidence": [
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 69,
+            "end_line": 83,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L69-L83",
+            "meaning": "RF publisher reset/expiry"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 493,
+            "end_line": 498,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L493-L498",
+            "meaning": "Source digit deadline reset"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 702,
+            "end_line": 714,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L702-L714",
+            "meaning": "Source deadline expiry feeds NUL"
+          },
+          {
+            "path": "rust/core/src/link/peer.rs",
+            "line": 85,
+            "end_line": 103,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/link/peer.rs#L85-L103",
+            "meaning": "Peer deadline reset and consumption"
+          },
+          {
+            "path": "rust/product/src/link/session.rs",
+            "line": 1077,
+            "end_line": 1080,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/link/session.rs#L1077-L1080",
+            "meaning": "Peer timeout currently synthesizes literal hash"
+          },
+          {
+            "path": "rust/core/src/phone_dtmf.rs",
+            "line": 231,
+            "end_line": 239,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/phone_dtmf.rs#L231-L239",
+            "meaning": "Phone grammar timeout"
+          }
+        ]
+      },
+      {
+        "id": "timer-reset-semantics",
+        "detail": "RF publisher resets last_ms and arms timeout after every completed decoded digit including '#'; unkey or an emitted timeout disarms it. Control-side digit_deadline is renewed for 0-9/A-D/*; '#', NUL, Unkey and Lost clear it. Collector last_ms resets on initiating/restart '*', then on each accepted nonterminator digit. Phone grammar calls tick before incoming digit, then last_ms=max(last_ms,now_ms).",
+        "evidence": [
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 69,
+            "end_line": 83,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L69-L83",
+            "meaning": "RF reset/disarm"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 493,
+            "end_line": 498,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L493-L498",
+            "meaning": "Control deadline accepted set"
+          },
+          {
+            "path": "rust/core/src/command.rs",
+            "line": 311,
+            "end_line": 331,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L311-L331",
+            "meaning": "Collector restart and last accepted digit"
+          },
+          {
+            "path": "rust/core/src/phone_dtmf.rs",
+            "line": 136,
+            "end_line": 149,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/phone_dtmf.rs#L136-L149",
+            "meaning": "Phone tick before digit"
+          }
+        ]
+      },
+      {
+        "id": "clock",
+        "detail": "Elapsed milliseconds, not wall/civil time. Current RF callbacks calculate now_ms=origin_ms+elapsed_samples/48 at 48 kHz; origin_ms is monotonic process epoch elapsed at activation. Peer session clocks use Instant epoch elapsed in milliseconds; host processes peer Digit with control clock.now_ms and retains captured RemoteUnkey timestamp.",
+        "evidence": [
+          {
+            "path": "rust/product/src/worker.rs",
+            "line": 613,
+            "end_line": 618,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/worker.rs#L613-L618",
+            "meaning": "RF sample progress timestamp"
+          },
+          {
+            "path": "rust/product/src/worker.rs",
+            "line": 1172,
+            "end_line": null,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/worker.rs#L1172",
+            "meaning": "RF monotonic origin"
+          },
+          {
+            "path": "rust/product/src/link/session.rs",
+            "line": 365,
+            "end_line": 370,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/link/session.rs#L365-L370",
+            "meaning": "Peer monotonic elapsed milliseconds"
+          },
+          {
+            "path": "rust/product/src/host.rs",
+            "line": 1453,
+            "end_line": 1462,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/host.rs#L1453-L1462",
+            "meaning": "Peer digit/control versus captured-unkey timestamps"
+          },
+          {
+            "path": "rust/product/src/lifecycle.rs",
+            "line": 744,
+            "end_line": 753,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/lifecycle.rs#L744-L753",
+            "meaning": "RuntimeClock now_ms from Instant elapsed"
+          }
+        ]
+      },
+      {
+        "id": "rf-unkey",
+        "detail": "An actual receiving falling edge emits Unkey after decoded digits for that frame. Ordinary local command collection maps Unkey directly to '#' and completes immediately; selected-remote mode ignores Unkey. New no-prefix collector should retain unkey as a completion event, independent of which literal terminator is configured.",
+        "evidence": [
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 74,
+            "end_line": 83,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L74-L83",
+            "meaning": "Actual receiver falling edge"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 518,
+            "end_line": 527,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L518-L527",
+            "meaning": "Ordinary Unkey to completion, selected remote exception"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf_tests.rs",
+            "line": 428,
+            "end_line": 458,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf_tests.rs#L428-L458",
+            "meaning": "Final digit before unkey test"
+          }
+        ]
+      },
+      {
+        "id": "peer-unkey",
+        "detail": "Actual peer unkey currently completes ONLY remote-base family collection on that ingress, not ordinary peer commands or selected *4 forwarding. This is a native scope difference to preserve deliberately or change explicitly, not infer from local RF behavior. Peer and private phone collectors are isolated by origin and exact reply connection; phone entry requires authenticated matching PhoneSource.",
+        "evidence": [
+          {
+            "path": "rust/core/src/runtime/links.rs",
+            "line": 584,
+            "end_line": 615,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L584-L615",
+            "meaning": "Peer and authenticated phone digit entry"
+          },
+          {
+            "path": "rust/core/src/runtime/links.rs",
+            "line": 623,
+            "end_line": 659,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L623-L659",
+            "meaning": "Origin plus exact connection keyed collectors"
+          },
+          {
+            "path": "rust/core/src/runtime/links.rs",
+            "line": 679,
+            "end_line": 708,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/links.rs#L679-L708",
+            "meaning": "Independent expiry and remote-base-only peer unkey"
+          }
+        ]
+      },
+      {
+        "id": "selection-hash-special",
+        "detail": "In selected remote-command mode a literal '#' clears selection and emits no forwarded digit. Other 0-9/A-D/* symbols forward immediately. NUL timeout and Unkey do not clear selection in DtmfCommands. PeerSession's synthetic '#' timer can therefore have different semantics than NUL on a peer-origin selected collector; changing configurable terminator should not conflate completion events with literal hash or blindly move this behavior.",
+        "evidence": [
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 518,
+            "end_line": 542,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L518-L542",
+            "meaning": "Selected remote literal hash handling"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf_tests.rs",
+            "line": 346,
+            "end_line": 365,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf_tests.rs#L346-L365",
+            "meaning": "Selection survives unkey and NUL, exits on hash"
+          },
+          {
+            "path": "rust/product/src/link/session.rs",
+            "line": 1077,
+            "end_line": 1078,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/link/session.rs#L1077-L1078",
+            "meaning": "Synthetic peer timeout hash"
+          }
+        ]
+      },
+      {
+        "id": "pad-test",
+        "detail": "PadTest is local human RF-only. It captures every valid keypad digit, including '*' and '#'; inactivity/NUL does not finish. Only actual Unkey ends capture and yields report. First 127 symbols retained, later symbols discarded with overflowed=true. Lost cancels capture entirely.",
+        "evidence": [
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 499,
+            "end_line": 516,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L499-L516",
+            "meaning": "Pad capture event rules"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 625,
+            "end_line": 632,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L625-L632",
+            "meaning": "RF human-only pad activation"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf_tests.rs",
+            "line": 301,
+            "end_line": 341,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf_tests.rs#L301-L341",
+            "meaning": "Capture hash, timeout, loss, bounds and peer tests"
+          }
+        ]
+      },
+      {
+        "id": "input-overflow",
+        "detail": "Native command collector accepts 127 symbols excluding initiating star and hash. On symbol 128 or invalid symbol it sets active=false, producing no operation; later digits cannot execute the retained prefix. A future '*' restarts and clears digits. It does not have the new contract's explicit ignore-until-next-completion overflow latch. Queue is 256 DigitEvents; overflow discards observed queued prefix and emits Lost, which resets collector and pad and cancels macro.",
+        "evidence": [
+          {
+            "path": "rust/core/src/command.rs",
+            "line": 311,
+            "end_line": 344,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L311-L344",
+            "meaning": "Collector input and overflow"
+          },
+          {
+            "path": "rust/core/src/command_tests.rs",
+            "line": 320,
+            "end_line": 332,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command_tests.rs#L320-L332",
+            "meaning": "127 symbol limit test"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 42,
+            "end_line": 43,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L42-L43",
+            "meaning": "256 event queue"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 142,
+            "end_line": 160,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L142-L160",
+            "meaning": "Queue overflow emits Lost"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 487,
+            "end_line": 502,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L487-L502",
+            "meaning": "Lost cancels macro and resets collection"
+          }
+        ]
+      },
+      {
+        "id": "prefix-and-immediate-dispatch",
+        "detail": "Native '*' is a global start/restart token except within recognized remote-base family arguments. Bare digits are ignored locally and may regenerate from idle peers. Mapping prefixes only allow 0-9/A-D, max 63; empty mapping disables that action. Collector may dispatch unambiguous complete fixed commands or macro trigger immediately on exact match, before hash/unkey/timeout. The new no-prefix candidate-buffer design with '*' or '#' literal inside mappings and boundary-only longest matching is an explicit behavior change.",
+        "evidence": [
+          {
+            "path": "rust/core/src/command.rs",
+            "line": 137,
+            "end_line": 148,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L137-L148",
+            "meaning": "Mapping alphabet and 63-byte bound"
+          },
+          {
+            "path": "rust/core/src/command.rs",
+            "line": 224,
+            "end_line": 255,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L224-L255",
+            "meaning": "Empty mappings disabled; typed argument parse"
+          },
+          {
+            "path": "rust/core/src/command.rs",
+            "line": 311,
+            "end_line": 338,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command.rs#L311-L338",
+            "meaning": "Star initiator and exact immediate dispatch"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 547,
+            "end_line": 554,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L547-L554",
+            "meaning": "Idle peer regeneration"
+          },
+          {
+            "path": "rust/core/src/command_tests.rs",
+            "line": 294,
+            "end_line": 316,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/command_tests.rs#L294-L316",
+            "meaning": "Immediate and deferred command examples"
+          }
+        ]
+      },
+      {
+        "id": "execute-string-versus-macro",
+        "detail": "Native Asterisk execute_digits validates the full alphabet then appends# if absent and uses the shared RF collector through the product API with now_ms=0. Native macro compilation instead requires explicitly terminated commands and rejects incomplete tails. The proposed isolated execute_dtmf action is distinct: explicit delimiters complete immediately and a pending tail waits for configured inactivity within the whole invocation budget; no implicit# or fake RF unkey is inserted.",
+        "evidence": [
+          {
+            "path": "rust/asterisk/src/cli.rs",
+            "line": 278,
+            "end_line": 303,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/asterisk/src/cli.rs#L278-L303",
+            "meaning": "execute_digits appends hash and Incomplete result"
+          },
+          {
+            "path": "rust/product/src/lifecycle.rs",
+            "line": 1104,
+            "end_line": 1133,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/product/src/lifecycle.rs#L1104-L1133",
+            "meaning": "Shared collector and timestamp zero"
+          },
+          {
+            "path": "rust/core/src/dtmf_macro.rs",
+            "line": 107,
+            "end_line": 141,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/dtmf_macro.rs#L107-L141",
+            "meaning": "Only explicit hash adds macro step"
+          },
+          {
+            "path": "rust/core/src/dtmf_macro.rs",
+            "line": 177,
+            "end_line": 189,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/dtmf_macro.rs#L177-L189",
+            "meaning": "Unterminated macro tail/trailing pause rejects"
+          }
+        ]
+      },
+      {
+        "id": "admin-timeout-separate",
+        "detail": "dtmf_admin_timeout_ms is 300000 by default, parsed from 1..u64::MAX in node/general settings. It controls authorization grant expiry; successful admin operations renew it. It is not command inactivity timeout and must remain separate.",
+        "evidence": [
+          {
+            "path": "rust/core/src/config/settings.rs",
+            "line": 1266,
+            "end_line": 1269,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1266-L1269",
+            "meaning": "Admin configurable bounds"
+          },
+          {
+            "path": "rust/core/src/config/settings.rs",
+            "line": 1443,
+            "end_line": 1445,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/settings.rs#L1443-L1445",
+            "meaning": "Admin defaults"
+          },
+          {
+            "path": "rust/core/src/config/schema.rs",
+            "line": 555,
+            "end_line": null,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/config/schema.rs#L555",
+            "meaning": "Admin parser validity"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 638,
+            "end_line": 644,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L638-L644",
+            "meaning": "Grant creation"
+          },
+          {
+            "path": "rust/core/src/runtime/dtmf.rs",
+            "line": 747,
+            "end_line": 750,
+            "url": "https://github.com/cpeter1207/rpt_advanced/blob/8188d5f0e6a738ac38e04e6fea2ba64c150e5ce9/rust/core/src/runtime/dtmf.rs#L747-L750",
+            "meaning": "Successful operation grant renewal"
+          }
+        ]
+      }
+    ],
+    "contract_guidance": [
+      "Add a scalar inactivity_timeout_ms beside terminator and mappings; default 3000 ms reflects current elapsed duration, but the scalar name and bounds are new design choices.",
+      "Retain RF unkey completion as mandatory behavior with no new enable/disable toggle.",
+      "Treat explicit terminator, inactivity, and actual unkey as distinguishable completion causes; do not implement inactivity/unkey by inventing literal '#'.",
+      "Declare live ingress and execute_dtmf end-of-string semantics separately: authorized synthetic action has no RF receiver-unkey and must wait for configured inactivity for a pending tail, within the invocation budget.",
+      "Describe no-prefix and boundary-only dispatch as deliberate redesign; native current behavior still requires '*' and permits immediate exact dispatch.",
+      "Preserve RF-only pad-test unkey semantics and current source/loss isolation unless user explicitly requests a change.",
+      "Do not claim all peer unkey paths already execute ordinary commands; current peer behavior is narrower."
+    ],
+    "sources": [
+      {
+        "path": "rust/asterisk/src/cli.rs",
+        "git_blob_sha": "f48c009325d87781964a5f67e120d0641c64d694",
+        "connector_blob_sha": "f48c009325d87781964a5f67e120d0641c64d694"
+      },
+      {
+        "path": "rust/asterisk/src/services.rs",
+        "git_blob_sha": "d0063737111763c42c545d3e4520608d33deb716",
+        "connector_blob_sha": "d0063737111763c42c545d3e4520608d33deb716"
+      },
+      {
+        "path": "rust/core/src/command.rs",
+        "git_blob_sha": "17051276212c8e41e5683aae9b3d6e902fe5070b",
+        "connector_blob_sha": "17051276212c8e41e5683aae9b3d6e902fe5070b"
+      },
+      {
+        "path": "rust/core/src/command_tests.rs",
+        "git_blob_sha": "ceac213ef30744ed203f4d7eb1b7c330e14f5c8c",
+        "connector_blob_sha": "ceac213ef30744ed203f4d7eb1b7c330e14f5c8c"
+      },
+      {
+        "path": "rust/core/src/config/schema.rs",
+        "git_blob_sha": "560dc611dbbd04461dd30339fa18c52cd543c129",
+        "connector_blob_sha": "560dc611dbbd04461dd30339fa18c52cd543c129"
+      },
+      {
+        "path": "rust/core/src/config/settings.rs",
+        "git_blob_sha": "1ce3e53d9c56a3c6f6e22d8cb1d03bd29f2fd473",
+        "connector_blob_sha": "1ce3e53d9c56a3c6f6e22d8cb1d03bd29f2fd473"
+      },
+      {
+        "path": "rust/core/src/dtmf_macro.rs",
+        "git_blob_sha": "9ba8ea8990a8dfb2c7b8be688610cc75594d825f",
+        "connector_blob_sha": "9ba8ea8990a8dfb2c7b8be688610cc75594d825f"
+      },
+      {
+        "path": "rust/core/src/link/audio.rs",
+        "git_blob_sha": "e965ea9183f28ca3e56bc0a30a571577784928c4",
+        "connector_blob_sha": "e965ea9183f28ca3e56bc0a30a571577784928c4"
+      },
+      {
+        "path": "rust/core/src/link/peer.rs",
+        "git_blob_sha": "4e48ffd839a1da448daad6146504207c477a5e89",
+        "connector_blob_sha": "4e48ffd839a1da448daad6146504207c477a5e89"
+      },
+      {
+        "path": "rust/core/src/phone_dtmf.rs",
+        "git_blob_sha": "b430a1c84e1c5b259798dc083dd3c91ba6692598",
+        "connector_blob_sha": "b430a1c84e1c5b259798dc083dd3c91ba6692598"
+      },
+      {
+        "path": "rust/core/src/remote_base_command.rs",
+        "git_blob_sha": "ecb23c075ceb28d4dbb7be2815242f808e865af8",
+        "connector_blob_sha": "ecb23c075ceb28d4dbb7be2815242f808e865af8"
+      },
+      {
+        "path": "rust/core/src/runtime/dtmf.rs",
+        "git_blob_sha": "3f31caa1275f0e05aab471dd81c2ac6532c5610a",
+        "connector_blob_sha": "3f31caa1275f0e05aab471dd81c2ac6532c5610a"
+      },
+      {
+        "path": "rust/core/src/runtime/dtmf_tests.rs",
+        "git_blob_sha": "8f55d86d59bcac310792eebab8e88b0cdd275ef0",
+        "connector_blob_sha": "8f55d86d59bcac310792eebab8e88b0cdd275ef0"
+      },
+      {
+        "path": "rust/core/src/runtime/links.rs",
+        "git_blob_sha": "8cebeeb0ba43651afcac0bb89442f22bb05e4b1e",
+        "connector_blob_sha": "8cebeeb0ba43651afcac0bb89442f22bb05e4b1e"
+      },
+      {
+        "path": "rust/core/tests/phone_dtmf.rs",
+        "git_blob_sha": "35b50c579c7002a02bb3ab85dc3819390dd9e0b6",
+        "connector_blob_sha": "35b50c579c7002a02bb3ab85dc3819390dd9e0b6"
+      },
+      {
+        "path": "rust/product/src/host.rs",
+        "git_blob_sha": "a42ba8dcfd5a25f7e8ab703b44eff5a88b64587a",
+        "connector_blob_sha": "a42ba8dcfd5a25f7e8ab703b44eff5a88b64587a"
+      },
+      {
+        "path": "rust/product/src/lifecycle.rs",
+        "git_blob_sha": "912b9d8b1df51754f5ab0016dc103914749e0c18",
+        "connector_blob_sha": "912b9d8b1df51754f5ab0016dc103914749e0c18"
+      },
+      {
+        "path": "rust/product/src/link/session.rs",
+        "git_blob_sha": "7d5000c13a46311f3fb1f5ddaaed4a39b3eec7ab",
+        "connector_blob_sha": "7d5000c13a46311f3fb1f5ddaaed4a39b3eec7ab"
+      },
+      {
+        "path": "rust/product/src/link/session/source.rs",
+        "git_blob_sha": "f8cbf9f1ebf458df9709f8df0350640476ea5adf",
+        "connector_blob_sha": "f8cbf9f1ebf458df9709f8df0350640476ea5adf"
+      },
+      {
+        "path": "rust/product/src/link/source_clock.rs",
+        "git_blob_sha": "fc7d1c0f2573c062d2eee45de05d02de1c3f252c",
+        "connector_blob_sha": "fc7d1c0f2573c062d2eee45de05d02de1c3f252c"
+      },
+      {
+        "path": "rust/product/src/services_phone_tests.rs",
+        "git_blob_sha": "42c93b26f77e3161d555b76d81420e805ad60889",
+        "connector_blob_sha": "42c93b26f77e3161d555b76d81420e805ad60889"
+      },
+      {
+        "path": "rust/product/src/worker.rs",
+        "git_blob_sha": "cfc16f5f728f2f6dd5f2929b0725ad0f202ef521",
+        "connector_blob_sha": "cfc16f5f728f2f6dd5f2929b0725ad0f202ef521"
+      },
+      {
+        "path": "rust/standalone/src/host_services.rs",
+        "git_blob_sha": "57c1e8b8ec402fc147b582ede1b2dedb1b62bf0f",
+        "connector_blob_sha": "57c1e8b8ec402fc147b582ede1b2dedb1b62bf0f"
+      }
+    ]
+  },
+  "canonical_default_mappings": {
+    "disconnect": {
+      "command": "*1",
+      "protected": false,
+      "action": "disconnect"
+    },
+    "monitor": {
+      "command": "*2",
+      "protected": false,
+      "action": "connect",
+      "mode": "monitor"
+    },
+    "transceive": {
+      "command": "*3",
+      "protected": false,
+      "action": "connect",
+      "mode": "transceive"
+    },
+    "remote": {
+      "command": "*4",
+      "protected": false,
+      "action": "select_command_target"
+    },
+    "status": {
+      "command": "*70",
+      "protected": false,
+      "action": "link_status"
+    },
+    "disconnect_all": {
+      "command": "*806",
+      "protected": false,
+      "action": "pause_permanent_links"
+    },
+    "last_keyed": {
+      "command": "*72",
+      "protected": false,
+      "action": "last_keyed"
+    },
+    "local_monitor": {
+      "command": "*75",
+      "protected": false,
+      "action": "connect",
+      "mode": "local-monitor"
+    },
+    "disconnect_permanent": {
+      "command": "*811",
+      "protected": false,
+      "action": "disconnect_permanent"
+    },
+    "permanent_monitor": {
+      "command": "*812",
+      "protected": false,
+      "action": "connect_permanent",
+      "mode": "monitor"
+    },
+    "permanent_transceive": {
+      "command": "*813",
+      "protected": false,
+      "action": "connect_permanent",
+      "mode": "transceive"
+    },
+    "full_status": {
+      "command": "*73",
+      "protected": false,
+      "action": "network_status"
+    },
+    "reconnect_all": {
+      "command": "*816",
+      "protected": false,
+      "action": "resume_permanent_links"
+    },
+    "permanent_local_monitor": {
+      "command": "*818",
+      "protected": false,
+      "action": "connect_permanent",
+      "mode": "local-monitor"
+    },
+    "disconnect_nonpermanent_all": {
+      "command": "*10",
+      "protected": false,
+      "action": "disconnect_nonpermanent_all"
+    },
+    "time": {
+      "command": "*722",
+      "protected": false,
+      "action": "announce_time"
+    },
+    "admin_unlock": {
+      "command": "*800",
+      "protected": false,
+      "action": "unlock_administration"
+    },
+    "admin_lock": {
+      "command": "*801",
+      "protected": false,
+      "action": "lock_administration"
+    },
+    "parrot_enable": {
+      "command": "*804",
+      "protected": true,
+      "action": "set_parrot",
+      "enabled": true
+    },
+    "parrot_disable": {
+      "command": "*805",
+      "protected": true,
+      "action": "set_parrot",
+      "enabled": false
+    },
+    "pad_test": {
+      "command": "*82",
+      "protected": false,
+      "action": "start_pad_test"
+    },
+    "message": {
+      "command": "*77",
+      "protected": false,
+      "action": "message"
+    },
+    "site_status": {
+      "command": "*76",
+      "protected": false,
+      "action": "site_status"
+    },
+    "cancel_message": {
+      "command": "*78",
+      "protected": false,
+      "action": "cancel_message"
+    },
+    "echo_telemetry": {
+      "command": "",
+      "protected": true,
+      "action": "set_echo_telemetry"
+    },
+    "radio": {
+      "command": "*6",
+      "protected": false,
+      "action": "radio"
+    },
+    "radio_recall_memory_0": {
+      "command": "*60",
+      "protected": false,
+      "action": "radio",
+      "operation": "recall_memory"
+    },
+    "radio_set_frequency_1": {
+      "command": "*61",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_frequency"
+    },
+    "radio_set_tone_2": {
+      "command": "*62",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone",
+      "direction": "rx"
+    },
+    "radio_set_tone_3": {
+      "command": "*63",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone",
+      "direction": "tx"
+    },
+    "radio_set_tone_enabled_40": {
+      "command": "*640",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "rx",
+      "enabled": false
+    },
+    "radio_set_tone_enabled_41": {
+      "command": "*641",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "rx",
+      "enabled": true
+    },
+    "radio_set_tone_enabled_42": {
+      "command": "*642",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "tx",
+      "enabled": false
+    },
+    "radio_set_tone_enabled_43": {
+      "command": "*643",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "tx",
+      "enabled": true
+    },
+    "radio_set_power_preset_44": {
+      "command": "*644",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_power_preset",
+      "preset": "low"
+    },
+    "radio_set_power_preset_45": {
+      "command": "*645",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_power_preset",
+      "preset": "medium"
+    },
+    "radio_set_power_preset_46": {
+      "command": "*646",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_power_preset",
+      "preset": "high"
+    },
+    "radio_status_51": {
+      "command": "*651",
+      "protected": false,
+      "action": "radio",
+      "operation": "status",
+      "detail": "long"
+    },
+    "radio_status_52": {
+      "command": "*652",
+      "protected": false,
+      "action": "radio",
+      "operation": "status",
+      "detail": "short"
+    },
+    "radio_mode_fm": {
+      "command": "*661",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 1
+    },
+    "radio_mode_usb": {
+      "command": "*662",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 3
+    },
+    "radio_mode_lsb": {
+      "command": "*663",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 4
+    },
+    "radio_mode_am": {
+      "command": "*664",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 2
+    },
+    "radio_step_711": {
+      "command": "*6711",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": -0.00002
+    },
+    "radio_step_714": {
+      "command": "*6714",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": -0.0001
+    },
+    "radio_step_717": {
+      "command": "*6717",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": -0.0005
+    },
+    "radio_step_713": {
+      "command": "*6713",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": 0.00002
+    },
+    "radio_step_716": {
+      "command": "*6716",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": 0.0001
+    },
+    "radio_step_719": {
+      "command": "*6719",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": 0.0005
+    },
+    "radio_scan_preset_721": {
+      "command": "*6721",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "down",
+      "preset": "slow"
+    },
+    "radio_scan_preset_724": {
+      "command": "*6724",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "down",
+      "preset": "medium"
+    },
+    "radio_scan_preset_727": {
+      "command": "*6727",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "down",
+      "preset": "fast"
+    },
+    "radio_scan_preset_723": {
+      "command": "*6723",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "up",
+      "preset": "slow"
+    },
+    "radio_scan_preset_726": {
+      "command": "*6726",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "up",
+      "preset": "medium"
+    },
+    "radio_scan_preset_729": {
+      "command": "*6729",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "up",
+      "preset": "fast"
+    },
+    "radio_tune_79": {
+      "command": "*679",
+      "protected": false,
+      "action": "radio",
+      "operation": "tune"
+    },
+    "radio_get_setting_90": {
+      "command": "*690",
+      "protected": false,
+      "action": "radio",
+      "operation": "get_setting"
+    },
+    "radio_set_setting_91": {
+      "command": "*691",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_setting"
+    },
+    "radio_start_scan_92": {
+      "command": "*692",
+      "protected": false,
+      "action": "radio",
+      "operation": "start_scan"
+    },
+    "radio_pause_scan_93": {
+      "command": "*693",
+      "protected": false,
+      "action": "radio",
+      "operation": "pause_scan"
+    },
+    "radio_resume_scan_94": {
+      "command": "*694",
+      "protected": false,
+      "action": "radio",
+      "operation": "resume_scan"
+    },
+    "radio_stop_scan_95": {
+      "command": "*695",
+      "protected": false,
+      "action": "radio",
+      "operation": "stop_scan"
+    },
+    "radio_set_scan_direction_960": {
+      "command": "*6960",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_direction",
+      "direction": "down"
+    },
+    "radio_set_scan_direction_961": {
+      "command": "*6961",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_direction",
+      "direction": "up"
+    },
+    "radio_skip_97": {
+      "command": "*697",
+      "protected": false,
+      "action": "radio",
+      "operation": "skip"
+    },
+    "radio_get_memory_98": {
+      "command": "*698",
+      "protected": false,
+      "action": "radio",
+      "operation": "get_memory"
+    },
+    "radio_catalog_990": {
+      "command": "*6990",
+      "protected": false,
+      "action": "radio",
+      "operation": "catalog",
+      "kind": "capabilities"
+    },
+    "radio_catalog_991": {
+      "command": "*6991",
+      "protected": false,
+      "action": "radio",
+      "operation": "catalog",
+      "kind": "memories"
+    },
+    "radio_catalog_992": {
+      "command": "*6992",
+      "protected": false,
+      "action": "radio",
+      "operation": "catalog",
+      "kind": "scan_lists"
+    },
+    "radio_scan_status_993": {
+      "command": "*6993",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_status"
+    },
+    "radio_set_inhibit_9940": {
+      "command": "*69940",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_inhibit",
+      "enabled": false
+    },
+    "radio_set_inhibit_9941": {
+      "command": "*69941",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_inhibit",
+      "enabled": true
+    },
+    "radio_set_scan_dwell_995": {
+      "command": "*6995",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_dwell"
+    },
+    "radio_set_scan_resume_delay_996": {
+      "command": "*6996",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_resume_delay"
+    },
+    "radio_set_scan_priority_997": {
+      "command": "*6997",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_priority"
+    },
+    "radio_current_status_998": {
+      "command": "*6998",
+      "protected": false,
+      "action": "radio",
+      "operation": "current_status"
+    },
+    "radio_invoke_999": {
+      "command": "*6999",
+      "protected": false,
+      "action": "radio",
+      "operation": "invoke"
+    },
+    "rx_mute_toggle": {
+      "command": "*99",
+      "protected": false,
+      "action": "rx_mute_toggle",
+      "target": "phone_patch"
+    }
+  },
+  "contract_notes": [
+    "All canonical command strings are complete codes. Legacy initiating star and provider family prefix are import/default inputs, not new special command-prefix syntax.",
+    "Generic radio fallback is retained for unknown/malformed radio payload handling. Explicit radio mappings are normal independent bindings; changing one does not silently rewrite others.",
+    "Provider default family is6/accesslocked and installed only with a configured enabled owner. Canonical authoring may retain all radio mappings while effective registration is dormant without that owner.",
+    "Use the actual legacy provider prefix to generate full radio codes during import; explicit canonical edits are then ordinary mapping updates.",
+    "Fixed radio spellings require empty parameter. Priority997 remains one parameterized mapping so0/00/etc all mean off without a longest-prefix collision.",
+    "Parrot/Echo telemetry defaults setprotectedtrue; radio false preserves public queries and configurable Open/Locked/Disabled mutation policy.",
+    "No built-in code is invented for DisconnectAll/ReconnectAll, typed runtime-only controls, inert phone grammar or arbitrary configured macro triggers.",
+    "New configurable inactivity timeout defaults3000ms. Unkey/timeout are completion reasons, not injected#; prior no-prefix/boundary-only/genericparameter requirements remain.",
+    "Code-derived native coverage remains77; the designed rx_mute_toggle *99 phone-only binding brings canonical defaults to78. It is not claimed to exist in the audited source."
+  ],
+  "source_default_mappings": {
+    "disconnect": {
+      "command": "*1",
+      "protected": false,
+      "action": "disconnect"
+    },
+    "monitor": {
+      "command": "*2",
+      "protected": false,
+      "action": "connect",
+      "mode": "monitor"
+    },
+    "transceive": {
+      "command": "*3",
+      "protected": false,
+      "action": "connect",
+      "mode": "transceive"
+    },
+    "remote": {
+      "command": "*4",
+      "protected": false,
+      "action": "select_command_target"
+    },
+    "status": {
+      "command": "*70",
+      "protected": false,
+      "action": "link_status"
+    },
+    "disconnect_all": {
+      "command": "*806",
+      "protected": false,
+      "action": "pause_permanent_links"
+    },
+    "last_keyed": {
+      "command": "*72",
+      "protected": false,
+      "action": "last_keyed"
+    },
+    "local_monitor": {
+      "command": "*75",
+      "protected": false,
+      "action": "connect",
+      "mode": "local-monitor"
+    },
+    "disconnect_permanent": {
+      "command": "*811",
+      "protected": false,
+      "action": "disconnect_permanent"
+    },
+    "permanent_monitor": {
+      "command": "*812",
+      "protected": false,
+      "action": "connect_permanent",
+      "mode": "monitor"
+    },
+    "permanent_transceive": {
+      "command": "*813",
+      "protected": false,
+      "action": "connect_permanent",
+      "mode": "transceive"
+    },
+    "full_status": {
+      "command": "*73",
+      "protected": false,
+      "action": "network_status"
+    },
+    "reconnect_all": {
+      "command": "*816",
+      "protected": false,
+      "action": "resume_permanent_links"
+    },
+    "permanent_local_monitor": {
+      "command": "*818",
+      "protected": false,
+      "action": "connect_permanent",
+      "mode": "local-monitor"
+    },
+    "disconnect_nonpermanent_all": {
+      "command": "*10",
+      "protected": false,
+      "action": "disconnect_nonpermanent_all"
+    },
+    "time": {
+      "command": "*722",
+      "protected": false,
+      "action": "announce_time"
+    },
+    "admin_unlock": {
+      "command": "*800",
+      "protected": false,
+      "action": "unlock_administration"
+    },
+    "admin_lock": {
+      "command": "*801",
+      "protected": false,
+      "action": "lock_administration"
+    },
+    "parrot_enable": {
+      "command": "*804",
+      "protected": true,
+      "action": "set_parrot",
+      "enabled": true
+    },
+    "parrot_disable": {
+      "command": "*805",
+      "protected": true,
+      "action": "set_parrot",
+      "enabled": false
+    },
+    "pad_test": {
+      "command": "*82",
+      "protected": false,
+      "action": "start_pad_test"
+    },
+    "message": {
+      "command": "*77",
+      "protected": false,
+      "action": "message"
+    },
+    "site_status": {
+      "command": "*76",
+      "protected": false,
+      "action": "site_status"
+    },
+    "cancel_message": {
+      "command": "*78",
+      "protected": false,
+      "action": "cancel_message"
+    },
+    "echo_telemetry": {
+      "command": "",
+      "protected": true,
+      "action": "set_echo_telemetry"
+    },
+    "radio": {
+      "command": "*6",
+      "protected": false,
+      "action": "radio"
+    },
+    "radio_recall_memory_0": {
+      "command": "*60",
+      "protected": false,
+      "action": "radio",
+      "operation": "recall_memory"
+    },
+    "radio_set_frequency_1": {
+      "command": "*61",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_frequency"
+    },
+    "radio_set_tone_2": {
+      "command": "*62",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone",
+      "direction": "rx"
+    },
+    "radio_set_tone_3": {
+      "command": "*63",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone",
+      "direction": "tx"
+    },
+    "radio_set_tone_enabled_40": {
+      "command": "*640",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "rx",
+      "enabled": false
+    },
+    "radio_set_tone_enabled_41": {
+      "command": "*641",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "rx",
+      "enabled": true
+    },
+    "radio_set_tone_enabled_42": {
+      "command": "*642",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "tx",
+      "enabled": false
+    },
+    "radio_set_tone_enabled_43": {
+      "command": "*643",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_tone_enabled",
+      "direction": "tx",
+      "enabled": true
+    },
+    "radio_set_power_preset_44": {
+      "command": "*644",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_power_preset",
+      "preset": "low"
+    },
+    "radio_set_power_preset_45": {
+      "command": "*645",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_power_preset",
+      "preset": "medium"
+    },
+    "radio_set_power_preset_46": {
+      "command": "*646",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_power_preset",
+      "preset": "high"
+    },
+    "radio_status_51": {
+      "command": "*651",
+      "protected": false,
+      "action": "radio",
+      "operation": "status",
+      "detail": "long"
+    },
+    "radio_status_52": {
+      "command": "*652",
+      "protected": false,
+      "action": "radio",
+      "operation": "status",
+      "detail": "short"
+    },
+    "radio_mode_fm": {
+      "command": "*661",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 1
+    },
+    "radio_mode_usb": {
+      "command": "*662",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 3
+    },
+    "radio_mode_lsb": {
+      "command": "*663",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 4
+    },
+    "radio_mode_am": {
+      "command": "*664",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_mode",
+      "selector": 2
+    },
+    "radio_step_711": {
+      "command": "*6711",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": -0.00002
+    },
+    "radio_step_714": {
+      "command": "*6714",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": -0.0001
+    },
+    "radio_step_717": {
+      "command": "*6717",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": -0.0005
+    },
+    "radio_step_713": {
+      "command": "*6713",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": 0.00002
+    },
+    "radio_step_716": {
+      "command": "*6716",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": 0.0001
+    },
+    "radio_step_719": {
+      "command": "*6719",
+      "protected": false,
+      "action": "radio",
+      "operation": "step",
+      "step_mhz": 0.0005
+    },
+    "radio_scan_preset_721": {
+      "command": "*6721",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "down",
+      "preset": "slow"
+    },
+    "radio_scan_preset_724": {
+      "command": "*6724",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "down",
+      "preset": "medium"
+    },
+    "radio_scan_preset_727": {
+      "command": "*6727",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "down",
+      "preset": "fast"
+    },
+    "radio_scan_preset_723": {
+      "command": "*6723",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "up",
+      "preset": "slow"
+    },
+    "radio_scan_preset_726": {
+      "command": "*6726",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "up",
+      "preset": "medium"
+    },
+    "radio_scan_preset_729": {
+      "command": "*6729",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_preset",
+      "direction": "up",
+      "preset": "fast"
+    },
+    "radio_tune_79": {
+      "command": "*679",
+      "protected": false,
+      "action": "radio",
+      "operation": "tune"
+    },
+    "radio_get_setting_90": {
+      "command": "*690",
+      "protected": false,
+      "action": "radio",
+      "operation": "get_setting"
+    },
+    "radio_set_setting_91": {
+      "command": "*691",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_setting"
+    },
+    "radio_start_scan_92": {
+      "command": "*692",
+      "protected": false,
+      "action": "radio",
+      "operation": "start_scan"
+    },
+    "radio_pause_scan_93": {
+      "command": "*693",
+      "protected": false,
+      "action": "radio",
+      "operation": "pause_scan"
+    },
+    "radio_resume_scan_94": {
+      "command": "*694",
+      "protected": false,
+      "action": "radio",
+      "operation": "resume_scan"
+    },
+    "radio_stop_scan_95": {
+      "command": "*695",
+      "protected": false,
+      "action": "radio",
+      "operation": "stop_scan"
+    },
+    "radio_set_scan_direction_960": {
+      "command": "*6960",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_direction",
+      "direction": "down"
+    },
+    "radio_set_scan_direction_961": {
+      "command": "*6961",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_direction",
+      "direction": "up"
+    },
+    "radio_skip_97": {
+      "command": "*697",
+      "protected": false,
+      "action": "radio",
+      "operation": "skip"
+    },
+    "radio_get_memory_98": {
+      "command": "*698",
+      "protected": false,
+      "action": "radio",
+      "operation": "get_memory"
+    },
+    "radio_catalog_990": {
+      "command": "*6990",
+      "protected": false,
+      "action": "radio",
+      "operation": "catalog",
+      "kind": "capabilities"
+    },
+    "radio_catalog_991": {
+      "command": "*6991",
+      "protected": false,
+      "action": "radio",
+      "operation": "catalog",
+      "kind": "memories"
+    },
+    "radio_catalog_992": {
+      "command": "*6992",
+      "protected": false,
+      "action": "radio",
+      "operation": "catalog",
+      "kind": "scan_lists"
+    },
+    "radio_scan_status_993": {
+      "command": "*6993",
+      "protected": false,
+      "action": "radio",
+      "operation": "scan_status"
+    },
+    "radio_set_inhibit_9940": {
+      "command": "*69940",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_inhibit",
+      "enabled": false
+    },
+    "radio_set_inhibit_9941": {
+      "command": "*69941",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_inhibit",
+      "enabled": true
+    },
+    "radio_set_scan_dwell_995": {
+      "command": "*6995",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_dwell"
+    },
+    "radio_set_scan_resume_delay_996": {
+      "command": "*6996",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_resume_delay"
+    },
+    "radio_set_scan_priority_997": {
+      "command": "*6997",
+      "protected": false,
+      "action": "radio",
+      "operation": "set_scan_priority"
+    },
+    "radio_current_status_998": {
+      "command": "*6998",
+      "protected": false,
+      "action": "radio",
+      "operation": "current_status"
+    },
+    "radio_invoke_999": {
+      "command": "*6999",
+      "protected": false,
+      "action": "radio",
+      "operation": "invoke"
+    }
+  },
+  "new_design_mappings": {
+    "rx_mute_toggle": {
+      "command": "*99",
+      "protected": false,
+      "action": "rx_mute_toggle",
+      "target": "phone_patch"
+    }
+  }
+}
