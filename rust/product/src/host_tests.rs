@@ -2762,8 +2762,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
             .iter()
             .all(|(_, status)| status.retiring.is_none())
     });
-    // Take the real callback owners off the worker before controlling the two
-    // distinct outcomes: a protected-owner rejection, then failed restoration.
+    // Retain the real TX guard through the busy rejection and the subsequent pending handoff.
     let lease = host.leases[0].1.clone();
     assert!(lease.lock().unwrap().quiesce());
     let mut owners = lease.lock().unwrap().owners.take().unwrap();
@@ -2781,6 +2780,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     };
     let before = resources();
     assert_eq!(before, (1, 1));
+    let work = host.runtime.node("1000").unwrap().work().unwrap();
     FAIL.store(true, Ordering::Release);
     assert_eq!(
         host.reload(document("unavailable", ""), clock()),
@@ -2791,13 +2791,23 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     assert_eq!(host.runtime.revision(), revision);
     assert!(!host.runtime.reload_pending());
     assert_eq!(resources(), before);
+    assert!(work.is_current());
+    drop(work);
+
+    host.reload(document("unavailable", ""), clock()).unwrap();
+    assert!(host.runtime.reload_pending());
+    assert_eq!(host.poll_reload(clock()), Ok(false));
+    assert_eq!(host.runtime.status(10)[0].1.active, active);
+    assert_eq!(host.runtime.status(10)[0].1.protected_owners, 1);
+    assert!(host.runtime.node("1000").unwrap().work().is_none());
+    assert_eq!(host.runtime.document(), &previous);
+    assert_eq!(host.runtime.revision(), revision);
+    assert_eq!(resources(), before);
+
     drop(held);
     lease.lock().unwrap().owners = Some(owners);
     assert_eq!(host.runtime.status(10)[0].1.protected_owners, 0);
-    assert!(matches!(
-        host.reload(document("unavailable", ""), clock()),
-        Err(RuntimeError::Restore)
-    ));
+    assert_eq!(host.poll_reload(clock()), Err(RuntimeError::Restore));
     assert_eq!(host.runtime.document(), &previous);
     assert_eq!(host.runtime.revision(), revision);
     assert!(!host.runtime.reload_pending());
