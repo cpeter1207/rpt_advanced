@@ -6,7 +6,7 @@
   },
   {
     "repository": "rptadv-gpio-adapter",
-    "sha": "47d0d1ef764cd8725d4979b373cf27b2fc1ecd57",
+    "sha": "66726ead2d43945d9e6e090d369288d950bba754",
     "packages": ["librptadv-gpio-adapter1", "librptadv-gpio-adapter-dev"]
   },
   {
@@ -60,7 +60,7 @@
   },
   {
     "repository": "USBRadioPlus",
-    "sha": "34f3d529a0e1158bb422d94aa79e658adefd2eb4",
+    "sha": "91f175c56a0b62c7dc84e24064f67ff49f142d8d",
     "packages": ["libusbradioplus-product1", "libusbradioplus-product-dev"]
   },
   {

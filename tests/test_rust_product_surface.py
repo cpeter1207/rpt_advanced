@@ -36,7 +36,7 @@ MORSE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 DTMF_MINIMUM_VERSION = "0.1.0~alpha3-1"
 TEMPLATE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 SCHEDULE_MINIMUM_VERSION = "0.1.0~alpha3-1"
-USBRADIO_MINIMUM_VERSION = "0.1.0~alpha37-1"
+USBRADIO_MINIMUM_VERSION = "0.1.0~alpha38-1"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,

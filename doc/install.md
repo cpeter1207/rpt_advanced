@@ -261,3 +261,10 @@ dpkg-buildpackage -Pstandalone -us -uc -b
 To include the Asterisk adapter, run `dpkg-buildpackage -us -uc -b` instead.
 Install the resulting runtime packages with APT. See the
 [testing guide](testing.md) for build checks.
+
+## Typed physical radio on Asterisk
+
+Install `usbradioplus` version `0.1.0~alpha38-1` or later when an Asterisk
+port uses a typed physical radio. This optional package supplies the driver
+station binding in `libusbradioplus_asterisk.so.1`. The standalone host uses
+the station ownership operations in `libusbradioplus-product1`.
