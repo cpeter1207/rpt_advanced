@@ -115,8 +115,16 @@ pub enum ResourceKind {
     Macro,
     /// message resource.
     Message,
-    /// telemetry resource.
-    Telemetry,
+    /// Scalar speech, Morse, ducking and clock defaults for this scope.
+    TelemetrySettings,
+    /// Named periodic identification recipe.
+    Identifier,
+    /// Named release announcement.
+    Announcement,
+    /// Named composable tail.
+    Tail,
+    /// Named receiver or peer courtesy.
+    Courtesy,
     /// sensor resource.
     Sensor,
     /// input resource.

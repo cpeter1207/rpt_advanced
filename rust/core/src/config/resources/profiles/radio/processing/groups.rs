@@ -137,3 +137,97 @@ impl PeakLimiter {
         }
     }
 }
+
+impl Equalizer {
+    pub(super) fn public_fields(&self) -> serde_json::Value {
+        serde_json::json!({
+            "low": {
+                "gain_db": self.low_gain_db,
+                "frequency_hz": self.low_frequency_hz,
+                "slope": self.low_slope
+            },
+            "mid": {
+                "gain_db": self.mid_gain_db,
+                "frequency_hz": self.mid_frequency_hz,
+                "width_octaves": self.mid_width_octaves
+            },
+            "high": {
+                "gain_db": self.high_gain_db,
+                "frequency_hz": self.high_frequency_hz,
+                "slope": self.high_slope
+            },
+            "enabled": self.enabled
+        })
+    }
+}
+
+impl Deesser {
+    pub(super) fn public_fields(&self) -> serde_json::Value {
+        serde_json::json!({
+            "frequency_hz": self.frequency_hz,
+            "width_octaves": self.width_octaves,
+            "threshold_dbfs": self.threshold_dbfs,
+            "ratio": self.ratio,
+            "max_reduction_db": self.max_reduction_db,
+            "timing": {
+                "attack_ms": self.attack_ms,
+                "release_ms": self.release_ms
+            },
+            "enabled": self.enabled
+        })
+    }
+}
+
+impl Agc {
+    pub(super) fn public_fields(&self) -> serde_json::Value {
+        serde_json::json!({
+            "target_lufs": self.target_lufs,
+            "max_gain_db": self.max_gain_db,
+            "max_attenuation_db": self.max_attenuation_db,
+            "timing": {
+                "loudness_window_ms": self.loudness_window_ms,
+                "gain_increase_db_per_second": self.gain_increase_db_per_second,
+                "gain_decrease_db_per_second": self.gain_decrease_db_per_second,
+                "hold_ms": self.hold_ms
+            },
+            "activity_threshold_dbfs": self.activity_threshold_dbfs,
+            "activity_hysteresis_db": self.activity_hysteresis_db,
+            "deadband_db": self.deadband_db,
+            "enabled": self.enabled
+        })
+    }
+}
+
+impl Expander {
+    pub(super) fn public_fields(&self) -> serde_json::Value {
+        serde_json::json!({
+            "threshold_dbfs": self.threshold_dbfs,
+            "ratio": self.ratio,
+            "max_attenuation_db": self.max_attenuation_db,
+            "timing": {
+                "attack_ms": self.attack_ms,
+                "release_ms": self.release_ms
+            },
+            "sidechain": {
+                "highpass_hz": self.sidechain_highpass_hz,
+                "lowpass_hz": self.sidechain_lowpass_hz
+            },
+            "enabled": self.enabled
+        })
+    }
+}
+
+impl PeakLimiter {
+    pub(super) fn public_fields(&self) -> serde_json::Value {
+        serde_json::json!({
+            "ceiling_dbfs": self.ceiling_dbfs,
+            "oversample": self.oversample,
+            "timing": {
+                "lookahead_ms": self.lookahead_ms,
+                "attack_ms": self.attack_ms,
+                "release_ms": self.release_ms
+            },
+            "enabled": self.enabled
+        })
+    }
+}

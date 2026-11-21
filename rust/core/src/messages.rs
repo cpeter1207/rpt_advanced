@@ -336,6 +336,47 @@ struct CatalogLayer {
     inherited: bool,
 }
 
+/// Immutable installed Fluent source layers in package/administrator precedence order.
+/// Each preparation gets a separate bundle based on these same pristine sources.
+pub struct InstalledMessageSources(BTreeMap<String, Vec<String>>);
+
+impl InstalledMessageSources {
+    /// Capture the installed locale files once on the management/bootstrap thread.
+    /// Missing optional translations use the same built-in English fallback as the runtime.
+    pub fn capture() -> Self {
+        let mut layers = BTreeMap::<String, Vec<String>>::new();
+        for directory in PACKAGE_DIRS.iter().rev().chain(ADMIN_DIRS.iter().rev()) {
+            let Ok(entries) = fs::read_dir(directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("ftl") {
+                    continue;
+                }
+                let Some(language) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if language.parse::<unic_langid::LanguageIdentifier>().is_ok()
+                    && let Some(source) = read_optional(&path)
+                {
+                    layers.entry(language.into()).or_default().push(source);
+                }
+            }
+        }
+        Self(layers)
+    }
+    /// Build a fresh installed-only catalog without filesystem access.
+    pub fn catalog(&self, language: &str) -> Result<MessageCatalog, CatalogError> {
+        MessageCatalog::from_installed(language, |language, catalog| {
+            if let Some(layers) = self.0.get(language) {
+                for layer in layers {
+                    catalog.add_overlay(language, layer);
+                }
+            }
+        })
+    }
+}
 /// One configuration generation's validated Fluent catalog.
 pub struct MessageCatalog {
     english: CatalogLayer,
@@ -376,14 +417,23 @@ impl MessageCatalog {
         admin_dirs: &[PathBuf],
         package_dirs: &[PathBuf],
     ) -> Result<Self, CatalogError> {
-        let mut catalog = Self::from_sources("en-US", ENGLISH, None)?;
-        for language in std::iter::once("en-US").chain((locale != "en-US").then_some(locale)) {
-            let before = catalog.overlays.len();
+        Self::from_installed(locale, |language, catalog| {
             for directory in package_dirs.iter().rev().chain(admin_dirs.iter().rev()) {
                 if let Some(source) = read_optional(&catalog_path(directory, language)) {
                     catalog.add_overlay(language, &source);
                 }
             }
+        })
+    }
+
+    fn from_installed(
+        locale: &str,
+        mut layers: impl FnMut(&str, &mut Self),
+    ) -> Result<Self, CatalogError> {
+        let mut catalog = Self::from_sources("en-US", ENGLISH, None)?;
+        for language in std::iter::once("en-US").chain((locale != "en-US").then_some(locale)) {
+            let before = catalog.overlays.len();
+            layers(language, &mut catalog);
             if language != "en-US"
                 && before == catalog.overlays.len()
                 && catalog.translation_warnings.is_empty()

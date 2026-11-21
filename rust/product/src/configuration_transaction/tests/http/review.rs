@@ -1,0 +1,511 @@
+//! Actual store and mTLS regressions for mutable dependencies and typed response contracts.
+use super::*;
+use crate::management::ProfileInputs;
+use rpt_advanced_core::config::resources::profiles::equipment::InterfaceCapability;
+use rptadv_peer_support::https::CoordinatorInbox;
+
+const SITE_PATH: &str = "/api/v1/configuration/site/";
+const PORTS: &str = "/api/v1/configuration/ports/";
+const DESIRED: &str = "/api/v1/status/desired/";
+const STORAGE: &str = "/api/v1/status/storage/";
+const CASE: &str = "RPTADV_HAL_REVIEW_CASE";
+
+#[test]
+fn authenticated_review_regressions() {
+    let mut failed = Vec::new();
+    for case in ["restore", "reload", "echo", "audio", "schemas", "poll"] {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CASE, case)
+            .status()
+            .unwrap();
+        if !status.success() {
+            failed.push(case);
+        }
+    }
+    assert!(failed.is_empty(), "review cases failed {failed:?}");
+}
+
+#[test]
+fn corrected_reload_requires_a_settled_publication_and_known_rollback() {
+    let (_fixture, store) = Fixture::new();
+    let guard = store.try_edit().unwrap();
+    let tx = Transaction::new(&guard, LIMITS);
+    first(&tx);
+    let selected = tx.inspect().unwrap();
+    let (manifest, bytes) = prepared("second");
+    let site = SITE.parse().unwrap();
+    tx.commit(
+        Admission::Save {
+            state: selected.digest,
+        },
+        &tx.inventory().unwrap(),
+        &manifest,
+        &[(site, &bytes)],
+        "88010a36-0761-47ce-9205-e817111530fd".parse().unwrap(),
+    )
+    .unwrap();
+    let (next, bytes) = prepared("third");
+    let reject = |reload: bool| {
+        let selected = tx.inspect().unwrap();
+        let working = tx.inventory().unwrap();
+        let admission = if reload {
+            Admission::Reload {
+                state: selected.digest,
+                working: digest(&working),
+            }
+        } else {
+            Admission::Save {
+                state: selected.digest,
+            }
+        };
+        let result = tx.commit(
+            admission,
+            &working,
+            &next,
+            &[(site, &bytes)],
+            "49ec3915-0dda-45fe-af75-d7e6185674cb".parse().unwrap(),
+        );
+        assert_eq!(result, Err(TransactionError::Conflict));
+        assert_eq!(tx.inspect().unwrap().digest, selected.digest);
+    };
+    reject(true); // Journal is selected.
+    tx.reconcile().unwrap();
+    reject(true); // Owner decision is still pending.
+    tx.record_activation(&tx.inspect().unwrap(), Activation::RecoveryRequired)
+        .unwrap();
+    reject(true); // Rollback has not been confirmed.
+    tx.record_activation(&tx.inspect().unwrap(), Activation::Failed)
+        .unwrap();
+    reject(false); // Ordinary authoring still requires confirmed adoption.
+}
+
+struct Stop<'a>(&'a AtomicBool);
+impl Drop for Stop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+struct Scenario<'a> {
+    fixture: &'a Fixture,
+    listener: &'a Listener,
+    inbox: &'a mut CoordinatorInbox,
+    client: &'a Client<'a>,
+}
+
+impl Scenario<'_> {
+    fn serve<T>(
+        &mut self,
+        inputs: ProfileInputs,
+        run: impl FnOnce(&Client<'_>, &RuntimeFixture) -> T,
+    ) -> T {
+        let rt = Arc::new(RuntimeFixture::default());
+        let app = Coordinator::with_profile_inputs(
+            WorkingFiles::open(&self.fixture.0).unwrap(),
+            KeyId::new("example").unwrap(),
+            LIMITS,
+            "/api/v1",
+            rt.clone(),
+            Arc::new(inputs),
+        )
+        .unwrap();
+        let stopping = AtomicBool::new(false);
+        thread::scope(|s| {
+            s.spawn(|| {
+                while !stopping.load(Ordering::Acquire) {
+                    if !app.poll_listener(self.listener, self.inbox) {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            });
+            let _stop = Stop(&stopping);
+            run(self.client, &rt)
+        })
+    }
+}
+
+fn inputs() -> ProfileInputs {
+    ProfileInputs {
+        messages: rpt_advanced_core::messages::InstalledMessageSources::capture(),
+        interfaces: BTreeMap::new(),
+    }
+}
+fn edit(client: &Client<'_>, method: &str, path: &str, body: Value) -> Reply {
+    let result = client.edit(method, path, Some(&body));
+    assert_eq!(
+        result.code,
+        if method == "POST" { 201 } else { 202 },
+        "{method} {path} {}",
+        result.body
+    );
+    client.ready();
+    result
+}
+fn put(client: &Client<'_>, path: &str, fields: Value) {
+    edit(client, "PUT", path, json!({"configuration":fields}));
+}
+fn port(client: &Client<'_>) -> String {
+    edit(client,"POST",PORTS,json!({"key":"radio","configuration":{"name":"Radio","inherit_from":"site","enabled":false}})).headers["location"].clone()
+}
+fn effective(path: &str) -> String {
+    path.replacen("/configuration/", "/effective/", 1)
+}
+fn operation(client: &Client<'_>, body: Value) -> Reply {
+    let boot = client.get("/api/v1/operations/").body["boot_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let uuid = rptadv_peer_support::working_files::transaction::new_identity().unwrap();
+    client.send(
+        "PUT",
+        &format!("/api/v1/operations/{boot}/{uuid}/"),
+        Some(("If-None-Match", "*")),
+        Some(&json!({"configuration":body})),
+    )
+}
+fn recover(client: &Client<'_>, action: &str, target: &str) -> Reply {
+    let mut body = json!({"submitted":true,"action":{"action":action},"desired_etag":client.etag(DESIRED),"working_fingerprint":client.get(STORAGE).body["working_fingerprint"]});
+    if action == "restore_configuration" {
+        body["restore"] = json!(target);
+    }
+    operation(client, body)
+}
+
+fn recovery(s: &mut Scenario<'_>, restore: bool) {
+    let (port_id, port_path) = s.serve(inputs(), |client, _| {
+        let loc = port(client);
+        (
+            client.get(&loc).body["id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+            loc,
+        )
+    });
+    let mut available = inputs();
+    available.interfaces.insert(
+        (
+            rpt_advanced_core::config::resources::candidate::ResourceKind::Sensor,
+            port_id,
+            "/gpio/pins/1".into(),
+        ),
+        InterfaceCapability::Number,
+    );
+    let (sensor_id,sensor_path)=s.serve(available,|client,rt|{
+        let lkg=client.get(DESIRED).body["desired_revision"].clone();
+        rt.rollback.store(true,Ordering::Release);
+        let sensor=client.edit("POST",&format!("{SITE_PATH}sensors/"),Some(&json!({"key":"meter","configuration":{"enabled":true,"source":{"type":"interface","node":"radio","property":"/gpio/pins/1"}}})));
+        assert_eq!(sensor.code,201,"{}",sensor.body);
+        let until=Instant::now()+Duration::from_secs(8);
+        while client.get("/api/v1/health/").body["status"]["historical_activation"]!="failed"{assert!(Instant::now()<until);thread::sleep(Duration::from_millis(4));}
+        assert_eq!(client.get("/api/v1/status/last-known-good/").body["last_known_good"],lkg);
+        let location=sensor.headers["location"].clone();
+        (location.trim_end_matches('/').rsplit('/').next().unwrap().to_owned(),location)
+    });
+    let root = s.fixture.0.clone();
+    let before = crate::management::FULL_PREPARATIONS.load(Ordering::Relaxed);
+    s.serve(inputs(), |client, rt| {
+        assert!(
+            crate::management::FULL_PREPARATIONS.load(Ordering::Relaxed) > before,
+            "changed inputs require fresh preparation"
+        );
+        assert!(rt.inhibits.load(Ordering::Acquire) > 0);
+        assert_eq!(client.get(&effective(&sensor_path)).code, 503);
+        let tag = client.etag(DESIRED);
+        assert!(
+            client.get(STORAGE).body["working_fingerprint"].is_string(),
+            "verified working state"
+        );
+        let selector = fs::read(root.join("state.json")).unwrap();
+        let invalid = recover(
+            client,
+            if restore {
+                "restore_configuration"
+            } else {
+                "reload_configuration"
+            },
+            "desired",
+        );
+        assert_eq!(invalid.code, 409, "{}", invalid.body);
+        assert_eq!(fs::read(root.join("state.json")).unwrap(), selector);
+        assert_eq!(client.etag(DESIRED), tag);
+        assert_eq!(rt.adoptions.load(Ordering::Acquire), 0);
+        if !restore {
+            fs::remove_file(root.join(format!("working/site/sensors/{sensor_id}.json"))).unwrap();
+        }
+        let accepted = recover(
+            client,
+            if restore {
+                "restore_configuration"
+            } else {
+                "reload_configuration"
+            },
+            "last_known_good",
+        );
+        assert_eq!(
+            accepted.body["receipt"]["state"], "completed",
+            "{}",
+            accepted.body
+        );
+        client.ready();
+        assert_eq!(rt.adoptions.load(Ordering::Acquire), 1);
+        assert!(rt.prepared_credentials.load(Ordering::Acquire) > 0);
+        assert!(rt.final_inspections.load(Ordering::Acquire) > 0);
+        assert_eq!(client.get(&port_path).code, 200);
+        assert_eq!(client.get(&sensor_path).code, 404);
+    });
+}
+
+fn echo(client: &Client<'_>, rt: &RuntimeFixture) {
+    let port = port(client);
+    let site_messages = format!("{SITE_PATH}telemetry/messages/");
+    let msg = edit(
+        client,
+        "POST",
+        &site_messages,
+        json!({"key":"hal-status","configuration":{"content":"READY"}}),
+    )
+    .headers["location"]
+        .clone();
+    let defaults = format!("{SITE_PATH}protocol-defaults/echolink/");
+    put(
+        client,
+        &defaults,
+        json!({"status_message":"{ hal-status }","enabled":false}),
+    );
+    let accounts = format!("{port}protocols/echolink/");
+    assert!(
+        client.get(&accounts).body["_links"]["item"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let account =
+        edit(client, "POST", &accounts, json!({"configuration":{}})).headers["location"].clone();
+    let view = effective(&account);
+    assert_eq!(
+        client.get(&view).body["_links"]["rpt:messages"][0]["href"],
+        msg
+    );
+    let local = edit(
+        client,
+        "POST",
+        &format!("{port}telemetry/messages/"),
+        json!({"key":"hal-status","configuration":{"content":"LOCAL"}}),
+    )
+    .headers["location"]
+        .clone();
+    assert_eq!(
+        client.get(&view).body["_links"]["rpt:messages"][0]["href"],
+        local
+    );
+    assert_eq!(
+        client.get(&effective(&defaults)).body["_links"]["rpt:messages"][0]["href"],
+        msg
+    );
+    put(
+        client,
+        &account,
+        json!({"status_message":"{ hal-status }","enabled":false}),
+    );
+    assert_eq!(
+        client.get(&view).body["_links"]["rpt:messages"][0]["href"],
+        local
+    );
+    let tag = client.etag(DESIRED);
+    let count = rt.adoptions.load(Ordering::Acquire);
+    for (method, path, body) in [
+        ("DELETE", &msg, None),
+        (
+            "PUT",
+            &local,
+            Some(json!({"configuration":{"tone":{"sequence":"440/20"}}})),
+        ),
+        (
+            "PATCH",
+            &account,
+            Some(
+                json!([{"op":"add","path":"/configuration/status_message","value":"{ missing-hal-message }"}]),
+            ),
+        ),
+    ] {
+        let rejected = client.edit(method, path, body.as_ref());
+        assert_eq!(rejected.code, 409, "{method} {path} {}", rejected.body);
+        assert_eq!(client.etag(DESIRED), tag);
+        assert_eq!(rt.adoptions.load(Ordering::Acquire), count);
+    }
+}
+
+fn audio(client: &Client<'_>) {
+    let port = port(client);
+    let site = format!("{SITE_PATH}rx/audio/");
+    let local = format!("{port}rx/audio/");
+    put(
+        client,
+        &site,
+        json!({"processing":{"compressor":{"defaults":{"ratio":3,"timing":{"attack_ms":25}}},"multiband_limiter":{"defaults":{"ratio":4}}}}),
+    );
+    put(
+        client,
+        &local,
+        json!({"processing":{"compressor":{"mid":{"ratio":3},"high":{"ratio":5,"timing":{"attack_ms":27}}}}}),
+    );
+    let doc = client.get(&effective(&local)).body;
+    for (path, value, href) in [
+        ("/processing/compressor/low/ratio", 3.0, &site),
+        ("/processing/compressor/mid/ratio", 3.0, &local),
+        ("/processing/compressor/high/ratio", 5.0, &local),
+        ("/processing/compressor/low/timing/attack_ms", 25.0, &site),
+        ("/processing/compressor/high/timing/attack_ms", 27.0, &local),
+        ("/processing/multiband_limiter/mid/ratio", 4.0, &site),
+    ] {
+        assert_eq!(
+            doc["effective"].pointer(path).and_then(Value::as_f64),
+            Some(value)
+        );
+        assert_eq!(doc["meta"]["sources"][path]["href"], *href, "{path}");
+        assert_eq!(client.get(href).code, 200);
+    }
+}
+
+fn checked_schema(client: &Client<'_>, template: &str, path: &str) -> (Value, Value) {
+    let links = client.get("/api/v1/openapi.json").body;
+    let href=links["paths"][template]["get"]["responses"]["200"]["content"]["application/hal+json"]["schema"]["$ref"].as_str().unwrap();
+    let schema = client.get(href);
+    let doc = client.get(path);
+    assert_eq!(schema.code, 200);
+    assert_eq!(doc.code, 200);
+    // The staged quality fixture supplies Debian's 2020-12 validator.
+    if let Some(python) = std::env::var_os("RPTADV_HAL_SCHEMA_PYTHON") {
+        let mut checker=Command::new(python).args(["-c",r#"
+import json,sys
+from decimal import Decimal
+from jsonschema import Draft202012Validator
+pair=json.load(sys.stdin,parse_float=Decimal)
+schema=pair["schema"]
+Draft202012Validator.check_schema(schema)
+Draft202012Validator(schema,format_checker=Draft202012Validator.FORMAT_CHECKER).validate(pair["document"])
+"#]).stdin(std::process::Stdio::piped()).spawn().unwrap();
+        serde_json::to_writer(
+            checker.stdin.take().unwrap(),
+            &json!({"schema":schema.body,"document":doc.body}),
+        )
+        .unwrap();
+        assert!(
+            checker.wait().unwrap().success(),
+            "schema {href} for {path}"
+        );
+        eprintln!("Validated complete authenticated response at {path} against {href}");
+    }
+    (doc.body, schema.body)
+}
+fn schemas(client: &Client<'_>) {
+    let limits = format!("{SITE_PATH}limits/");
+    let template = "/effective/site/limits/";
+    let (empty, schema) = checked_schema(client, template, &effective(&limits));
+    assert_eq!(empty["effective"]["modes"], json!([]));
+    for key in ["modes", "rx_ranges_mhz"] {
+        assert_eq!(
+            schema["properties"]["effective"]["properties"][key]["minItems"]
+                .as_u64()
+                .unwrap_or(0),
+            0,
+            "{key} effective empty allowed"
+        );
+        assert_eq!(
+            client.get("/api/v1/schemas/limits/").body["properties"]["configuration"]["properties"]
+                [key]["minItems"],
+            1
+        );
+    }
+    put(
+        client,
+        &limits,
+        json!({"modes":["FM"],"rx_ranges_mhz":[[144,148]]}),
+    );
+    let (configured, _) = checked_schema(client, template, &effective(&limits));
+    assert_eq!(configured["effective"]["modes"], json!(["FM"]));
+    assert_eq!(
+        configured["effective"]["rx_ranges_mhz"][0][0].as_f64(),
+        Some(144.0)
+    );
+    let port = port(client);
+    let accounts = format!("{port}protocols/allstarlink/");
+    let loc=edit(client,"POST",&accounts,json!({"configuration":{"node_number":1234,"iax":{"registration_url":""},"status_post":{"url":""}}})).headers["location"].clone();
+    let template = "/effective/ports/{port}/protocols/allstarlink/{member}/";
+    let (disabled, _) = checked_schema(client, template, &effective(&loc));
+    for (parent, key) in [("iax", "registration_url"), ("status_post", "url")] {
+        assert!(disabled["effective"][parent].get(key).is_none());
+    }
+    put(
+        client,
+        &loc,
+        json!({"iax":{"registration_url":"https://node.example/iax"},"status_post":{"url":"https://node.example/status"}}),
+    );
+    let (enabled, _) = checked_schema(client, template, &effective(&loc));
+    assert_eq!(
+        enabled["effective"]["iax"]["registration_url"],
+        "https://node.example/iax"
+    );
+    assert_eq!(
+        enabled["effective"]["status_post"]["url"],
+        "https://node.example/status"
+    );
+}
+fn poll(client: &Client<'_>, fixture: &Fixture) {
+    let count = || crate::management::FULL_PREPARATIONS.load(Ordering::Relaxed);
+    let before = count();
+    let fingerprint = client.get(STORAGE).body["working_fingerprint"].clone();
+    for path in [
+        "/api/v1/health/",
+        "/api/v1/status/",
+        DESIRED,
+        STORAGE,
+        "/api/v1/changes/",
+    ] {
+        assert_eq!(client.get(path).code, 200);
+    }
+    assert_eq!(count(), before, "status reads rebuilt domain profiles");
+    let file = "working/site/metadata.json";
+    let original = fs::read(fixture.0.join(file)).unwrap();
+    let mut changed: Value = serde_json::from_slice(&original).unwrap();
+    changed["configuration"]["name"] = json!("external");
+    fixture.put(file, &serde_json::to_vec(&changed).unwrap());
+    assert_ne!(client.get(STORAGE).body["working_fingerprint"], fingerprint);
+    assert_eq!(count(), before);
+    fixture.put(file, &original);
+    put(
+        client,
+        SITE_PATH,
+        json!({"name":"new revision","inherit_from":null}),
+    );
+    assert!(count() > before);
+    let after = count();
+    client.get("/api/v1/health/");
+    assert_eq!(count(), after);
+}
+
+pub(super) fn run(
+    case: &str,
+    fixture: &Fixture,
+    listener: &Listener,
+    inbox: &mut CoordinatorInbox,
+    client: &Client<'_>,
+) {
+    let mut scenario = Scenario {
+        fixture,
+        listener,
+        inbox,
+        client,
+    };
+    match case {
+        "restore" | "reload" => recovery(&mut scenario, case == "restore"),
+        "echo" => scenario.serve(inputs(), echo),
+        "audio" => scenario.serve(inputs(), |c, _| audio(c)),
+        "schemas" => scenario.serve(inputs(), |c, _| schemas(c)),
+        "poll" => scenario.serve(inputs(), |c, _| poll(c, fixture)),
+        _ => panic!("invalid fixture case"),
+    }
+}

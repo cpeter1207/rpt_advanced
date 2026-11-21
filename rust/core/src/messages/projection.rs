@@ -279,6 +279,11 @@ impl MessageCatalog {
         media: &BTreeSet<String>,
         previous: &BTreeMap<String, LocalizedMessage>,
     ) -> Result<(Self, MessageBindings, Vec<RejectedAttribute>), CatalogError> {
+        // A projected layer contains a candidate's authored messages; only pristine installed
+        // resources may seed the next candidate. Dependency graphs are installed on projection.
+        if self.english.dependencies.get().is_some() {
+            return Err(CatalogError::InvalidMessage);
+        }
         let english: LanguageIdentifier = "en-US".parse().expect("English locale");
         let mut bindings = MessageBindings::new();
         let mut layers = Vec::new();

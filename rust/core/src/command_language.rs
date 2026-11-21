@@ -2,7 +2,7 @@
 mod action;
 mod binding;
 mod fields;
-pub(crate) use fields::scaled;
+pub use fields::scaled;
 mod host;
 mod invocation;
 pub use invocation::{Invocation, MacroBudget, ParameterOrigin};

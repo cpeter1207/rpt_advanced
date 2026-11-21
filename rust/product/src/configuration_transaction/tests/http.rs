@@ -2,6 +2,7 @@
 use super::*;
 #[path = "../../../../peer-support/tests/support/https_frontend.rs"]
 mod frontend;
+mod review;
 use crate::management::{
     Adoption, AdoptionOutcome, Coordinator, Effect, Fault, Observed, OperationOwner, Runtime,
 };
@@ -35,6 +36,8 @@ struct RuntimeFixture {
     remove_key: AtomicBool,
     damage_working: Mutex<Option<std::path::PathBuf>>,
     fail_selector: AtomicBool,
+    prepared_credentials: std::sync::atomic::AtomicUsize,
+    final_inspections: std::sync::atomic::AtomicUsize,
     adoptions: std::sync::atomic::AtomicUsize,
     inhibit_history: Mutex<Vec<(Option<String>, Fault)>>,
     inhibits: std::sync::atomic::AtomicUsize,
@@ -70,6 +73,7 @@ impl Runtime for RuntimeFixture {
         _: &mut String,
         _: &crate::configuration_private::Credentials,
     ) -> Result<(), Fault> {
+        self.prepared_credentials.fetch_add(1, Ordering::Relaxed);
         if self.reject_credentials.swap(false, Ordering::AcqRel) {
             Err(Fault::Conflict)
         } else {
@@ -97,6 +101,7 @@ impl Runtime for RuntimeFixture {
         !self.fail_selector.swap(false, Ordering::AcqRel)
     }
     fn before_final_inspection(&self) {
+        self.final_inspections.fetch_add(1, Ordering::Relaxed);
         if self.remove_key.swap(false, Ordering::AcqRel) {
             fixture_key_available(false);
         }
@@ -313,6 +318,233 @@ impl Client<'_> {
     }
 }
 
+fn typed_profiles(client: &Client<'_>, site: &str, port: &str) {
+    let effective = |path: &str| path.replacen("/configuration/", "/effective/", 1);
+    let write = |path: &str, fields: Value| {
+        let result = client.edit("PUT", path, Some(&json!({"configuration":fields})));
+        assert_eq!(result.code, 202, "PUT {path}: {}", result.body);
+        client.ready();
+    };
+    let create = |path: &str, key: &str, fields: Value| {
+        let result = client.edit(
+            "POST",
+            path,
+            Some(&json!({"key":key,"configuration":fields})),
+        );
+        assert_eq!(result.code, 201, "POST {path}: {}", result.body);
+        client.ready();
+        result.headers["location"].clone()
+    };
+    let remove = |path: &str| {
+        let result = client.edit("DELETE", path, None);
+        assert_eq!(result.code, 202, "DELETE {path}: {}", result.body);
+        client.ready();
+    };
+    let site_audio = format!("{site}rx/audio/");
+    let port_audio = format!("{port}rx/audio/");
+    write(&site_audio, json!({"enabled":false,"input_gain_db":4}));
+    write(
+        &port_audio,
+        json!({"input_gain_db":"invalid","unrelated":true,"output_gain_db":2}),
+    );
+    assert_eq!(
+        client.get(&port_audio).body["configuration"],
+        json!({"output_gain_db":2})
+    );
+    let view = client.get(&effective(&port_audio));
+    assert_eq!(view.body["effective"]["enabled"], false);
+    assert_eq!(
+        view.body["meta"]["sources"]["/input_gain_db"]["href"],
+        site_audio
+    );
+    assert_eq!(
+        view.body["meta"]["sources"]["/output_gain_db"]["href"],
+        port_audio
+    );
+    let iface = format!("{site}interface/");
+    let child_iface = format!("{port}interface/");
+    write(&iface, json!({"parallel":{"inputs":{"10":"cor"}}}));
+    write(&child_iface, json!({"parallel":{"inputs":{"12":"cor"}}}));
+    let signal = format!("{port}rx/signaling/");
+    write(&signal, json!({"squelch":{"source":"parallel"}}));
+    let signal_view = client.get(&effective(&signal));
+    assert_eq!(
+        signal_view.body["effective"]["squelch"]["pin"],
+        json!([10, 12])
+    );
+    assert_eq!(
+        signal_view.body["meta"]["sources"]["/squelch/pin"],
+        json!({"kind":"derived","sources":[{"href":iface},{"href":child_iface}]})
+    );
+    write(&signal, json!({"squelch":{"source":"parallel","pin":[12]}}));
+    let cleared = client.get(&effective(&child_iface));
+    assert_eq!(cleared.body["effective"]["parallel"]["inputs"]["10"], "");
+    assert_eq!(
+        cleared.body["meta"]["sources"]["/parallel/inputs/10"],
+        json!({"kind":"derived","sources":[{"href":iface},{"href":signal}]}),
+        "cleared connector role provenance"
+    );
+    let tx = format!("{port}tx/signaling/");
+    for (source, pin, pointer) in [
+        ("sound_chip_gpio", 1, "/gpio/pins/1"),
+        ("parallel", 2, "/parallel/outputs/2"),
+    ] {
+        write(
+            &tx,
+            json!({"ctcss":{"enabled":true,"source":"external","output":{"source":source,"pin":[pin],"inverted":true}}}),
+        );
+        let wired = client.get(&effective(&child_iface));
+        assert_eq!(
+            wired.body["effective"].pointer(pointer),
+            Some(&json!("out1"))
+        );
+        assert_eq!(
+            wired.body["meta"]["sources"][pointer],
+            json!({"kind":"derived","sources":[{"href":tx}]}),
+            "encoder idle output provenance"
+        );
+    }
+    write(&tx, json!({}));
+    let memories = format!("{port}memories/");
+    let memory = |freq: Value| json!({"frequency":freq,"mode":"FM","offset":{"enabled":false,"direction":"plus","frequency":0.6},"rx_ctcss":{"enabled":false,"frequency":100},"tx_ctcss":{"enabled":false,"frequency":100}});
+    let rows = json!([memory(json!(146.520001)), memory(json!(444.987654))]);
+    write(&memories, json!({"entries":rows}));
+    let mv = client.get(&effective(&memories));
+    assert_eq!(
+        mv.body["effective"]["entries"][1]["frequency"],
+        json!(444.987654)
+    );
+    assert_eq!(mv.body["meta"]["sources"]["/entries"]["href"], memories);
+    let scans = format!("{site}scan-lists/");
+    write(&scans, json!({"a/b~c":{"selector":1,"members":[2]}}));
+    let sv = client.get(&effective(&scans));
+    assert!(
+        sv.body["meta"]["deferred_relationships"].is_array(),
+        "{}",
+        sv.body
+    );
+    let port_scans = client.get(&effective(&format!("{port}scan-lists/")));
+    assert_eq!(
+        port_scans.body["meta"]["sources"]["/a~1b~0c/members"]["href"],
+        scans
+    );
+    let tag = client.etag(&memories);
+    assert_eq!(
+        client
+            .edit(
+                "PUT",
+                &memories,
+                Some(&json!({"configuration":{"entries":[memory(json!(145.1))]}}))
+            )
+            .code,
+        409
+    );
+    assert_eq!(client.etag(&memories), tag);
+    write(&scans, json!({}));
+    let messages = format!("{site}telemetry/messages/");
+    let msg = create(&messages, "hal-note", json!({"content":"Station ready"}));
+    let tails = format!("{port}telemetry/tails/");
+    let tail = create(&tails, "current", json!({"content":"{ hal-note }"}));
+    assert_eq!(
+        client.get(&effective(&tail)).body["_links"]["rpt:messages"][0]["href"],
+        msg
+    );
+    let tag = client.etag(&msg);
+    assert_eq!(client.edit("DELETE", &msg, None).code, 409);
+    assert_eq!(client.etag(&msg), tag);
+    write(&msg, json!({"content":"Station available"}));
+    remove(&tail);
+    remove(&msg);
+    let groups = format!("{port}permanent-groups/");
+    let group = create(
+        &groups,
+        "home",
+        json!({"remote_node":["1234","2345"],"group_name":"Local group"}),
+    );
+    assert_eq!(
+        client.get(&effective(&group)).body["effective"]["remote_node"],
+        json!(["1234", "2345"])
+    );
+    assert_eq!(
+        client
+            .edit(
+                "POST",
+                &groups,
+                Some(&json!({"key":"duplicate","configuration":{"remote_node":["2345"]}}))
+            )
+            .code,
+        409
+    );
+    remove(&group);
+    let site_account = format!("{site}protocol-defaults/allstarlink/");
+    write(&site_account, json!({"node_number":4242}));
+    let inherited = create(
+        &format!("{site}permanent-groups/"),
+        "monitor",
+        json!({"remote_node":["4242"]}),
+    );
+    let accounts = format!("{port}protocols/allstarlink/");
+    assert!(
+        client.get(&accounts).body["_links"]["item"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let tag = client.etag(&accounts);
+    assert_eq!(
+        client
+            .edit("POST", &accounts, Some(&json!({"configuration":{}})))
+            .code,
+        409
+    );
+    assert_eq!(client.etag(&accounts), tag);
+    let other = client.edit(
+        "POST",
+        &accounts,
+        Some(&json!({"configuration":{"node_number":4343}})),
+    );
+    assert_eq!(other.code, 201, "{}", other.body);
+    client.ready();
+    remove(&other.headers["location"]);
+    remove(&inherited);
+    write(&site_account, json!({}));
+    let sensors = format!("{site}sensors/");
+    let sensor = create(
+        &sensors,
+        "board",
+        json!({"enabled":true,"source":{"type":"hwmon","device":"board","channel":"temp1"}}),
+    );
+    let alarms = format!("{port}alarms/");
+    let alarm = create(
+        &alarms,
+        "hot",
+        json!({"enabled":true,"source":"board","condition":"above","trip_value":37,"clear_value":34}),
+    );
+    assert_eq!(
+        client.get(&effective(&alarm)).body["effective"]["source"],
+        "board"
+    );
+    assert_eq!(client.edit("DELETE", &sensor, None).code, 409);
+    remove(&alarm);
+    remove(&sensor);
+    let endpoint = |line: &str| json!({"enabled":true,"source":{"type":"gpiod","device":"gpiochip0","line":line}});
+    let output = create(&format!("{port}outputs/"), "drive", endpoint("1"));
+    let site_outputs = format!("{site}outputs/");
+    let tag = client.etag(&site_outputs);
+    let claim = client.edit(
+        "POST",
+        &site_outputs,
+        Some(&json!({"key":"alias","configuration":endpoint("01")})),
+    );
+    assert_eq!(
+        claim.code, 409,
+        "duplicate GPIO line accepted: {}",
+        claim.body
+    );
+    assert_eq!(client.etag(&site_outputs), tag);
+    remove(&output);
+}
+
 fn cert(dir: &Path, name: &str) -> CertificateDer<'static> {
     let result = Command::new("openssl")
         .args(["x509", "-outform", "DER", "-in"])
@@ -456,6 +688,10 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         port: listener.local_addr().port(),
         proxy: None,
     };
+    if let Ok(case) = std::env::var("RPTADV_HAL_REVIEW_CASE") {
+        review::run(&case, &fixture, &listener, &mut inbox, &client);
+        return;
+    }
     let runtime = Arc::new(RuntimeFixture::default());
     let app = Coordinator::new(store, key, LIMITS, "/api/v1", runtime.clone()).unwrap();
     let done = AtomicBool::new(false);
@@ -511,6 +747,16 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         assert!(event.body["properties"]["start"].is_object());
         assert!(event.body["properties"].get("configuration").is_none());
         assert!(client.get("/api/v1/schemas/json-patch/").body["items"]["oneOf"].is_array());
+        let site_radio = client.get("/api/v1/effective/site/radio/");
+        assert_eq!(
+            site_radio.code, 200,
+            "zero-port typed radio defaults {}",
+            site_radio.body
+        );
+        assert_eq!(
+            site_radio.body["meta"]["sources"]["/duplex_mode"]["kind"],
+            "built-in"
+        );
         let inventory = client.get(ports);
         assert_eq!(inventory.code, 200);
         assert_eq!(inventory.body["configuration"]["members"], json!([]));
@@ -564,6 +810,7 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         runtime.observed.lock().unwrap().active_revision = Some(confirmed);
         terminal.send(AdoptionOutcome::Confirmed).unwrap();
         client.ready();
+        typed_profiles(&client, site, port);
         let commands = format!("{site}command/settings/");
         let warning_count = runtime.warnings.load(Ordering::Acquire);
         assert_eq!(
@@ -1138,6 +1385,37 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
             client.get(ports).body["configuration"]["members"],
             json!([])
         );
+        let site_account = format!("{site}protocol-defaults/allstarlink/");
+        assert_eq!(
+            client
+                .edit(
+                    "PUT",
+                    &site_account,
+                    Some(&json!({"configuration":{"node_number":4545}}))
+                )
+                .code,
+            202
+        );
+        client.ready();
+        let groups = format!("{site}permanent-groups/");
+        let standby = client.edit(
+            "POST",
+            &groups,
+            Some(&json!({"key":"future","configuration":{"remote_node":["4545"]}})),
+        );
+        assert_eq!(
+            standby.code, 201,
+            "zero-port permanent defaults: {}",
+            standby.body
+        );
+        client.ready();
+        assert_eq!(
+            client
+                .edit("DELETE", &standby.headers["location"], None)
+                .code,
+            202
+        );
+        client.ready();
         let changed = json!({"id":SITE,"kind":"metadata","configuration":{"name":"hand-edited","inherit_from":null,"unsupported":"ignored"}});
         fixture.put("working/site/metadata.json", changed.to_string().as_bytes());
         let dirty = client.get("/api/v1/status/");

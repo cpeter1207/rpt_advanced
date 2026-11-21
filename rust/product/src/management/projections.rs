@@ -1,5 +1,7 @@
 //! Public shape is built exclusively from validated domain settings.
-use super::{Diagnostic, Fault};
+mod radio;
+mod sources;
+use super::{Diagnostic, Fault, ProfileInputs};
 use rpt_advanced_core::config::{
     EchoLinkAnnouncement, EchoLinkSettings, EchoLinkTelemetry, EchoLinkTransport, LinkLookupMethod,
     resources::{
@@ -13,6 +15,7 @@ use rpt_advanced_core::config::{
     },
 };
 use serde_json::{Map, Value, json};
+pub(super) use sources::Origin;
 use std::collections::BTreeMap;
 
 pub(super) struct EventLinks {
@@ -23,6 +26,9 @@ pub(super) struct EventLinks {
 type Fields = Map<String, Value>;
 #[derive(Default)]
 pub(super) struct Projections {
+    pub sources: BTreeMap<(Scope, Kind, Option<Id>), sources::Origins>,
+    pub message_links: BTreeMap<(Scope, Kind, Option<Id>), Vec<Binding>>,
+    pub site_diagnostics: BTreeMap<Kind, Vec<&'static str>>,
     pub warnings: Vec<Diagnostic>,
     pub local: BTreeMap<Id, Fields>,
     pub event_links: BTreeMap<(Scope, Id), EventLinks>,
@@ -42,7 +48,10 @@ impl Projections {
         candidate: &ModularCandidate<'_>,
         registry: &ResourceRegistry,
         zone: Option<&str>,
+        inputs: &ProfileInputs,
     ) -> Result<Self, Fault> {
+        #[cfg(test)]
+        super::FULL_PREPARATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut out = Self::default();
         let profiles = candidate
             .resolve_protocol_profiles()
@@ -58,6 +67,29 @@ impl Projections {
             out.local
                 .insert(local.binding.id, local.configuration.clone());
         }
+        let radio = candidate
+            .resolve_radio_profiles()
+            .map_err(|_| Fault::Conflict)?;
+        out.warnings.extend(
+            radio
+                .warnings()
+                .iter()
+                .chain(radio.site_warnings())
+                .copied()
+                .map(Diagnostic::Resource),
+        );
+        for binding in registry.bindings() {
+            if let Some(local) = radio.local(binding.id) {
+                out.local.insert(binding.id, local.configuration.clone());
+            }
+        }
+        for d in radio.site_diagnostics() {
+            out.site_diagnostics
+                .entry(d.resource.kind)
+                .or_default()
+                .push(d.field);
+        }
+        let mut equipment_scopes = Vec::new();
         let site = Scope::Site(registry.site_id());
         for (scope, id) in std::iter::once((site, registry.site_id()))
             .chain(registry.port_keys().map(|(_, p)| (Scope::Port(p), p)))
@@ -83,6 +115,7 @@ impl Projections {
             out.local
                 .insert(id, fields.as_object().expect("metadata object").clone());
             out.effective.insert((scope,id),json!({"name":e.name,"inherit_from":parent(e.inherit_from),"enabled":e.enabled,"callsign":e.callsign,"language":e.language}));
+            radio::scope(&mut out, scope, &radio)?;
             let (asl, echo, phone, proxy) = match scope {
                 Scope::Site(_) => {
                     let p = profiles.site_accounts();
@@ -103,12 +136,46 @@ impl Projections {
                     )
                 }
             };
+            let mut aliases = std::collections::BTreeSet::new();
+            if matches!(scope, Scope::Port(_))
+                && let Some(n) = asl.as_ref().and_then(|p| p.settings.node_number)
+            {
+                aliases.insert(n.to_string());
+            }
+            if matches!(scope, Scope::Port(_))
+                && let Some(p) = echo
+                && p.settings.node_number != 0
+            {
+                aliases.insert(rpt_advanced_core::link::EchoAlias::format(
+                    p.settings.node_number,
+                ));
+            }
+            let groups = candidate
+                .permanent_groups(scope, &aliases)
+                .map_err(|_| Fault::Conflict)?;
+            out.warnings
+                .extend(groups.warnings.into_iter().map(Diagnostic::Resource));
+            out.local.extend(groups.local);
+            for (b, g) in groups.effective.values() {
+                let mut fields = json!({"remote_node":g.remote_nodes});
+                if let Some(name) = &g.group_name {
+                    fields["group_name"] = json!(name);
+                }
+                out.effective.insert((scope, b.id), fields);
+            }
             if let Some(p) = asl {
                 let s = &p.settings;
-                out.protocol(scope,p,json!({"node_number":s.node_number,"callsign":s.callsign,"allow_nodes":s.allow_nodes,"deny_nodes":s.deny_nodes,
+                let mut public = json!({"node_number":s.node_number,"callsign":s.callsign,"allow_nodes":s.allow_nodes,"deny_nodes":s.deny_nodes,
                     "directory_file":s.directory_file,"lookup_method":match s.lookup_method{LinkLookupMethod::Both=>"both",LinkLookupMethod::Dns=>"dns",LinkLookupMethod::File=>"file"},
-                    "iax":{"registration_url":s.registration_url,"local_port":s.local_port,"timing":{"registration_interval_s":s.registration_interval_s}},
-                    "status_post":{"url":s.status_post_url,"timing":{"interval_s":s.status_post_interval_s}}}));
+                    "iax":{"local_port":s.local_port,"timing":{"registration_interval_s":s.registration_interval_s}},
+                    "status_post":{"timing":{"interval_s":s.status_post_interval_s}}});
+                if let Some(url) = &s.registration_url {
+                    public["iax"]["registration_url"] = json!(url);
+                }
+                if let Some(url) = &s.status_post_url {
+                    public["status_post"]["url"] = json!(url);
+                }
+                out.protocol(scope, p, public);
             }
             if let Some(p) = phone {
                 let s = &p.settings;
@@ -193,6 +260,146 @@ impl Projections {
                     .iter()
                     .map(|w| Diagnostic::Command(scope, *w)),
             );
+            let language = e.language.parse().map_err(|_| Fault::Invalid)?;
+            let installed = inputs
+                .messages
+                .catalog(&e.language)
+                .map_err(|_| Fault::Unavailable)?;
+            let (telemetry, messages, media) = candidate
+                .prepare_telemetry(scope, installed, &language)
+                .map_err(|_| Fault::Conflict)?;
+            let command_recipes = messages
+                .command_messages(&commands)
+                .map_err(|_| Fault::Conflict)?;
+            let station = candidate
+                .equipment_profiles(
+                    scope,
+                    |kind, b| {
+                        inputs
+                            .interfaces
+                            .get(&(kind, b.port, b.property.clone()))
+                            .copied()
+                    },
+                    &commands,
+                    &messages,
+                )
+                .map_err(|_| Fault::Conflict)?;
+            let mut add_recipe =
+                |kind, id, recipe: &rpt_advanced_core::composition::Composition| {
+                    let links = out.message_links.entry((scope, kind, id)).or_default();
+                    for key in recipe.referenced_messages() {
+                        if let Some((binding, _)) = messages.effective.get(key)
+                            && !links.contains(binding)
+                        {
+                            links.push(*binding);
+                        }
+                    }
+                };
+            if let Some(account) = echo
+                && !account.settings.status_message.is_empty()
+            {
+                let status = messages
+                    .compile_text_only(&account.settings.status_message)
+                    .map_err(|_| Fault::Conflict)?;
+                add_recipe(Kind::Echolink, None, &status);
+            }
+            for key in commands.language.mapping_messages() {
+                if let Some(recipe) = command_recipes.get(key) {
+                    add_recipe(Kind::Command, None, recipe);
+                }
+            }
+            for name in commands.language.macros.keys() {
+                let (b, actions) = commands.named_macro(name).ok_or(Fault::Invalid)?;
+                for a in actions {
+                    if let rpt_advanced_core::command_language::Action::Message(content, _) =
+                        &a.action
+                        && let Some(recipe) = command_recipes.get(content)
+                    {
+                        add_recipe(Kind::Macro, Some(b.id), recipe);
+                    }
+                }
+            }
+            for (name, recipe) in &messages.recipes {
+                add_recipe(Kind::Message, Some(messages.effective[name].0.id), recipe);
+            }
+            for ((kind, name), (b, _)) in &media.members {
+                let family = match kind {
+                    Kind::Identifier => "identifiers",
+                    Kind::Announcement => "announcements",
+                    Kind::Tail => "tails",
+                    Kind::Courtesy => "courtesies",
+                    _ => continue,
+                };
+                if let Some(recipe) = media.recipes.get(&(family, name.clone())) {
+                    add_recipe(*kind, Some(b.id), recipe);
+                }
+            }
+            for ((kind, name), (b, _)) in &station.effective {
+                if *kind == Kind::Sensor
+                    && let Some(recipe) = station.labels.get(name.as_str())
+                {
+                    add_recipe(*kind, Some(b.id), recipe);
+                }
+                if *kind == Kind::Alarm {
+                    for field in ["trip_message", "clear_message", "repeat_message"] {
+                        if let Some(recipe) = station
+                            .alarm_messages
+                            .get(&(name.as_str().to_owned(), field))
+                        {
+                            add_recipe(*kind, Some(b.id), recipe);
+                        }
+                    }
+                }
+            }
+            for warnings in [&telemetry.warnings, &messages.warnings, &station.warnings] {
+                out.warnings
+                    .extend(warnings.iter().copied().map(Diagnostic::Resource));
+            }
+            out.sources.insert(
+                (scope, Kind::TelemetrySettings, None),
+                sources::selected(&media.effective, |p| telemetry.source(p)),
+            );
+            for ((kind, key), (b, fields)) in &media.members {
+                out.sources.insert(
+                    (scope, *kind, Some(b.id)),
+                    sources::selected(fields, |p| telemetry.member_source(*kind, key, p)),
+                );
+            }
+            for (key, (b, fields)) in &messages.effective {
+                out.sources.insert(
+                    (scope, Kind::Message, Some(b.id)),
+                    sources::selected(fields, |p| {
+                        messages.source(key, p).or_else(|| match p {
+                            ["speech", "model"] => telemetry.source(&["speech", "voice"]),
+                            ["speech" | "morse", ..] => telemetry.source(p),
+                            _ => None,
+                        })
+                    }),
+                );
+            }
+            for ((kind, key), (b, fields)) in &station.effective {
+                out.sources.insert(
+                    (scope, *kind, Some(b.id)),
+                    sources::selected(fields, |p| station.source(*kind, key, p)),
+                );
+            }
+            out.fixed_effective.insert(
+                (scope, Kind::TelemetrySettings),
+                Value::Object(media.effective),
+            );
+            for (binding, fields) in media
+                .members
+                .values()
+                .chain(messages.effective.values())
+                .chain(station.effective.values())
+            {
+                out.effective
+                    .insert((scope, binding.id), Value::Object(fields.clone()));
+            }
+            out.local.extend(telemetry.local);
+            out.local.extend(messages.local);
+            out.local.extend(station.local.clone());
+            equipment_scopes.push(station);
             let events = candidate
                 .event_profiles(&commands, zone)
                 .map_err(|_| Fault::Conflict)?;
@@ -228,12 +435,38 @@ impl Projections {
                 out.effective.insert((scope, event.binding.id), body);
             }
         }
+        equipment::ScopedEquipment::acquisition_plan(&equipment_scopes)
+            .map_err(|_| Fault::Conflict)?;
+        out.add_sources(registry);
         Ok(out)
     }
 
     fn protocol<T>(&mut self, scope: Scope, p: &ProtocolProfile<T>, mut fields: Value) {
+        let public = fields.as_object_mut().expect("public protocol fields");
+        public.retain(|_, v| !v.is_null());
+        if let Some(provider) = public.get_mut("provider").and_then(Value::as_object_mut) {
+            provider.retain(|_, v| !v.is_null());
+        }
+        if p.binding.kind == Kind::Echolink
+            && public.get("node_number").and_then(Value::as_u64) == Some(0)
+        {
+            public.remove("node_number");
+        }
         let t = p.jitter.timing();
         fields["jitter"] = json!({"timing":{"minimum_ms":t.minimum_ms,"initial_ms":t.initial_ms,"maximum_ms":t.maximum_ms}});
+        for (key, field) in [
+            ("initial_ms", JitterField::Initial),
+            ("minimum_ms", JitterField::Minimum),
+            ("maximum_ms", JitterField::Maximum),
+        ] {
+            self.sources
+                .entry((scope, p.binding.kind, None))
+                .or_default()
+                .insert(
+                    format!("/jitter/timing/{key}"),
+                    p.jitter.selected_source(field).resource.into(),
+                );
+        }
         self.effective.insert((scope, p.binding.id), fields);
     }
 

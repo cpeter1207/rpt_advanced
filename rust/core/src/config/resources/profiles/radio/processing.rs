@@ -4,7 +4,7 @@ pub(super) mod fields;
 mod groups;
 use super::super::normalize::warn;
 use super::inputs::Inputs;
-use super::{CandidateWarning, NormalizedProfileResource, ResourceKind};
+use super::{CandidateWarning, NormalizedProfileResource, ResourceBinding, ResourceKind};
 use dynamics::{Compressor, Limiter};
 use groups::*;
 use serde::Serialize;
@@ -104,6 +104,7 @@ pub(super) fn resolve(
     layers: [Option<&NormalizedProfileResource>; 2],
     captured: [bool; 2],
     w: &mut Vec<CandidateWarning>,
+    source: &mut dyn FnMut(&[&str], ResourceBinding),
 ) -> Option<ProcessingProfile> {
     let v = Inputs(std::array::from_fn(|i| {
         let resource = layers[i]?;
@@ -135,8 +136,8 @@ pub(super) fn resolve(
     );
     let agc = Agc::read(&v);
     let deesser = Deesser::read(&v);
-    let compressor = Compressor::read(&v, w);
-    let limiter = Limiter::read(&v, w);
+    let compressor = Compressor::read(&v, w, source);
+    let limiter = Limiter::read(&v, w, source);
     let enabled = [
         equalizer.enabled,
         expander.enabled,
@@ -212,4 +213,37 @@ pub(super) fn resolve(
         receive,
         transmit_tail,
     })
+}
+
+impl ProcessingProfile {
+    /// Render only the public settings admitted for this processing role.
+    pub fn public_fields(&self) -> serde_json::Value {
+        use serde_json::json;
+        let order = self
+            .stage_order
+            .iter()
+            .map(|stage| match stage {
+                Stage::Equalizer => "equalizer",
+                Stage::Expander => "expander",
+                Stage::Agc => "agc",
+                Stage::Deesser => "deesser",
+                Stage::Compressor => "compressor",
+                Stage::Limiter => "multiband_limiter",
+            })
+            .collect::<Vec<_>>();
+        let mut v = json!({"enabled":self.enabled,"input_gain_db":self.input_gain_db,"output_gain_db":self.output_gain_db,"stage_order":order,
+            "equalizer":self.equalizer.public_fields(),"expander":self.expander.public_fields(),"agc":self.agc.public_fields(),
+            "deesser":self.deesser.public_fields(),"compressor":self.compressor.public_fields(),"multiband_limiter":self.limiter.public_fields(),
+            "peak_limiter":self.peak_limiter.public_fields()});
+        if let Some(r) = &self.receive {
+            v["rnnoise"] = json!({"enabled":self.rnnoise_enabled});
+            v["bandpass"] = json!({"enabled":r.bandpass_enabled,"highpass_hz":r.bandpass_highpass_hz,"lowpass_hz":r.bandpass_lowpass_hz});
+            v["ctcss_filter"] = json!({"mode":match r.pl_filter{PlFilter::Disabled=>"disabled",PlFilter::DecodedToneNotch=>"notch",PlFilter::HighPass=>"highpass"},
+                "notch_width_hz":r.notch_width_hz,"highpass_hz":r.highpass_hz});
+        }
+        if let Some(t) = &self.transmit_tail {
+            v["bandpass"] = json!({"enabled":t.bandpass_enabled,"highpass_hz":t.bandpass_highpass_hz,"lowpass_hz":t.bandpass_lowpass_hz});
+        }
+        v
+    }
 }

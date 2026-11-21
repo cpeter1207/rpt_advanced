@@ -12,6 +12,8 @@ mod jitter;
 /// Public identities keyed by their real mailbox number and declaring resource.
 pub mod mailbox;
 mod normalize;
+/// Effective permanent link groups and route ownership.
+pub mod permanent;
 mod phone;
 /// Named Fluent and media message preparation for a real management scope.
 pub mod public_messages;

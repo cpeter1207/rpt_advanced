@@ -27,7 +27,7 @@ impl<R: Runtime> Backend<R> {
         selected: &Selected,
         body: &Value,
     ) -> Result<Recovery<R::Prepared>, Fault> {
-        let snapshot = Snapshot::from_selected(selected, self.zone.as_deref())?;
+        let snapshot = self.snapshot(selected)?;
         let relative = "/status/desired/";
         let full = format!("{}{relative}", self.api.mount);
         let (route, params) = self.api.lookup(&full)?;
@@ -52,7 +52,7 @@ impl<R: Runtime> Backend<R> {
         }
         let name = body["action"]["action"].as_str().ok_or(Fault::Invalid)?;
         if name == "apply_configuration" {
-            for warning in &snapshot.projections.warnings {
+            for warning in &snapshot.views.result.as_ref().map_err(|e| *e)?.warnings {
                 self.runtime.diagnostic(*warning);
             }
             if selected.status == StartupStatus::ExternalEdit || selected.state.journal.is_some() {
@@ -109,6 +109,7 @@ impl<R: Runtime> Backend<R> {
                 &candidate,
                 loaded.manifest().registry(),
                 self.zone.as_deref(),
+                &self.inputs,
             )?;
             let prepared = self.runtime.prepare(
                 &candidate,
@@ -131,8 +132,12 @@ impl<R: Runtime> Backend<R> {
             let mut graph = Graph::import(&draft, &selected.desired)?;
             let initial = graph.manifest(target)?;
             let candidate = graph.assemble(&initial)?;
-            let validated =
-                Projections::prepare(&candidate, initial.registry(), self.zone.as_deref())?;
+            let validated = Projections::prepare(
+                &candidate,
+                initial.registry(),
+                self.zone.as_deref(),
+                &self.inputs,
+            )?;
             for warning in &validated.warnings {
                 self.runtime.diagnostic(*warning);
             }
@@ -145,7 +150,12 @@ impl<R: Runtime> Backend<R> {
             }
             let manifest = graph.manifest(target)?;
             let candidate = graph.assemble(&manifest)?;
-            Projections::prepare(&candidate, manifest.registry(), self.zone.as_deref())?;
+            Projections::prepare(
+                &candidate,
+                manifest.registry(),
+                self.zone.as_deref(),
+                &self.inputs,
+            )?;
             let prepared = self.runtime.prepare(
                 &candidate,
                 manifest.registry(),

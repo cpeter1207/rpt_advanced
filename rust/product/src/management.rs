@@ -6,6 +6,9 @@ mod recovery;
 use recovery::Recovery;
 mod openapi;
 mod projections;
+#[cfg(test)]
+pub(crate) static FULL_PREPARATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 mod representation;
 mod schema;
 
@@ -24,7 +27,8 @@ use rpt_advanced_core::{
             ModularCandidate, ResourceId as Id, ResourceKind as Kind, ResourceRegistry,
             ResourceScope as Scope,
         },
-        state::Activation,
+        profiles::credentials::CredentialSlot,
+        state::{Activation, ManifestRef},
     },
     management::routes::{Parameters, Route, Target},
 };
@@ -259,6 +263,22 @@ pub trait Runtime: Send + Sync + 'static {
     ) -> Effect;
 }
 
+/// Pristine catalog sources and capabilities supplied by the hardware inventory owner.
+pub struct ProfileInputs {
+    /// Installed source layers shared with this station's generation preparation.
+    pub messages: rpt_advanced_core::messages::InstalledMessageSources,
+    /// Cached public interface capabilities indexed by equipment kind, real port ID and property pointer.
+    pub interfaces: BTreeMap<
+        (Kind, Id, String),
+        rpt_advanced_core::config::resources::profiles::equipment::InterfaceCapability,
+    >,
+}
+// Immutable inputs belong to one Backend. A fresh coordinator starts with an empty cache.
+struct PreparedViews {
+    selection: ManifestRef,
+    result: Result<Projections, Fault>,
+    credential_slots: Vec<(Id, CredentialSlot)>,
+}
 struct Snapshot {
     registry: ResourceRegistry,
     revision: String,
@@ -267,25 +287,22 @@ struct Snapshot {
     storage: &'static str,
     working: Option<String>,
     versions: BTreeMap<Id, String>,
-    projections: Projections,
+    views: Arc<PreparedViews>,
     secrets_state: &'static str,
     configured: BTreeMap<Id, BTreeMap<&'static str, bool>>,
 }
 impl Snapshot {
-    fn from_selected(s: &Selected, zone: Option<&str>) -> Result<Self, Fault> {
+    fn from_selected(s: &Selected, views: Arc<PreparedViews>) -> Self {
         let manifest = s.desired.manifest();
         let registry = manifest.registry();
-        let candidate = s.desired.assemble_candidate().map_err(|_| Fault::Storage)?;
-        let projections = Projections::prepare(&candidate, registry, zone)?;
         use crate::configuration_private::SecretsState;
-        use rpt_advanced_core::config::resources::profiles::credentials::CredentialSlot;
         let secrets_state = match s.private.state() {
             SecretsState::Ready => "ready",
             SecretsState::Locked => "locked",
             SecretsState::Error => "error",
         };
         let mut configured = BTreeMap::<Id, BTreeMap<&'static str, bool>>::new();
-        for ((id, slot), _) in candidate.credential_owners().map_err(|_| Fault::Invalid)? {
+        for &(id, slot) in &views.credential_slots {
             let flags = configured.entry(id).or_default();
             if let Some(value) = s.private.configured(id, slot) {
                 let field = match slot {
@@ -300,7 +317,7 @@ impl Snapshot {
                 flags.insert(field, value);
             }
         }
-        Ok(Self {
+        Self {
             registry: registry.clone(),
             revision: manifest.revision().as_str().to_owned(),
             last_good: s
@@ -335,15 +352,16 @@ impl Snapshot {
                     ))
                 })
                 .collect(),
-            projections,
+            views,
             secrets_state,
             configured,
-        })
+        }
     }
 }
 
 /// Outcome of a successful public inspection, including restrictions on a later handoff.
 struct Inspection {
+    projection_error: Option<Fault>,
     status: StartupStatus,
     bookkeeping_fault: bool,
 }
@@ -355,12 +373,48 @@ struct Backend<R> {
     key: KeyId,
     limits: CaptureLimits,
     zone: Option<String>,
+    inputs: Arc<ProfileInputs>,
     runtime: Arc<R>,
     api: Arc<Api>,
     cached: Arc<RwLock<Option<Arc<Snapshot>>>>,
 }
 
 impl<R: Runtime> Backend<R> {
+    fn snapshot(&self, selected: &Selected) -> Result<Snapshot, Fault> {
+        let prior = self
+            .cached
+            .read()
+            .expect("management snapshot")
+            .as_ref()
+            .filter(|s| s.views.selection == selected.state.desired)
+            .map(|s| Arc::clone(&s.views));
+        let views = match prior {
+            Some(views) => views,
+            None => {
+                let candidate = selected
+                    .desired
+                    .assemble_candidate()
+                    .map_err(|_| Fault::Storage)?;
+                let credential_slots = candidate
+                    .credential_owners()
+                    .map_err(|_| Fault::Invalid)?
+                    .into_keys()
+                    .collect();
+                let result = Projections::prepare(
+                    &candidate,
+                    selected.desired.manifest().registry(),
+                    self.zone.as_deref(),
+                    &self.inputs,
+                );
+                Arc::new(PreparedViews {
+                    selection: selected.state.desired.clone(),
+                    result,
+                    credential_slots,
+                })
+            }
+        };
+        Ok(Snapshot::from_selected(selected, views))
+    }
     fn refresh(&self, startup: bool) -> Result<(), Fault> {
         let result = self.inspect_snapshot(startup);
         if let Err(error) = result
@@ -385,7 +439,8 @@ impl<R: Runtime> Backend<R> {
         startup: bool,
     ) -> Result<Inspection, Fault> {
         let selected = tx.inspect()?;
-        let view = Snapshot::from_selected(&selected, self.zone.as_deref())?;
+        let view = self.snapshot(&selected)?;
+        let projection_error = view.views.result.as_ref().err().copied();
         let blocked = if selected.status == StartupStatus::SecretsUnavailable {
             Some(Fault::Unavailable)
         } else if selected.status == StartupStatus::StorageFault
@@ -397,13 +452,14 @@ impl<R: Runtime> Backend<R> {
         {
             Some(Fault::Storage)
         } else {
-            None
+            projection_error
         };
         if let Some(fault) = blocked {
             self.runtime.inhibit_uncertain(Some(&view.revision), fault);
         }
         *self.cached.write().expect("management snapshot") = Some(Arc::new(view));
         Ok(Inspection {
+            projection_error,
             status: selected.status,
             bookkeeping_fault: selected.bookkeeping_fault,
         })
@@ -429,7 +485,7 @@ impl<R: Runtime> Backend<R> {
             }
             StartupStatus::ExternalEdit => Err(Fault::Conflict),
             _ if inspection.bookkeeping_fault && !repairing_bookkeeping => Err(Fault::Unavailable),
-            _ => Ok(()),
+            _ => inspection.projection_error.map_or(Ok(()), Err),
         }
     }
 
@@ -443,7 +499,7 @@ impl<R: Runtime> Backend<R> {
         let guard = self.store.try_edit().map_err(lock_error)?;
         let transaction = Transaction::new(&guard, self.limits).with_write_key(&self.key);
         let selected = transaction.inspect()?;
-        let snapshot = Snapshot::from_selected(&selected, self.zone.as_deref())?;
+        let snapshot = self.snapshot(&selected)?;
         let prior = self.api.read(
             r,
             p,
@@ -540,8 +596,12 @@ impl<R: Runtime> Backend<R> {
         let mut manifest = graph.manifest(revision)?;
         if let Some(binding) = written {
             let candidate = graph.assemble(&manifest)?;
-            let projections =
-                Projections::prepare(&candidate, manifest.registry(), self.zone.as_deref())?;
+            let projections = Projections::prepare(
+                &candidate,
+                manifest.registry(),
+                self.zone.as_deref(),
+                &self.inputs,
+            )?;
             for warning in &projections.warnings {
                 self.runtime.diagnostic(*warning);
             }
@@ -549,7 +609,12 @@ impl<R: Runtime> Backend<R> {
             manifest = graph.manifest(revision)?;
         }
         let candidate = graph.assemble(&manifest)?;
-        Projections::prepare(&candidate, manifest.registry(), self.zone.as_deref())?;
+        Projections::prepare(
+            &candidate,
+            manifest.registry(),
+            self.zone.as_deref(),
+            &self.inputs,
+        )?;
         let mut prepared = self.runtime.prepare(
             &candidate,
             manifest.registry(),
@@ -763,6 +828,27 @@ impl<R: Runtime> Coordinator<R> {
         mount: &str,
         runtime: Arc<R>,
     ) -> Result<Self, Fault> {
+        Self::with_profile_inputs(
+            store,
+            key,
+            limits,
+            mount,
+            runtime,
+            Arc::new(ProfileInputs {
+                messages: rpt_advanced_core::messages::InstalledMessageSources::capture(),
+                interfaces: BTreeMap::new(),
+            }),
+        )
+    }
+    /// Start the coordinator with the same immutable preparation inputs supplied to the runtime host.
+    pub fn with_profile_inputs(
+        store: WorkingFiles,
+        key: KeyId,
+        limits: CaptureLimits,
+        mount: &str,
+        runtime: Arc<R>,
+        inputs: Arc<ProfileInputs>,
+    ) -> Result<Self, Fault> {
         let api = Arc::new(Api::new(mount)?);
         let cached = Arc::new(RwLock::new(None));
         let boot = fresh()?;
@@ -780,6 +866,7 @@ impl<R: Runtime> Coordinator<R> {
             key,
             limits,
             zone: crate::schedule_zone::capture(),
+            inputs,
             api: Arc::clone(&api),
             runtime: Arc::clone(&runtime),
             cached: Arc::clone(&cached),

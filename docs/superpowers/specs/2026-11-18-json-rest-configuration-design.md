@@ -1426,6 +1426,8 @@ Retain `macro_limits.max_symbols` (default/maximum 4096) and `macro_limits.timin
 
 ## PUT and RFC 6901/6902 PATCH
 
+Effective configuration documents carry `meta.sources`, an object keyed by RFC 6901 pointers relative to the effective field object (the flat event uses its field object directly). Each scalar or complete array has one entry. A stored source is `{"kind":"resource","href":"/api/v1/configuration/.../"}`; its link opens the declaring author's resource at the configured mount. A built-in value has `{"kind":"built-in"}`. A computed value, such as a physical signal pin list derived from connector roles, identifies its contributing declarations with `{"kind":"derived","sources":[{"href":"/api/v1/configuration/.../"}]}`. Ignored values contribute no source. The existing `rpt:source` link on an effective member continues to identify its declaring resource. Site defaults that need a concrete port to satisfy a relationship identify the affected settings in `meta.deferred_relationships`. Message dependencies with registered authoring resources appear in the `rpt:messages` link array.
+
 PUT replaces only the addressed resource's stored authoring configuration. Omitted ordinary fields remove local overrides and reveal inheritance/defaults; PUT never implicitly replaces linked child resources. Private credential omission preserves the corresponding private record.
 
 PATCH uses `Content-Type: application/json-patch+json` and `Accept-Patch` advertises that type on every writable endpoint. RFC 6901 defines pointer addressing; RFC 6902 defines the operation array. There is no custom object-merge PATCH or JSON Merge Patch endpoint. [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901.html), [RFC 6902](https://www.rfc-editor.org/rfc/rfc6902.html)
@@ -1542,6 +1544,8 @@ Edit the `working/` resource tree, then invoke `rpt-advanced --reload` or `syste
 Only authoring configuration and permitted local-name metadata for newly created definitions are editable. Do not edit immutable objects, manifests, state pointers, encrypted records or server-assigned identities. Password/hash changes go through REST or a controlled credential import, never plaintext working files.
 
 The helper captures the accepted configuration revision plus a bounded tree fingerprint of sorted allowed paths and file-byte hashes. The server accepts no arbitrary path argument.
+
+Ordinary saves require confirmed adoption of the selected revision. An explicit reload can also replace a fully published, failed desired revision after the owner has confirmed rollback. Reload requires an empty publication journal, the expected desired validator and current working fingerprint, and full validation of the replacement and its private graph before the selector changes. Pending activation, uncertain rollback and an outstanding publication journal block reload. Affected transmission remains inhibited until the owner confirms adoption of the replacement.
 
 Under the coordinator/edit locks, securely capture the full allowed tree and check the fingerprint. Infer one candidate from the file set. Existing UUIDs retain identities; new `new-<token>` directories/files can request new radios or named definitions, which receive canonical IDs. Local-key renaming is explicit delete/create, not credential rebinding.
 

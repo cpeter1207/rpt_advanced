@@ -58,6 +58,12 @@ impl fmt::Debug for RemotePolicy {
     }
 }
 impl RemotePolicy {
+    /// Public modulation names admitted by the RF limit profile, in authored order.
+    pub fn mode_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.modes
+            .iter()
+            .map(|mode| fields::MODES[*mode as usize - 1])
+    }
     /// Explicit public device, kept separate from the arbitrary public option keys.
     pub fn hamlib_device(&self) -> Option<&str> {
         self.hamlib_options.get("rig_pathname").map(String::as_str)

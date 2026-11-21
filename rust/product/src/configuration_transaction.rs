@@ -641,9 +641,24 @@ impl<'a, 'store> Transaction<'a, 'store> {
                     return Err(TransactionError::SecretsUnavailable);
                 }
                 let mut use_lkg = false;
-                let (expect, working, recovery) = match admission {
-                    Admission::Save { state } => (state, old.state.clean_working, false),
-                    Admission::Reload { state, working } => (state, Some(working), false),
+                let settled = old.state.journal.is_none();
+                let (expect, working, admitted) = match admission {
+                    Admission::Save { state } => (
+                        state,
+                        old.state.clean_working,
+                        settled && old.state.activation == Activation::Confirmed,
+                    ),
+                    // Confirmed rollback settles the previous activation. An explicit,
+                    // fingerprinted reload can replace that failed desired graph.
+                    Admission::Reload { state, working } => (
+                        state,
+                        Some(working),
+                        settled
+                            && matches!(
+                                old.state.activation,
+                                Activation::Confirmed | Activation::Failed
+                            ),
+                    ),
                     Admission::Restore {
                         state,
                         working,
@@ -668,9 +683,7 @@ impl<'a, 'store> Transaction<'a, 'store> {
                     Admission::Provision { .. } => unreachable!(),
                 };
                 if expect != old.digest
-                    || !recovery
-                        && (old.state.journal.is_some()
-                            || old.state.activation != Activation::Confirmed)
+                    || !admitted
                     || manifest.revision() == &old.state.desired.revision
                     || manifest.id() == &old.state.desired.manifest
                 {

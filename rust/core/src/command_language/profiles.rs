@@ -538,6 +538,13 @@ impl CommandLanguage {
                 parameter: &digits[m.command.len()..],
             })
     }
+    /// Fixed message compositions admitted directly by mappings in this scope.
+    pub fn mapping_messages(&self) -> impl Iterator<Item = &str> {
+        self.mappings.values().filter_map(|m| match &m.decoder {
+            Decoder::Fixed(Action::Message(content, _)) => Some(content.as_str()),
+            _ => None,
+        })
+    }
     pub(crate) fn static_actions(&self) -> impl Iterator<Item = &Action> {
         self.macros
             .values()

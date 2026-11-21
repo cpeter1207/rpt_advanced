@@ -70,6 +70,7 @@ pub enum PublicMessageSource {
 /// A validated sequence prepared as one logical telemetry item.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Composition {
+    referenced_messages: Vec<String>,
     segments: Vec<Segment>,
     invoking: ResolvedMessageSettings,
     definitions: Arc<BTreeMap<String, ResolvedMessageSettings>>,
@@ -236,10 +237,16 @@ impl Composition {
             }
         }
         Ok(Self {
+            referenced_messages: tokens.into_keys().collect(),
             segments,
             invoking,
             definitions,
         })
+    }
+
+    /// Structural message names resolved when preparing this composition, in stable order.
+    pub fn referenced_messages(&self) -> &[String] {
+        &self.referenced_messages
     }
 
     /// Ordered segments; sequence boundaries do not imply independent completion or PTT.

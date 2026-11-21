@@ -39,31 +39,54 @@ pub(super) struct Limiter {
     high: Band,
 }
 impl Band {
-    fn read(v: &Inputs<'_>, stage: &str, band: &str, default: Self) -> Self {
-        let direct = |key, default| {
-            v.number(
-                &[stage, band, key],
-                v.number(&[stage, "defaults", key], default),
-            )
+    fn read(
+        v: &Inputs<'_>,
+        stage: &str,
+        band: &str,
+        default: Self,
+        source: &mut dyn FnMut(&[&str], ResourceBinding),
+    ) -> Self {
+        let mut number = |path: &[&str], fallback: &[&str], default: f64| {
+            let selected = |p: &[&str]| {
+                v.values(p)
+                    .find_map(|(value, b)| Some((value.as_f64()?, b)))
+            };
+            if let Some((value, binding)) = selected(path).or_else(|| selected(fallback)) {
+                source(path, binding);
+                value
+            } else {
+                default
+            }
         };
-        let timing = |key, default| {
-            v.number(
+        let mut direct =
+            |key, default| number(&[stage, band, key], &[stage, "defaults", key], default);
+        let threshold_dbfs = direct("threshold_dbfs", default.threshold_dbfs);
+        let ratio = direct("ratio", default.ratio);
+        let makeup_gain_db = direct("makeup_gain_db", default.makeup_gain_db);
+        let knee_db = direct("knee_db", default.knee_db);
+        let mut timing = |key, default| {
+            number(
                 &[stage, band, "timing", key],
-                v.number(&[stage, "defaults", "timing", key], default),
+                &[stage, "defaults", "timing", key],
+                default,
             )
         };
         Self {
-            threshold_dbfs: direct("threshold_dbfs", default.threshold_dbfs),
-            ratio: direct("ratio", default.ratio),
-            makeup_gain_db: direct("makeup_gain_db", default.makeup_gain_db),
-            knee_db: direct("knee_db", default.knee_db),
+            threshold_dbfs,
+            ratio,
+            makeup_gain_db,
+            knee_db,
             attack_ms: timing("attack_ms", default.attack_ms),
             release_ms: timing("release_ms", default.release_ms),
         }
     }
 }
 impl Compressor {
-    pub(super) fn read(v: &Inputs<'_>, w: &mut Vec<CandidateWarning>) -> Self {
+    pub(super) fn read(
+        v: &Inputs<'_>,
+        w: &mut Vec<CandidateWarning>,
+        source: &mut dyn FnMut(&[&str], ResourceBinding),
+    ) -> Self {
         let [low_crossover_hz, high_crossover_hz] = v.ordered(
             &["compressor", "crossover", "low_hz"],
             &["compressor", "crossover", "high_hz"],
@@ -84,8 +107,8 @@ impl Compressor {
             attack_ms: 75.0,
             release_ms: 300.0,
         };
-        let [full, low, mid, high] =
-            ["defaults", "low", "mid", "high"].map(|band| Band::read(v, "compressor", band, base));
+        let [full, low, mid, high] = ["defaults", "low", "mid", "high"]
+            .map(|band| Band::read(v, "compressor", band, base, source));
         Self {
             enabled: v.flag(&["compressor", "enabled"], false),
             layout: Layout::ThreeBand,
@@ -101,7 +124,11 @@ impl Compressor {
     }
 }
 impl Limiter {
-    pub(super) fn read(v: &Inputs<'_>, w: &mut Vec<CandidateWarning>) -> Self {
+    pub(super) fn read(
+        v: &Inputs<'_>,
+        w: &mut Vec<CandidateWarning>,
+        source: &mut dyn FnMut(&[&str], ResourceBinding),
+    ) -> Self {
         let [low_crossover_hz, high_crossover_hz] = v.ordered(
             &["multiband_limiter", "crossover", "low_hz"],
             &["multiband_limiter", "crossover", "high_hz"],
@@ -127,6 +154,7 @@ impl Limiter {
                     attack_ms,
                     release_ms,
                 },
+                source,
             )
         });
         Self {
@@ -139,5 +167,36 @@ impl Limiter {
             mid,
             high,
         }
+    }
+}
+
+impl Band {
+    fn public_fields(&self, makeup: bool, knee: bool) -> serde_json::Value {
+        let mut band = serde_json::json!({"threshold_dbfs":self.threshold_dbfs,"ratio":self.ratio,
+            "timing":{"attack_ms":self.attack_ms,"release_ms":self.release_ms}});
+        if makeup {
+            band["makeup_gain_db"] = self.makeup_gain_db.into();
+        }
+        if knee {
+            band["knee_db"] = self.knee_db.into();
+        }
+        band
+    }
+}
+impl Compressor {
+    pub(super) fn public_fields(&self) -> serde_json::Value {
+        serde_json::json!({"enabled":self.enabled,
+            "crossover":{"low_hz":self.low_crossover_hz,"high_hz":self.high_crossover_hz},
+            "defaults":self.full.public_fields(true,false),"low":self.low.public_fields(true,true),
+            "mid":self.mid.public_fields(true,true),"high":self.high.public_fields(true,true),"sidechain":{"highpass_hz":self.sidechain_highpass_hz,"lowpass_hz":self.sidechain_lowpass_hz}})
+    }
+}
+
+impl Limiter {
+    pub(super) fn public_fields(&self) -> serde_json::Value {
+        serde_json::json!({"enabled":self.enabled,
+            "crossover":{"low_hz":self.low_crossover_hz,"high_hz":self.high_crossover_hz},
+            "defaults":self.full.public_fields(false,true),"low":self.low.public_fields(false,true),
+            "mid":self.mid.public_fields(false,true),"high":self.high.public_fields(false,true)})
     }
 }

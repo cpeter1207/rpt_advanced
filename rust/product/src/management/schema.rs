@@ -60,7 +60,7 @@ fn field_schema(kind: Kind, port: bool) -> Value {
             s
         }
         Kind::TxSignaling => extracted("transmit", "signaling"),
-        Kind::Interface => defs["interface"].clone(),
+        Kind::Interface => only("interface", &["audio", "gpio", "parallel", "serial"]),
         Kind::PeerAudio => defs["linkProcessing"].clone(),
         Kind::Control | Kind::Power | Kind::Limits => extracted("radio", kind.as_str()),
         Kind::Memories => object(json!({"entries":extracted("radio","memories")})),
@@ -106,7 +106,10 @@ fn field_schema(kind: Kind, port: bool) -> Value {
         Kind::Event => defs["event"].clone(),
         Kind::Macro => defs["commandMacro"].clone(),
         Kind::Message => defs["message"].clone(),
-        Kind::Telemetry => defs["telemetry"].clone(),
+        Kind::TelemetrySettings => only("telemetry", &["duck_db", "timing", "speech", "morse"]),
+        Kind::Identifier | Kind::Announcement | Kind::Tail | Kind::Courtesy => {
+            defs[kind.as_str()].clone()
+        }
         Kind::PermanentGroup => defs["permanentLink"].clone(),
         _ => defs[kind.as_str()].clone(),
     };
@@ -151,6 +154,14 @@ pub(super) fn response_document(route: &Route) -> Value {
         json!({"password_configured":{"type":"boolean"},"pin_configured":{"type":"boolean"},"unlock_configured":{"type":"boolean"},"lock_configured":{"type":"boolean"}}),
     );
     let mut properties = json!({"_links":links,"meta":object(json!({"configuration_revision":text,"resource_version":text,"request_version":id,"secrets_state":{"enum":["ready","locked","error"]},"credentials":flags}))});
+    if route.view == Some(View::Effective) {
+        let origin = json!({"oneOf":[{"type":"object","properties":{"kind":{"const":"built-in"}},"required":["kind"],"additionalProperties":false},
+            {"type":"object","properties":{"kind":{"const":"resource"},"href":{"type":"string","format":"uri-reference"}},"required":["kind","href"],"additionalProperties":false},
+            {"type":"object","properties":{"kind":{"const":"derived"},"sources":{"type":"array","items":link,"minItems":1}},"required":["kind","sources"],"additionalProperties":false}]});
+        properties["meta"]["properties"]["sources"] = json!({"type":"object","additionalProperties":origin,"description":"Accepted effective leaves by RFC 6901 pointer. Each array has one source."});
+        properties["meta"]["properties"]["deferred_relationships"] =
+            json!({"type":"array","items":{"type":"string"}});
+    }
     match route.target {
         Target::Section(_) | Target::Member(_) | Target::Metadata => {
             let kind = match route.target {
@@ -160,10 +171,21 @@ pub(super) fn response_document(route: &Route) -> Value {
             properties["id"] = id;
             properties["key"] = text;
             if route.view == Some(View::Status) {
-                properties["status"] = json!({"type":"object"});
+                properties["status"] = object(
+                    json!({"active_revision":nullable_text,"owner_generation":{"type":["integer","null"],"minimum":0}}),
+                );
             } else {
                 let mut cfg = field_schema(kind, route.profile == "port");
                 if let Some(props) = cfg.get_mut("properties").and_then(Value::as_object_mut) {
+                    if route.view == Some(View::Effective) && kind == Kind::Limits {
+                        for key in ["modes", "rx_ranges_mhz"] {
+                            if let Some(constraints) =
+                                props.get_mut(key).and_then(Value::as_object_mut)
+                            {
+                                constraints.remove("minItems");
+                            }
+                        }
+                    }
                     props.remove("credentials");
                     props.remove("pin_hash");
                     if let Some(admin) = props

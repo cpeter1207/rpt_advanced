@@ -1,5 +1,8 @@
 //! Prepare named JSON messages from registered authoring resources and installed Fluent catalogs.
 
+/// Public controller telemetry consumers and render defaults.
+pub mod telemetry;
+
 use super::{
     CandidateWarning, ModularCandidate, ResourceBinding, ResourceId, ResourceKind, ResourceScope,
     normalize::{self, Fields, Rule},
@@ -130,6 +133,9 @@ fn normalized(
         warnings,
     );
     let fail = PublicMessageError::Definition(binding);
+    if body.get("content").is_some_and(Value::is_string) && !fields.contains_key("content") {
+        return Err(fail);
+    }
     if let Some(raw) = body.get("bindings") {
         if let Some(map) = raw.as_object() {
             let mut accepted = Object::new();

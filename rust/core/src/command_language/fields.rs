@@ -70,7 +70,8 @@ impl<'a> Fields<'a> {
 }
 
 /// Convert the original JSON numeric spelling exactly, including exponent notation.
-pub(crate) fn scaled(text: &str, places: i32) -> Option<i128> {
+/// Convert an exact JSON decimal spelling to an integer at the requested decimal scale.
+pub fn scaled(text: &str, places: i32) -> Option<i128> {
     let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
     let negative = mantissa.starts_with('-');
     let (whole, fraction) = mantissa

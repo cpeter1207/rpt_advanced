@@ -91,9 +91,29 @@ const PROFILES: &[(ResourceKind, &str, Layout)] = &[
         Layout::Collection("telemetry/messages"),
     ),
     (
-        ResourceKind::Telemetry,
-        "telemetry",
-        Layout::Collection("telemetry/definitions"),
+        ResourceKind::TelemetrySettings,
+        "telemetry-settings",
+        Layout::File("telemetry/settings.json"),
+    ),
+    (
+        ResourceKind::Identifier,
+        "identifier",
+        Layout::Collection("telemetry/identifiers"),
+    ),
+    (
+        ResourceKind::Announcement,
+        "announcement",
+        Layout::Collection("telemetry/announcements"),
+    ),
+    (
+        ResourceKind::Tail,
+        "tail",
+        Layout::Collection("telemetry/tails"),
+    ),
+    (
+        ResourceKind::Courtesy,
+        "courtesy",
+        Layout::Collection("telemetry/courtesies"),
     ),
     (
         ResourceKind::Sensor,

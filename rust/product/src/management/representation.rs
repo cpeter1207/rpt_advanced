@@ -2,7 +2,7 @@
 use super::{Fault, Snapshot};
 use rpt_advanced_core::{
     config::resources::candidate::{
-        ResourceId as Id, ResourceKind as Kind, ResourceScope as Scope,
+        ResourceBinding as Binding, ResourceId as Id, ResourceKind as Kind, ResourceScope as Scope,
     },
     management::routes::{self, Parameters, Route, Target, View},
 };
@@ -69,6 +69,58 @@ impl Api {
         json!({"href":format!("{}{path}",self.mount)})
     }
 
+    fn authoring_href(&self, b: Binding, s: &Snapshot) -> Result<String, Fault> {
+        let port = match b.scope {
+            Scope::Site(_) => None,
+            Scope::Port(id) => Some(id),
+        };
+        let target = if b.kind == Kind::Metadata {
+            Target::Metadata
+        } else if b.kind.is_named()
+            || (port.is_some()
+                && matches!(
+                    b.kind,
+                    Kind::Allstarlink | Kind::Echolink | Kind::PhonePatch
+                ))
+        {
+            Target::Member(b.kind)
+        } else {
+            Target::Section(b.kind)
+        };
+        let member = if b.kind == Kind::EcholinkProxy && port.is_some() {
+            Some(
+                s.registry
+                    .binding(b.scope, Kind::Echolink)
+                    .ok_or(Fault::Invalid)?
+                    .id,
+            )
+        } else if matches!(target, Target::Member(_)) {
+            Some(b.id)
+        } else {
+            None
+        };
+        let route = self
+            .routes
+            .values()
+            .find(|r| {
+                r.view == Some(View::Configuration)
+                    && r.target == target
+                    && r.path.contains("{port}") == port.is_some()
+            })
+            .ok_or(Fault::Invalid)?;
+        Ok(format!(
+            "{}{}",
+            self.mount,
+            expand(
+                &route.path,
+                Parameters {
+                    port,
+                    member,
+                    ..Default::default()
+                }
+            )
+        ))
+    }
     pub fn links(&self, path: &str, profile: &str) -> Value {
         json!({"self":self.href(path),"profile":self.href(&format!("/profiles/{profile}/")),
             "curies":[{"name":"rpt","href":format!("{}/rels/{{rel}}/",self.mount),"templated":true}]})
@@ -314,8 +366,13 @@ impl Api {
                     body["meta"]["credentials"] = json!(values);
                     body["meta"]["secrets_state"] = json!(snapshot.secrets_state);
                 } else if r.view == Some(View::Status) {
-                    body["status"] = state(s, live);
+                    body["status"] = json!({"active_revision":live.active_revision,"owner_generation":binding.and_then(|id|live.owners.get(&id))});
                 } else {
+                    let projections = snapshot
+                        .views
+                        .result
+                        .as_ref()
+                        .map_err(|_| Fault::Unavailable)?;
                     let logical = matches!(r.target, Target::Section(_));
                     let kind = match r.target {
                         Target::Section(k) | Target::Member(k) => k,
@@ -324,27 +381,71 @@ impl Api {
                     let data = match (r.view, binding) {
                         (Some(View::Effective), id) => {
                             match id
-                                .and_then(|id| snapshot.projections.effective.get(&(scope, id)))
-                                .or_else(|| {
-                                    snapshot.projections.fixed_effective.get(&(scope, kind))
-                                }) {
+                                .and_then(|id| projections.effective.get(&(scope, id)))
+                                .or_else(|| projections.fixed_effective.get(&(scope, kind)))
+                            {
                                 Some(fields) => fields.clone(),
                                 None if logical && kind.has_optional_presence() => json!({}),
                                 None => return Err(Fault::Unavailable),
                             }
                         }
-                        (Some(View::Configuration), Some(id)) => {
-                            match snapshot.projections.local.get(&id) {
-                                Some(fields) => Value::Object(fields.clone()),
-                                None if logical && !snapshot.versions.contains_key(&id) => {
-                                    json!({})
-                                }
-                                _ => return Err(Fault::Unavailable),
+                        (Some(View::Configuration), Some(id)) => match projections.local.get(&id) {
+                            Some(fields) => Value::Object(fields.clone()),
+                            None if logical && !snapshot.versions.contains_key(&id) => {
+                                json!({})
                             }
-                        }
+                            _ => return Err(Fault::Unavailable),
+                        },
                         (_, None) if logical => json!({}),
                         _ => return Err(Fault::Missing),
                     };
+                    let member = kind.is_named().then_some(binding).flatten();
+                    if let Some(references) = projections.message_links.get(&(scope, kind, member))
+                    {
+                        links["rpt:messages"] = Value::Array(
+                            references
+                                .iter()
+                                .map(|b| {
+                                    self.authoring_href(*b, snapshot)
+                                        .map(|href| json!({"href":href}))
+                                })
+                                .collect::<Result<_, _>>()?,
+                        );
+                    }
+                    if r.view == Some(View::Effective) {
+                        let key = (scope, kind, if kind.is_named() { binding } else { None });
+                        let mut origins = serde_json::Map::new();
+                        let mut hrefs = BTreeMap::new();
+                        if let Some(sources) = projections.sources.get(&key) {
+                            for (path, src) in sources {
+                                let mut href = |b: Binding| -> Result<String, Fault> {
+                                    if let std::collections::btree_map::Entry::Vacant(e) =
+                                        hrefs.entry(b.id)
+                                    {
+                                        e.insert(self.authoring_href(b, snapshot)?);
+                                    }
+                                    Ok(hrefs[&b.id].clone())
+                                };
+                                use super::projections::Origin;
+                                let source = match src {
+                                    Origin::Resource(b) => {
+                                        json!({"kind":"resource","href":href(*b)?})
+                                    }
+                                    Origin::Derived(bindings) => {
+                                        json!({"kind":"derived","sources":bindings.iter().map(|b|href(*b).map(|v|json!({"href":v}))).collect::<Result<Vec<_>,_>>()?})
+                                    }
+                                    Origin::BuiltIn => json!({"kind":"built-in"}),
+                                };
+                                origins.insert(path.clone(), source);
+                            }
+                        }
+                        body["meta"]["sources"] = Value::Object(origins);
+                        if matches!(scope, Scope::Site(_))
+                            && let Some(fields) = projections.site_diagnostics.get(&kind)
+                        {
+                            body["meta"]["deferred_relationships"] = json!(fields);
+                        }
+                    }
                     if kind == Kind::Event {
                         body.as_object_mut()
                             .expect("body")
@@ -364,7 +465,8 @@ impl Api {
                     }
                 }
                 if let Some(id) = binding
-                    && let Some(event) = snapshot.projections.event_links.get(&(scope, id))
+                    && let Ok(projections) = &snapshot.views.result
+                    && let Some(event) = projections.event_links.get(&(scope, id))
                 {
                     let macro_link =
                         |b: &rpt_advanced_core::config::resources::candidate::ResourceBinding| {

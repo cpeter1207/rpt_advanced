@@ -109,9 +109,11 @@ pub struct RadioSettings {
     pub scan_lists: BTreeMap<String, ScanList>,
 }
 
+type BandSources = BTreeMap<(ResourceScope, ResourceKind), BTreeMap<String, ResourceBinding>>;
 /// Verified radio definitions and recognized public overrides.
 #[derive(Debug)]
 pub struct ResolvedRadioProfiles {
+    band_sources: BandSources,
     site: RadioSettings,
     partial_site_scans: BTreeMap<String, PartialSiteScan>,
     site_diagnostics: Vec<RadioProfileError>,
@@ -137,6 +139,19 @@ impl ResolvedRadioProfiles {
     /// Source-attributed warnings for site defaults independent of individual port admission.
     pub fn site_warnings(&self) -> &[CandidateWarning] {
         &self.site_warnings
+    }
+    /// Actual authors selected for dynamics band fields, including shared stage defaults.
+    /// Paths use public configuration field names relative to the requested section.
+    pub fn processing_band_sources(
+        &self,
+        scope: ResourceScope,
+        kind: ResourceKind,
+    ) -> impl Iterator<Item = (&str, ResourceBinding)> {
+        self.band_sources
+            .get(&(scope, kind))
+            .into_iter()
+            .flatten()
+            .map(|(path, b)| (path.as_str(), *b))
     }
     /// Captured authoring resource, including an explicitly empty processing document.
     pub fn source(&self, scope: ResourceScope, kind: ResourceKind) -> Option<ResourceBinding> {
@@ -223,20 +238,28 @@ impl ModularCandidate<'_> {
             .collect();
         let mut site_diagnostics = Vec::new();
         let mut partial_site_scans = BTreeMap::new();
+        let mut band_sources = BandSources::new();
         let site_settings = self.radio_settings(
             site,
             &local,
             &mut site_warnings,
             &mut site_diagnostics,
             Some(&mut partial_site_scans),
+            &mut band_sources,
         );
         let mut device_claims = BTreeMap::new();
         let mut ports = BTreeMap::new();
         for (key, id) in registry.port_keys() {
             let scope = ResourceScope::Port(id);
             let mut diagnostics = Vec::new();
-            let settings =
-                self.radio_settings(scope, &local, &mut warnings, &mut diagnostics, None);
+            let settings = self.radio_settings(
+                scope,
+                &local,
+                &mut warnings,
+                &mut diagnostics,
+                None,
+                &mut band_sources,
+            );
             if let Some(error) = diagnostics.into_iter().next() {
                 return Err(error);
             }
@@ -268,6 +291,7 @@ impl ModularCandidate<'_> {
         }
         Ok(ResolvedRadioProfiles {
             site: site_settings,
+            band_sources,
             partial_site_scans,
             site_diagnostics,
             site_warnings,
@@ -285,6 +309,7 @@ impl ModularCandidate<'_> {
         warnings: &mut Vec<CandidateWarning>,
         diagnostics: &mut Vec<RadioProfileError>,
         partial_site_scans: Option<&mut BTreeMap<String, PartialSiteScan>>,
+        band_sources: &mut BandSources,
     ) -> RadioSettings {
         let registry = self.registry();
         let site = ResourceScope::Site(registry.site_id());
@@ -334,7 +359,17 @@ impl ModularCandidate<'_> {
                     .and_then(|scope| self.staged(scope, kind))
                     .is_some_and(|s| s.was_captured())
             });
-            processing::resolve(kind, layers(kind), captured, warnings)
+            processing::resolve(kind, layers(kind), captured, warnings, &mut |path, b| {
+                let prefix = if kind == ResourceKind::PeerAudio {
+                    ""
+                } else {
+                    "/processing"
+                };
+                band_sources
+                    .entry((scope, kind))
+                    .or_default()
+                    .insert(format!("{prefix}/{}", path.join("/")), b);
+            })
         };
         let processing = ProcessingRoles {
             local: role(ResourceKind::RxAudio),
