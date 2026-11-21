@@ -405,3 +405,26 @@ fn failed_operations_and_truncated_observations_do_not_look_successful() {
     assert_eq!(jitter.reset(), Err(Error::OperationFailed));
     assert!(matches!(jitter.observe(), Err(Error::OperationFailed)));
 }
+
+#[test]
+fn configured_phone_jitter_preserves_sample_units_and_rejects_unrepresentable_delays() {
+    let api = descriptor();
+    let descriptor = ptr::from_ref(&api).cast();
+    let jitter =
+        unsafe { Jitter::with_delays(descriptor, 16000, 320, 160, [30, 70, 140]) }.unwrap();
+    let config = unsafe { &*jitter.context.as_ptr().cast::<State>() }.config;
+    assert_eq!(
+        [
+            config.minimum_delay,
+            config.initial_delay,
+            config.maximum_delay
+        ],
+        [480, 1120, 2240]
+    );
+    for invalid in [[70, 30, 140], [30, 140, 70], [30, 70, u32::MAX]] {
+        assert!(matches!(
+            unsafe { Jitter::with_delays(descriptor, 16000, 320, 160, invalid) },
+            Err(Error::InvalidDescriptor)
+        ));
+    }
+}

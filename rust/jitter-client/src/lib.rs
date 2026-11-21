@@ -203,8 +203,19 @@ impl Jitter {
         }
     }
 
-    /// Prepare either fixed policy through the same validated descriptor/lifecycle.
-    unsafe fn with_delays(
+    /// Prepare packet jitter with the selected minimum, initial and maximum in milliseconds.
+    /// The native configuration stores sample counts at the negotiated PCM rate.
+    /// An unordered tuple or a delay outside the native 32-bit range is rejected
+    /// before allocating a context.
+    ///
+    /// # Safety
+    /// `descriptor` must point to a valid `rptadv_jitter_descriptor_v1` readable
+    /// for its declared size. Its callbacks must obey ABI 1. Each successful
+    /// creation must return an independent, exclusively owned context that can
+    /// move between threads for serial use. Callbacks must never retain borrowed
+    /// arguments or unwind across the ABI boundary. The provider's DSO must
+    /// remain loaded until the context is destroyed.
+    pub unsafe fn with_delays(
         descriptor: *const c_void,
         rate: u32,
         loss_unit: u32,
@@ -242,13 +253,21 @@ impl Jitter {
         {
             return Err(Error::InvalidDescriptor);
         }
+        let [minimum_ms, initial_ms, maximum_ms] = delays_ms;
+        if minimum_ms > initial_ms || initial_ms > maximum_ms {
+            return Err(Error::InvalidDescriptor);
+        }
+        let samples = |ms: u32| {
+            u32::try_from(u64::from(rate) * u64::from(ms) / 1000)
+                .map_err(|_| Error::InvalidDescriptor)
+        };
         let options = Config {
             struct_size: size_of::<Config>() as u32,
             abi_version: 1,
             clock_rate_hz: rate,
-            minimum_delay: rate * delays_ms[0] / 1000,
-            initial_delay: rate * delays_ms[1] / 1000,
-            maximum_delay: rate * delays_ms[2] / 1000,
+            minimum_delay: samples(minimum_ms)?,
+            initial_delay: samples(initial_ms)?,
+            maximum_delay: samples(maximum_ms)?,
             adjustment_step: rate / 100,
             concealment_span: loss_unit,
             maximum_packets: 64,
