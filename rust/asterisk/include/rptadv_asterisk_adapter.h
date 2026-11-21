@@ -34,7 +34,16 @@ struct rptadv_asterisk_descriptor_v1 {
 const struct rptadv_asterisk_descriptor_v1 *rptadv_asterisk_descriptor_v1(void);
 /** Start the authenticated managed service. The linked product and all adapter
  * libraries remain loaded until the selected lifecycle confirms unload.
- * @return Zero to retain the module, including cleanup after uncertain startup. */
+ * @param[in] module Current Asterisk module handle, borrowed through unload.
+ * @param[in] product Immutable lifecycle descriptor for the selected product.
+ * @param[in] management Immutable management descriptor from the same product
+ * DSO, with a readable size prefix and complete table for version 1.
+ * @param[in] control Immutable Asterisk control provider descriptor.
+ * @param[in] file Immutable file provider descriptor.
+ * @param[in] speech Immutable speech provider descriptor.
+ * @return 0 if the module must stay loaded, including when startup or registration
+ * failed and cleanup remains pending. Returns 1 to decline the load.
+ */
 int rptadv_asterisk_load_management_v1(void *module,
                                        const struct rptadv_product_descriptor_v1 *product,
                                        const struct rptadv_product_management_v1 *management,

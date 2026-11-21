@@ -680,15 +680,22 @@ struct rptadv_product_descriptor_v1 {
  * was rejected and drained; -2 requires retaining all providers and retrying stop.
  * A missing or invalid table cannot be replaced by legacy configuration start. */
 struct rptadv_product_management_v1 {
-    uint32_t struct_size;
-    uint32_t abi_version;
-    uint8_t capability[16];
+    uint32_t struct_size;   /**< Complete readable table size. */
+    uint32_t abi_version;   /**< Exactly 1. */
+    uint8_t capability[16]; /**< Fixed-width management capability identity. */
+    /** Start with the host and its control, file and speech providers. The
+     * provisioning JSON is a borrowed span of provisioning_length bytes.
+     * Return 0 on startup, -1 after rejection and drain, or -2 if stop must be retried.
+     */
     int (*start)(const struct rptadv_host_services_v10 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *provisioning_json,
                  size_t provisioning_length);
 };
+/** Return the managed startup capability.
+ * @return Immutable descriptor valid while the product library is loaded.
+ */
 const struct rptadv_product_management_v1 *rptadv_product_management_descriptor_v1(void);
 
 /** Synchronous optional visitor for one registered port. The UUID points to 16 network-order
@@ -701,12 +708,20 @@ typedef int (*rptadv_managed_port_sink_v1)(void *context, const uint8_t *uuid, c
  * candidate before any records are emitted. No process writer lease or device is opened.
  * All callbacks and spans are borrowed for this call; nonzero from a port sink aborts. */
 struct rptadv_product_inspection_v1 {
-    uint32_t struct_size;
-    uint32_t abi_version;
-    uint8_t capability[16];
+    uint32_t struct_size;   /**< Complete readable table size. */
+    uint32_t abi_version;   /**< Exactly 1. */
+    uint8_t capability[16]; /**< Fixed-width inspection capability identity. */
+    /** Validate the provisioning JSON span of the given byte length. A null
+     * port sink validates without visiting ports. An optional diagnostic sink receives
+     * warnings or a safe error. Each sink is called with its supplied context.
+     * Return 0 on success or -1 on validation failure or visitor rejection.
+     */
     int (*inspect)(const char *provisioning_json, size_t length, rptadv_managed_port_sink_v1 port,
                    void *port_context, rptadv_text_sink_v1 diagnostic, void *diagnostic_context);
 };
+/** Return the read-only managed inspection capability.
+ * @return Immutable descriptor valid while the product library is loaded.
+ */
 const struct rptadv_product_inspection_v1 *rptadv_product_inspection_descriptor_v1(void);
 
 /** Return immutable process-lifetime product metadata.
