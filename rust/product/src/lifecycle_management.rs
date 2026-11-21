@@ -190,7 +190,7 @@ impl Engine {
         self: &Arc<Self>,
         target: ResourceId,
         revision: &str,
-        _action: &PreparedAction,
+        action: &PreparedAction,
     ) -> Result<OperationOwner, Fault> {
         let gate = self
             .management_state
@@ -199,9 +199,21 @@ impl Engine {
             .cloned()
             .ok_or(Fault::Unavailable)?;
         let expected = revision.to_owned();
+        let site_action = matches!(&action.action, rpt_advanced_core::command_language::Action::Site(command)
+            if !matches!(command,rpt_advanced_core::site::SiteCommand::Inhibit(_)));
         self.run(move |host| {
             if gate.load(Ordering::Acquire) || !host.modular_revision_matches(&expected) {
                 return Err(RuntimeError::Rejected);
+            }
+            if let Some(generation) = host.runtime.site_work(&target.to_string()) {
+                if !site_action {
+                    return Err(RuntimeError::Unavailable);
+                }
+                return Ok(OperationOwner {
+                    scope: ResourceScope::Site(target),
+                    generation,
+                    requires_grant: false,
+                });
             }
             let generation = host
                 .runtime
@@ -214,7 +226,13 @@ impl Engine {
                 requires_grant: false,
             })
         })
-        .map_err(|_| Fault::Conflict)
+        .map_err(|error| {
+            if error == RuntimeError::Unavailable {
+                Fault::Unavailable
+            } else {
+                Fault::Conflict
+            }
+        })
     }
 
     pub(crate) fn dispatch_registered(

@@ -217,7 +217,9 @@ pub struct RadioStatus {
     pub(crate) source_clock: Arc<crate::link::source_clock::SourceClock>,
     carrier: Arc<AtomicU64>,
     dtmf: Arc<AtomicBool>,
-    transmit_keyed: Arc<AtomicBool>,
+    transmit_keyed: Arc<AtomicU64>,
+    // The control owner publishes monotonic time. The audio callback only copies its stamp.
+    transmit_control_ms: Arc<AtomicU64>,
     remote_controls: Arc<AtomicU32>,
     handoff: Arc<LocalHandoff>,
     vad_delay_ms: Arc<AtomicU64>,
@@ -369,8 +371,20 @@ impl RadioStatus {
     pub fn remote_command_source_active(&self) -> bool {
         self.snapshot().0 && self.remote_controls.load(Ordering::Acquire) & 25 != 25
     }
-    pub(crate) fn transmit_keyed(&self) -> bool {
-        self.transmit_keyed.load(Ordering::Acquire)
+    pub(crate) fn transmit_observation(&self, now_ms: u64) -> Option<bool> {
+        // A 4096-frame callback covers about 85 ms at 48 kHz. Allow several buffers of jitter.
+        const MAX_AGE_MS: u64 = 500;
+        let now_ms = now_ms.min(u64::MAX >> 2);
+        self.transmit_control_ms.store(now_ms, Ordering::Release);
+        let observation = self.transmit_keyed.load(Ordering::Acquire);
+        if now_ms.saturating_sub(observation >> 2) > MAX_AGE_MS {
+            return None;
+        }
+        match observation & 3 {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
     }
     #[cfg(test)]
     fn update(&self, receiving: bool, now_ms: u64) {
@@ -793,7 +807,7 @@ unsafe extern "C" fn transmit_callback(
         if let Some(ctcss_enabled) = ctcss_enabled {
             *ctcss_enabled = 0;
         }
-        publish_transmit_keyed(status, false);
+        publish_transmit_keyed(status, None);
         return -1;
     };
     if keyed.is_none() || ctcss_enabled.is_none() {
@@ -804,7 +818,7 @@ unsafe extern "C" fn transmit_callback(
         if let Some(ctcss_enabled) = ctcss_enabled {
             *ctcss_enabled = 0;
         }
-        publish_transmit_keyed(status, false);
+        publish_transmit_keyed(status, None);
         publish_transmit_samples(callback_context, samples);
         return -1;
     }
@@ -823,7 +837,7 @@ unsafe extern "C" fn transmit_callback(
             -1
         }
     };
-    publish_transmit_keyed(status, result == 0 && *keyed != 0);
+    publish_transmit_keyed(status, (result == 0).then_some(*keyed != 0));
     publish_transmit_samples(callback_context, samples);
     result
 }
@@ -834,9 +848,13 @@ fn publish_transmit_samples(context: Option<&TransmitContext>, samples: &[f32]) 
         unsafe { &mut *context.meter.get() }.publish(samples, Some(&ring.current.observer));
     }
 }
-fn publish_transmit_keyed(status: Option<&RadioStatus>, keyed: bool) {
+fn publish_transmit_keyed(status: Option<&RadioStatus>, keyed: Option<bool>) {
     if let Some(status) = status {
-        status.transmit_keyed.store(keyed, Ordering::Release);
+        let stamp = status.transmit_control_ms.load(Ordering::Acquire);
+        let state = keyed.map_or(0, |value| 1 + u64::from(value));
+        status
+            .transmit_keyed
+            .store(stamp << 2 | state, Ordering::Release);
     }
 }
 unsafe fn transmit(
@@ -1421,10 +1439,7 @@ impl RadioWorker {
         }
         drop(self.radio.take());
         self.receive.active.store(false, Ordering::Release);
-        self.transmit
-            .status
-            .transmit_keyed
-            .store(false, Ordering::Release);
+        publish_transmit_keyed(Some(&self.transmit.status), None);
         Ok(true)
     }
 
@@ -1444,10 +1459,7 @@ impl Drop for RadioWorker {
     fn drop(&mut self) {
         // Must precede automatic field destruction, including partially activated setup.
         drop(self.radio.take());
-        self.transmit
-            .status
-            .transmit_keyed
-            .store(false, Ordering::Release);
+        publish_transmit_keyed(Some(&self.transmit.status), None);
     }
 }
 #[cfg(test)]

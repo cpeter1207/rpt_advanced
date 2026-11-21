@@ -61,16 +61,23 @@ ELF_DEPENDENCIES = {
     HWMON: {"libsensors.so.5"},
 }
 EXPORTS = {
-    "librptadv_asterisk_adapter.so.1": "rptadv_asterisk_descriptor_v1",
-    PRODUCT: "rptadv_product_descriptor_v1",
-    "librptadv_control_asterisk_adapter.so.1": "rptadv_control_descriptor_v1",
-    "librptadv_file_adapter.so.1": "rptadv_file_adapter_descriptor",
-    "librptadv_speech_adapter.so.1": "rptadv_speech_adapter_descriptor",
-    STANDALONE_CONTROL: "rptadv_control_standalone_descriptor_v1",
-    RESOLVER: "rptadv_resolver_adapter_descriptor_v1",
-    JITTER: "rptadv_jitter_adapter_descriptor_v1",
-    GPIOD: "rptadv_gpiod_adapter_descriptor_v1",
-    HWMON: "rptadv_hwmon_adapter_descriptor_v1",
+    "librptadv_asterisk_adapter.so.1": {
+        "rptadv_asterisk_descriptor_v1",
+        "rptadv_asterisk_load_management_v1",
+    },
+    PRODUCT: {
+        "rptadv_product_descriptor_v1",
+        "rptadv_product_management_descriptor_v1",
+        "rptadv_product_inspection_descriptor_v1",
+    },
+    "librptadv_control_asterisk_adapter.so.1": {"rptadv_control_descriptor_v1"},
+    "librptadv_file_adapter.so.1": {"rptadv_file_adapter_descriptor"},
+    "librptadv_speech_adapter.so.1": {"rptadv_speech_adapter_descriptor"},
+    STANDALONE_CONTROL: {"rptadv_control_standalone_descriptor_v1"},
+    RESOLVER: {"rptadv_resolver_adapter_descriptor_v1"},
+    JITTER: {"rptadv_jitter_adapter_descriptor_v1"},
+    GPIOD: {"rptadv_gpiod_adapter_descriptor_v1"},
+    HWMON: {"rptadv_hwmon_adapter_descriptor_v1"},
 }
 MANUALS = (
     "README.md",
@@ -122,9 +129,7 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
                     "nm", "-D", "--defined-only", str(path)
                 ).splitlines()
             }
-            assert exports == {EXPORTS[name]}, (
-                f"incorrect exports for {name}: {exports}"
-            )
+            assert exports == EXPORTS[name], f"incorrect exports for {name}: {exports}"
         needed = dynamic(path, "NEEDED")
         assert needed - system == dependencies, f"incorrect NEEDED for {name}: {needed}"
         if name == "app_rpt_advanced.so":
@@ -725,9 +730,14 @@ def verify_artifact_policy() -> None:
                 return
             raise AssertionError("invalid artifact composition was accepted")
 
+        public_symbols = EXPORTS.copy()
+
         def inspect(*arguments: str) -> str:
             if arguments[:3] == ("nm", "-D", "--defined-only"):
-                return f"0000 T {EXPORTS[Path(arguments[-1]).name]}\n"
+                return "".join(
+                    f"0000 T {symbol}\n"
+                    for symbol in public_symbols[Path(arguments[-1]).name]
+                )
             if (
                 arguments[:3] == ("nm", "-D", "--undefined-only")
                 and Path(arguments[-1]).name == RESOLVER
@@ -740,6 +750,13 @@ def verify_artifact_policy() -> None:
             patch(f"{__name__}.command", side_effect=inspect) as symbols,
         ):
             artifacts(root)
+            for name, expected in EXPORTS.items():
+                for symbol in expected:
+                    public_symbols[name] = expected - {symbol}
+                    rejected()
+                public_symbols[name] = expected | {"unexpected_export"}
+                rejected()
+                public_symbols[name] = expected
             tables["app_rpt_advanced.so"]["RUNPATH"] = {
                 "$ORIGIN/../../test-linux-gnu/rpt_advanced"
             }

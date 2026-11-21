@@ -83,6 +83,47 @@ impl ScopedEquipment {
         }
     }
 
+    fn declares(&self, kind: ResourceKind, name: &str) -> bool {
+        self.effective[&(kind, PortKey::new(name))].0.scope == self.scope
+    }
+
+    /// Enabled fans resolve their output and sensor references where their policy runs.
+    fn enabled_local_fans(&self) -> impl Iterator<Item = &FanSettings> {
+        self.settings
+            .fans
+            .iter()
+            .filter(|f| f.enabled && self.declares(ResourceKind::Fan, &f.name))
+    }
+
+    /// Keep each scope's logical readings and execute shared actuators and alarms only at their declarations.
+    pub fn policy(&self) -> ResolvedSiteSettings {
+        let mut policy = self.settings.clone();
+        let owned = |kind, name: &str| self.declares(kind, name);
+        policy
+            .alarms
+            .retain(|a| owned(ResourceKind::Alarm, &a.name));
+        policy.fans.retain(|f| owned(ResourceKind::Fan, &f.name));
+        for output in &mut policy.outputs {
+            output.enabled &= owned(ResourceKind::Output, &output.name);
+        }
+        for input in &mut policy.inputs {
+            let key = PortKey::new(&input.name);
+            if self
+                .source(ResourceKind::Input, &key, &["on_active"])
+                .is_some_and(|b| b.scope != self.scope)
+            {
+                input.on_active.clear();
+            }
+            if self
+                .source(ResourceKind::Input, &key, &["on_inactive"])
+                .is_some_and(|b| b.scope != self.scope)
+            {
+                input.on_inactive.clear();
+            }
+        }
+        policy
+    }
+
     /// Physical owner of an enabled sensor or input viewed in this scope.
     pub fn acquisition_owner(&self, kind: ResourceKind, key: &PortKey) -> Option<ResourceBinding> {
         self.acquisition_owners.get(&(kind, key.clone())).copied()
@@ -145,7 +186,7 @@ impl ScopedEquipment {
                     return Err(EquipmentError::Relationship(binding));
                 }
             }
-            for fan in scope.settings.fans.iter().filter(|f| f.enabled) {
+            for fan in scope.enabled_local_fans() {
                 let binding = resource(ResourceKind::Fan, &fan.name).expect("registered fan");
                 let sink = output(&fan.output).ok_or(EquipmentError::Relationship(binding))?;
                 if claims
@@ -200,7 +241,7 @@ impl ScopedEquipment {
             EquipmentError::Relationship(self.effective[&(kind, PortKey::new(name))].0)
         };
         let mut fan_outputs = BTreeSet::new();
-        for f in s.fans.iter().filter(|f| f.enabled) {
+        for f in self.enabled_local_fans() {
             let sink = s
                 .outputs
                 .iter()

@@ -1699,6 +1699,10 @@ fn reload_waits_for_restored_readiness_and_retains_failed_restoration_until_safe
             .unwrap();
         assert!(runtime.reload_pending());
         assert!(rx.acquire().is_none());
+        assert!(
+            runtime.node("1000").unwrap().work().is_none(),
+            "restoration admitted incumbent work before physical readiness"
+        );
         assert_eq!(runtime.document(), &initial);
         ready.store(if success { 1 } else { 2 }, Ordering::Release);
         if !success {
@@ -1718,6 +1722,14 @@ fn reload_waits_for_restored_readiness_and_retains_failed_restoration_until_safe
         assert_eq!(runtime.revision(), 1);
         assert_eq!(runtime.document(), &initial);
         assert_eq!(rx.acquire().is_some(), success);
+        assert_eq!(
+            runtime
+                .node("1000")
+                .unwrap()
+                .work()
+                .map(|permit| permit.id()),
+            success.then_some(1)
+        );
         runtime.detached("1000", 1);
         assert!(runtime.stop(0));
     }
@@ -4629,53 +4641,87 @@ fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_so
 }
 
 #[test]
-fn device_reload_rejects_outstanding_work_and_hazards_but_waits_for_quiescence() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    struct PausingDevice(Arc<AtomicBool>);
+fn device_reload_rejects_outstanding_work_and_drains_in_flight_callbacks() {
+    struct PausingDevice {
+        can_stop: Arc<AtomicBool>,
+        closes: Arc<AtomicUsize>,
+    }
     impl DeviceHandoff for PausingDevice {
         fn quiesce(&mut self) -> bool {
-            self.0.load(Ordering::Acquire)
+            self.can_stop.load(Ordering::Acquire)
         }
-        fn close(&mut self) {}
+        fn close(&mut self) {
+            self.closes.fetch_add(1, Ordering::Relaxed);
+        }
         fn open(&mut self, _: &GenerationSettings) -> bool {
             true
         }
     }
     for reason in 0..3 {
         let can_stop = Arc::new(AtomicBool::new(reason != 1));
+        let closes = Arc::new(AtomicUsize::new(0));
         let device = |_: &str, _: &ResolvedNodeSettings| {
-            Ok(Box::new(PausingDevice(can_stop.clone())) as Box<dyn DeviceHandoff>)
+            Ok(Box::new(PausingDevice {
+                can_stop: can_stop.clone(),
+                closes: closes.clone(),
+            }) as Box<dyn DeviceHandoff>)
         };
         let mut runtime = Runtime::start(
-            ConfigDocument::parse("[1000]\nradio_channel=old\n").unwrap(),
+            ConfigDocument::parse("[1000]\nradio_channel=old\n[2000]\nradio_channel=same\n")
+                .unwrap(),
             &Media,
             adapter,
             device,
             clock(),
         )
         .unwrap();
-        let (mut rx, _tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
         let work = (reason == 0).then(|| runtime.node("1000").unwrap().work().unwrap());
         let protected = (reason == 2).then(|| rx.acquire().unwrap());
         let result = runtime.reload(
-            ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
+            ConfigDocument::parse("[1000]\nradio_channel=new\n[2000]\nradio_channel=same\n")
+                .unwrap(),
             &Media,
             adapter,
             device,
             clock(),
         );
-        if reason == 1 {
+        if reason == 0 {
+            assert_eq!(result, Err(RuntimeError::Busy));
+        } else {
             assert_eq!(result, Ok(()));
             assert!(runtime.reload_pending());
-        } else {
-            assert_eq!(result, Err(RuntimeError::Busy));
+            assert_eq!(runtime.poll_reload(clock()), Ok(false));
         }
         assert_eq!(runtime.settings("1000").unwrap().channel, "old");
         assert_eq!(runtime.revision(), 1);
+        assert_eq!(closes.load(Ordering::Relaxed), 0);
+        assert!(runtime.node("2000").unwrap().work().unwrap().is_current());
+        if reason == 1 {
+            assert!(runtime.node("1000").unwrap().work().is_none());
+        }
+        if reason == 2 {
+            // The running RX block retains its generation. New TX blocks cannot enter.
+            assert_eq!(protected.as_ref().unwrap().id(), 1);
+            assert!(tx.acquire().is_none());
+            assert!(
+                runtime.node("1000").unwrap().work().is_none(),
+                "physical handoff admitted incumbent work while RX was draining"
+            );
+        }
         drop(protected);
         drop(work);
-        assert_eq!(rx.acquire().unwrap().id(), 1);
         can_stop.store(true, Ordering::Release);
+        if reason == 0 {
+            assert_eq!(rx.acquire().unwrap().id(), 1);
+        } else {
+            assert_eq!(runtime.poll_reload(clock()), Ok(true));
+            assert_eq!(closes.load(Ordering::Relaxed), 1);
+            assert_eq!(runtime.node("1000").unwrap().work().unwrap().id(), 2);
+            assert_eq!(runtime.settings("1000").unwrap().channel, "new");
+            assert_eq!(rx.acquire().unwrap().id(), 2);
+            assert_eq!(tx.acquire().unwrap().id(), 2);
+        }
         assert!(runtime.stop(0));
     }
 }
@@ -6159,4 +6205,61 @@ fn pending_device_staging_commit_and_uncertain_reverse_retain_the_transaction() 
         assert!(runtime.node("1000").unwrap().work().is_some());
         assert!(runtime.stop(0));
     }
+}
+
+#[test]
+fn equipment_macro_retains_callers_deadline_after_a_wait() {
+    use crate::command_language::{MacroOutcome, prepare_runtime_action};
+    use serde_json::json;
+    let mut runtime = command_runtime(
+        json!({"macro_limits":{"timing":{"max_duration_ms":10}}}),
+        &[
+            (
+                "macro",
+                "parent",
+                json!({"actions":[{"action":"pause","timing":{"duration_ms":5}},
+            {"action":"set_transmit_inhibit","enabled":true}]}),
+            ),
+            (
+                "macro",
+                "child",
+                json!({"actions":[{"action":"pause","timing":{"duration_ms":5}},
+            {"action":"connect","parameter":"00204"}]}),
+            ),
+        ],
+    );
+    let port = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    let now = |delta| RuntimeClock {
+        now_ms: clock().now_ms + delta,
+        ..clock()
+    };
+    let parent = prepare_runtime_action(&json!({"action":"call_macro","macro":"parent"})).unwrap();
+    let (_, links::LinkEffect::CommandQueued(_)) = runtime
+        .management_action(port, "operator", &parent, now(0))
+        .unwrap()
+    else {
+        panic!("parent admission")
+    };
+    assert!(runtime.advance_commands("1000", now(0)).unwrap().is_none());
+    let Some((links::LinkEffect::SiteCommand(_, permit), receipt)) =
+        runtime.advance_commands("1000", now(5)).unwrap()
+    else {
+        panic!("site action from actual parent")
+    };
+    let links::LinkEffect::CommandQueued(child) = runtime
+        .equipment_macro("1000", "child", Some(&permit), now(5))
+        .unwrap()
+    else {
+        panic!("child admission")
+    };
+    receipt.settle(true);
+    assert!(runtime.advance_commands("1000", now(5)).unwrap().is_none());
+    assert!(runtime.advance_commands("1000", now(5)).unwrap().is_none());
+    let effect = runtime.advance_commands("1000", now(11)).unwrap();
+    assert!(
+        effect.is_none(),
+        "expired equipment child emitted a domain effect"
+    );
+    assert_eq!(child.outcome(), Some(MacroOutcome::Limit));
+    assert!(runtime.stop(now(12).now_ms));
 }

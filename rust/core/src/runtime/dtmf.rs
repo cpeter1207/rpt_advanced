@@ -209,6 +209,7 @@ pub struct DigitOperation {
 /// Retain the source's live grant and the generation across deferred domain work.
 #[derive(Clone)]
 pub struct ActionPermit {
+    pub(super) source: crate::command_language::CommandSource,
     pub(super) receiver: bool,
     pub(super) generation: Arc<super::GenerationWork>,
     pub(super) grant: Option<Arc<AtomicU64>>,

@@ -262,20 +262,31 @@ fn projected(rows: &[Row]) -> Result<Vec<ScopedEquipment>, EquipmentError> {
     };
     let members = rows
         .iter()
+        .filter(|(_, _, kind, _, _)| kind.is_named())
         .map(|(id, s, k, n, _)| (bind(*id, *s, *k), PortKey::new(*n)))
+        .collect::<Vec<_>>();
+    let sections = rows
+        .iter()
+        .filter(|(_, _, kind, _, _)| !kind.is_named())
+        .map(|(id, s, kind, _, _)| bind(*id, *s, *kind))
         .collect::<Vec<_>>();
     let ports = [
         (identity(2), PortKey::new("a")),
         (identity(3), PortKey::new("b")),
     ];
-    let reg = ResourceRegistry::with_members(identity(1), &ports, &[], &members).unwrap();
+    let reg = ResourceRegistry::with_members(identity(1), &ports, &sections, &members).unwrap();
     let mut docs = Vec::new();
     for n in 1..=3 {
         let b = bind(n, n, ResourceKind::Metadata);
         docs.push((b,serde_json::to_vec(&json!({"id":b.id.to_string(),"kind":"metadata","configuration":{"inherit_from":if n==1{Value::Null}else{json!("site")},"name":format!("owner{n}")}})).unwrap()));
     }
-    for ((b, key), row) in members.iter().zip(rows) {
-        docs.push((*b,serde_json::to_vec(&json!({"id":b.id.to_string(),"kind":b.kind.as_str(),"key":key.as_str(),"configuration":row.4})).unwrap()));
+    for (id, scope, kind, key, body) in rows {
+        let b = bind(*id, *scope, *kind);
+        let mut doc = json!({"id":b.id.to_string(),"kind":kind.as_str(),"configuration":body});
+        if kind.is_named() {
+            doc["key"] = json!(key);
+        }
+        docs.push((b, serde_json::to_vec(&doc).unwrap()));
     }
     let caps = docs
         .iter()
@@ -324,6 +335,157 @@ fn projected(rows: &[Row]) -> Result<Vec<ScopedEquipment>, EquipmentError> {
 fn gpio(line: &str) -> Value {
     json!({"enabled":true,"source":{"type":"gpiod","device":"gpiochip0","line":line}})
 }
+#[test]
+fn inherited_fan_claims_only_its_declared_sink() {
+    use ResourceKind::*;
+    let site_output: Row = (
+        10,
+        1,
+        Output,
+        "blower",
+        json!({"enabled":true,"source":{"type":"hwmon","device":"board","channel":"pwm1"}}),
+    );
+    let child_output: Row = (12, 2, Output, "blower", gpio("2"));
+    let site_fan: Row = (
+        11,
+        1,
+        Fan,
+        "cooler",
+        json!({"enabled":true,"output":"blower"}),
+    );
+    let child_input: Row = (
+        13,
+        2,
+        Input,
+        "switch",
+        json!({"enabled":true,"source":{"type":"gpiod","device":"gpiochip0","line":"3"},"on_active":["output:blower:on"]}),
+    );
+    let child_macro: Row = (
+        14,
+        2,
+        Macro,
+        "switch-on",
+        json!({"actions":[{"action":"set_output","name":"blower","state":"on"}]}),
+    );
+    let child_mapping: Row = (
+        15,
+        2,
+        Command,
+        "",
+        json!({"mappings":{"switch":{"command":"B","protected":true,"action":"set_output","name":"blower","state":"on"}}}),
+    );
+    let child_fan: Row = (
+        16,
+        2,
+        Fan,
+        "second",
+        json!({"enabled":true,"output":"blower"}),
+    );
+    let temperature: Row = (
+        17,
+        1,
+        Sensor,
+        "temp",
+        json!({"enabled":true,"source":{"type":"hwmon","device":"board","channel":"temp1_input"}}),
+    );
+    let thermal = json!({
+        "enabled":true,"output":"blower","mode":"temperature","temperature_sensor":"temp",
+        "temperature_curve":[{"temperature":30,"duty":0.25},{"temperature":45,"duty":1.0}]
+    });
+    let thermal_site = (11, 1, Fan, "cooler", thermal.clone());
+    let thermal_child = (16, 2, Fan, "second", thermal);
+    let cases = [
+        (
+            "named input action",
+            vec![child_output.clone(), child_input.clone()],
+            &[][..],
+        ),
+        (
+            "named macro",
+            vec![child_output.clone(), child_macro.clone()],
+            &[],
+        ),
+        (
+            "DTMF mapping",
+            vec![child_output.clone(), child_mapping.clone()],
+            &[],
+        ),
+        (
+            "declared PWM fan with digital child output",
+            vec![child_output.clone(), temperature.clone(), thermal_site],
+            &[],
+        ),
+        (
+            "named action addresses shared sink",
+            vec![child_input],
+            &[11, 13],
+        ),
+        ("macro addresses shared sink", vec![child_macro], &[11]),
+        (
+            "DTMF mapping addresses shared sink",
+            vec![child_mapping],
+            &[11],
+        ),
+        (
+            "two fans address shared sink",
+            vec![child_fan.clone()],
+            &[16],
+        ),
+        (
+            "two fans address independent sinks",
+            vec![child_output.clone(), child_fan],
+            &[],
+        ),
+        (
+            "declared child fan requires a PWM sink",
+            vec![child_output, temperature, thermal_child],
+            &[16],
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    for (case, extra, expected) in cases {
+        let mut rows = vec![site_output.clone(), site_fan.clone()];
+        for row in extra {
+            if row.0 == 11 {
+                rows[1] = row;
+            } else {
+                rows.push(row);
+            }
+        }
+        let result = projected(&rows).and_then(|all| {
+            let key = (Output, PortKey::new("blower"));
+            let child = rows.iter().any(|row| row.0 == 12);
+            let child_id = if child { 12 } else { 10 };
+            for (i, output_id) in [10, child_id, 10].into_iter().enumerate() {
+                assert_eq!(all[i].effective[&key].0.id, identity(output_id), "{case}");
+                assert_eq!(
+                    all[i].settings.outputs[0]
+                        .endpoint
+                        .as_ref()
+                        .unwrap()
+                        .channel,
+                    if output_id == 12 { "2" } else { "pwm1" },
+                    "{case}"
+                );
+            }
+            ScopedEquipment::validate_owners(&all)
+        });
+        let matches = match result {
+            Ok(()) => expected.is_empty(),
+            Err(EquipmentError::Relationship(binding)) => {
+                expected.iter().any(|id| binding.id == identity(*id))
+            }
+            Err(EquipmentError::Scope) => false,
+        };
+        if !matches {
+            mismatches.push(format!(
+                "{case}: expected relationship IDs {expected:?}, got {result:?}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
 #[test]
 fn round_one_shared_fan_prohibits_sibling_fan_and_direct_action() {
     use ResourceKind::*;

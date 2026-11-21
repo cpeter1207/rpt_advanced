@@ -158,4 +158,6 @@ impl Engine {
 #[path = "lifecycle_site_tests.rs"]
 mod tests;
 #[cfg(test)]
-pub(crate) use tests::{install_delayed_site_bank, site_bank_delay};
+pub(crate) use tests::{
+    install_delayed_site_bank, site_bank_delay, site_bank_electrical, site_bank_sample,
+};

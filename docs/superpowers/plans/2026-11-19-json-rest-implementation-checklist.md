@@ -10,7 +10,7 @@ Make sure normal jitter adjustments and packet loss concealment do not take down
 Review and update the agent rules, wishlist, and architecture documentation as you implement.
 Update this checklist each time an item is complete.
 Commit and push regularly.
-Build and test major milestones on node524950.local before continuing. Per the 2026-11-20 instruction, execute milestones continuously until the implementation/runtime cutover is complete, then pause; do not change the installed service without explicit deployment authorization.
+Build and test major milestones on node524950.local before continuing. Continue through the other implementation, CLI and runtime milestones, leaving the React single-page JavaScript web app until last. Before starting the web app, present a table mapping its JSON keys to proposed Fluent message IDs and English text, then pause for the user's approval. Do not build the cancelled native menu application. Do not change the installed service without explicit deployment authorization.
 Do not invent requirements or edge cases.
 Consolidate as many error conditions as you can to avoid unnecessary branching.
 Log warnings or errors when errors occur. Log warnings when an error isn't fatal. Log errors when something fatal occurs that takes down a connection or the entire controller.
@@ -52,7 +52,13 @@ Use test-driven development.
 [x] - Complete reviewed telemetry resources and typed HAL domain projections, per-field sources, text-only EchoLink dependencies, cached views and capability-loss recovery; pass 1,242 distinct affected host/native tests plus full host fast checks. Actual runtime adoption, live status and startup remain pending.
 [x] - Complete the reviewed registered command/macro/DTMF/mute/calendar execution foundation, physical signaling preparation and sparse HAL/schema joins; pass 1,773 distinct affected host/native tests, ten package checks and full host fast/strict documentation checks. Actual process startup, network participants, client migration and runtime cutover remain pending.
 
-[x] - Complete reviewed shared modular Engine/bootstrap and typed station handoff foundations for standalone and Asterisk, management-only/locked startup, lifetime writer ownership and confirmed recovery/TX inhibition. Pass AMD64 103 aggregate and 13 actual mTLS scenarios, ARM64 103 aggregate and eight mTLS scenarios, 38 affected lifecycle tests and the combined full workspace fast gate. Shared site runtime routing, independent protocol/phone participants, clients and final legacy removal remain pending.
+[x] - Complete reviewed shared modular Engine/bootstrap and typed station handoff foundations for standalone and Asterisk, management-only/locked startup, lifetime writer ownership and confirmed recovery/TX inhibition. Pass AMD64 103 aggregate and 13 actual mTLS scenarios, ARM64 103 aggregate and eight mTLS scenarios, 38 affected lifecycle tests and the combined full workspace fast gate. Independent protocol/phone participants, clients and final legacy removal remain pending.
+
+[x] - Complete reviewed shared site runtime routing, physical I/O ownership, independent inherited views, fan/output claims, automatic action faults and fresh PTT feedback. Pass 11 AMD64 scenarios, six ARM64 regressions across two runs and the full workspace fast gate, with source, SDK and installed-state guards. Retain the first native run's unexplained HTTP fixture error in the validation report.
+
+[x] - Align configuration fan validation with the declaring scope and actual output identity; permit independent child overrides while preserving shared-sink exclusivity and PWM/sensor checks. Pass all ten equipment tests on AMD64 and ARM64, the full workspace fast gate and independent specification/code-quality review.
+
+[x] - Drain physical callback hazards after quiescing and fence new affected-node work throughout handoff and rollback readiness. Pass native regressions, actual mTLS scenarios, exact release export/package checks, the full workspace fast gate and independent review. The complete hosted matrix, production coverage and healthy-node continuity after deliberate confirmation rejection still require evidence.
 
 [x] - Record approved scheduler policies: pair a start with its next end and skip overlapping starts; ignore the in-progress occurrence when restart_recovery is false; skip missed calendar work while forcing pending monotonic deadlines; cancel without either boundary macro if nominal end arrives before start execution. Preserve existing permanent-route ownership and hold fences.
 
@@ -324,7 +330,11 @@ Use test-driven development.
 
 [] - Test translations, native references/selectors, media nesting rejection, context/quality failures, byte limits, routing and nested message actions.
 
-[] - Update CLI, tuner, Asterisk composition and reload helpers to discover HAL resources, use mTLS, edit specific JSON resources and submit typed operations.
+[] - Update the controller CLI, Asterisk composition and reload helpers to discover HAL resources, use mTLS, edit specific JSON resources and submit typed operations.
+[] - After completing the other implementation, CLI and runtime work, present the JSON-key-to-Fluent-message-ID-and-English-text mapping table for the React web app and pause for user approval before starting its implementation.
+[] - Build the single-page JavaScript app using React for controller configuration, status and radio tuning through the authenticated reverse proxy and HAL API, with resource-local updates, typed operations and exclusive temporary-tuning ownership and cleanup.
+[] - Verify WCAG 2.1 AAA across the complete web app and workflows; use Guidepup automation as extensively as practical, practical actual VoiceOver and TalkBack automation, criterion-specific checks and the user's manual JAWS, NVDA and VoiceOver-on-iPhone test results.
+[] - Keep the existing usbradioplus-tune application dedicated to USBRadioPlus and its supported INI tuning behavior; retire its rpt-advanced-specific backend during the controller cutover, and package/document the applications separately.
 
 [] - Remove controller Unix-socket clients and INI read/write/save paths; keep USBRadioPlus-owned INI tooling and configuration behavior intact.
 

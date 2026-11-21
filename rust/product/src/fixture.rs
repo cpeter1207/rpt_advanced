@@ -79,6 +79,9 @@ pub(crate) static REVIEW_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static REVIEW_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 /// Raw measurements from one registered station's deterministic radio callbacks.
 pub(crate) struct ReviewOutput {
+    pub pause_tx: std::sync::atomic::AtomicBool,
+    pub skipped_tx: AtomicUsize,
+    pub missing_tx_frame: std::sync::atomic::AtomicBool,
     pub value: AtomicUsize,
     pub keyed: AtomicUsize,
     pub dekeyed: AtomicUsize,
@@ -96,6 +99,9 @@ pub(crate) fn watch_output(name: &str) -> std::sync::Arc<ReviewOutput> {
         .entry(name.to_owned())
         .or_insert_with(|| {
             std::sync::Arc::new(ReviewOutput {
+                pause_tx: false.into(),
+                skipped_tx: 0.into(),
+                missing_tx_frame: false.into(),
                 value: AtomicUsize::new(usize::MAX),
                 keyed: AtomicUsize::new(0),
                 dekeyed: AtomicUsize::new(0),
@@ -297,10 +303,25 @@ unsafe extern "C" fn radio_activate(
                         8,
                     );
                     first += 8;
+                    if let Some(output) = &observed
+                        && output.pause_tx.load(Ordering::Acquire)
+                    {
+                        output.skipped_tx.fetch_add(1, Ordering::Release);
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        continue;
+                    }
+                    let frames = if observed
+                        .as_ref()
+                        .is_some_and(|o| o.missing_tx_frame.load(Ordering::Acquire))
+                    {
+                        0
+                    } else {
+                        8
+                    };
                     transmit(
                         contexts.1 as *mut c_void,
                         samples.as_mut_ptr(),
-                        8,
+                        frames,
                         &mut keyed,
                         &mut ctcss_enabled,
                     );

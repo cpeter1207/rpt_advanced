@@ -236,7 +236,7 @@ pub struct CommandCompletion {
 }
 #[derive(Default)]
 pub(super) struct CommandPrograms {
-    pub(super) generation: Option<super::super::generation::CommandGeneration>,
+    pub(super) generation: Option<super::super::generation::ScopedGeneration>,
     queue: VecDeque<Program>,
     pub(super) scheduler: Option<EventScheduler>,
     pub(super) owner: Option<crate::config::resources::candidate::ResourceScope>,
@@ -307,14 +307,21 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         key: String,
         ctx: InvocationContext,
         now: u64,
+        deadline: Option<u64>,
     ) -> Result<CommandResponse, RuntimeError> {
         let pin = self
             .links
             .command_source(&ctx.source)
             .and_then(|c| c.collector_pin());
         let p = self.links.command_profile().ok_or(RuntimeError::Rejected)?;
-        self.programs
-            .push(p, Frame::Actions { key, next: 0 }, ctx, now, None, pin)
+        let receipt =
+            self.programs
+                .push(p, Frame::Actions { key, next: 0 }, ctx, now, None, pin)?;
+        if let Some(deadline) = deadline {
+            let child = self.programs.queue.back_mut().expect("just enqueued");
+            child.deadline = child.deadline.min(deadline);
+        }
+        Ok(receipt)
     }
     pub(super) fn enqueue_single(
         &mut self,
@@ -414,6 +421,10 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .is_some_and(|c| c.admin_unlocked(clock.now_ms));
         if profile.is_none() {
             node.programs.finish(p, MacroOutcome::Cancelled);
+            return Ok(None);
+        }
+        if clock.now_ms > p.deadline {
+            node.programs.finish(p, MacroOutcome::Limit);
             return Ok(None);
         }
         if let Err(outcome) = p.budget.resume(grant, clock.now_ms) {

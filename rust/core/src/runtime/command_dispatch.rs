@@ -113,7 +113,7 @@ impl PreparedCommands {
         node.programs
             .activate_scheduler(self.scheduler, self.pending);
         node.programs.generation =
-            Some(super::super::generation::CommandGeneration::new(generation));
+            Some(super::super::generation::ScopedGeneration::new(generation));
         node.programs.owner = Some(self.profile.owner);
         node.command_messages = Some(self.messages);
         node.links.install_profile(self.profile, generation);
@@ -460,6 +460,27 @@ impl<A: Send, C: Send> Runtime<A, C> {
         {
             return Err(RuntimeError::Rejected);
         }
+        if let ResourceScope::Site(id) = invocation.context.owner {
+            let name = id.to_string();
+            let current = self.site_work(&name).ok_or(RuntimeError::MissingNode)?;
+            if !current.same_owner(&invocation.context.generation)
+                || invocation.context.recheck(false).is_err()
+            {
+                return Err(RuntimeError::Rejected);
+            }
+            let Action::Site(command) = invocation.action else {
+                return Err(RuntimeError::Rejected);
+            };
+            let permit = super::super::dtmf::ActionPermit {
+                source: invocation.context.source,
+                receiver: false,
+                generation: invocation.context.generation,
+                grant: None,
+                reply: None,
+                deadline: None,
+            };
+            return Ok((name, LinkEffect::SiteCommand(command, permit)));
+        }
         let local = self
             .nodes
             .iter()
@@ -474,6 +495,55 @@ impl<A: Send, C: Send> Runtime<A, C> {
         let effect = self.dispatch_action(&local, invocation, clock, None)?;
         Ok((local, effect))
     }
+    /// Admit an equipment-triggered macro on its real radio target and original caller authority.
+    pub fn equipment_macro(
+        &mut self,
+        local: &str,
+        name: &str,
+        permit: Option<&super::super::dtmf::ActionPermit>,
+        clock: RuntimeClock,
+    ) -> Result<LinkEffect, RuntimeError> {
+        let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        let owner = node
+            .links
+            .command_profile()
+            .ok_or(RuntimeError::Rejected)?
+            .owner;
+        let active = node.command_work().ok_or(RuntimeError::Rejected)?;
+        let context = match permit {
+            Some(token)
+                if token.current(Some(clock.now_ms)) && active.same_owner(&token.generation) =>
+            {
+                InvocationContext {
+                    owner,
+                    generation: token.generation.clone(),
+                    source: token.source.clone(),
+                    requires_grant: token.grant.is_some(),
+                }
+            }
+            Some(_) => return Err(RuntimeError::Rejected),
+            None => InvocationContext {
+                owner,
+                generation: active,
+                source: CommandSource::Host,
+                requires_grant: false,
+            },
+        };
+        self.dispatch_action(
+            local,
+            Invocation {
+                context,
+                action: Action::CallMacro(name.to_owned()),
+                parameter: None,
+                origin: ParameterOrigin::Typed,
+            },
+            clock,
+            permit
+                .and_then(|p| p.deadline)
+                .map(|deadline| (deadline, None)),
+        )
+    }
+
     /// Admit a consumed DTMF buffer against its exact current generation, scope, source and grant.
     pub fn dispatch_mapping(
         &mut self,
@@ -556,6 +626,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .recheck(grant)
             .map_err(|_| RuntimeError::Rejected)?;
         let mut permit = super::super::dtmf::ActionPermit {
+            source: source.clone(),
             receiver: matches!(source, CommandSource::Receiver),
             reply: match source {
                 CommandSource::Connection { reply, .. } => Some(reply.clone()),
@@ -658,7 +729,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             }
             Action::CallMacro(key) => {
                 return node
-                    .enqueue_program(key, invocation.context, clock.now_ms)
+                    .enqueue_program(key, invocation.context, clock.now_ms, permit.deadline)
                     .map(LinkEffect::CommandQueued);
             }
             Action::Message(name, destination) => {

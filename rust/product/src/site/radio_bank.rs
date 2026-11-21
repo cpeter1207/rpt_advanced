@@ -33,6 +33,7 @@ struct Replacement {
 #[derive(Default)]
 struct Bank {
     inputs: Vec<Input>,
+    observation_clock: Option<(u64, u64)>,
     outputs: Vec<Output>,
     generation: u64,
     pending: Option<Pending>,
@@ -44,6 +45,7 @@ struct Bank {
 }
 struct Input {
     sensor: bool,
+    stale_ms: u64,
     node: String,
     name: String,
     mask: u32,
@@ -106,8 +108,33 @@ impl Bank {
     }
     fn observe(&mut self, snapshot: &abi::UrpAstSiteSnapshot, now_ms: u64) {
         self.settled = false;
+        let observed = (snapshot.generation != 0 && snapshot.observed_at_valid == 1)
+            .then(|| snapshot.snapshot_at_ms.checked_sub(snapshot.observed_at_ms))
+            .flatten()
+            .map(|age| {
+                let local = match self.observation_clock {
+                    Some((stamp, local)) if stamp == snapshot.observed_at_ms => local,
+                    _ => now_ms.saturating_sub(age),
+                };
+                self.observation_clock = Some((snapshot.observed_at_ms, local));
+                local
+            });
         for value in &mut self.inputs {
             value.reading = input(snapshot, value.mask, value.active_high, now_ms);
+            if let (Some(local), Some(_)) = (observed, value.reading.observed_at_ms) {
+                value.reading.observed_at_ms = Some(local);
+                if snapshot.input_quality == 1 {
+                    value.reading.quality = if now_ms
+                        .saturating_sub(local)
+                        .max(snapshot.snapshot_at_ms - snapshot.observed_at_ms)
+                        >= value.stale_ms
+                    {
+                        ReadingQuality::Stale
+                    } else {
+                        ReadingQuality::Valid
+                    };
+                }
+            }
         }
         if snapshot.generation == 0 {
             self.pending = None;
@@ -316,6 +343,7 @@ impl RadioSite {
                     }
                 }
                 if !next.replaced.contains(&key.0) {
+                    bank.observation_clock = old.observation_clock;
                     bank.pending = old.pending;
                     bank.touched = old.touched;
                 }
@@ -348,14 +376,25 @@ impl RadioSite {
                     i.endpoint.as_ref(),
                     i.interface.as_ref(),
                     false,
+                    5000,
                 )
             });
             let sensors = settings
                 .sensors
                 .iter()
                 .filter(|s| s.enabled && s.interface.is_some())
-                .map(|s| (&s.name, true, None, s.interface.as_ref(), true));
-            for (name, active_high, endpoint, interface, sensor) in inputs.chain(sensors) {
+                .map(|s| {
+                    (
+                        &s.name,
+                        true,
+                        None,
+                        s.interface.as_ref(),
+                        true,
+                        s.stale_after_ms,
+                    )
+                });
+            for (name, active_high, endpoint, interface, sensor, stale_ms) in inputs.chain(sensors)
+            {
                 if let Some((owner, bank, mask)) = owned_pin(endpoint, interface, false)? {
                     result
                         .banks
@@ -364,6 +403,7 @@ impl RadioSite {
                         .inputs
                         .push(Input {
                             sensor,
+                            stale_ms,
                             node: node.clone(),
                             name: name.clone(),
                             mask,

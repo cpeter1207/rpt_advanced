@@ -108,12 +108,20 @@ impl FanState {
                 run_on_until_ms: None,
             };
         }
-        let keyed = self.settings.mode != FanMode::Temperature
+        let observes_ptt = self.settings.mode != FanMode::Temperature;
+        let unknown_ptt = observes_ptt
             && self
                 .settings
                 .ptt_nodes
                 .iter()
-                .any(|node| ptt.get(node).copied().unwrap_or(false));
+                .any(|key| !ptt.contains_key(key));
+        let keyed = observes_ptt
+            && (self
+                .settings
+                .ptt_nodes
+                .iter()
+                .any(|key| ptt.get(key) == Some(&true))
+                || unknown_ptt && self.keyed);
         if self.keyed && !keyed {
             self.run_on_until = Some(now_ms.saturating_add(self.settings.run_on_ms));
         }
@@ -144,6 +152,7 @@ impl FanState {
         FanSnapshot {
             duty,
             fault: thermal_fault
+                || unknown_ptt
                 || !output.available
                 || (!output.pwm && !self.settings.temperature_curve.is_empty())
                 || tach_fault,

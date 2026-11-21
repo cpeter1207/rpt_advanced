@@ -50,7 +50,7 @@ pub use modular::PreparedConfigurationTransition;
 
 enum ConfigurationSource {
     Document(ConfigDocument),
-    Modular(Arc<RuntimeConfiguration>),
+    Modular(Arc<RuntimeConfiguration>, Box<modular::PreparedSite>),
 }
 
 fn queue_status_media(
@@ -185,6 +185,7 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     host: NodeHost<DtmfWorker, RuntimeTransmit<A>>,
     device: Box<dyn DeviceHandoff>,
     device_open: bool,
+    handoff_pending: bool,
     failed_station_replacement: bool,
     pending_peer_cleanup: bool,
     links: NodeLinkControl,
@@ -344,6 +345,9 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
     }
     /// Reserve current-generation ownership before submitting external work.
     pub fn work(&mut self) -> Option<GenerationWork> {
+        if self.handoff_pending {
+            return None;
+        }
         self.host.control().work()
     }
     /// Copy lifecycle status without entering an audio owner.
@@ -456,6 +460,7 @@ pub struct Runtime<A: Send = (), C: Send = ()> {
     generation: u64,
     document: ConfigDocument,
     modular: Option<Arc<RuntimeConfiguration>>,
+    shared_site: Option<modular::SharedSite>,
     configuration_gate: Arc<AtomicBool>,
     warnings: Vec<ConfigWarning>,
     nodes: Vec<RuntimeNode<A, C>>,
@@ -477,6 +482,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             generation: 0,
             document: ConfigDocument::default(),
             modular: None,
+            shared_site: None,
             configuration_gate: Arc::new(AtomicBool::new(false)),
             warnings: Vec::new(),
             nodes: Vec::new(),
@@ -975,6 +981,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     .control()
                     .publish_prepared(candidate.generation, clock.now_ms)
                     .expect("prevalidated serialized publication");
+                old.handoff_pending = false;
                 if handoff && !old.control.adapter_exposed {
                     old.host
                         .control()
@@ -1023,6 +1030,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     host: NodeHost::new(candidate.generation),
                     device: candidate.device.expect("prepared new lease"),
                     device_open: true,
+                    handoff_pending: false,
                     failed_station_replacement: false,
                     pending_peer_cleanup: false,
                     links,
@@ -1050,9 +1058,11 @@ impl<A: Send, C: Send> Runtime<A, C> {
             ConfigurationSource::Document(document) => {
                 self.document = document;
                 self.modular = None;
+                self.shared_site = None;
             }
-            ConfigurationSource::Modular(configuration) => {
+            ConfigurationSource::Modular(configuration, site) => {
                 self.document = ConfigDocument::default();
+                self.publish_site(*site, generation_id);
                 self.modular = Some(configuration);
             }
         }
@@ -2206,6 +2216,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
     /// Gate all new work, stop devices and emit peer teardown effects; return true only when reclaimed.
     pub fn stop(&mut self, now_ms: u64) -> bool {
         self.stopping = true;
+        self.shared_site = None;
         self.scheduler = None;
         if self.pending_reload.is_some() {
             for node in &mut self.nodes {

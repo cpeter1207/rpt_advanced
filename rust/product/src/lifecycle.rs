@@ -79,7 +79,9 @@ mod site;
 #[cfg(target_os = "linux")]
 pub(crate) use native::PreparedSite;
 #[cfg(test)]
-pub(crate) use site::{install_delayed_site_bank, site_bank_delay};
+pub(crate) use site::{
+    install_delayed_site_bank, site_bank_delay, site_bank_electrical, site_bank_sample,
+};
 
 pub(crate) struct Engine {
     executor: ControlClient,
@@ -692,10 +694,10 @@ impl Engine {
                     .collect::<Vec<_>>()
                 {
                     let node = host.runtime.node(&local).ok_or(RuntimeError::MissingNode)?;
-                    let work = node
-                        .work()
-                        .expect("configured node retains an active generation");
-                    if let Some(retry) = node.links().take_retry(clock.now_ms, work) {
+                    // A failed station restore retains its configuration, but has no radio to retry.
+                    if let Some(work) = node.work()
+                        && let Some(retry) = node.links().take_retry(clock.now_ms, work)
+                    {
                         retries.push((local, retry));
                     }
                 }

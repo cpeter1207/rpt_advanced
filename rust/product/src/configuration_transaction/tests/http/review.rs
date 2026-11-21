@@ -23,6 +23,16 @@ fn authenticated_review_regressions() {
         "schemas",
         "poll",
         "native-runtime",
+        "native-site-zero",
+        "native-site-views",
+        "native-site-fence",
+        "native-site-fault-reload",
+        "native-site-claim-release",
+        "native-site-output-override",
+        "native-site-alarm-zero",
+        "native-site-alarm-live",
+        "native-site-action-fault",
+        "native-site-ptt-silence",
         "native-cold",
         "native-reopen",
         "native-two-live",
@@ -627,6 +637,16 @@ pub(super) fn run(
         "standalone-managed" => native::standalone(&scenario),
         "managed-bootstrap" | "inspection-r1" => native::bootstrap(&scenario),
         "native-runtime"
+        | "native-site-zero"
+        | "native-site-views"
+        | "native-site-fence"
+        | "native-site-fault-reload"
+        | "native-site-claim-release"
+        | "native-site-output-override"
+        | "native-site-alarm-zero"
+        | "native-site-alarm-live"
+        | "native-site-action-fault"
+        | "native-site-ptt-silence"
         | "native-inspection-registered"
         | "native-cold"
         | "native-reopen"

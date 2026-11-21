@@ -57,9 +57,9 @@ pub struct GenerationWork {
     state: Arc<WorkState>,
 }
 
-/// A command generation follows the port configuration across audio-adapter publications.
-pub(super) struct CommandGeneration(pub(super) Arc<GenerationWork>);
-impl CommandGeneration {
+/// A revocable configuration work owner, independent of any physical audio generation.
+pub(super) struct ScopedGeneration(pub(super) Arc<GenerationWork>);
+impl ScopedGeneration {
     pub(super) fn new(id: u64) -> Self {
         Self(Arc::new(GenerationWork {
             id,
@@ -70,7 +70,7 @@ impl CommandGeneration {
         }))
     }
 }
-impl Drop for CommandGeneration {
+impl Drop for ScopedGeneration {
     fn drop(&mut self) {
         self.0.state.admitted.store(false, Ordering::Release);
     }

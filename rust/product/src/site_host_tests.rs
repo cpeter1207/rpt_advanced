@@ -929,9 +929,16 @@ fn round_one_host_merges_cached_sensor_calibration_quality_and_original_time() {
     let first = state.snapshot(2000);
     assert_eq!(first.current.value, Some(20.0));
     assert_eq!(first.current.observed_at_ms, Some(1950));
-    let again = host.poll_sites(2000);
-    state.observe(again[owner].sensors["sense"].clone(), 2000);
-    assert_eq!(state.snapshot(2000), first);
+    // The cached owner returns the same device snapshot on a later control tick.
+    // Its last observation must keep its original time and expire at the original deadline.
+    let again = host.poll_sites(2010);
+    assert_eq!(again[owner].sensors["sense"].observed_at_ms, Some(1950));
+    assert_eq!(again[owner].inputs["door"].observed_at_ms, Some(1950));
+    state.observe(again[owner].sensors["sense"].clone(), 2010);
+    assert_eq!(state.snapshot(2010), first);
+    let expired = host.poll_sites(7000);
+    state.observe(expired[owner].sensors["sense"].clone(), 7000);
+    assert_eq!(state.snapshot(7000).current.quality, ReadingQuality::Stale);
     let input = &values[owner].inputs["door"];
     assert_eq!(input.value, Some(false));
     assert_eq!(input.observed_at_ms, Some(1950));
@@ -940,5 +947,5 @@ fn round_one_host_merges_cached_sensor_calibration_quality_and_original_time() {
         crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
         drops
     );
-    assert!(host.stop(2100));
+    assert!(host.stop(7100));
 }

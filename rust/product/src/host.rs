@@ -1162,6 +1162,11 @@ impl Host {
     }
     pub(crate) fn status_text(&mut self, local: &str) -> Result<String, RuntimeError> {
         use std::fmt::Write;
+        if self.runtime.shared_site_name() == Some(local) {
+            let mut status = String::new();
+            self.write_site_status(local, &mut status)?;
+            return Ok(status);
+        }
         let node = self.runtime.node(local).ok_or(RuntimeError::MissingNode)?;
         let radio_receive = node.radio_receive_status();
         let ingress: Vec<_> = node
@@ -1436,7 +1441,7 @@ impl Host {
                 if !permit.current(Some(clock.now_ms)) {
                     return Err(RuntimeError::Rejected);
                 }
-                self.site_command(local, command, clock)
+                self.authorized_site_command(local, command, clock, Some(&permit))
                     .map_err(|_| RuntimeError::Rejected)
             }
             LinkEffect::Connect(_) => Err(RuntimeError::Rejected),
@@ -1825,7 +1830,8 @@ impl Host {
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
                             .status
-                            .transmit_keyed()
+                            .transmit_observation(clock.now_ms)
+                            == Some(true)
                     });
                 self.status_post.observe(
                     &local,

@@ -51,6 +51,17 @@ impl<A: Send, C: Send> Candidate<A, C> {
     }
 }
 
+impl<A: Send, C: Send> RuntimeNode<A, C> {
+    /// Stop physical callbacks and drain their generation guards before closing either lease.
+    fn quiesce_handoff(&mut self, now_ms: u64) -> bool {
+        if !self.device.quiesce() {
+            return false;
+        }
+        self.host.control().gate_callbacks();
+        self.status(now_ms).protected_owners == 0
+    }
+}
+
 impl<A: Send, C: Send> ReloadTransaction<A, C> {
     pub(super) fn new(
         source: ConfigurationSource,
@@ -99,7 +110,7 @@ impl<A: Send, C: Send> ReloadTransaction<A, C> {
         if self.failure.is_none() {
             for index in 0..self.candidates.len() {
                 if let Err(error) = self.forward(runtime, index, clock.now_ms) {
-                    if matches!(self.source, ConfigurationSource::Modular(_)) {
+                    if matches!(self.source, ConfigurationSource::Modular(..)) {
                         // A restored device resumes its old callbacks. Fence every incumbent
                         // whose physical plan differs from the accepted desired generation
                         // before any reverse open, including stations omitted by the candidate.
@@ -236,10 +247,11 @@ impl<A: Send, C: Send> ReloadTransaction<A, C> {
                 DeviceProgress::Handoff(old_index) => {
                     let node = &mut runtime.nodes[old_index];
                     // Reject before touching a device with externally held work.
-                    let status = node.status(now_ms);
-                    if status.outstanding_work != 0 || status.protected_owners != 0 {
+                    if node.status(now_ms).outstanding_work != 0 {
                         return Err(RuntimeError::Busy);
                     }
+                    // Keep new work out between polls, including while the device is restoring.
+                    node.handoff_pending = true;
                     // Once retirement starts, another node's failure must also
                     // restore this owner, even if its stop is still pending.
                     self.changed.push(old_index);
@@ -247,11 +259,7 @@ impl<A: Send, C: Send> ReloadTransaction<A, C> {
                 }
                 DeviceProgress::Quiescing(old_index) => {
                     let node = &mut runtime.nodes[old_index];
-                    if !node.device.quiesce() {
-                        return Ok(());
-                    }
-                    node.host.control().gate_callbacks();
-                    if node.status(now_ms).protected_owners != 0 {
+                    if !node.quiesce_handoff(now_ms) {
                         return Ok(());
                     }
                     node.device.close();
@@ -320,7 +328,7 @@ impl<A: Send, C: Send> ReloadTransaction<A, C> {
             loop {
                 match self.restoring[position] {
                     RestoreProgress::Close => {
-                        if !node.device.quiesce() {
+                        if !node.quiesce_handoff(now_ms) {
                             break;
                         }
                         node.device.close();
@@ -343,6 +351,7 @@ impl<A: Send, C: Send> ReloadTransaction<A, C> {
                         Ok(false) => break,
                         Ok(true) => {
                             node.host.control().restore_callbacks();
+                            node.handoff_pending = false;
                             self.restoring[position] = RestoreProgress::Done;
                         }
                         Err(_) => self.restoring[position] = RestoreProgress::Failed,

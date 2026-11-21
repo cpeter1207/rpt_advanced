@@ -66,6 +66,13 @@ pub enum SiteEffect {
     },
     /// Aggregate site protective inhibit, never an interlock reset.
     TransmitInhibit(bool),
+    /// Apply a validated equipment action at its declaring scope.
+    Equipment {
+        /// Alarm or input whose action is being applied.
+        source: String,
+        /// Actuator demand to route to its declaring owner.
+        command: SiteCommand,
+    },
     /// Existing validated controller action macro.
     Macro(String),
     /// Named local-only message queued through ordinary telemetry admission.
@@ -170,6 +177,8 @@ pub struct SiteController {
     inhibitors: BTreeSet<String>,
     availability: BTreeMap<String, FanOutput>,
     ptt: BTreeMap<PortKey, bool>,
+    modular_claims: Option<BTreeSet<String>>,
+    has_radio_target: bool,
 }
 impl SiteController {
     /// Prepare all named policy state outside audio; no device is opened here.
@@ -206,7 +215,46 @@ impl SiteController {
             inhibitors: BTreeSet::new(),
             availability: BTreeMap::new(),
             ptt: BTreeMap::new(),
+            modular_claims: None,
+            has_radio_target: true,
         }
+    }
+    /// Bind physical fan reservations after the full configuration has passed its owner barrier.
+    pub fn bind_actuators(&mut self, claims: BTreeSet<String>, has_radio_target: bool) {
+        // A fan can change the same sink independently of the direct output cache.
+        self.published_outputs
+            .retain(|name, _| !claims.contains(name));
+        self.modular_claims = Some(claims);
+        self.has_radio_target = has_radio_target;
+    }
+    /// Re-evaluate a previously refused demand on the next control tick after reconfiguration.
+    /// Logical fan state, pulse deadlines and the physical owner's submission remain intact.
+    pub fn retry_actuator_delivery(
+        &mut self,
+        kind: crate::config::resources::candidate::ResourceKind,
+        name: &str,
+    ) {
+        use crate::config::resources::candidate::ResourceKind;
+        match kind {
+            ResourceKind::Fan => {
+                self.fan_status.remove(name);
+            }
+            ResourceKind::Output => {
+                self.published_outputs.remove(name);
+            }
+            _ => {}
+        }
+    }
+    fn fan_claims(&self, name: &str) -> bool {
+        self.modular_claims.as_ref().map_or_else(
+            || {
+                self.settings
+                    .fans
+                    .iter()
+                    .any(|fan| fan.enabled && fan.output == name)
+            },
+            |claims| claims.contains(name),
+        )
     }
     /// Replace policy only after device owners complete safe handoff. Preserve
     /// unchanged deadlines, input debounce, alarm latches and measurement history.
@@ -322,13 +370,7 @@ impl SiteController {
         self.availability.clone_from(&observations.outputs);
         for index in 0..self.settings.outputs.len() {
             let name = self.settings.outputs[index].name.clone();
-            if self.settings.outputs[index].enabled
-                && !self
-                    .settings
-                    .fans
-                    .iter()
-                    .any(|fan| fan.enabled && fan.output == name)
-            {
+            if self.settings.outputs[index].enabled && !self.fan_claims(&name) {
                 self.publish_output(&name, &mut effects);
             }
         }
@@ -451,8 +493,29 @@ impl SiteController {
                     effects.push(SiteEffect::Macro(name.clone()));
                     Ok(())
                 }
+                SiteAction::Inhibit(_) if !self.has_radio_target => Err(SiteError::Unavailable),
                 SiteAction::Inhibit(enabled) => {
                     self.inhibit(source, *enabled, effects);
+                    Ok(())
+                }
+                SiteAction::Output { name, request } if self.modular_claims.is_some() => {
+                    effects.push(SiteEffect::Equipment {
+                        source: source.to_owned(),
+                        command: SiteCommand::Output {
+                            name: name.clone(),
+                            request: *request,
+                        },
+                    });
+                    Ok(())
+                }
+                SiteAction::Fan { name, duty } if self.modular_claims.is_some() => {
+                    effects.push(SiteEffect::Equipment {
+                        source: source.to_owned(),
+                        command: SiteCommand::Fan {
+                            name: name.clone(),
+                            duty: *duty,
+                        },
+                    });
                     Ok(())
                 }
                 SiteAction::Output { name, request } => {
@@ -475,12 +538,7 @@ impl SiteController {
         now_ms: u64,
         effects: &mut Vec<SiteEffect>,
     ) -> Result<(), SiteError> {
-        if self
-            .settings
-            .fans
-            .iter()
-            .any(|fan| fan.enabled && fan.output == name)
-        {
+        if self.fan_claims(name) {
             return Err(SiteError::Unsafe);
         }
         self.outputs

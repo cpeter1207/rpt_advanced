@@ -17,6 +17,31 @@ static BANK: Mutex<Bank> = Mutex::new(Bank {
     hold: 0,
     pending: None,
 });
+struct ObservedBank {
+    owner: String,
+    time: u64,
+    quality: u32,
+    snapshots: usize,
+    writes: usize,
+}
+static OBSERVED: Mutex<Option<ObservedBank>> = Mutex::new(None);
+
+/// Select the cached sample returned by the existing delayed physical bank and read its counters.
+pub(crate) fn site_bank_sample(owner: &str, time: u64, quality: u32) -> (usize, usize) {
+    let mut observed = OBSERVED.lock().unwrap();
+    let state = observed.get_or_insert_with(|| ObservedBank {
+        owner: owner.to_owned(),
+        time,
+        quality,
+        snapshots: 0,
+        writes: 0,
+    });
+    assert_eq!(state.owner, owner);
+    state.time = time;
+    state.quality = quality;
+    (state.snapshots, state.writes)
+}
+
 static REJECT_AFTER: AtomicUsize = AtomicUsize::new(0);
 static CLOSE_AFTER: Mutex<Option<(usize, Weak<Engine>)>> = Mutex::new(None);
 
@@ -31,6 +56,12 @@ pub(crate) fn install_delayed_site_bank(host: &mut abi::rptadv_host_services_v10
     host.radio_site_publish = Some(publish);
     host.radio_site_snapshot = Some(snapshot);
 }
+/// Return checked masks and whether a provider request is still waiting for service.
+pub(crate) fn site_bank_electrical() -> (u32, u32, bool) {
+    let bank = BANK.lock().unwrap();
+    (bank.mask, bank.high, bank.pending.is_some())
+}
+
 pub(crate) fn site_bank_delay(hold: usize) -> u32 {
     let mut bank = BANK.lock().unwrap();
     bank.hold = hold;
@@ -47,7 +78,7 @@ fn apply(bank: &mut Bank, binding: bool, mask: u32, high: u32) {
 
 unsafe extern "C" fn snapshot(
     _: *mut c_void,
-    _: *mut c_void,
+    handle: *mut c_void,
     _: u32,
     result: *mut abi::UrpAstSiteSnapshot,
 ) -> i32 {
@@ -63,6 +94,15 @@ unsafe extern "C" fn snapshot(
         (*result).input_mask = 0xff;
         (*result).input_quality = 1;
         (*result).observed_at_valid = 1;
+        if let Some(view) = OBSERVED.lock().unwrap().as_mut() {
+            if crate::fixture::radio_name(handle) != view.owner {
+                return -1;
+            }
+            view.snapshots += 1;
+            (*result).observed_at_ms = view.time;
+            (*result).snapshot_at_ms = view.time;
+            (*result).input_quality = view.quality;
+        }
         (*result).claimed_mask = bank.mask;
         (*result).requested_high_mask = bank.high;
         (*result).submitted_high_mask = bank.high;
@@ -99,6 +139,9 @@ unsafe extern "C" fn publish(
     let value = unsafe { &*value };
     let mut bank = BANK.lock().unwrap();
     assert_eq!(value.generation, bank.generation);
+    if let Some(view) = OBSERVED.lock().unwrap().as_mut() {
+        view.writes += 1;
+    }
     if bank.hold != 0 {
         bank.pending = Some((false, value.output_mask, value.high_mask));
     } else {

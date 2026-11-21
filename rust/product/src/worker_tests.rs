@@ -140,10 +140,11 @@ fn worker_with_interval(status: RadioStatus, interval_ms: u64) -> RadioWorker {
 #[test]
 fn transmit_callback_publishes_ptt_state_for_control_snapshot() {
     let status = RadioStatus::default();
-    super::publish_transmit_keyed(Some(&status), true);
-    assert!(status.transmit_keyed());
-    super::publish_transmit_keyed(Some(&status), false);
-    assert!(!status.transmit_keyed());
+    assert_eq!(status.transmit_observation(10), None);
+    super::publish_transmit_keyed(Some(&status), Some(true));
+    assert_eq!(status.transmit_observation(10), Some(true));
+    super::publish_transmit_keyed(Some(&status), Some(false));
+    assert_eq!(status.transmit_observation(10), Some(false));
 }
 
 #[test]

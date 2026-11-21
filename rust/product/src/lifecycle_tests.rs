@@ -24,6 +24,11 @@ impl Engine {
         Some(host.runtime.node(port)?.command_work()?.id())
     }
 
+    /// Force the same scheduled cycle the real ticker runs once per civil second.
+    pub(crate) fn fixture_schedule_tick(self: &Arc<Self>) -> Result<(), RuntimeError> {
+        self.pump(self.clock(), true)
+    }
+
     pub(crate) fn start_fixture_ticker(self: &Arc<Self>) {
         self.start_ticker().unwrap();
     }

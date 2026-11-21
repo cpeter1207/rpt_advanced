@@ -128,3 +128,22 @@ fn site_fan_disabled_stable_ptt_and_invalid_tach() {
     assert_eq!(running.run_on_until_ms, None);
     assert!(running.fault);
 }
+
+#[test]
+fn missing_selector_is_not_a_confirmed_transmitter_release() {
+    let mut fan = FanState::new(settings("run_on_ms=0"));
+    let initial = fan.advance(0, &BTreeMap::new(), None, None, available(false));
+    assert!(initial.fault);
+    assert_eq!(initial.duty, 0.0);
+    assert_eq!(
+        fan.advance(1, &ptt(true), None, None, available(false))
+            .duty,
+        1.0
+    );
+    let missing = fan.advance(2, &BTreeMap::new(), None, None, available(false));
+    assert!(missing.fault);
+    assert_eq!(missing.duty, 1.0);
+    let released = fan.advance(3, &ptt(false), None, None, available(false));
+    assert!(!released.fault);
+    assert_eq!(released.duty, 0.0);
+}
