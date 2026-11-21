@@ -79,7 +79,7 @@ typedef struct rptadv_jitter_observation_v1 {
     uint64_t overload_span;   /**< Sum of discarded packet spans, including overlaps. */
 } rptadv_jitter_observation_v1;
 
-/** Stable ABI 1 table. Every operation is required. */
+/** Stable ABI 1 table. The prefix through observe is required. */
 typedef struct rptadv_jitter_descriptor_v1 {
     uint32_t struct_size;   /**< Complete readable descriptor size. */
     uint32_t abi_version;   /**< RPTADV_JITTER_ABI_VERSION. */
@@ -97,9 +97,11 @@ typedef struct rptadv_jitter_descriptor_v1 {
      * Actual span can be shorter/longer than desired_span, including partial
      * packets and missing spans of concealment_span. Positive start_offset is
      * missing prefix; negative offset skips already released packet samples.
-     * NOT_DUE requires no advance. A proposed delay above maximum_delay clears
+     * NOT_DUE requires no advance. A proposed delay above the effective ceiling clears
      * queued packets and adaptive state, counts overload loss, and returns
      * NOT_DUE; the next packet starts a fresh arrival+initial_delay epoch.
+     * The ceiling is maximum_delay unless a bounds edit is draining
+     * previously admitted excess under the preceding ceiling.
      */
     int32_t (*get)(void *context, uint64_t now_ns, uint32_t desired_span, uint8_t *payload,
                    size_t capacity, rptadv_jitter_result_v1 *result);
@@ -114,6 +116,14 @@ typedef struct rptadv_jitter_descriptor_v1 {
     int32_t (*advance)(void *context, uint64_t now_ns, uint32_t downstream_span);
     /** Copy current owner-thread diagnostics. */
     int32_t (*observe)(const void *context, rptadv_jitter_observation_v1 *result);
+    /** Optional ABI 1 suffix. Check struct_size through this pointer before use.
+     * Change the bounds (in source samples) of one exclusively owned context.
+     * Preserve queued payloads, clock, observations and an outstanding get.
+     * A fetched decision still requires its original advance. Initial applies
+     * at the next genuine priming. Already accumulated excess delay drains
+     * on committed output, bounded by the preceding ceiling; observe continues
+     * to report the actual delay. Invalid bounds leave the context untouched. */
+    int32_t (*set_delays)(void *context, uint32_t minimum, uint32_t initial, uint32_t maximum);
 } rptadv_jitter_descriptor_v1;
 
 /** Return the immutable descriptor; retain the shared object while using it.

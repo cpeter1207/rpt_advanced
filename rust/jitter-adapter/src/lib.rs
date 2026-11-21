@@ -56,6 +56,8 @@ struct Context {
     slots: Box<[Slot]>,
     timeline: Option<Timeline>,
     pending: Option<Pending>,
+    // Previous overload ceiling while already-admitted delay drains.
+    draining_maximum: Option<u32>,
     last_now: u64,
     downstream_span: u32,
     unsuccessful_gets: u32,
@@ -76,14 +78,13 @@ impl Context {
         if config.abi_version != 1
             || config.struct_size < size_of::<abi::rptadv_jitter_config_v1>() as u32
             || !(1..=48000).contains(&config.clock_rate_hz)
-            || config.minimum_delay == 0
-            || config.minimum_delay > config.initial_delay
-            || config.initial_delay > config.maximum_delay
-            || config.maximum_delay > 32767
-            || config.adjustment_step == 0
-            || config.adjustment_step > config.maximum_delay
-            || config.concealment_span == 0
-            || config.concealment_span > config.maximum_delay
+            || !Self::valid_delays(
+                config.minimum_delay,
+                config.initial_delay,
+                config.maximum_delay,
+                config.adjustment_step,
+                config.concealment_span,
+            )
             || !(1..=200).contains(&config.maximum_packets)
             || !(1..=65527).contains(&config.maximum_payload_bytes)
         {
@@ -104,6 +105,7 @@ impl Context {
                 .collect(),
             timeline: None,
             pending: None,
+            draining_maximum: None,
             last_now: 0,
             downstream_span: 0,
             unsuccessful_gets: 0,
@@ -111,6 +113,63 @@ impl Context {
             // SAFETY: the neutral diagnostics structure contains only integers.
             observation: unsafe { std::mem::zeroed() },
         })
+    }
+
+    fn valid_delays(minimum: u32, initial: u32, maximum: u32, step: u32, concealment: u32) -> bool {
+        minimum != 0
+            && minimum <= initial
+            && initial <= maximum
+            && maximum <= 32767
+            && step != 0
+            && step <= maximum
+            && concealment != 0
+            && concealment <= maximum
+    }
+
+    fn set_delays(&mut self, minimum: u32, initial: u32, maximum: u32) -> i32 {
+        if !Self::valid_delays(
+            minimum,
+            initial,
+            maximum,
+            self.config.adjustment_step,
+            self.config.concealment_span,
+        ) {
+            return -1;
+        }
+        if [minimum, initial, maximum]
+            == [
+                self.config.minimum_delay,
+                self.config.initial_delay,
+                self.config.maximum_delay,
+            ]
+        {
+            return 0;
+        }
+        if minimum != self.config.minimum_delay {
+            let mut margin = minimum as i32;
+            // SAFETY: this exclusive owner retains the native buffer. SET_MARGIN
+            // copies one bounded signed sample count without taking ownership.
+            if unsafe {
+                abi::jitter_buffer_ctl(
+                    self.native.as_ptr(),
+                    abi::JITTER_BUFFER_SET_MARGIN as i32,
+                    ptr::from_mut(&mut margin).cast(),
+                )
+            } != 0
+            {
+                return -1;
+            }
+        }
+        let old_ceiling = self.draining_maximum.unwrap_or(self.config.maximum_delay);
+        self.draining_maximum = (maximum < old_ceiling
+            && self
+                .admitted_delay_ns()
+                .is_some_and(|delay| delay > i128::from(self.units_ns(maximum))))
+        .then_some(old_ceiling);
+        self.config.minimum_delay = minimum;
+        self.config.initial_delay = initial;
+        self.config.maximum_delay = maximum;
+        0
     }
 
     fn native(config: &abi::rptadv_jitter_config_v1) -> Option<NonNull<abi::JitterBuffer>> {
@@ -164,6 +223,7 @@ impl Context {
         }
         self.timeline = None;
         self.pending = None;
+        self.draining_maximum = None;
         self.last_now = 0;
         self.downstream_span = 0;
         self.unsuccessful_gets = 0;
@@ -205,6 +265,32 @@ impl Context {
             .unwrap()
             .deadline_ns
             .saturating_add(self.units_ns(self.downstream_span))
+    }
+
+    /// Largest delay already admitted at this edit, including a fetched decision
+    /// that must still be advanced exactly once. Later puts are excluded.
+    fn admitted_delay_ns(&self) -> Option<i128> {
+        let timeline = self.timeline.as_ref()?;
+        // The first due get selects the earliest queued packet, which can precede
+        // the arrival that established the timeline's initial cursor.
+        let cursor = if timeline.started {
+            timeline.cursor
+        } else {
+            self.slots
+                .iter()
+                .filter(|slot| slot.active)
+                .map(|slot| slot.timestamp)
+                .min()?
+        };
+        let current = i128::from(self.deadline()) - self.ideal_ns(cursor);
+        Some(self.pending.as_ref().map_or(current, |pending| {
+            // A pending insertion consumes output time without advancing source
+            // time. Include retained downstream audio once on the effective clock.
+            let samples = u64::from(self.downstream_span) + u64::from(pending.output_span);
+            let duration = samples * 1_000_000_000 / u64::from(self.config.clock_rate_hz);
+            let due = timeline.deadline_ns.saturating_add(duration);
+            current.max(i128::from(due) - self.ideal_ns(pending.next_timestamp))
+        }))
     }
 
     fn collect_retired(&mut self) {
@@ -373,7 +459,8 @@ impl Context {
         }
         let cursor = self.timeline.as_ref().unwrap().cursor;
         let delay = i128::from(self.deadline()) - self.ideal_ns(cursor);
-        if delay > i128::from(self.units_ns(self.config.maximum_delay)) {
+        let ceiling = self.units_ns(self.draining_maximum.unwrap_or(self.config.maximum_delay));
+        if delay > i128::from(ceiling) {
             if !self.overload() {
                 return -1;
             }
@@ -406,8 +493,7 @@ impl Context {
         }
         let deferred = std::mem::take(&mut self.deferred_insertion);
         if kind == abi::JITTER_BUFFER_INSERTION as i32
-            && delay + i128::from(self.units_ns(native.span))
-                > i128::from(self.units_ns(self.config.maximum_delay))
+            && delay + i128::from(self.units_ns(native.span)) > i128::from(ceiling)
         {
             if !self.overload() {
                 return -1;
@@ -496,6 +582,21 @@ impl Context {
         .clamp(0, i128::from(u64::MAX)) as u64;
         let timeline = self.timeline.as_mut().unwrap();
         timeline.deadline_ns = timeline.deadline_ns.max(minimum);
+        if self.draining_maximum.is_some() {
+            let target = (self.ideal_ns(self.timeline.as_ref().unwrap().cursor)
+                + i128::from(self.units_ns(self.config.maximum_delay)))
+            .clamp(0, i128::from(u64::MAX)) as u64;
+            let step = self.units_ns(released.min(self.config.adjustment_step));
+            // Compare the actual fetch deadline (including retained decoded audio)
+            // with the owner's clock. Apply only the reduction to the stored base.
+            let due = self.deadline();
+            let reduced = due.saturating_sub(step).max(target).max(now).min(due);
+            let timeline = self.timeline.as_mut().unwrap();
+            timeline.deadline_ns = timeline.deadline_ns.saturating_sub(due - reduced);
+            if self.deadline() <= target {
+                self.draining_maximum = None;
+            }
+        }
         0
     }
 
@@ -646,6 +747,13 @@ unsafe extern "C" fn observe(
     })
 }
 
+unsafe extern "C" fn set_delays(raw: *mut c_void, minimum: u32, initial: u32, maximum: u32) -> i32 {
+    boundary(|| {
+        unsafe { raw.cast::<Context>().as_mut() }
+            .map_or(-1, |context| context.set_delays(minimum, initial, maximum))
+    })
+}
+
 static DESCRIPTOR: abi::rptadv_jitter_descriptor_v1 = abi::rptadv_jitter_descriptor_v1 {
     struct_size: size_of::<abi::rptadv_jitter_descriptor_v1>() as u32,
     abi_version: 1,
@@ -657,6 +765,7 @@ static DESCRIPTOR: abi::rptadv_jitter_descriptor_v1 = abi::rptadv_jitter_descrip
     get: Some(get),
     advance: Some(advance),
     observe: Some(observe),
+    set_delays: Some(set_delays),
 };
 
 /// Return the immutable jitter ABI 1 descriptor while this shared object is loaded.
