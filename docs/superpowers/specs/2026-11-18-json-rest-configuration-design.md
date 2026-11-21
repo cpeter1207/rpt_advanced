@@ -72,6 +72,10 @@ Preserve profile presence/default semantics, remote options, memories/scans and 
 
 Remove controller INI-specific examples, installed paths, tests and documentation while retaining negative rejection tests and provider-owned INI tests. Controller-authored static_directory_file currently uses [extnodes] INI in both hosts; replace it with a JSON static-node table/resource and typed lookup, preserving static-first/source-authentication semantics. Downloaded external directory feeds are protocol data and retain a separately owned decoder/fallback path. Remove iax-secrets.conf and its implicit/default/check/reload paths in favor of the encrypted credential owner. The [implementation checklist](../plans/2026-11-19-json-rest-implementation-checklist.md) tracks the complete work; completion is recorded there as each step is verified.
 
+## Held-key manual PTT decision
+
+The 2026-11-20 clarification defines PTT key_down as observing a held keyboard key to request manual PTT. It is an input, not an emitted keyboard event. Use an explicitly selected keyboard endpoint and documented backend code set. A separate real hardware actuator is still necessary; do not infer USB GPIO or another output from the keyboard input. The schema representation for selecting both input and actuator is awaiting the requested follow-up decision. RX key_down independently observes the configured key.
+
 ## Protocol jitter and phone-patch keying
 
 Phone patch has no tx or keying_mode switch. Receive admission uses the shared VAD settings and runtime receiver mute. The removed local/remote lists, exposed attachment/reverse-call limits and check_deadline_ms remain absent; owning-port/admission context and runtime bounds still apply.
