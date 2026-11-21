@@ -71,6 +71,8 @@ pub struct EventTicket {
     pub nominal_subsecond_ms: u16,
     /// Boundary or warning.
     pub kind: EventWork,
+    /// Original warning boundary and the exact macro it would run.
+    pub(crate) warning_boundary: Option<WarningBoundary>,
     /// Resolved macro in the exact invoking scope.
     pub command: MacroRef,
 }
@@ -121,6 +123,7 @@ struct Work {
     subsecond: u16,
     origin: EventOrigin,
     command: MacroRef,
+    warning_boundary: Option<WarningBoundary>,
     due_ms: i128,
     grace_ms: i128,
     last_opportunity: Option<i128>,
@@ -168,8 +171,22 @@ struct Window {
     end: i64,
     begun: bool,
 }
+pub(crate) type WarningRoute = (crate::command_language::ProtectedOperand<String>, bool);
+#[derive(Clone, Debug)]
+pub(crate) struct WarningBoundary {
+    pub(crate) due: i64,
+    pub(crate) route: Option<WarningRoute>,
+}
+struct CapturedWarning {
+    kind: EventWork,
+    nominal: i64,
+    command: MacroRef,
+    boundary: Option<WarningBoundary>,
+}
 #[derive(Clone)]
 struct Entry {
+    start_route: Option<WarningRoute>,
+    end_route: Option<WarningRoute>,
     spec: Event,
     last_check: Option<i64>,
     warning_seen: BTreeMap<EventWork, i64>,
@@ -188,7 +205,7 @@ struct Capture {
     opening: Option<(i64, Option<i64>, EventOrigin)>,
     next_check: Option<i64>,
     end_due: bool,
-    warnings: Vec<(EventWork, i64, MacroRef)>,
+    warnings: Vec<CapturedWarning>,
 }
 impl Capture {
     // Required queries fail closed for this stream and leave a value-free diagnostic.
@@ -280,6 +297,8 @@ impl Entry {
     fn prepared(spec: Event, prior: Option<&Entry>) -> Self {
         let mut entry = Self {
             spec,
+            start_route: None,
+            end_route: None,
             last_check: None,
             warning_seen: BTreeMap::new(),
             poll: None,
@@ -439,7 +458,27 @@ impl Entry {
                 .result(w.at.match_minute(now))
                 .filter(|due| self.warning_seen.get(&kind).is_none_or(|seen| due > seen))
             {
-                capture.warnings.push((kind, second, w.command.clone()));
+                let boundary = match kind {
+                    EventWork::StartWarning(_) => Some((&self.spec.start, &self.start_route)),
+                    EventWork::EndWarning(_) => {
+                        self.spec.end.as_ref().map(|b| (b, &self.end_route))
+                    }
+                    _ => None,
+                }
+                .and_then(|(b, route)| {
+                    let due =
+                        capture.result(schedule(&b.at)?.next_after(second.saturating_sub(1)))?;
+                    Some(WarningBoundary {
+                        due,
+                        route: route.clone(),
+                    })
+                });
+                capture.warnings.push(CapturedWarning {
+                    kind,
+                    nominal: second,
+                    command: w.command.clone(),
+                    boundary,
+                });
             }
         }
         if capture.issue.is_some() {
@@ -457,11 +496,11 @@ impl Entry {
         command: MacroRef,
         clock: RuntimeClock,
         minutes: u64,
-    ) {
+    ) -> Option<&mut Work> {
         // The existing command-only policy keeps the oldest occupied stream reservation.
         // Independent warnings and the opposite boundary have their own slots.
         if self.work.iter().any(|w| w.kind == kind) {
-            return;
+            return None;
         }
         self.work.push(Work {
             id: Arc::new(()),
@@ -469,6 +508,7 @@ impl Entry {
             nominal,
             origin,
             command,
+            warning_boundary: None,
             due_ms: if origin == EventOrigin::Calendar {
                 due_ms(clock, nominal)
             } else {
@@ -485,6 +525,7 @@ impl Entry {
             eligible: false,
             phase: Phase::Waiting,
         });
+        self.work.last_mut()
     }
     fn boundary(
         &mut self,
@@ -498,7 +539,7 @@ impl Entry {
         } else {
             self.spec.end.as_ref().expect("paired window")
         };
-        self.add(
+        let _ = self.add(
             kind,
             nominal,
             origin,
@@ -537,8 +578,16 @@ impl Entry {
             let seen = self.warning_seen.entry(kind).or_insert(clock.wall_seconds);
             *seen = (*seen).max(clock.wall_seconds);
         }
-        for (kind, nominal, command) in c.warnings {
-            self.add(kind, nominal, EventOrigin::Calendar, command, clock, 0)
+        for CapturedWarning {
+            kind,
+            nominal,
+            command,
+            boundary,
+        } in c.warnings
+        {
+            if let Some(work) = self.add(kind, nominal, EventOrigin::Calendar, command, clock, 0) {
+                work.warning_boundary = boundary;
+            }
         }
         self.poll = c.poll;
         self.issue = c.issue;
@@ -631,6 +680,7 @@ impl Calendar {
             generation,
             owner: self.owner,
             event: e.spec.binding.id,
+            warning_boundary: w.warning_boundary.clone(),
             origin: w.origin,
             observed: w.observed,
             nominal: w.nominal,
@@ -656,6 +706,17 @@ impl Calendar {
     }
 }
 impl EventScheduler {
+    pub(crate) fn bind_warning_routes(
+        &mut self,
+        mut route: impl FnMut(&MacroRef) -> Option<WarningRoute>,
+    ) {
+        if let Some(calendar) = &mut self.calendar {
+            for entry in &mut calendar.events {
+                entry.start_route = route(&entry.spec.start.command);
+                entry.end_route = entry.spec.end.as_ref().and_then(|b| route(&b.command));
+            }
+        }
+    }
     /// Bind the prepared profiles and route key of one exact invoking controller.
     pub fn from_profiles(
         generation: u64,
@@ -784,10 +845,22 @@ impl EventScheduler {
         local: &str,
         links: &mut super::super::link_schedule::LinkScheduler,
     ) -> bool {
+        self.apply_owned_group_holds(local, local, None, self.generation, links)
+    }
+    pub(in crate::runtime) fn apply_owned_group_holds(
+        &self,
+        local: &str,
+        route_owner: &str,
+        owner: Option<ResourceScope>,
+        route_generation: u64,
+        links: &mut super::super::link_schedule::LinkScheduler,
+    ) -> bool {
         let Some(c) = self.calendar.as_ref() else {
             return false;
         };
-        if c.port_key.as_ref().is_none_or(|key| key.as_str() != local) {
+        if owner.is_some_and(|owner| owner != c.owner)
+            || c.port_key.as_ref().is_none_or(|key| key.as_str() != local)
+        {
             return false;
         }
         let groups = c
@@ -801,7 +874,7 @@ impl EventScheduler {
                     .map(|(_, key)| key.as_str())
             })
             .collect();
-        links.event_groups(self.generation, local, &groups)
+        links.event_groups(route_generation, route_owner, &groups)
     }
     /// Offer the oldest eligible reservation. A full macro queue leaves the same ticket pending.
     pub fn offer(&self) -> Option<EventTicket> {

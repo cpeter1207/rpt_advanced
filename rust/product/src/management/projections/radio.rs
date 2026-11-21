@@ -29,8 +29,13 @@ fn digital(d: DigitalCode) -> String {
 fn binding(b: &SignalBinding) -> Value {
     let mut obj = json!({"source":b.source.as_str(),"inverted":b.inverted});
     if !b.pins.is_empty() {
-        obj["pin"] = json!(b.pins);
+        obj["pin"] = if b.source == SignalSource::Serial {
+            json!(b.serial_pins().collect::<Vec<_>>())
+        } else {
+            json!(b.pins)
+        };
     }
+    insert(&mut obj, "scancode", b.scancode.map(Value::from));
     obj
 }
 fn rx_signals(s: &RxSignals) -> Value {
@@ -107,7 +112,15 @@ fn interface(i: &Interface) -> Value {
         .zip(p.inputs)
         .map(|(k, v)| (k.to_string(), json!(v.as_str())))
         .collect::<Map<_, _>>();
-    json!({"audio":audio,"gpio":gpio,"serial":s,"parallel":{"device":p.device,"base_address":p.base_address,"outputs":outputs,"inputs":inputs}})
+    let mut result = json!({"audio":audio,"gpio":gpio,"serial":s,"parallel":{"device":p.device,"base_address":p.base_address,"outputs":outputs,"inputs":inputs}});
+    insert(
+        &mut result,
+        "keyboard",
+        i.keyboard_device
+            .as_deref()
+            .map(|device| json!({"device":device})),
+    );
+    result
 }
 fn memory(m: &Memory) -> Value {
     let tone = |t: &MemoryTone| json!({"enabled":t.enabled,"frequency":hz(t.tenths_hz)});

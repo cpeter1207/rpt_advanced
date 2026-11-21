@@ -1192,12 +1192,15 @@ pub(crate) fn failed_output_delay_endpoints() -> (InboundProducer, InboundConsum
     }
 }
 
-pub(crate) fn failed_media_push_endpoints() -> (InboundProducer, InboundConsumer) {
+pub(crate) fn failed_regeneration_push_endpoints() -> (RegenerationWriter, InboundConsumer) {
     // SAFETY: the copied descriptor retains its released create/destroy pair for this test.
     unsafe {
         let mut api = *ffi::rpcr3_descriptor();
-        api.ring_producer_push = Some(failed_push);
-        InboundRing::from_descriptor(48000, InboundPolicy::Media, Box::leak(Box::new(api))).unwrap()
+        api.ring_producer_push_tagged = Some(rejected_tagged);
+        let endpoints =
+            InboundRing::from_descriptor(48000, InboundPolicy::Media, Box::leak(Box::new(api)))
+                .unwrap();
+        InboundRing::prepare_regeneration(endpoints).unwrap()
     }
 }
 
@@ -1327,4 +1330,32 @@ pub(crate) unsafe fn local_with_descriptor(
         )
     }
     .unwrap()
+}
+
+#[test]
+fn round2_untimed_sdk_preserves_ordinary_playback_but_refuses_mute_capable_ingress() {
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        api.struct_size =
+            std::mem::offset_of!(ffi::rpcr3_descriptor, ring_consumer_render_sample_timed) as u32;
+        let table = Box::leak(Box::new(api));
+        let (mut producer, mut reader) =
+            InboundRing::from_descriptor(8000, InboundPolicy::Echo, table).unwrap();
+        assert_eq!(producer.write(&[0.4; 640]), Ok(640));
+        producer.finish().unwrap();
+        assert!(reader.render(&mut [0.; 960]).unwrap() > 0);
+        for policy in [
+            InboundPolicy::Peer,
+            InboundPolicy::Echo,
+            InboundPolicy::Phone,
+            InboundPolicy::Local {
+                squelch_delay_ms: 0,
+            },
+        ] {
+            assert!(
+                InboundRing::receiver_from_descriptor(8000, policy, table, PeerSignals::new())
+                    .is_err()
+            );
+        }
+    }
 }

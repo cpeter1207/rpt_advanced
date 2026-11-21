@@ -1,6 +1,9 @@
 //! Per-node bounded media distribution, independent of station control.
 
-use super::{regeneration::RegenerationProducer, ring::InboundProducer};
+use super::{
+    regeneration::{RegenerationDigit, RegenerationProducer},
+    ring::RegenerationWriter,
+};
 use crate::Error;
 use rpt_advanced_core::config::ResolvedDtmfRegenerationSettings;
 use rpt_advanced_core::link::LinkDispatcher;
@@ -105,12 +108,15 @@ impl Drop for Dispatch {
 /// Control-owned lifetime handle; the media thread alone owns queue endpoints.
 pub(crate) struct PreparedDispatch {
     state: Arc<DispatchState>,
-    digits: Option<Producer<char>>,
+    digits: Option<Producer<RegenerationDigit>>,
 }
 impl PreparedDispatch {
     /// Drop new excess digits; never block the generation's control owner.
-    pub(crate) fn queue_digit(&mut self, digit: char) -> bool {
-        if self.state.phase.load(Ordering::Acquire) != ACTIVE || !"0123456789ABCD*#".contains(digit)
+    pub(crate) fn queue_digit(&mut self, digit: impl Into<RegenerationDigit>) -> bool {
+        let digit = digit.into();
+        if self.state.phase.load(Ordering::Acquire) != ACTIVE
+            || !"0123456789ABCD*#".contains(digit.symbol)
+            || digit.origin.as_ref().is_some_and(|o| !o.current())
         {
             return false;
         }
@@ -245,7 +251,7 @@ impl MediaWorker {
         &mut self,
         dispatcher: LinkDispatcher,
         wakes: Vec<PeerWake>,
-        regeneration: Option<(ResolvedDtmfRegenerationSettings, InboundProducer, usize)>,
+        regeneration: Option<(ResolvedDtmfRegenerationSettings, RegenerationWriter, usize)>,
     ) -> Result<PreparedDispatch, Error> {
         if self.stop.load(Ordering::Acquire) {
             return Err(Error::Reservation);

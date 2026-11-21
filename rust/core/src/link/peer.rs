@@ -90,7 +90,11 @@ impl Peer {
         self.digit_deadline = (digit != '#').then(|| now_ms.saturating_add(3000));
         true
     }
-    /// Consume one due three-second terminator in the non-audio owner.
+    /// Retire the advisory legacy delimiter timer after its source finishes.
+    pub fn finish_digits(&mut self) -> bool {
+        self.digit_deadline.take().is_some()
+    }
+    /// Consume one due legacy inactivity deadline in the non-audio owner.
     pub fn expire_digit(&mut self, now_ms: u64) -> bool {
         if self
             .digit_deadline

@@ -29,6 +29,14 @@ pub(super) enum Decoder {
     SendDigit(char),
 }
 impl Mapping {
+    /// Only radio-family commands consume real peer unkey.
+    pub(crate) fn radio(&self) -> bool {
+        matches!(
+            self.decoder,
+            Decoder::Radio(_) | Decoder::Fixed(Action::Radio(_))
+        )
+    }
+
     pub(super) fn prepare(key: &str, body: &Value) -> Result<Self> {
         let mut obj = body.as_object().ok_or(ActionError::Invalid)?.clone();
         let command = obj

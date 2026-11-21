@@ -1,5 +1,10 @@
 //! Bounded radio-to-control digit handoff and existing linking command policy.
 
+mod mapped;
+pub(crate) use mapped::CommandProfile;
+pub(super) use mapped::MappedCollector;
+pub use mapped::MappedInput;
+
 use crate::{
     audio::{DtmfDetector, DtmfError},
     command::{Command, CommandCollector, DtmfCommandMap, LinkAction},
@@ -88,6 +93,7 @@ impl DtmfPublisher {
 pub struct DtmfWorker {
     detector: DtmfDetector,
     publisher: DtmfPublisher,
+    receive_mute: Option<Arc<AtomicU64>>,
 }
 impl DtmfWorker {
     /// Allocate the fixed 256-event queue and return its separate control consumer.
@@ -97,9 +103,13 @@ impl DtmfWorker {
             Self {
                 detector: DtmfDetector::new(muting)?,
                 publisher,
+                receive_mute: None,
             },
             dispatcher,
         ))
+    }
+    pub(super) fn bind_receive_mute(&mut self, gate: Arc<AtomicU64>) {
+        self.receive_mute = Some(gate);
     }
     /// Decode every digit completion and publish without allocation, submission, or locks.
     pub fn process(&mut self, receiving: bool, audio: &mut [f32], now_ms: u64) {
@@ -109,8 +119,17 @@ impl DtmfWorker {
             emitted = true;
         });
         self.publisher.finish_frame(receiving, now_ms, emitted);
+        if self.receive_epoch() & 1 != 0 {
+            audio.fill(0.0);
+        }
     }
 
+    /// Snapshot the local operational gate for this receive callback.
+    pub fn receive_epoch(&self) -> u64 {
+        self.receive_mute
+            .as_ref()
+            .map_or(0, |g| g.load(Ordering::Acquire))
+    }
     /// Current receive-side muting state for the delayed PCM consumer.
     #[must_use]
     pub fn suppressing(&self) -> bool {
@@ -184,8 +203,41 @@ pub struct DigitOperation {
     pub origin: Option<String>,
     pub(crate) admin_authorized: bool,
     pub(super) macro_permit: Option<MacroPermit>,
+    pub(super) action_permit: Option<ActionPermit>,
 }
 
+/// Retain the source's live grant and the generation across deferred domain work.
+#[derive(Clone)]
+pub struct ActionPermit {
+    pub(super) receiver: bool,
+    pub(super) generation: Arc<super::GenerationWork>,
+    pub(super) grant: Option<Arc<AtomicU64>>,
+    pub(super) reply: Option<crate::link::PeerReply>,
+    pub(super) deadline: Option<u64>,
+}
+impl ActionPermit {
+    /// Recheck the generation, caller, deadline and any actual-source grant prior to submission.
+    pub fn current(&self, now: Option<u64>) -> bool {
+        self.reply.as_ref().is_none_or(|r| !r.ended())
+            && self.generation.is_current()
+            && self.grant.as_ref().is_none_or(|g| {
+                let expiry = g.load(Ordering::Acquire);
+                expiry != 0 && now.is_none_or(|t| t < expiry)
+            })
+            && self.deadline.is_none_or(|d| now.is_none_or(|t| t <= d))
+    }
+}
+impl PartialEq for ActionPermit {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.generation, &other.generation)
+    }
+}
+impl Eq for ActionPermit {}
+impl std::fmt::Debug for ActionPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ActionPermit")
+    }
+}
 /// Shared cancellation follows copied operations into ordinary dispatch queues.
 #[derive(Clone, Debug)]
 pub(super) struct MacroPermit {
@@ -226,6 +278,8 @@ pub struct PadTestResult {
 /// Control-side interpretation; media and directory work stay outside collection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DigitOutcome {
+    /// A completed registry-bound candidate, still subject to exact-source admission.
+    Mapped(MappedInput),
     /// Source-only failure notice; expansion and credential digits are never included.
     MacroStopped {
         /// Exact originating connection, absent only for the local RF source.
@@ -239,9 +293,20 @@ pub enum DigitOutcome {
     PadTest(PadTestResult),
     /// Idle addressed peer digit eligible for configured local-TX regeneration.
     Regenerate(char),
+    /// Received signaling fenced to its original connection and mute epoch.
+    ReceivedDigit(char, crate::link::RegenerationOrigin),
 }
 
 impl DigitOperation {
+    /// A missing peer return path represents RF only for actual receiver-origin controls.
+    pub fn receiver_source(&self) -> bool {
+        self.reply.is_none() && self.action_permit.as_ref().is_none_or(|p| p.receiver)
+    }
+    /// Preserve voice responses only for an actual ingress.
+    pub fn audible_source(&self) -> bool {
+        self.reply.is_some() || self.receiver_source()
+    }
+
     /// Construct a non-administrative typed operation for trusted control interfaces.
     pub fn new(command: Command, digit: Option<char>) -> Self {
         Self {
@@ -252,12 +317,14 @@ impl DigitOperation {
             origin: None,
             admin_authorized: false,
             macro_permit: None,
+            action_permit: None,
         }
     }
 }
 
 /// Serialized command collection; authorization/peer availability stays with link control.
 pub struct DtmfCommands {
+    mapped: Option<MappedCollector>,
     map: DtmfCommandMap,
     collector: CommandCollector,
     last_node: String,
@@ -268,7 +335,8 @@ pub struct DtmfCommands {
     admin_unlock_hash: String,
     admin_lock_hash: String,
     admin_timeout_ms: u64,
-    admin_until_ms: u64,
+    admin_until_ms: Arc<AtomicU64>,
+    radio_present: bool,
     remote_access: RemoteDtmfAccess,
     macros: Arc<Vec<CompiledDtmfMacro>>,
     macro_limits: DtmfMacroLimits,
@@ -281,7 +349,12 @@ impl DtmfCommands {
     pub(super) fn for_source(&self) -> Self {
         let mut commands = Self::new(self.map.clone());
         commands.peer_source = true;
+        commands.mapped = self
+            .mapped
+            .as_ref()
+            .map(|m| MappedCollector::new(m.profile.clone(), m.generation));
         commands.remote_access = self.remote_access;
+        commands.radio_present = self.radio_present;
         commands.configure_admin(
             &self.admin_unlock_hash,
             &self.admin_lock_hash,
@@ -295,6 +368,7 @@ impl DtmfCommands {
     pub fn new(map: DtmfCommandMap) -> Self {
         let collector = map.collector();
         Self {
+            mapped: None,
             map,
             collector,
             last_node: String::new(),
@@ -305,14 +379,67 @@ impl DtmfCommands {
             admin_unlock_hash: String::new(),
             admin_lock_hash: String::new(),
             admin_timeout_ms: 300_000,
-            admin_until_ms: 0,
+            admin_until_ms: Arc::new(AtomicU64::new(0)),
             remote_access: RemoteDtmfAccess::Disabled,
+            radio_present: false,
             macros: Arc::new(Vec::new()),
             macro_limits: DtmfMacroLimits::default(),
             active_macro: None,
             macro_permit: None,
             macro_stopped: false,
         }
+    }
+    pub(super) fn install_profile(&mut self, profile: Arc<CommandProfile>, generation: u64) {
+        self.cancel_macro();
+        self.mapped = Some(MappedCollector::new(profile, generation));
+    }
+    pub(super) fn profile(&self) -> Option<&Arc<CommandProfile>> {
+        self.mapped.as_ref().map(|m| &m.profile)
+    }
+    pub(super) fn collector_pin(&self) -> Option<Arc<()>> {
+        self.mapped.as_ref().map(|c| c.pin())
+    }
+
+    pub(super) fn apply_admin(&mut self, unlock: bool, code: Option<&str>, now_ms: u64) -> bool {
+        if !unlock && code.is_none() {
+            self.admin_until_ms.store(0, Ordering::Release);
+            return true;
+        }
+        let hash = if unlock {
+            &self.admin_unlock_hash
+        } else {
+            &self.admin_lock_hash
+        };
+        let valid = self.credentials_configured() && code.is_some_and(|s| verify_hash(hash, s));
+        if valid || unlock {
+            self.admin_until_ms.store(
+                if valid && unlock {
+                    now_ms.saturating_add(self.admin_timeout_ms)
+                } else {
+                    0
+                },
+                Ordering::Release,
+            );
+        }
+        valid
+    }
+    pub(super) fn node_operand(&mut self, target: &str, dtmf: bool) -> Option<String> {
+        if dtmf && target == "0" {
+            return (!self.last_node.is_empty()).then(|| self.last_node.clone());
+        }
+        if dtmf {
+            self.last_node = target.to_owned();
+        }
+        Some(target.to_owned())
+    }
+    pub(super) fn start_pad(&mut self) {
+        self.pad = Some(PadTestResult {
+            digits: String::with_capacity(127),
+            overflowed: false,
+        });
+    }
+    pub(super) fn radio_enabled(&self) -> bool {
+        self.radio_present
     }
     /// Borrow the final remapped command namespace during candidate preparation.
     pub(crate) fn command_map(&self) -> &DtmfCommandMap {
@@ -371,11 +498,14 @@ impl DtmfCommands {
         })
     }
 
-    fn admin_unlocked(&mut self, now_ms: u64) -> bool {
-        if now_ms >= self.admin_until_ms {
-            self.admin_until_ms = 0;
+    pub(super) fn grant_deadline(&self) -> Arc<AtomicU64> {
+        self.admin_until_ms.clone()
+    }
+    pub(super) fn admin_unlocked(&mut self, now_ms: u64) -> bool {
+        if now_ms >= self.admin_until_ms.load(Ordering::Acquire) {
+            self.admin_until_ms.store(0, Ordering::Release);
         }
-        self.admin_until_ms != 0
+        self.admin_until_ms.load(Ordering::Acquire) != 0
     }
 
     /// Advance at most one complete command without sleeping the serialized control owner.
@@ -414,7 +544,7 @@ impl DtmfCommands {
                     if self.map.mappings().iter().any(|mapping| {
                         mapping.action == LinkAction::AdminLock && mapping.digits == text
                     }) {
-                        self.admin_until_ms = 0;
+                        self.admin_until_ms.store(0, Ordering::Release);
                         return None;
                     }
                     let Some(mut operation) = self.complete_command(&text, now_ms, false) else {
@@ -427,6 +557,17 @@ impl DtmfCommands {
                 }
             }
         }
+    }
+    pub(super) fn configure_radio_owner(
+        &mut self,
+        owner: Option<&crate::remote_base_command::RemoteCommandConfiguration>,
+    ) -> Result<(), crate::command::CommandMapError> {
+        let (prefix, access) = owner.map_or(("", RemoteDtmfAccess::Disabled), |radio| {
+            (radio.prefix.as_str(), radio.access)
+        });
+        self.configure_remote(prefix, access)?;
+        self.radio_present = owner.is_some();
+        Ok(())
     }
     /// Atomically install the enabled rig's family and mutation policy. An empty
     /// prefix removes the family; invalid mappings leave the current collector intact.
@@ -457,6 +598,7 @@ impl DtmfCommands {
         self.collector = map.collector();
         self.map = map;
         self.remote_access = access;
+        self.radio_present = !prefix.is_empty();
         Ok(())
     }
     /// Install hashed DTMF credentials on control; administration stays unavailable unless both
@@ -470,7 +612,7 @@ impl DtmfCommands {
             self.admin_lock_hash.push_str(lock_hash);
             self.admin_timeout_ms = timeout_ms;
         }
-        self.admin_until_ms = 0;
+        self.admin_until_ms.store(0, Ordering::Release);
     }
     /// Select an independently authorized direct peer after the link owner validates it.
     pub fn select_remote(&mut self, remote: &str) {
@@ -485,6 +627,13 @@ impl DtmfCommands {
     }
     /// Interpret copied events on control. Call `Lost` also after control submission rejection.
     pub fn feed(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
+        if self.mapped.is_some() && self.pad.is_none() && self.remote.is_empty() {
+            let grant = self.admin_unlocked(match event {
+                DigitEvent::Digit { now_ms, .. } | DigitEvent::Unkey { now_ms } => now_ms,
+                DigitEvent::Lost => 0,
+            });
+            return self.mapped.as_mut()?.feed(event, grant);
+        }
         if matches!(event, DigitEvent::Lost | DigitEvent::Digit { digit: '0'..='9' | 'A'..='D' | '*' | '#', .. })
         {
             self.cancel_macro();
@@ -538,11 +687,12 @@ impl DtmfCommands {
                     origin: None,
                     admin_authorized: false,
                     macro_permit: None,
+                    action_permit: None,
                 })
             });
         }
-        if now_ms >= self.admin_until_ms {
-            self.admin_until_ms = 0;
+        if now_ms >= self.admin_until_ms.load(Ordering::Acquire) {
+            self.admin_until_ms.store(0, Ordering::Release);
         }
         if self.peer_source
             && !self.collector.active()
@@ -596,7 +746,7 @@ impl DtmfCommands {
     fn complete_command(&mut self, text: &str, now_ms: u64, human: bool) -> Option<DigitOperation> {
         self.admin_unlocked(now_ms);
         if let Some(remote) = self.map.parse_remote(text) {
-            let authorized = self.admin_until_ms != 0;
+            let authorized = self.admin_until_ms.load(Ordering::Acquire) != 0;
             if !self.remote_authorized(remote.administrative(), authorized, now_ms) {
                 return None;
             }
@@ -635,13 +785,16 @@ impl DtmfCommands {
                 if !human {
                     return None;
                 }
-                self.admin_until_ms = if self.credentials_configured()
-                    && verify_hash(&self.admin_unlock_hash, &command.node)
-                {
-                    now_ms.saturating_add(self.admin_timeout_ms)
-                } else {
-                    0
-                };
+                self.admin_until_ms.store(
+                    if self.credentials_configured()
+                        && verify_hash(&self.admin_unlock_hash, &command.node)
+                    {
+                        now_ms.saturating_add(self.admin_timeout_ms)
+                    } else {
+                        0
+                    },
+                    Ordering::Release,
+                );
                 return None;
             }
             LinkAction::AdminLock => {
@@ -651,12 +804,12 @@ impl DtmfCommands {
                 if self.credentials_configured()
                     && verify_hash(&self.admin_lock_hash, &command.node)
                 {
-                    self.admin_until_ms = 0;
+                    self.admin_until_ms.store(0, Ordering::Release);
                 }
                 return None;
             }
             LinkAction::ParrotEnable | LinkAction::ParrotDisable | LinkAction::EchoTelemetry => {
-                if self.admin_until_ms == 0 {
+                if self.admin_until_ms.load(Ordering::Acquire) == 0 {
                     return None;
                 }
                 admin_authorized = true;
@@ -680,12 +833,14 @@ impl DtmfCommands {
             origin: None,
             admin_authorized,
             macro_permit: None,
+            action_permit: None,
         })
     }
 
     /// Preserve commands, selected/remembered destinations, and live administrative grants.
     pub(super) fn retains_state(&self, now_ms: u64) -> bool {
-        self.collector.active()
+        self.mapped.as_ref().is_some_and(MappedCollector::pending)
+            || self.collector.active()
             || self.active_macro.is_some()
             || self
                 .macro_permit
@@ -694,13 +849,22 @@ impl DtmfCommands {
             || !self.remote.is_empty()
             || !self.last_node.is_empty()
             || self.pad.is_some()
-            || now_ms < self.admin_until_ms
+            || now_ms < self.admin_until_ms.load(Ordering::Acquire)
     }
     pub(super) fn remote_collecting(&self) -> bool {
-        self.collector.active() && self.collector.remote_family()
+        self.mapped
+            .as_ref()
+            .is_some_and(MappedCollector::peer_unkey)
+            || self.collector.active() && self.collector.remote_family()
     }
     /// Expire only this origin's pending command, without ending remote selection.
     pub(super) fn expire(&mut self, now_ms: u64) -> Option<DigitOutcome> {
+        if self.mapped.as_ref().is_some_and(MappedCollector::active) {
+            return self.feed(DigitEvent::Digit {
+                digit: '\0',
+                now_ms,
+            });
+        }
         if self
             .digit_deadline
             .is_some_and(|deadline| now_ms >= deadline)
@@ -720,9 +884,11 @@ impl DtmfCommands {
         authorized: bool,
         now_ms: u64,
     ) -> bool {
-        let authorized = authorized && self.admin_until_ms != 0 && now_ms < self.admin_until_ms;
-        if !authorized && now_ms >= self.admin_until_ms {
-            self.admin_until_ms = 0;
+        let authorized = authorized
+            && self.admin_until_ms.load(Ordering::Acquire) != 0
+            && now_ms < self.admin_until_ms.load(Ordering::Acquire);
+        if !authorized && now_ms >= self.admin_until_ms.load(Ordering::Acquire) {
+            self.admin_until_ms.store(0, Ordering::Release);
         }
         authorized
     }
@@ -746,8 +912,13 @@ impl DtmfCommands {
 
     /// Renew the source grant only after a successful administrative completion.
     pub(crate) fn confirm_administrative_action(&mut self, now_ms: u64) {
-        if self.admin_until_ms != 0 && now_ms < self.admin_until_ms {
-            self.admin_until_ms = now_ms.saturating_add(self.admin_timeout_ms);
+        if self.admin_until_ms.load(Ordering::Acquire) != 0
+            && now_ms < self.admin_until_ms.load(Ordering::Acquire)
+        {
+            self.admin_until_ms.store(
+                now_ms.saturating_add(self.admin_timeout_ms),
+                Ordering::Release,
+            );
         }
     }
 
@@ -758,6 +929,7 @@ impl DtmfCommands {
 
 impl Drop for DtmfCommands {
     fn drop(&mut self) {
+        self.admin_until_ms.store(0, Ordering::Release);
         self.cancel_macro();
     }
 }

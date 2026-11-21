@@ -155,6 +155,22 @@ impl LinkManager {
             serial: 0,
         })
     }
+    pub(crate) fn wire_node(&self) -> Option<&str> {
+        (!self.local.is_empty()).then_some(self.local.as_str())
+    }
+    pub(crate) fn configure_wire_node(&mut self, node: Option<&str>) {
+        self.local = node.unwrap_or_default().to_owned();
+    }
+    /// Compare the actual ASL account including leading-zero spellings used on ingress.
+    /// This check does not alter the handler's original generic parameter or peer name.
+    pub(crate) fn is_wire_self(&self, name: &str) -> bool {
+        self.wire_node().is_some_and(|local| {
+            local == name
+                || (decimal_identity(local)
+                    && decimal_identity(name)
+                    && local.trim_start_matches('0') == name.trim_start_matches('0'))
+        })
+    }
     /// Direct ended peers reserve identity; only live topology proves transit reachability.
     pub fn reaches(&self, name: &str, include_paused: bool) -> bool {
         self.peers.iter().any(|peer| {
@@ -176,7 +192,7 @@ impl LinkManager {
         if !decimal_identity(name) {
             return Err(AdmissionError::Identity);
         }
-        if name == self.local
+        if self.is_wire_self(name)
             || self.peers.iter().any(|peer| {
                 peer.name == name
                     || (group.is_none()
@@ -634,6 +650,23 @@ impl LinkManager {
         }
     }
 
+    /// A matching active ungrouped permanent connection or its existing outage recovery.
+    /// An indirect advertised route or a pending owner that has been paused is not a match.
+    pub(crate) fn active_permanent(&self, name: &str, mode: Mode) -> bool {
+        self.peers.iter().any(|p| {
+            p.name == name && p.mode == mode && p.permanent && !p.ended && p.group.is_none()
+        }) || self.retries.iter().any(|r| {
+            r.name == name
+                && r.mode == mode
+                && r.automatic
+                && !r.paused
+                && r.group.is_none()
+                && r.blocked_topology.is_none()
+                && !self.peers.iter().any(|p| {
+                    p.name == name || !p.ended && p.routes.iter().any(|route| route.node == name)
+                })
+        })
+    }
     /// Exact permanent route ownership, including paused recovery intent.
     pub fn owns_permanent(&self, name: &str) -> bool {
         self.peers
@@ -815,7 +848,7 @@ impl LinkManager {
             return Vec::new();
         }
         match message {
-            Protocol::Query { requester } if requester != &self.local => {
+            Protocol::Query { requester } if !self.is_wire_self(requester) => {
                 let age = if transitioned_ms == 0 {
                     0
                 } else {
@@ -843,7 +876,7 @@ impl LinkManager {
                 source,
                 keyed,
                 age_seconds,
-            } if destination != &self.local => {
+            } if !self.is_wire_self(destination) => {
                 let text = format!(
                     "K {destination} {source} {} {age_seconds}",
                     u8::from(*keyed)
@@ -881,7 +914,7 @@ impl LinkManager {
         else {
             return Vec::new();
         };
-        if destination == &self.local {
+        if self.is_wire_self(destination) {
             return Vec::new();
         }
         let text = format!("D {destination} {source} {sequence} {digit}");

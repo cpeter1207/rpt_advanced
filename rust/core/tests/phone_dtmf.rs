@@ -377,8 +377,8 @@ fn distinct_manual_prefix_families_remain_configurable() {
 
 #[test]
 fn every_action_and_pending_collection_redacts_payloads_in_debug() {
-    let actions: [Action; 9] = [
-        Action::TelephoneDigit('8'),
+    let actions = [
+        Action::<String>::TelephoneDigit('8'),
         Action::Attach(Some("10001234".into())),
         Action::SelectTarget("10001234".into()),
         Action::NodeDigit {

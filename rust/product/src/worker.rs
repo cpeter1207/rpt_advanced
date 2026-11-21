@@ -264,7 +264,7 @@ impl LocalRingUpdate {
         Self::with_handoff(delay_ms, Arc::default())
     }
     fn with_handoff(delay_ms: u64, handoff: Arc<LocalHandoff>) -> Result<Self, RingError> {
-        let (producer, consumer) = InboundRing::open(
+        let (producer, consumer) = InboundRing::open_receiver(
             48_000,
             InboundPolicy::Local {
                 squelch_delay_ms: delay_ms,
@@ -682,6 +682,8 @@ fn receive(
     if take_test_failure(TestFailure::ReceivePanic) {
         panic!("injected receive processing panic");
     }
+    ring.producer
+        .local_epoch(generation.state().receive_epoch());
     generation
         .state()
         .process(metadata.receiver_keyed != 0, samples, now_ms);
@@ -883,7 +885,9 @@ unsafe fn transmit(
     {
         return 0;
     }
+    let receive_epoch = generation.state().controller.receive_epoch();
     let consumer = &mut ring.consumer;
+    consumer.local_epoch(receive_epoch);
     let handoff = &ring.handoff;
     let token = handoff.token.load(Ordering::Acquire);
     let epoch = token & !1;
@@ -915,6 +919,9 @@ unsafe fn transmit(
             Arc::as_ptr(&ring.handoff),
             context.status.current_handoff.load(Ordering::Acquire),
         );
+    receiving &= receive_epoch & 1 == 0
+        && generation.state().controller.receive_epoch() == receive_epoch
+        && (receive_epoch == 0 || consumer.fresh());
     if !receiving || context.status.dtmf_muted() {
         samples.fill(0.0);
     }

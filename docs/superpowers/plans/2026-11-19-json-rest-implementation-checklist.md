@@ -49,6 +49,9 @@ Use test-driven development.
 
 [x] - Complete reviewed modular HAL/store coordination, protected operation receipts, Fluent message preparation and cached site equipment profiles; pass 1,230 distinct affected tests on the development host and native ARM64 node plus host full fast checks. Complete typed API projections and actual runtime/bootstrap joins remain pending.
 
+[x] - Complete reviewed telemetry resources and typed HAL domain projections, per-field sources, text-only EchoLink dependencies, cached views and capability-loss recovery; pass 1,242 distinct affected host/native tests plus full host fast checks. Actual runtime adoption, live status and startup remain pending.
+[x] - Complete the reviewed registered command/macro/DTMF/mute/calendar execution foundation, physical signaling preparation and sparse HAL/schema joins; pass 1,773 distinct affected host/native tests, ten package checks and full host fast/strict documentation checks. Actual process startup, network participants, client migration and runtime cutover remain pending.
+
 [x] - Record approved scheduler policies: pair a start with its next end and skip overlapping starts; ignore the in-progress occurrence when restart_recovery is false; skip missed calendar work while forcing pending monotonic deadlines; cancel without either boundary macro if nominal end arrives before start execution. Preserve existing permanent-route ownership and hold fences.
 
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.

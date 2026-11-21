@@ -105,6 +105,9 @@ pub struct EventScheduler {
     last_tick: Option<i64>,
 }
 impl EventScheduler {
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
     /// Construct all event state before publication; unchanged names/triggers retain progress.
     pub fn new(
         generation: u64,

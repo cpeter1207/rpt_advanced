@@ -258,6 +258,9 @@ impl Host {
             }
         }
     }
+    pub(super) fn defer_link(&mut self, local: &str, effect: LinkEffect) {
+        self.site_delivery.links.push((local.to_owned(), effect));
+    }
     /// Transfer generation-protected dials to the existing off-control dispatcher.
     pub(crate) fn take_site_links(&mut self) -> Vec<(String, LinkEffect)> {
         std::mem::take(&mut self.site_delivery.links)

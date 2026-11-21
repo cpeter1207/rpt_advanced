@@ -60,7 +60,10 @@ fn field_schema(kind: Kind, port: bool) -> Value {
             s
         }
         Kind::TxSignaling => extracted("transmit", "signaling"),
-        Kind::Interface => only("interface", &["audio", "gpio", "parallel", "serial"]),
+        Kind::Interface => only(
+            "interface",
+            &["audio", "gpio", "parallel", "serial", "keyboard"],
+        ),
         Kind::PeerAudio => defs["linkProcessing"].clone(),
         Kind::Control | Kind::Power | Kind::Limits => extracted("radio", kind.as_str()),
         Kind::Memories => object(json!({"entries":extracted("radio","memories")})),
@@ -250,6 +253,9 @@ pub(super) fn response_document(route: &Route) -> Value {
     s["required"] = json!(["_links"]);
     let mut defs = serde_json::Map::new();
     dependencies(&s, &mut defs);
+    if route.view != Some(View::Effective) {
+        sparse_bindings(&mut defs);
+    }
     if !defs.is_empty() {
         s["$defs"] = Value::Object(defs);
     }
@@ -319,6 +325,7 @@ pub(super) fn document(route: &Route, create: bool) -> Value {
     }
     let mut defs = serde_json::Map::new();
     dependencies(&schema, &mut defs);
+    sparse_bindings(&mut defs);
     if !defs.is_empty() {
         schema["$defs"] = Value::Object(defs);
     }
@@ -339,6 +346,21 @@ fn resource(kind: Kind, route: &Route, create: bool) -> Value {
         s["properties"]["key"] = json!({"type":"string"});
     }
     s
+}
+
+/// Sparse declarations inherit binding companions; effective RX retains its required code.
+fn sparse_bindings(defs: &mut serde_json::Map<String, Value>) {
+    if let Some(squelch) = defs.get_mut("squelch") {
+        for clause in squelch["allOf"]
+            .as_array_mut()
+            .expect("squelch source rules")
+        {
+            clause["then"]
+                .as_object_mut()
+                .expect("source constraint")
+                .remove("required");
+        }
+    }
 }
 
 fn dependencies(schema: &Value, out: &mut serde_json::Map<String, Value>) {

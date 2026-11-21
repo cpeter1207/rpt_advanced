@@ -233,6 +233,8 @@ fn configured_message_broadcast_obeys_destination_and_peer_mode() {
         (PlaybackDestination::Local, Mode::TRANSCEIVE, false),
         (PlaybackDestination::LocalAndLinks, Mode::TRANSCEIVE, true),
         (PlaybackDestination::LocalAndLinks, Mode::MONITOR, false),
+        (PlaybackDestination::Peers, Mode::TRANSCEIVE, true),
+        (PlaybackDestination::Peers, Mode::MONITOR, false),
     ] {
         let (mut peer, _, mut output) = peer_with_kerchunk("200", 4, 0);
         peer.mode = mode;
@@ -256,10 +258,15 @@ fn configured_message_broadcast_obeys_destination_and_peer_mode() {
             )
         );
         let mut rf = [0.0; 4];
-        links
+        let keyed = links
             .process(&mut controller, false, &mut rf, SourcePosition::default())
             .unwrap();
-        assert_eq!(rf, [0.25; 4]);
+        if destination == PlaybackDestination::Peers {
+            assert!(!keyed);
+            assert_eq!(rf, [0.0; 4]);
+        } else {
+            assert_eq!(rf, [0.25; 4]);
+        }
         dispatcher.dispatch(1);
         let mut remote = [0.0; 4];
         assert_eq!(output.read_span(&mut remote).is_some(), expected);
@@ -956,4 +963,78 @@ fn ended_peer_cannot_hold_ptt_or_remain_a_dispatch_destination() {
         assert_eq!(outbound.read(&mut output), 1);
         assert_eq!(output, [0.0]);
     }
+}
+
+#[test]
+fn operator_mute_drains_each_input_and_gates_its_pcm_and_key_only() {
+    struct Wave {
+        signals: PeerSignals,
+        level: f32,
+        samples: usize,
+    }
+    impl PeerInput for Wave {
+        fn signals(&self) -> &PeerSignals {
+            &self.signals
+        }
+        fn source_rate(&self) -> u32 {
+            48000
+        }
+        fn available(&self) -> u64 {
+            12480
+        }
+        fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+            self.samples += output.len();
+            output.fill(self.level);
+            Some(output.len())
+        }
+    }
+    let mut peers = vec![];
+    let mut tokens = vec![];
+    for (name, level) in [("2000", 0.25), ("3000", 0.5)] {
+        let sig = PeerSignals::new();
+        sig.publish_pcm();
+        sig.set_radio_keyed(true);
+        tokens.push(sig.reply_target());
+        let (w, _r) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+        peers.push(
+            AudioPeer::new(
+                name,
+                Mode::TRANSCEIVE,
+                Wave {
+                    signals: sig,
+                    level,
+                    samples: 0,
+                },
+                w,
+                960,
+                0,
+            )
+            .unwrap(),
+        );
+    }
+    let (mut mixer, _) = LinkAudio::new(peers, 960).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    for (a, b, level) in [(true, true, 0.0), (true, false, 0.5), (false, true, 0.25)] {
+        tokens[0].set_rx_muted(a);
+        tokens[1].set_rx_muted(b);
+        let mut audio = [0.0; 96];
+        let ptt = mixer
+            .process(
+                &mut controller,
+                false,
+                &mut audio,
+                SourcePosition::default(),
+            )
+            .unwrap();
+        assert_eq!(ptt, !(a && b));
+        assert!(audio.iter().all(|&x| x == level));
+        assert!(tokens.iter().all(|t| t.active()), "raw qualifier survives");
+    }
+    assert!(mixer.peers.iter().all(|p| p.input.samples == 288));
 }

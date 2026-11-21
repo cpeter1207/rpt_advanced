@@ -2192,6 +2192,7 @@
               "type": "string",
               "enum": [
                 "local",
+                "peers",
                 "local_and_links"
               ],
               "default": "local"
@@ -9835,9 +9836,9 @@
         },
         "scancode": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 4294967295,
-          "description": "Backend scan code; key_down requires this field. The selected keyboard backend defines the code set."
+          "minimum": 1,
+          "maximum": 767,
+          "description": "Held-key observation on interface.keyboard.device. The Linux evdev backend uses decimal EV_KEY codes 1 through 767 from input-event-codes.h."
         },
         "pin": {
           "type": "array",
@@ -10827,6 +10828,19 @@
           },
           "additionalProperties": false,
           "$comment": "JSON device/base_address map to parallel_port_device/parallel_port_base_address; numbered maps to parallel_pin_N_assignment."
+        },
+        "keyboard": {
+          "type": "object",
+          "properties": {
+            "device": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "description": "Explicit Linux evdev endpoint, typically a stable /dev/input/by-id event symlink."
+            }
+          },
+          "additionalProperties": false,
+          "description": "Non-grabbing held-key observation. Scancodes for this backend are Linux EV_KEY codes. The selected device must report support for each code."
         },
         "serial": {
           "$ref": "#/$defs/serialDevice",

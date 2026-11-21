@@ -185,6 +185,10 @@ fn duplicate_routes_overlap(routes: &[RouteSpec], windows: &[ReplacementSpec]) -
 }
 
 impl LinkScheduler {
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Whether final link publication must refresh civil-time window policy.
     pub fn requires_civil_time(&self) -> bool {
         !self.windows.is_empty()
@@ -377,6 +381,10 @@ impl LinkScheduler {
             .iter()
             .filter(|route| route.wanted() && !route.paused)
             .map(|route| &route.spec)
+    }
+    /// The declared route owner retains its own hold, selection and recovery policy.
+    pub(super) fn owns_target(&self, remote: &str) -> bool {
+        self.routes.iter().any(|r| r.spec.remote == remote)
     }
     /// Whether a direct peer is managed as a member of any permanent group.
     pub fn is_group_member(&self, remote: &str) -> bool {

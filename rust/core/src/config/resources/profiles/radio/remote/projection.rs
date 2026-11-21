@@ -41,6 +41,7 @@ pub struct RemoteSettings<'a> {
 enum EncoderOutput {
     Usb(u8),
     Parallel(u8),
+    Serial(u8),
 }
 #[derive(Serialize)]
 struct Scan<'a> {
@@ -81,10 +82,11 @@ impl Signal {
             SignalSource::Dsp => "dsp",
             SignalSource::Hamlib => "rig",
             SignalSource::Auto => "automatic",
-            SignalSource::SoundChipGpio | SignalSource::Parallel | SignalSource::External => {
-                "external"
-            }
-            SignalSource::Serial | SignalSource::KeyDown => {
+            SignalSource::SoundChipGpio
+            | SignalSource::Parallel
+            | SignalSource::Serial
+            | SignalSource::External => "external",
+            SignalSource::KeyDown => {
                 unreachable!("unsupported physical binding normalized")
             }
         };
@@ -170,6 +172,7 @@ impl RadioPortProfile {
         };
         let ptt_source = match self.signals.tx.ptt.source {
             SignalSource::Hamlib => "hamlib",
+            SignalSource::Serial => "serial",
             SignalSource::Parallel => "parallel",
             SignalSource::SoundChipGpio => "usb",
             _ => unreachable!("normalized PTT"),
@@ -178,6 +181,8 @@ impl RadioPortProfile {
         let cor_source = if squelch.enabled {
             match squelch.binding.source {
                 SignalSource::Dsp => "dsp",
+                SignalSource::Serial => "serial",
+                SignalSource::KeyDown => "key_down",
                 SignalSource::Parallel => "parallel",
                 SignalSource::SoundChipGpio => "usb",
                 _ => unreachable!("normalized carrier"),
@@ -196,6 +201,10 @@ impl RadioPortProfile {
         let external_encode_output = external.and_then(|b| match (b.source, b.pins.as_slice()) {
             (SignalSource::SoundChipGpio, [n]) => Some(EncoderOutput::Usb(*n)),
             (SignalSource::Parallel, [n]) => Some(EncoderOutput::Parallel(*n)),
+            (SignalSource::Serial, _) => Some(EncoderOutput::Serial(
+                b.serial_pins()
+                    .fold(0, |m, p| m | if p == "RTS" { 1 } else { 2 }),
+            )),
             _ => None,
         });
         Some(RemoteSettings {

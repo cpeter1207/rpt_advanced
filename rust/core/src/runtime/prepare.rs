@@ -62,6 +62,8 @@ pub enum RuntimeError {
     MissingNode,
     /// A message queue is full or a copied reservation is stale.
     Rejected,
+    /// The requested domain operation has no available owner or adapter.
+    Unavailable,
     /// Existing link policy denied, invalidated, or rejected an operation.
     Link(crate::link::AdmissionError),
 }

@@ -42,6 +42,13 @@ fn pattern(v: &Value) -> Option<Value> {
     let s = v.as_str()?;
     NativePattern::parse(s).ok().map(|_| Value::from(s))
 }
+fn destination_name(destination: PlaybackDestination) -> &'static str {
+    match destination {
+        PlaybackDestination::Local => "local",
+        PlaybackDestination::LocalAndLinks => "local_and_links",
+        PlaybackDestination::Peers => "peers",
+    }
+}
 fn selector(v: &Value) -> Option<Value> {
     v.as_str()
         .filter(|s| s.len() <= 63 && crate::config::message_selector_valid(s))
@@ -90,7 +97,10 @@ const FIELDS: Fields = &[
     (
         "playback",
         Rule::Object(&[
-            ("destination", Rule::Choice(&["local", "local_and_links"])),
+            (
+                "destination",
+                Rule::Choice(&["local", "peers", "local_and_links"]),
+            ),
             ("repeat", Rule::Bool),
         ]),
     ),
@@ -377,12 +387,10 @@ fn settings(
             repeat_during_playback: nested("playback", "repeat")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
-            destination: if nested("playback", "destination").and_then(Value::as_str)
-                == Some("local_and_links")
-            {
-                PlaybackDestination::LocalAndLinks
-            } else {
-                PlaybackDestination::Local
+            destination: match nested("playback", "destination").and_then(Value::as_str) {
+                Some("peers") => PlaybackDestination::Peers,
+                Some("local_and_links") => PlaybackDestination::LocalAndLinks,
+                _ => PlaybackDestination::Local,
             },
         },
         delivery: PoliteDelivery {
@@ -590,7 +598,7 @@ impl ModularCandidate<'_> {
         for (name, (_, fields)) in &mut effective {
             let s = &definitions[name];
             merge(fields,json!({
-                "playback":{"repeat":s.playback.repeat_during_playback,"destination":match s.playback.destination {PlaybackDestination::Local=>"local",PlaybackDestination::LocalAndLinks=>"local_and_links"}},
+                "playback":{"repeat":s.playback.repeat_during_playback,"destination":destination_name(s.playback.destination)},
                 "polite":{"timing":{"maximum_wait_ms":s.delivery.maximum_wait_ms},"expiry":match s.delivery.expiry {PoliteExpiry::Skip=>"skip",PoliteExpiry::Morse=>"morse"},"busy":match s.delivery.busy {PoliteBusy::Skip=>"skip",PoliteBusy::Wait=>"wait"}},
                 "speech":{"model":s.speech_defaults.voice,"level_db":s.speech_defaults.level_db,"timing":{"speed_percent":s.speech_defaults.speed_percent}},
                 "morse":{"frequency_hz":s.morse_defaults.frequency_hz,"level_db":s.morse_defaults.level_db,"timing":{"speed_wpm":s.morse_defaults.speed_wpm}}

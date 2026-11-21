@@ -222,6 +222,8 @@ pub struct Interface {
     pub parallel: Parallel,
     /// Serial endpoint configuration.
     pub serial: Serial,
+    /// Explicit Linux evdev keyboard observation endpoint.
+    pub keyboard_device: Option<String>,
 }
 impl WiringProfile {
     pub(super) fn ordinary_mask(self) -> u8 {
@@ -282,6 +284,25 @@ impl Interface {
         w: &mut Vec<super::CandidateWarning>,
         site: &mut super::SitePrerequisites,
     ) -> Self {
+        let choices = ["data_bits", "stop_bits"].map(|field| {
+            v.values(&["serial", field])
+                .map(|(value, source)| {
+                    (
+                        value.as_f64().expect("normalized serial framing"),
+                        Some(source),
+                    )
+                })
+                .collect()
+        });
+        let [data_bits, stop_bits] = super::inputs::choose_pair(
+            choices,
+            [8.0, 1.0],
+            ["data_bits", "stop_bits"],
+            |bits, stops| {
+                stops == 1.0 || (bits == 5.0 && stops == 1.5) || (bits >= 6.0 && stops == 2.0)
+            },
+            w,
+        );
         Self {
             audio: InterfaceAudio::read(v),
             gpio: Gpio::read(v, w, site),
@@ -293,15 +314,19 @@ impl Interface {
                 inputs: ["10", "12", "13", "15"]
                     .map(|k| ParallelInput::read(v.text(&["parallel", "inputs", k], ""))),
             },
+            keyboard_device: v
+                .get(&["keyboard", "device"])
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             serial: Serial {
                 device: v
                     .get(&["serial", "device"])
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 baud_rate: v.uint(&["serial", "baud_rate"], 9600),
-                data_bits: v.uint(&["serial", "data_bits"], 8) as u8,
+                data_bits: data_bits as u8,
                 parity: SerialParity::read(v.text(&["serial", "parity"], "none")),
-                stop_bits: v.number(&["serial", "stop_bits"], 1.0),
+                stop_bits,
             },
         }
     }

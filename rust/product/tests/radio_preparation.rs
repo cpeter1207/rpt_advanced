@@ -38,6 +38,17 @@ fn station(f: impl FnOnce(&RadioPortProfile)) {
 }
 
 fn station_with(extra: &[(K, Value)], f: impl FnOnce(&RadioPortProfile)) {
+    station_inheriting(&[], extra, |p, _| f(p));
+}
+
+fn station_inheriting(
+    parent: &[(K, Value)],
+    extra: &[(K, Value)],
+    f: impl FnOnce(
+        &RadioPortProfile,
+        &[rpt_advanced_core::config::resources::candidate::CandidateWarning],
+    ),
+) {
     use rpt_advanced_core::config::resources::{
         PortKey,
         candidate::{
@@ -72,7 +83,7 @@ fn station_with(extra: &[(K, Value)], f: impl FnOnce(&RadioPortProfile)) {
             body.push((*kind, configuration.clone()))
         }
     }
-    let bindings: Vec<_> = body
+    let mut bindings: Vec<_> = body
         .iter()
         .enumerate()
         .map(|(i, (kind, _))| ResourceBinding {
@@ -81,6 +92,14 @@ fn station_with(extra: &[(K, Value)], f: impl FnOnce(&RadioPortProfile)) {
             id: id(3 + i),
         })
         .collect();
+    for (kind, value) in parent {
+        bindings.push(ResourceBinding {
+            scope: ResourceScope::Site(site),
+            kind: *kind,
+            id: id(3 + body.len()),
+        });
+        body.push((*kind, value.clone()));
+    }
     let registry = ResourceRegistry::new(
         site,
         &[(port, PortKey::new("literal display #"))],
@@ -113,7 +132,7 @@ fn station_with(extra: &[(K, Value)], f: impl FnOnce(&RadioPortProfile)) {
         .collect::<Vec<_>>();
     let candidate = ModularCandidate::assemble(&registry, &captured).unwrap();
     let radios = candidate.resolve_radio_profiles().unwrap();
-    f(radios.port(port).unwrap())
+    f(radios.port(port).unwrap(), radios.warnings())
 }
 
 #[test]
@@ -233,39 +252,62 @@ fn controller_owned_tx_admission_is_independent_from_native_audio_and_rollback_e
 }
 
 #[test]
-fn r1_inverted_parallel_arrays_require_per_pin_polarity_and_health() {
-    use rptadv_product::configuration_radio::PreparationError;
-    // The product exposes an online, OR-reduced observation. The radio descriptor inverts that single bit.
-    let samples = [
-        (true, [false, false], true, true),
-        (true, [false, true], true, false),
-        (true, [true, false], true, false),
-        (true, [true, true], false, false),
-        (false, [false, false], false, true),
-    ];
-    for (online, pins, wanted, aggregate) in samples {
-        assert_eq!(online && pins.iter().any(|p| !*p), wanted);
-        assert_eq!(!(online && pins.iter().any(|p| *p)), aggregate);
-    }
+fn physical_parallel_inputs_prepare_with_per_pin_polarity_and_positive_radio_qualification() {
     let api = RadioPreparationApi::open().unwrap();
-    station(|baseline| {
-        let previous = api.prepare_station(baseline, "6").unwrap();
-        for name in ["squelch", "ctcss"] {
-            for pins in [vec![10], vec![10, 12]] {
-                let rows = [(
+    for (name, expected_source) in [("squelch", 5), ("ctcss", 4)] {
+        let prepare = |inverted| {
+            let mut owner = None;
+            station_with(
+                &[(
                     K::RxSignaling,
-                    json!({(name):{"enabled":true,"source":"parallel","pin":pins,"inverted":true}}),
-                )];
-                station_with(&rows, |p| {
-                    assert!(matches!(
-                        api.prepare_station(p, "6"),
-                        Err(PreparationError::Unsupported("inverted_parallel_input"))
-                    ))
-                });
+                    json!({(name):{"enabled":true,"source":"parallel","pin":[10,12],"inverted":inverted}}),
+                )],
+                |profile| owner = Some(api.prepare_station(profile, "6").unwrap()),
+            );
+            owner.unwrap()
+        };
+        let active_low = prepare(true);
+        let active_high = prepare(false);
+        assert!(!active_low.equivalent(&active_high).unwrap());
+        active_low
+            .visit(|station| {
+                // SAFETY: native visit retains the radio request through this synchronous call.
+                let radio = unsafe { station.radio.as_ref().unwrap() };
+                let qualifier = if name == "squelch" {
+                    radio.qualification.carrier_source
+                } else {
+                    radio.qualification.subaudible_source
+                };
+                assert_eq!(qualifier, expected_source);
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn physical_ordinary_parallel_ptt_prepares_for_sound_chip_and_generic_alsa_without_remote_policy() {
+    let api = RadioPreparationApi::open().unwrap();
+    let mut previous = None;
+    for backend in ["sound_chip", "alsa"] {
+        let resources = [
+            (
+                K::Interface,
+                json!({"audio":{"backend":backend,"device_identifier":"hw:2,0"}}),
+            ),
+            (
+                K::TxSignaling,
+                json!({"ptt":{"source":"parallel","pin":[2,3],"inverted":true}}),
+            ),
+        ];
+        station_with(&resources, |profile| {
+            let station = api.prepare_station(profile, "6").unwrap();
+            assert!(station.remote_commands().unwrap().is_none());
+            if let Some(usb) = &previous {
+                assert!(!station.equivalent(usb).unwrap());
             }
-        }
-        assert_eq!(previous.inspect().unwrap().settle_ms, 77);
-    });
+            previous = Some(station);
+        });
+    }
 }
 #[test]
 fn r1_operating_ctcss_frequency_changes_the_visited_decoder_mask_and_semantic_equality() {
@@ -427,4 +469,181 @@ fn r2_parallel_decoder_length_fallback_keeps_the_native_default_table() {
         assert_eq!(p.signals.rx.ctcss.tones.ordered, [1000]);
         assert_eq!(p.signals.tx.ctcss.tones.ordered, [885]);
     });
+}
+
+#[test]
+fn physical_ordinary_hamlib_owns_only_configured_ptt_without_a_startup_memory() {
+    let api = RadioPreparationApi::open().unwrap();
+    let resources = [
+        (
+            K::Control,
+            json!({"enabled":false,"backend":"hamlib","hamlib":{"model":"RIG_MODEL_DUMMY","options":{"ptt_type":"RIG"}}}),
+        ),
+        (K::TxSignaling, json!({"ptt":{"source":"hamlib"}})),
+    ];
+    station_with(&resources, |profile| {
+        assert!(!profile.remote.enabled);
+        let station = api.prepare_station(profile, "6").unwrap();
+        assert!(station.remote_commands().unwrap().is_none());
+    });
+}
+
+#[test]
+fn physical_dedicated_serial_station_prepares_both_modem_directions_without_cat() {
+    use rpt_advanced_core::config::resources::profiles::radio::SignalSource;
+    let api = RadioPreparationApi::open().unwrap();
+    let resources = [
+        (
+            K::Interface,
+            json!({"audio":{"backend":"alsa","device_identifier":"hw:3,0"},"serial":{"device":"/fixture/modem"}}),
+        ),
+        (
+            K::RxSignaling,
+            json!({"squelch":{"source":"serial","pin":["CTS","DSR"],"inverted":true},"ctcss":{"enabled":true,"source":"serial","pin":["DCD","RI"]}}),
+        ),
+        (
+            K::TxSignaling,
+            json!({"ptt":{"source":"serial","pin":["DTR","RTS"],"inverted":true}}),
+        ),
+    ];
+    station_with(&resources, |profile| {
+        assert_eq!(
+            profile.signals.rx.squelch.binding.source,
+            SignalSource::Serial
+        );
+        assert_eq!(profile.signals.rx.squelch.binding.pins, [8, 6]);
+        assert_eq!(profile.signals.tx.ptt.pins, [4, 7]);
+        let candidate = api.prepare_station(profile, "6").unwrap();
+        assert!(candidate.remote_commands().unwrap().is_none());
+    });
+}
+
+#[test]
+fn physical_explicit_keyboard_endpoint_prepares_receive_carrier_without_changing_actuator() {
+    use rpt_advanced_core::config::resources::profiles::radio::SignalSource;
+    let api = RadioPreparationApi::open().unwrap();
+    station_with(
+        &[
+            (
+                K::Interface,
+                json!({"audio":{"device_selection":"automatic_lowest_alsa_card"},"keyboard":{"device":"/fixture/explicit-event"}}),
+            ),
+            (
+                K::RxSignaling,
+                json!({"squelch":{"source":"key_down","scancode":42,"inverted":true}}),
+            ),
+        ],
+        |profile| {
+            assert_eq!(
+                profile.signals.rx.squelch.binding.source,
+                SignalSource::KeyDown
+            );
+            assert_eq!(profile.signals.tx.ptt.source, SignalSource::SoundChipGpio);
+            let station = api.prepare_station(profile, "6").unwrap();
+            station
+                .visit(|record| {
+                    // SAFETY: this callback borrows the matched provider-owned radio record.
+                    let radio = unsafe { record.radio.as_ref() }.unwrap();
+                    assert_eq!(radio.qualification.carrier_source, 7);
+                })
+                .unwrap();
+        },
+    );
+}
+
+#[test]
+fn physical_serial_ptt_and_separate_external_encoder_prepare_with_independent_polarity() {
+    use rpt_advanced_core::config::resources::profiles::radio::SignalSource;
+    let api = RadioPreparationApi::open().unwrap();
+    station_with(
+        &[
+            (
+                K::Interface,
+                json!({"audio":{"device_selection":"automatic_lowest_alsa_card"},"serial":{"device":"/fixture/modem"}}),
+            ),
+            (
+                K::TxSignaling,
+                json!({
+                    "ptt":{"source":"serial","pin":["RTS"]},
+                    "ctcss":{"enabled":true,"source":"external","output":{"source":"serial","pin":["DTR"],"inverted":true}}
+                }),
+            ),
+        ],
+        |profile| {
+            let binding = profile.signals.tx.ctcss.output.as_ref().unwrap();
+            assert_eq!(binding.source, SignalSource::Serial);
+            assert_eq!(binding.serial_pins().collect::<Vec<_>>(), ["DTR"]);
+            assert!(binding.inverted);
+            assert!(
+                api.prepare_station(profile, "6")
+                    .unwrap()
+                    .remote_commands()
+                    .unwrap()
+                    .is_none()
+            );
+        },
+    );
+}
+
+#[test]
+fn inherited_serial_stop_bits_prepare_with_independent_port_overrides() {
+    use rpt_advanced_core::config::resources::ResourceWarning;
+    let parent = [(
+        K::Interface,
+        json!({"serial":{"data_bits":8,"stop_bits":1}}),
+    )];
+    let child = [
+        (
+            K::Interface,
+            json!({"audio":{"backend":"alsa","device_identifier":"hw:3,0"},"serial":{"device":"/fixture/tty","baud_rate":19200,"stop_bits":1.5}}),
+        ),
+        (
+            K::RxSignaling,
+            json!({"squelch":{"source":"serial","pin":["CTS"]}}),
+        ),
+        (
+            K::TxSignaling,
+            json!({"ptt":{"source":"serial","pin":["RTS"]}}),
+        ),
+    ];
+    station_inheriting(&parent, &child, |profile, warnings| {
+        let config = &profile.interface.serial;
+        assert_eq!(
+            (config.data_bits, config.stop_bits, config.baud_rate),
+            (8, 1.0, 19200)
+        );
+        assert!(warnings.iter().any(|w| w.resource.kind == K::Interface
+            && matches!(w.warning, ResourceWarning::InvalidValue("stop_bits"))));
+        RadioPreparationApi::open()
+            .unwrap()
+            .prepare_station(profile, "6")
+            .unwrap();
+    });
+}
+
+#[test]
+fn physical_inverted_sound_chip_roles_visit_validity_aware_native_qualifiers() {
+    let api = RadioPreparationApi::open().unwrap();
+    for (carrier, expected) in [(true, (7, 0)), (false, (8, 6))] {
+        let rx = json!({
+            "squelch":{"enabled":carrier,"source":"sound_chip_gpio","inverted":true},
+            "ctcss":{"enabled":!carrier,"source":"sound_chip_gpio","inverted":true}
+        });
+        station_with(&[(K::RxSignaling, rx)], |profile| {
+            let prepared = api.prepare_station(profile, "6").unwrap();
+            prepared
+                .visit(|station| {
+                    // SAFETY: this synchronous visit borrows the complete accepted template.
+                    let radio = unsafe { station.radio.as_ref() }.unwrap();
+                    assert_eq!(
+                        (
+                            radio.qualification.carrier_source,
+                            radio.qualification.subaudible_source
+                        ),
+                        expected
+                    );
+                })
+                .unwrap();
+        });
+    }
 }

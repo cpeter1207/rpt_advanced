@@ -36,6 +36,7 @@ pub(crate) struct State {
     pub(crate) async_detaches: usize,
     pub(crate) fail_async_attach: bool,
     no_async_thread: bool,
+    pub(crate) finish_first_step_before_registration: bool,
     pub(crate) continuous_async: bool,
     pub(crate) observe_calls: usize,
     pub(crate) echo_observation: Option<abi::rptadv_peer_observation_v1>,
@@ -58,6 +59,7 @@ pub(crate) struct State {
     call_elapsed: u32,
     deadlines: Vec<u64>,
     source_position: u64,
+    before_audio: Option<Arc<std::sync::Barrier>>,
     source_keyed: bool,
     source_closed: bool,
     source_finish: bool,
@@ -155,7 +157,7 @@ fn echo_source_never_detects_a_new_burst_before_the_previous_finite_token_retire
         }
     }
     assert_eq!(state.lock().unwrap().source_acknowledgements, 2);
-    assert_eq!(digits, ['5', '#']);
+    assert_eq!(digits, ['5']);
 }
 
 #[test]
@@ -245,13 +247,17 @@ fn echo_source_decodes_dtmf_and_retains_mute_spans_but_never_decodes_codec_plc()
             Input::Audio(vec![0.0; 640]),
         ]);
         session.step(0).unwrap();
-        let mut decoded = Vec::new();
-        while let Some(event) = control.event() {
-            if let Event::Digit(digit) = event {
-                decoded.push(digit);
-            }
+        let signals: Vec<_> = std::iter::from_fn(|| control.event())
+            .filter(|event| matches!(event, Event::Digit(_) | Event::LegacyDigitBoundary))
+            .collect();
+        if digits == 0 {
+            assert!(signals.is_empty());
+        } else {
+            assert!(matches!(
+                signals.as_slice(),
+                [Event::Digit('5'), Event::LegacyDigitBoundary]
+            ));
         }
-        assert_eq!(decoded, if digits == 0 { vec![] } else { vec!['5', '#'] });
         let mut heard = false;
         for now in 1..20 {
             let mut pcm = [0.0; 960];
@@ -329,7 +335,10 @@ fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
     session.step(20).unwrap();
     session.step(30).unwrap();
     assert!(!control.ended());
-    assert_eq!(session.pending_remote_unkey, Some(20));
+    assert_eq!(
+        session.pending_remote_unkey.as_ref().map(|r| r.at),
+        Some(20)
+    );
     assert_eq!((0..64).filter_map(|_| control.event()).count(), 64);
     session.step(40).unwrap();
     assert!(matches!(control.event(), Some(Event::RemoteUnkey(20))));
@@ -721,7 +730,7 @@ fn echo_source_command_timeout_runs_while_a_bounded_read_turn_still_has_pcm() {
     assert!(session.inbound.signals().dtmf_muted());
     assert_eq!(state.lock().unwrap().source_position, 1342);
     session.step(3000).unwrap();
-    assert!(matches!(control.event(), Some(Event::Digit('#'))));
+    assert!(matches!(control.event(), Some(Event::LegacyDigitBoundary)));
     assert!(control.event().is_none());
     assert!(!session.inbound.signals().dtmf_muted());
     assert_eq!(state.lock().unwrap().input.len(), 4);
@@ -820,7 +829,7 @@ fn echo_source_metadata_backpressure_delays_finish_and_errors_do_not_acknowledge
                 break;
             }
         }
-        assert_eq!(digits, ['5', '#']);
+        assert_eq!(digits, ['5']);
         assert_eq!(state.lock().unwrap().source_acknowledgements, 1);
     }
 }
@@ -1195,7 +1204,7 @@ fn remote_dtmf_actual_unkey_survives_event_backpressure_without_hangup() {
     assert!(!control.ended());
     assert!(!session.inbound.signals().radio_keyed());
     session.step(3).unwrap();
-    assert_eq!(session.pending_remote_unkey, Some(2));
+    assert_eq!(session.pending_remote_unkey.as_ref().map(|r| r.at), Some(2));
     assert!(!session.inbound.signals().radio_keyed());
     assert_eq!((0..64).filter_map(|_| control.event()).count(), 64);
     session.step(4).unwrap();
@@ -1306,7 +1315,7 @@ unsafe extern "C" fn async_attach(
     state.lock().unwrap().async_attaches += 1;
     let address = step_context as usize;
     let worker_state = state.clone();
-    let thread = (!state.lock().unwrap().no_async_thread).then(|| {
+    let mut thread = (!state.lock().unwrap().no_async_thread).then(|| {
         thread::spawn(move || {
             loop {
                 let result = unsafe { step.unwrap()(address as *mut c_void) };
@@ -1319,6 +1328,13 @@ unsafe extern "C" fn async_attach(
             }
         })
     });
+    let finish_first = state.lock().unwrap().finish_first_step_before_registration;
+    if finish_first
+        && let Some(worker) = thread.take()
+        && worker.join().is_err()
+    {
+        return -1;
+    }
     unsafe {
         *registration = Box::into_raw(Box::new(AsyncRegistration {
             state,
@@ -1557,6 +1573,10 @@ unsafe extern "C" fn read_source(
         let (accepted, offered, remaining) = match input {
             Input::Audio(mut pcm) | Input::Concealed(mut pcm) => {
                 let offered = pcm.len();
+                if let Some(gate) = state.before_audio.take() {
+                    gate.wait();
+                    gate.wait();
+                }
                 let accepted = unsafe {
                     sink.audio.unwrap()(
                         sink.context,
@@ -2980,7 +3000,7 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     session.step(21).unwrap();
     assert!(matches!(control.event(), Some(Event::Digit('6'))));
     session.step(3021).unwrap();
-    assert!(matches!(control.event(), Some(Event::Digit('#'))));
+    assert!(matches!(control.event(), Some(Event::LegacyDigitBoundary)));
     let old = control.observer.clone();
     let (inbound, input) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     let observer = inbound.observer();
@@ -3388,4 +3408,530 @@ fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let writes = state.lock().unwrap().writes.clone();
     assert!(!writes.is_empty());
     assert!(writes.iter().all(|count| *count > 0));
+}
+
+#[test]
+fn registered_ordinary_resident_pcm_pending_suffix_and_first_signal_lose_muted_epoch() {
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let (io, state) = peer(48000);
+        let output = || {
+            rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+                .unwrap()
+                .into_endpoints()
+                .1
+        };
+        let (mut session, mut control) =
+            PeerSession::prepare(io, output(), "1000", "2000", false).unwrap();
+        let (input, mut ring) =
+            InboundRing::redirected(48000, InboundPolicy::Peer, &signals.reply_target()).unwrap();
+        control
+            .send(Command::Redirect {
+                inbound: input,
+                outbound: output(),
+                dtmf_muting: false,
+            })
+            .ok()
+            .unwrap();
+        session.step(1).unwrap();
+        state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+        session.step(2).unwrap();
+        for n in 3..24 {
+            state
+                .lock()
+                .unwrap()
+                .input
+                .push_back(Input::Audio(vec![0.625; 4096]));
+            session.step(n).unwrap();
+            if session.pending_input.is_some() {
+                break;
+            }
+        }
+        assert!(matches!(
+            session.pending_input,
+            Some(PendingInput::Audio { .. })
+        ));
+        assert!(ring.available() > 0);
+        let action = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.; 960]));
+        session.step(25).unwrap();
+        assert!(
+            session.pending_input.is_some(),
+            "the native FIFO still owns its space"
+        );
+        for _ in 0..10 {
+            assert_eq!(ring.render(&mut [0.; 960]).unwrap(), 0);
+            session.step(25).unwrap();
+            if session.pending_input.is_none() && state.lock().unwrap().input.is_empty() {
+                break;
+            }
+        }
+        assert!(session.pending_input.is_none() && state.lock().unwrap().input.is_empty());
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        let stamped = std::iter::from_fn(|| control.received_event())
+            .find_map(|e| match e {
+                Event::ReceivedDigit('5', r) => Some(r),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(stamped.at, 2);
+        assert!(stamped.regeneration.is_some_and(|r| !r.current()));
+        assert!(!session.inbound.signals().radio_keyed());
+        let mut pcm = [9.; 960];
+        for _ in 0..20 {
+            assert_eq!(
+                ring.render(&mut pcm).unwrap(),
+                0,
+                "stale samples supply no receive/key evidence"
+            );
+            assert_eq!(pcm, [0.; 960]);
+        }
+        for n in 0..8 {
+            state
+                .lock()
+                .unwrap()
+                .input
+                .push_back(Input::Audio(vec![0.25; 2048]));
+            session.step(26 + n).unwrap();
+        }
+        assert!(
+            (0..12).any(|_| ring.render(&mut pcm).unwrap() > 0 && pcm.iter().any(|v| *v > 0.1))
+        );
+        assert!(!session.inbound.signals().ended());
+        session.stop();
+    });
+}
+
+fn round2_echo(
+    signals: &rpt_advanced_core::link::PeerSignals,
+) -> (
+    PeerSession,
+    PeerControl,
+    crate::link::ring::InboundConsumer,
+    Shared,
+) {
+    let (io, state) = source_peer();
+    let output = || {
+        rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints()
+            .1
+    };
+    let (mut session, mut control) =
+        PeerSession::prepare(io, output(), "1000", "2000", false).unwrap();
+    let (inbound, consumer) =
+        InboundRing::redirected(8000, InboundPolicy::Echo, &signals.reply_target()).unwrap();
+    control
+        .send(Command::Redirect {
+            inbound,
+            dtmf_muting: false,
+            outbound: output(),
+        })
+        .ok()
+        .unwrap();
+    session.step(0).unwrap();
+    (session, control, consumer, state)
+}
+
+#[test]
+fn round2_echo_muted_tagged_prefix_and_zero_credit_keep_call_and_digits_live() {
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let (mut s, mut control, mut ring, state) = round2_echo(signals);
+        let action = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        ring.render(&mut [0.; 960]).unwrap();
+        state.lock().unwrap().input.extend([
+            Input::Audio(vec![0.25; 4096]),
+            Input::Audio(vec![0.5; 4096]),
+            Input::Audio(five_tone(640)),
+            Input::Audio(vec![0.; 640]),
+        ]);
+        s.step(1).unwrap();
+        assert_eq!(
+            state.lock().unwrap().source_credits,
+            [(0, 4096), (4096, 2080)]
+        );
+        s.step(2).unwrap();
+        assert_eq!(
+            state.lock().unwrap().source_credits.last(),
+            Some(&(6176, 0))
+        );
+        for now in 3..140 {
+            let mut pcm = [9.; 960];
+            assert_eq!(ring.render(&mut pcm).unwrap(), 0);
+            assert_eq!(pcm, [0.; 960]);
+            s.step(now).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 1 {
+                break;
+            }
+        }
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.source_acknowledgements, 1);
+            let mut next = 0;
+            for &(start, n) in &state.source_credits {
+                assert_eq!(start, next);
+                next += n as u64;
+            }
+            assert_eq!(next, 9472);
+        }
+        assert!(std::iter::from_fn(|| control.event()).any(|e| matches!(e, Event::Digit('5'))));
+        assert!(!control.ended());
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.3; 1600]));
+        s.step(150).unwrap();
+        assert!((0..32).any(|_| {
+            let mut pcm = [0.; 960];
+            ring.render(&mut pcm).unwrap() > 0 && pcm.iter().any(|v| *v > 0.1)
+        }));
+        s.stop();
+    });
+}
+
+#[test]
+fn round2_echo_unmute_during_provider_delivery_cannot_reauthorize_old_pcm() {
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let (mut s, _control, mut ring, state) = round2_echo(signals);
+        let action = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        ring.render(&mut [0.; 960]).unwrap();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        {
+            let mut state = state.lock().unwrap();
+            state.before_audio = Some(gate.clone());
+            state.input.push_back(Input::Audio(vec![0.7; 1600]));
+        }
+        std::thread::scope(|scope| {
+            let io = scope.spawn(|| s.step(2));
+            gate.wait();
+            host.runtime
+                .management_action(port, "mgr", &action, clock)
+                .unwrap();
+            ring.render(&mut [0.; 960]).unwrap();
+            gate.wait();
+            io.join().unwrap().unwrap();
+        });
+        assert!(ring.signals().radio_keyed());
+        assert!(
+            !ring
+                .signals()
+                .output_radio_keyed(ring.signals().receive_epoch()),
+            "the old finite burst cannot key on its delayed acknowledgement"
+        );
+        for now in 3..48 {
+            let mut pcm = [0.; 960];
+            assert_eq!(ring.render(&mut pcm).unwrap(), 0, "capture epoch");
+            assert_eq!(pcm, [0.; 960]);
+            s.step(now).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 1 {
+                break;
+            }
+        }
+        assert_eq!(state.lock().unwrap().source_acknowledgements, 1);
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.3; 1600]));
+        s.step(50).unwrap();
+        assert!((0..32).any(|_| {
+            let mut pcm = [0.; 960];
+            ring.render(&mut pcm).unwrap() > 0 && pcm.iter().any(|v| *v > 0.1)
+        }));
+        s.stop();
+    });
+}
+
+#[test]
+fn round2_healthy_source_keeps_native_priming_and_cursor_through_mute() {
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let action = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        let (mut p, mut c) =
+            InboundRing::redirected(48000, InboundPolicy::Peer, &signals.reply_target()).unwrap();
+        for n in 0..3 {
+            assert_eq!(
+                p.write_tagged(&[0.4; 4096], 18, n * 4096, &[]).unwrap(),
+                4096
+            );
+        }
+        let mut pcm = [0.; 960];
+        for _ in 0..4 {
+            c.render(&mut pcm).unwrap();
+        }
+        assert!(pcm.iter().any(|v| *v > 0.1));
+        let before = c.observe().unwrap().available_samples;
+        assert!(before > 4096);
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        let timed = c.render_timed_sample().unwrap();
+        assert_eq!(timed.sample, 0.);
+        assert!(
+            timed.provenance.unwrap().position.is_some(),
+            "native source coordinate must survive mute"
+        );
+        assert!(
+            c.observe().unwrap().available_samples > 0,
+            "primed FIFO kept"
+        );
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        assert_eq!(p.write_tagged(&[0.2; 960], 18, 12288, &[]).unwrap(), 960);
+        for _ in 0..16 {
+            c.render(&mut pcm).unwrap();
+            if pcm.iter().any(|v| *v > 0.1) {
+                assert!(pcm.iter().all(|v| *v < 0.35));
+                return;
+            }
+        }
+        panic!("post-unmute input never played on the continuing converter");
+    });
+}
+
+#[test]
+fn round2_muted_gap_keeps_the_same_native_plc_and_source_coordinates_as_live_reference() {
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let action = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        let (mut source, mut reader) =
+            InboundRing::redirected(48000, InboundPolicy::Peer, &signals.reply_target()).unwrap();
+        let (mut reference_source, mut reference) =
+            InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+        for producer in [&mut source, &mut reference_source] {
+            for n in 0..3 {
+                assert_eq!(
+                    producer
+                        .write_tagged(&[0.4; 4096], 21, n * 4096, &[])
+                        .unwrap(),
+                    4096
+                );
+            }
+            assert_eq!(producer.gap(800).unwrap(), 800);
+        }
+        for _ in 0..10 {
+            let mut a = [0.; 960];
+            let mut b = [0.; 960];
+            reader.render(&mut a).unwrap();
+            reference.render(&mut b).unwrap();
+            assert_eq!(a, b);
+        }
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        let mut plc = 0;
+        for _ in 0..4096 {
+            let a = reader.render_timed_sample().unwrap();
+            let b = reference.render_timed_sample().unwrap();
+            let ap = a.provenance.unwrap();
+            let bp = b.provenance.unwrap();
+            assert_eq!(ap.position, bp.position);
+            assert_eq!((ap.gap, ap.plc), (bp.gap, bp.plc));
+            assert_eq!(a.sample, 0.);
+            assert!(!ap.real);
+            if bp.gap && bp.plc {
+                plc += 1;
+            }
+        }
+        assert!(
+            plc > 0,
+            "the native provider synthesized the mapped missing interval"
+        );
+        let a = reader.observe().unwrap();
+        let b = reference.observe().unwrap();
+        assert_eq!(a.missing_samples, b.missing_samples);
+        assert_eq!(
+            a.consecutive_shortfall_samples,
+            b.consecutive_shortfall_samples
+        );
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        assert_eq!(
+            source.write_tagged(&[0.25; 2048], 21, 13088, &[]).unwrap(),
+            2048
+        );
+        assert!((0..10).any(|_| {
+            let mut pcm = [0.; 960];
+            reader.render(&mut pcm).unwrap() > 0 && pcm.iter().any(|v| *v > 0.1)
+        }));
+    });
+}
+
+#[test]
+fn round3_deferred_echo_burst_keeps_first_key_epoch_through_retry_and_finite_ack() {
+    use crate::link::ring::InboundConsumer;
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode, PeerSignals, SourcePosition},
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    // Observe the actual ring's returned credit without replacing any receive decision.
+    struct Observed(InboundConsumer, Arc<AtomicUsize>);
+    impl PeerInput for Observed {
+        fn source_rate(&self) -> u32 {
+            self.0.source_rate()
+        }
+        fn signals(&self) -> &PeerSignals {
+            self.0.signals()
+        }
+        fn available(&self) -> u64 {
+            self.0.available()
+        }
+        fn finite_playout(&self) -> Option<bool> {
+            self.0.finite_playout()
+        }
+        fn receive_audio_current(&self) -> bool {
+            self.0.receive_audio_current()
+        }
+        fn native_real_count(&self, audible: usize) -> usize {
+            self.0.native_real_count(audible)
+        }
+        fn render(&mut self, samples: &mut [f32]) -> Option<usize> {
+            let accepted = self.0.render(samples).ok()?;
+            self.1.fetch_add(accepted, Ordering::Relaxed);
+            Some(accepted)
+        }
+    }
+
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let (mut session, _control, consumer, state) = round2_echo(signals);
+        let credit = Arc::new(AtomicUsize::new(0));
+        let (outbound, _) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+        let peer = AudioPeer::new(
+            "2000",
+            Mode::TRANSCEIVE,
+            Observed(consumer, credit.clone()),
+            outbound,
+            960,
+            0,
+        )
+        .unwrap();
+        let (mut links, _dispatch) = LinkAudio::new(vec![peer], 960).unwrap();
+        let (mut controller, _owner) = NodeController::new(
+            ControllerSettings {
+                hang_ms: 0,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        let mut render = || {
+            let mut pcm = [0.; 960];
+            let keyed = links
+                .process(&mut controller, false, &mut pcm, SourcePosition::default())
+                .unwrap();
+            (keyed, pcm, credit.swap(0, Ordering::Relaxed))
+        };
+        let mute = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.25; 1600]));
+        session.step(1).unwrap();
+        assert!(session.source_finish.is_some());
+        let (key, pcm, real) = render();
+        assert!(key && real > 0 && pcm.iter().any(|v| *v > 0.1));
+        host.runtime
+            .management_action(port, "manager", &mute, clock)
+            .unwrap();
+        {
+            let mut state = state.lock().unwrap();
+            state.source_interleave = true;
+            state.input.push_back(Input::Audio(vec![0.75; 1600]));
+        }
+        session.step(2).unwrap();
+        assert_eq!(
+            state.lock().unwrap().source_credits.last(),
+            Some(&(1600, 0))
+        );
+        assert_eq!(state.lock().unwrap().source_acknowledgements, 0);
+        host.runtime
+            .management_action(port, "manager", &mute, clock)
+            .unwrap();
+
+        let mut raw_second = false;
+        for now in 3..80 {
+            let ack = state.lock().unwrap().source_acknowledgements;
+            if ack == 2 {
+                break;
+            }
+            if ack == 1 && session.inbound.signals().radio_keyed() {
+                raw_second = true;
+            }
+            let (key, pcm, real) = render();
+            assert_eq!(real, 0);
+            assert_eq!(pcm, [0.; 960]);
+            assert!(
+                !key,
+                "deferred finite audio keyed the transmitter, acknowledgements={ack}"
+            );
+            session.step(now).unwrap();
+        }
+        assert!(
+            raw_second,
+            "the provider selected the held burst on a later read"
+        );
+        assert_eq!(state.lock().unwrap().source_completions, [1, 1]);
+
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.4; 1600]));
+        session.step(80).unwrap();
+        let mut heard = false;
+        for now in 81..120 {
+            let (key, pcm, real) = render();
+            heard |= key && real > 0 && pcm.iter().any(|v| *v > 0.1);
+            session.step(now).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 3 {
+                break;
+            }
+        }
+        assert!(heard, "fresh third burst must produce PCM and PTT");
+        assert_eq!(state.lock().unwrap().source_completions, [1, 1, 1]);
+        assert!(!session.inbound.signals().radio_keyed());
+        session.stop();
+    });
 }

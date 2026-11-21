@@ -2,7 +2,7 @@
 use crate::{
     link::{
         dispatcher::{MediaWorker, PreparedDispatch},
-        ring::{InboundPolicy, InboundRing},
+        ring::InboundRing,
         session::{Command as PeerCommand, Event, PeerControl, PeerIoWorker, PeerSession},
         text::{TextDestination, TextPayload, TextRouter},
     },
@@ -191,18 +191,25 @@ pub struct GenerationControl {
     text_origins: Vec<(String, TextOrigin)>,
     dispatcher: PreparedDispatch,
     status: LinkAudioStatus,
-    redirects: Vec<(String, PeerCommand)>,
-    awaiting: Vec<(String, crate::link::ring::InboundObserver)>,
+    redirects: Vec<(u64, PeerCommand)>,
+    awaiting: Vec<(u64, crate::link::ring::InboundObserver)>,
     local_update: Option<LocalRingUpdate>,
     awaiting_local: bool,
 }
 impl GenerationControl {
-    fn acknowledge(&mut self, remote: &str, observer: &crate::link::ring::InboundObserver) {
+    fn acknowledge(
+        &mut self,
+        connection: u64,
+        observer: &crate::link::ring::InboundObserver,
+    ) -> bool {
+        let before = self.awaiting.len();
         self.awaiting
-            .retain(|(name, expected)| name != remote || !expected.same_generation(observer));
+            .retain(|(name, expected)| *name != connection || !expected.same_generation(observer));
+        self.awaiting.len() != before
     }
 }
 struct PeerOwner {
+    superseded: bool,
     local: String,
     remote: String,
     mode: Mode,
@@ -281,9 +288,12 @@ fn prepared(
                 .map_err(|_| RuntimeError::Preparation)?,
         );
         text_origins.push((peer.remote.clone(), origin));
-        let (inbound, input) =
-            InboundRing::open(snapshot.input_rate, peer.control.inbound_policy())
-                .map_err(|_| RuntimeError::Preparation)?;
+        let (inbound, input) = InboundRing::redirected(
+            snapshot.input_rate,
+            peer.control.inbound_policy(),
+            &peer.control.reply_target(),
+        )
+        .map_err(|_| RuntimeError::Preparation)?;
         let processor = services
             .prepare_peer_processing(
                 &settings.radio.processing_configuration,
@@ -308,10 +318,10 @@ fn prepared(
             Some(group) => prepared_peer.with_group_member(group.clone()),
             None => prepared_peer,
         });
-        awaiting.push((peer.remote.clone(), inbound.observer()));
+        awaiting.push((peer.control.connection_generation(), inbound.observer()));
         wakes.push(peer.control.wake());
         redirects.push((
-            peer.remote.clone(),
+            peer.control.connection_generation(),
             PeerCommand::Redirect {
                 inbound,
                 outbound,
@@ -323,8 +333,8 @@ fn prepared(
         LinkAudio::new(audio, MAXIMUM_FRAMES).map_err(|_| RuntimeError::Preparation)?;
     audio = audio.with_text(Box::new(TextMix(text_readers)));
     let regeneration = if settings.dtmf_regeneration.enabled {
-        let (writer, reader) = InboundRing::open(48000, InboundPolicy::Media)
-            .map_err(|_| RuntimeError::Preparation)?;
+        let (writer, reader) =
+            InboundRing::regeneration().map_err(|_| RuntimeError::Preparation)?;
         audio = audio.with_regeneration(ProcessedPeer::new(reader, None));
         Some((settings.dtmf_regeneration, writer, MAXIMUM_FRAMES))
     } else {
@@ -554,6 +564,13 @@ impl Host {
     }
     /// Submit eligible addressed digits only to this node's active local signaling lane.
     pub fn regenerate(&mut self, local: &str, digit: char) -> Result<(), RuntimeError> {
+        self.regenerate_digit(local, digit.into())
+    }
+    pub(crate) fn regenerate_digit(
+        &mut self,
+        local: &str,
+        digit: crate::link::regeneration::RegenerationDigit,
+    ) -> Result<(), RuntimeError> {
         let generation = self
             .runtime
             .status(0)
@@ -694,6 +711,22 @@ impl Host {
         }
         Ok(!self.runtime.reload_pending())
     }
+    /// Name supplied to the actual native protocol owner for this outbound route.
+    pub(crate) fn wire_local(&mut self, local: &str, remote: &str) -> Result<String, RuntimeError> {
+        if PeerIdentity::from_operator(remote)
+            .map_err(|_| RuntimeError::Rejected)?
+            .protocol()
+            == ProtocolId::AllStarLink
+        {
+            self.runtime
+                .node(local)
+                .and_then(|node| node.network_account())
+                .map(str::to_owned)
+                .ok_or(RuntimeError::Unavailable)
+        } else {
+            Ok(local.to_owned())
+        }
+    }
     /// Route reserved Echo aliases before ASL lookup; an address alone cannot admit an Echo QSO.
     pub fn lookup(
         &self,
@@ -739,7 +772,14 @@ impl Host {
         source: &str,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
-        let local = io.local().to_owned();
+        let local = if io.identity().protocol() == ProtocolId::AllStarLink {
+            self.runtime
+                .network_owner(io.local())
+                .ok_or(RuntimeError::MissingNode)?
+        } else {
+            io.local()
+        }
+        .to_owned();
         if io.identity().protocol() == ProtocolId::Phone {
             self.runtime
                 .settings(&local)
@@ -820,10 +860,11 @@ impl Host {
         let (_, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
+        let wire_local = self.wire_local(local, remote)?;
         let (mut session, control) = PeerSession::prepare(
             io,
             outbound,
-            local,
+            &wire_local,
             remote,
             self.runtime
                 .settings(local)
@@ -836,7 +877,21 @@ impl Host {
             session.stop();
             return Err(RuntimeError::Rejected);
         }
+        let connection = control.connection_generation();
+        for old in self
+            .peers
+            .iter_mut()
+            .filter(|p| p.local == local && p.remote == remote && !p.superseded)
+        {
+            old.superseded = true;
+            self.runtime
+                .node(local)
+                .expect("running port")
+                .links()
+                .retire_source(&old.control.reply_target());
+        }
         self.peers.push(PeerOwner {
+            superseded: false,
             local: local_name,
             remote: remote_name,
             mode,
@@ -845,13 +900,13 @@ impl Host {
             control,
         });
         if let Err(error) = self.refresh(local, clock) {
-            self.detach(local, remote, clock.now_ms);
+            self.detach_connection(local, remote, Some(connection), clock.now_ms);
             return Err(error);
         }
         if let Some(peer) = self
             .peers
             .iter_mut()
-            .find(|peer| peer.local == local && peer.remote == remote)
+            .find(|peer| peer.control.connection_generation() == connection)
         {
             peer.announced = true;
             let _ = if peer.control.text_origin().protocol == ProtocolId::EchoLink as u32 {
@@ -898,11 +953,22 @@ impl Host {
         Err(RuntimeError::Busy)
     }
     fn detach(&mut self, local: &str, remote: &str, now_ms: u64) {
-        let announced = if let Some(index) = self
-            .peers
-            .iter()
-            .position(|peer| peer.local == local && peer.remote == remote)
-        {
+        self.detach_connection(local, remote, None, now_ms)
+    }
+    fn detach_connection(
+        &mut self,
+        local: &str,
+        remote: &str,
+        connection: Option<u64>,
+        now_ms: u64,
+    ) {
+        let announced = if let Some(index) = self.peers.iter().position(|peer| {
+            peer.local == local
+                && peer.remote == remote
+                && connection.map_or(!peer.superseded, |id| {
+                    id == peer.control.connection_generation()
+                })
+        }) {
             let peer = self.peers.remove(index);
             self.text.cancel(&peer.control.text_origin());
             let announced = peer.announced.then(|| {
@@ -913,7 +979,12 @@ impl Host {
             });
             peer.control.stop();
             self.peer_io.reap();
+            if peer.superseded {
+                return;
+            }
             announced
+        } else if connection.is_some() {
+            return;
         } else {
             None
         };
@@ -936,6 +1007,12 @@ impl Host {
     pub(crate) fn status_text(&mut self, local: &str) -> Result<String, RuntimeError> {
         use std::fmt::Write;
         let node = self.runtime.node(local).ok_or(RuntimeError::MissingNode)?;
+        let radio_receive = node.radio_receive_status();
+        let ingress: Vec<_> = node
+            .links()
+            .ingress_receive_status()
+            .map(|(id, state)| (id.clone(), state))
+            .collect();
         let peers = node.links().manager().snapshot();
         let topology = self
             .runtime
@@ -950,6 +1027,26 @@ impl Host {
                 if peers.len() == 1 { "link" } else { "links" }
             )
         };
+        let _ = writeln!(
+            result,
+            "  radio.rx.muted={} active={}",
+            radio_receive.muted, radio_receive.active
+        );
+        for (id, rx) in ingress {
+            let kind = match id.protocol() {
+                ProtocolId::AllStarLink => "allstarlink",
+                ProtocolId::EchoLink => "echolink",
+                ProtocolId::Phone => "phone",
+            };
+            let _ = writeln!(
+                result,
+                "  {} {} rx.muted={} active={}",
+                kind,
+                id.wire_identity(),
+                rx.muted,
+                rx.active
+            );
+        }
         match self.services.echo_account_status(local) {
             Ok(Some(account)) => {
                 let _ = writeln!(result, "  {account}");
@@ -1167,6 +1264,25 @@ impl Host {
             return Err(RuntimeError::Rejected);
         }
         match effect {
+            LinkEffect::PrivatePhoneMedia(reply, stream) => {
+                if !reply.phone_authenticated() {
+                    return Err(RuntimeError::Rejected);
+                }
+                let caller = reply.phone_source().ok_or(RuntimeError::Rejected)?;
+                self.queue_phone_reply(caller, &reply, stream)
+            }
+            LinkEffect::VerifyCommandTarget(operation) => {
+                let verified = self.lookup(local, &operation.command.node, None).is_ok();
+                let effect = self.runtime.command(local, operation, clock, verified)?;
+                self.immediate(local, effect, clock)
+            }
+            LinkEffect::SiteCommand(command, permit) => {
+                if !permit.current(Some(clock.now_ms)) {
+                    return Err(RuntimeError::Rejected);
+                }
+                self.site_command(local, command, clock)
+                    .map_err(|_| RuntimeError::Rejected)
+            }
             LinkEffect::Connect(_) => Err(RuntimeError::Rejected),
             LinkEffect::Detach(remotes) => {
                 for remote in remotes {
@@ -1187,7 +1303,15 @@ impl Host {
                 Ok(())
             }
             LinkEffect::Digit(outcome) => {
-                if let DigitOutcome::RemoteCandidate(operation) = outcome {
+                if let DigitOutcome::Mapped(input) = outcome {
+                    if let Ok(effect) = self.runtime.dispatch_mapping(local, input, clock) {
+                        if matches!(effect, LinkEffect::Connect(_)) {
+                            self.defer_link(local, effect);
+                        } else {
+                            let _ = self.immediate(local, effect, clock);
+                        }
+                    }
+                } else if let DigitOutcome::RemoteCandidate(operation) = outcome {
                     // Selection changes collection of the very next queued digit.
                     let verified = self.lookup(local, &operation.command.node, None).is_ok();
                     let _ = self.runtime.command(local, operation, clock, verified);
@@ -1217,6 +1341,7 @@ impl Host {
             LinkEffect::SelectedRemote
             | LinkEffect::ParrotEnabled(_)
             | LinkEffect::EchoTelemetry(_)
+            | LinkEffect::CommandQueued(_)
             | LinkEffect::None => Ok(()),
         }
     }
@@ -1230,7 +1355,7 @@ impl Host {
         let peer = self
             .peers
             .iter_mut()
-            .find(|peer| peer.local == local && peer.remote == remote)
+            .find(|peer| peer.local == local && peer.remote == remote && !peer.superseded)
             .ok_or(RuntimeError::Rejected)?;
         peer.control
             .send(PeerCommand::Text {
@@ -1395,22 +1520,28 @@ impl Host {
                         clock.now_ms,
                     ));
             }
-            while let Some(event) = peer.control.event() {
+            while let Some(event) = peer.control.received_event() {
                 events.push((
                     peer.local.clone(),
                     peer.remote.clone(),
+                    peer.control.connection_generation(),
+                    peer.superseded,
                     event,
                     peer.control.reply_target(),
                 ));
             }
             if peer.control.ended() {
-                ended.push((peer.local.clone(), peer.remote.clone()));
+                ended.push((
+                    peer.local.clone(),
+                    peer.remote.clone(),
+                    peer.control.connection_generation(),
+                ));
             }
         }
-        for (local, remote) in ended {
-            self.detach(&local, &remote, clock.now_ms);
+        for (local, remote, connection) in ended {
+            self.detach_connection(&local, &remote, Some(connection), clock.now_ms);
         }
-        for (local, remote, event, reply) in events {
+        for (local, remote, connection, superseded, event, reply) in events {
             let (receiving, transitioned) = self
                 .leases
                 .iter()
@@ -1423,6 +1554,24 @@ impl Host {
                         .snapshot()
                 })
                 .unwrap_or((false, 0));
+            let (event, reply, received_at, regeneration) = match event {
+                Event::ReceivedDigit(d, r) => (Event::Digit(d), r.reply, r.at, r.regeneration),
+                Event::ReceivedText(t, r) => (Event::Text(t), r.reply, r.at, r.regeneration),
+                Event::ReceivedUnkey(r) => (Event::RemoteUnkey(r.at), r.reply, r.at, None),
+                // Only the session owner can attest a command symbol's time and source.
+                Event::Digit(_) | Event::Text(_) | Event::RemoteUnkey(_) => continue,
+                other => (other, reply, clock.now_ms, None),
+            };
+            if !superseded && matches!(event, Event::Digit(_) | Event::Text(_)) {
+                let ready = self
+                    .runtime
+                    .node(&local)
+                    .map(|n| n.links().expire_connection_digits(&reply, received_at))
+                    .unwrap_or_default();
+                for outcome in ready {
+                    self.immediate(&local, LinkEffect::Digit(outcome), clock)?;
+                }
+            }
             let Some(node) = self.runtime.node(&local) else {
                 continue;
             };
@@ -1431,12 +1580,25 @@ impl Host {
                     self.human_text(&local, message);
                 }
                 Event::Redirected(observer) => {
-                    if let Some(generation) = node.status(clock.now_ms).active {
-                        // This serialized owner has not changed the just-read generation.
-                        node.adapter_control_mut(generation)
-                            .expect("active generation retains its adapter control")
-                            .acknowledge(&remote, &observer);
+                    let expected = node
+                        .status(clock.now_ms)
+                        .active
+                        .and_then(|generation| node.adapter_control_mut(generation))
+                        .is_some_and(|control| control.acknowledge(connection, &observer));
+                    let target = observer.signals().reply_target();
+                    if superseded {
+                        target.retire();
+                    } else if expected && !target.ended() {
+                        let id = rpt_advanced_core::link::PeerIdentity::from_operator(&remote)
+                            .map_err(|_| RuntimeError::Rejected)?;
+                        node.links()
+                            .attach_ingress(id, target)
+                            .map_err(RuntimeError::Link)?;
                     }
+                }
+                _ if superseded => continue,
+                Event::ReceivedDigit(..) | Event::ReceivedText(..) | Event::ReceivedUnkey(..) => {
+                    unreachable!()
                 }
                 Event::Text(text) => {
                     if let Ok(effect) = node.links().peer_text(
@@ -1445,14 +1607,26 @@ impl Host {
                         reply,
                         receiving,
                         transitioned,
-                        clock.now_ms,
+                        received_at,
                     ) {
-                        self.immediate(&local, effect, clock)?;
+                        self.immediate(&local, received_effect(effect, regeneration), clock)?;
                     }
                 }
                 Event::Digit(digit) => {
                     if let Some(operation) =
-                        node.links().peer_digit(&remote, digit, clock.now_ms, reply)
+                        node.links().peer_digit(&remote, digit, received_at, reply)
+                    {
+                        self.immediate(
+                            &local,
+                            received_effect(LinkEffect::Digit(operation), regeneration),
+                            clock,
+                        )?;
+                    }
+                }
+                Event::LegacyDigitBoundary => {
+                    if let Some(operation) =
+                        node.links()
+                            .legacy_peer_boundary(&remote, clock.now_ms, reply)
                     {
                         self.immediate(&local, LinkEffect::Digit(operation), clock)?;
                     }
@@ -1471,6 +1645,15 @@ impl Host {
                 .map(|node| node.drain_digits())
                 .unwrap_or_default();
             for event in events {
+                use rpt_advanced_core::runtime::dtmf::DigitEvent;
+                if let DigitEvent::Digit { now_ms, .. } | DigitEvent::Unkey { now_ms } = event
+                    && let Some(ready) = self
+                        .runtime
+                        .node(&local)
+                        .and_then(|node| node.links().expire_receiver_digits(now_ms))
+                {
+                    self.immediate(&local, LinkEffect::Digit(ready), clock)?;
+                }
                 if let Some(outcome) = self.runtime.digit(&local, event) {
                     self.immediate(&local, LinkEffect::Digit(outcome), clock)?;
                 }
@@ -1495,19 +1678,12 @@ impl Host {
                     keyed,
                     node.links().manager().snapshot(),
                 );
-                self.operations.extend(
-                    node.links()
-                        .expire_peer_digits(clock.now_ms)
-                        .into_iter()
-                        .map(|operation| (local.clone(), operation)),
-                );
-                self.operations.extend(
-                    node.links()
-                        .advance_macros(clock.now_ms)
-                        .into_iter()
-                        .map(|operation| (local.clone(), operation)),
-                );
+                let mut ready = node.links().expire_peer_digits(clock.now_ms);
+                ready.extend(node.links().advance_macros(clock.now_ms));
                 let messages = node.links().due_topology(clock.now_ms);
+                for outcome in ready {
+                    self.immediate(&local, LinkEffect::Digit(outcome), clock)?;
+                }
                 for (remote, text) in messages {
                     let _ = self.text(&local, &remote, &text, false);
                 }
@@ -1556,24 +1732,22 @@ impl Host {
                 }
             }
             let mut pending = Vec::new();
-            for (remote, command) in control.redirects.drain(..) {
-                if let Some(peer) = self
-                    .peers
-                    .iter_mut()
-                    .find(|peer| peer.local == local && peer.remote == remote)
-                {
+            for (connection, command) in control.redirects.drain(..) {
+                if let Some(peer) = self.peers.iter_mut().find(|peer| {
+                    peer.local == local && peer.control.connection_generation() == connection
+                }) {
                     if let Err(command) = peer.control.send(command) {
-                        pending.push((remote, command));
+                        pending.push((connection, command));
                     }
                 } else {
-                    control.awaiting.retain(|(name, _)| name != &remote);
+                    control.awaiting.retain(|(name, _)| *name != connection);
                 }
             }
             control.redirects = pending;
-            control.awaiting.retain(|(remote, _)| {
-                self.peers
-                    .iter()
-                    .any(|peer| peer.local == local && &peer.remote == remote)
+            control.awaiting.retain(|(connection, _)| {
+                self.peers.iter().any(|peer| {
+                    peer.local == local && peer.control.connection_generation() == *connection
+                })
             });
             let redirects_done = control.awaiting.is_empty() && !control.awaiting_local;
             if let Some(old) = status.retiring {
@@ -1717,4 +1891,18 @@ impl Drop for Host {
 
 #[cfg(test)]
 #[path = "host_tests.rs"]
-mod tests;
+pub(crate) mod tests;
+
+fn received_effect(
+    effect: LinkEffect,
+    origin: Option<rpt_advanced_core::link::RegenerationOrigin>,
+) -> LinkEffect {
+    match effect {
+        LinkEffect::Digit(DigitOutcome::ReceivedDigit(d, _)) => origin
+            .filter(|o| o.current())
+            .map_or(LinkEffect::None, |o| {
+                LinkEffect::Digit(DigitOutcome::ReceivedDigit(d, o))
+            }),
+        other => other,
+    }
+}

@@ -29,14 +29,14 @@ GPIOD = "librptadv_gpiod_adapter.so.1"
 HWMON = "librptadv_hwmon_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
 PRODUCT = "librptadv_product.so.2"
-RING_MINIMUM_VERSION = "3.0.0~alpha5"
+RING_MINIMUM_VERSION = "3.0.0~alpha6"
 SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha3"
 TONE_MINIMUM_VERSION = "0.1.0~alpha1"
 MORSE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 DTMF_MINIMUM_VERSION = "0.1.0~alpha3-1"
 TEMPLATE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 SCHEDULE_MINIMUM_VERSION = "0.1.0~alpha3-1"
-USBRADIO_MINIMUM_VERSION = "0.1.0~alpha36-1"
+USBRADIO_MINIMUM_VERSION = "0.1.0~alpha37-1"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,

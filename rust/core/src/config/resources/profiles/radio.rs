@@ -263,6 +263,20 @@ impl ModularCandidate<'_> {
             if let Some(error) = diagnostics.into_iter().next() {
                 return Err(error);
             }
+            for (kind, receive) in [
+                (ResourceKind::RxSignaling, true),
+                (ResourceKind::TxSignaling, false),
+            ] {
+                if let Some(binding) = registry.binding(scope, kind)
+                    && let Some(resource) = local.get_mut(&binding.id)
+                {
+                    signals::prune_inherited_serial(
+                        &mut resource.configuration,
+                        receive,
+                        &settings.signals,
+                    );
+                }
+            }
             let metadata = self
                 .port_metadata(id)
                 .expect("assembled metadata")

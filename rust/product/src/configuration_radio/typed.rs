@@ -19,6 +19,9 @@ use std::{
     sync::Arc,
 };
 
+// The matched header and runtime table must both advertise physical preparation ABI 1.
+const _: () = assert!(abi::URP_NATIVE_PHYSICAL_PREPARATION_ABI_VERSION == 1);
+
 /// Value-free preparation or lifecycle diagnostic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PreparationError {
@@ -86,6 +89,9 @@ unsafe fn named<T>(library: &Library, getter: &[u8], name: &[u8]) -> Result<NonN
             .map_err(|_| PreparationError::Unavailable)?()
     };
     let pointer = NonNull::new(pointer).ok_or(PreparationError::Incompatible)?;
+    if !pointer.as_ptr().is_aligned() {
+        return Err(PreparationError::Incompatible);
+    }
     let head = pointer.cast::<Header>().as_ptr();
     // SAFETY: all provider descriptors expose size as the first uint32_t. Other fields
     // are inspected only once that size covers the entire expected descriptor.
@@ -205,8 +211,8 @@ impl RadioPreparationApi {
                 )?,
                 named(
                     &library,
-                    b"usbradioplus_preparation_descriptor\0",
-                    b"usbradioplus.preparation1",
+                    b"usbradioplus_physical_preparation_descriptor\0",
+                    b"usbradioplus.physical-preparation1",
                 )?,
                 named(
                     &library,

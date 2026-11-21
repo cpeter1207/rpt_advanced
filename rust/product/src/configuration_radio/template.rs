@@ -36,16 +36,6 @@ pub(super) fn radio(p: &RadioPortProfile) -> Result<abi::rptadv_radio_session_co
     let rx = &p.signals.rx;
     let tx = &p.signals.tx;
     let sq = &rx.squelch;
-    // The native provider reduces the raw port bits and maps an offline port to false.
-    // Inverting afterward loses both per-pin polarity and the independent health gate.
-    for (enabled, binding) in [
-        (sq.enabled, &sq.binding),
-        (rx.ctcss.enabled, &rx.ctcss.binding),
-    ] {
-        if enabled && binding.source == SignalSource::Parallel && binding.inverted {
-            return Err(rejected("inverted_parallel_input"));
-        }
-    }
     r.receive.noise_filter_profile = u32::from(sq.noise_filter == NoiseFilter::Alternate);
     r.receive.squelch_open_level = (999 - sq.level) * 32767 / 1000;
     r.receive.squelch_hysteresis = sq.hysteresis;
@@ -67,7 +57,8 @@ pub(super) fn radio(p: &RadioPortProfile) -> Result<abi::rptadv_radio_session_co
             (SignalSource::Dsp, false) => 1,
             (SignalSource::SoundChipGpio, false) => 3,
             (SignalSource::SoundChipGpio, true) => 4,
-            (SignalSource::Parallel, false) => 5,
+            (SignalSource::Parallel, _) => 5,
+            (SignalSource::Serial | SignalSource::KeyDown, _) => 7,
             _ => return Err(rejected("carrier_source")),
         }
     };
@@ -82,7 +73,8 @@ pub(super) fn radio(p: &RadioPortProfile) -> Result<abi::rptadv_radio_session_co
             (SignalSource::Dsp, false) => 3,
             (SignalSource::SoundChipGpio, false) => 1,
             (SignalSource::SoundChipGpio, true) => 2,
-            (SignalSource::Parallel, false) => 4,
+            (SignalSource::Parallel, _) => 4,
+            (SignalSource::Serial, _) => 6,
             _ => return Err(rejected("receive_source")),
         };
         if tone.binding.source == SignalSource::Dsp {
@@ -143,17 +135,26 @@ pub(super) fn with_request<T>(
     prefix: &str,
     call: impl FnOnce(&abi::UrpTypedPreparation) -> Result<T>,
 ) -> Result<T> {
-    if p.interface.audio.backend == AudioBackend::Alsa && !p.remote.enabled {
-        return Err(PreparationError::Unsupported("audio_backend"));
-    }
     if !p.remote.enabled {
-        // The ordinary product keys USB and parallel together. Exclusive parallel or rig PTT
-        // needs the released remote owner until the ordinary physical capability adds selection.
-        if p.signals.tx.ptt.source != SignalSource::SoundChipGpio {
-            return Err(PreparationError::Unsupported("ptt_source"));
+        if !matches!(
+            p.signals.tx.ptt.source,
+            SignalSource::SoundChipGpio
+                | SignalSource::Parallel
+                | SignalSource::Serial
+                | SignalSource::Hamlib
+        ) {
+            return Err(rejected("ptt_source"));
         }
-        if (p.signals.tx.ctcss.enabled && p.signals.tx.ctcss.source != SignalSource::Dsp)
-            || (p.signals.tx.dcs.enabled && p.signals.tx.dcs.source != SignalSource::Dsp)
+        if (p.signals.tx.ctcss.enabled
+            && !matches!(
+                p.signals.tx.ctcss.source,
+                SignalSource::Dsp | SignalSource::External
+            ))
+            || (p.signals.tx.dcs.enabled
+                && !matches!(
+                    p.signals.tx.dcs.source,
+                    SignalSource::Dsp | SignalSource::External
+                ))
         {
             return Err(PreparationError::Unsupported("encode_source"));
         }
@@ -214,7 +215,7 @@ pub(super) fn with_request<T>(
     let settings = settings(p, prefix)?;
     let req = abi::UrpTypedPreparation {
         struct_size: size_of::<abi::UrpTypedPreparation>() as u32,
-        abi_version: 1,
+        abi_version: abi::URP_NATIVE_PHYSICAL_PREPARATION_ABI_VERSION,
         station: &s,
         settings: settings.as_ptr(),
         settings_length: settings.len() as u32,
@@ -255,6 +256,102 @@ fn settings(p: &RadioPortProfile, prefix: &str) -> Result<Vec<u8>> {
             "turnoff_duration_ms":tx.dcs.duration_ms,"peak_dbfs":tx.dcs.level_dbfs},
         "diagnostics":{"status_publication_interval_ms":p.general.status_snapshot_interval_ms}
     });
+    let invert_parallel = |enabled: bool, binding: &SignalBinding| {
+        enabled && binding.source == SignalSource::Parallel && binding.inverted
+    };
+    root["physical"] = json!({
+        "parallel_carrier_inverted": invert_parallel(rx.squelch.enabled, &rx.squelch.binding),
+        "parallel_ctcss_inverted": invert_parallel(rx.ctcss.enabled, &rx.ctcss.binding),
+    });
+    if !p.remote.enabled {
+        root["physical"]["ordinary"] = json!({
+            "audio_source": if p.interface.audio.backend == AudioBackend::Alsa { "alsa" } else { "cm119" },
+            "ptt_source": match tx.ptt.source {
+                SignalSource::Parallel => "parallel", SignalSource::Serial => "serial",
+                SignalSource::Hamlib => "hamlib", _ => "usb",
+            },
+        });
+    }
+    if !p.remote.enabled && tx.ptt.source == SignalSource::Hamlib {
+        let control = &p.remote;
+        root["physical"]["hamlib"] = json!({
+            "model": control.hamlib_model.as_deref().ok_or_else(|| rejected("hamlib_model"))?,
+            "options": control.hamlib_options, "timeout_ms": control.timeout_ms,
+            "retries": control.retries, "timeout_retries": control.timeout_retries, "poll_interval_ms": control.poll_interval_ms,
+        });
+    }
+    let mask = |enabled: bool, binding: &SignalBinding| {
+        if !enabled || binding.source != SignalSource::Serial {
+            return 0u32;
+        }
+        binding.serial_pins().fold(0, |bits, pin| {
+            bits | match pin {
+                "CTS" | "RTS" => 1,
+                "DSR" | "DTR" => 2,
+                "DCD" => 4,
+                "RI" => 8,
+                _ => 0,
+            }
+        })
+    };
+    let carrier = mask(rx.squelch.enabled, &rx.squelch.binding);
+    let tone = mask(rx.ctcss.enabled, &rx.ctcss.binding);
+    let encoder = if tx.ctcss.enabled && tx.ctcss.source == SignalSource::External {
+        Some(
+            tx.ctcss
+                .output
+                .as_ref()
+                .ok_or_else(|| rejected("external_encode_output"))?,
+        )
+    } else if tx.dcs.enabled && tx.dcs.source == SignalSource::External {
+        Some(
+            tx.dcs
+                .output
+                .as_ref()
+                .ok_or_else(|| rejected("external_encode_output"))?,
+        )
+    } else {
+        None
+    };
+    let encoder_mask = encoder.map_or(0, |b| mask(true, b));
+    if !p.remote.enabled
+        && let Some(binding) = encoder
+    {
+        let value = match (binding.source, binding.pins.as_slice()) {
+            (SignalSource::SoundChipGpio, [n]) => json!({"usb":n}),
+            (SignalSource::Parallel, [n]) => json!({"parallel":n}),
+            (SignalSource::Serial, _) if encoder_mask != 0 => json!({"serial":encoder_mask}),
+            _ => return Err(rejected("external_encode_output")),
+        };
+        root["physical"]["ordinary"]["external_encode_output"] = value;
+        root["physical"]["ordinary"]["external_encode_inverted"] = json!(binding.inverted);
+    }
+    let ptt = mask(true, &tx.ptt);
+    let outputs = ptt | encoder_mask;
+    if carrier | tone | outputs != 0 {
+        let serial = &p.interface.serial;
+        root["physical"]["serial"] = json!({
+            "path": serial.device.as_deref().ok_or_else(|| rejected("serial_device"))?,
+            "baud": serial.baud_rate, "data_bits": serial.data_bits,
+            "stop_half_bits": (serial.stop_bits * 2.0) as u32,
+            "parity": match serial.parity {
+                SerialParity::None => 0, SerialParity::Odd => 1, SerialParity::Even => 2,
+                SerialParity::Mark => 3, SerialParity::Space => 4,
+            },
+            "outputs": outputs, "encoder": encoder_mask,
+            "idle": (if tx.ptt.inverted {ptt} else {0}) | (if encoder.is_some_and(|b|b.inverted) {encoder_mask} else {0}),
+            "carrier": carrier, "tone": tone,
+            "carrier_inverted": carrier != 0 && rx.squelch.binding.inverted,
+            "tone_inverted": tone != 0 && rx.ctcss.binding.inverted,
+        });
+    }
+    if rx.squelch.enabled && rx.squelch.binding.source == SignalSource::KeyDown {
+        root["physical"]["keyboard"] = json!({
+            "device":p.interface.keyboard_device.as_deref().ok_or_else(||rejected("keyboard_device"))?,
+            "carrier":rx.squelch.binding.scancode.ok_or_else(||rejected("scancode"))?,
+            "carrier_inverted":rx.squelch.binding.inverted,
+        });
+    }
     if let Some(remote) = p.remote_settings(prefix) {
         root["remote"] = serde_json::to_value(remote).map_err(|_| PreparationError::Limit)?;
     }

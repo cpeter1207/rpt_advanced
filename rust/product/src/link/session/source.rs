@@ -26,6 +26,7 @@ fn collect_mute_start(
 
 #[derive(Clone, Copy)]
 struct Cached {
+    epoch: u64,
     start: u64,
     count: usize,
     next: usize,
@@ -35,6 +36,7 @@ struct Cached {
 pub(super) struct Decoded<'a> {
     pub start: u64,
     pub pcm: &'a [f32],
+    pub epoch: u64,
     pub concealed: bool,
 }
 
@@ -202,6 +204,7 @@ impl SourceIngress {
                 }
             }
             self.cached = Some(Cached {
+                epoch: block.epoch,
                 start: block.start,
                 count: block.pcm.len(),
                 next: 0,
@@ -227,11 +230,12 @@ impl SourceIngress {
             );
         }
         let accepted = inbound
-            .write_tagged(
+            .write_received_tagged(
                 &scratch[cached.next..cached.next + block.pcm.len()],
                 self.generation,
                 block.start,
                 &offered[..count],
+                cached.epoch,
             )
             .map_err(|_| Error::Write)?;
         cached.next += accepted;
@@ -354,6 +358,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        epoch: 0,
                         start: 0,
                         pcm: &[],
                         concealed: false
@@ -377,6 +382,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        epoch: 0,
                         start: 0,
                         pcm: &tone,
                         concealed: false
@@ -391,6 +397,7 @@ mod tests {
                         &mut inbound,
                         &mut scratch,
                         Decoded {
+                            epoch: 0,
                             start: 256,
                             pcm: &tone[..160],
                             concealed: true
@@ -431,6 +438,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        epoch: 0,
                         start,
                         pcm: &pcm,
                         concealed: false
@@ -447,6 +455,7 @@ mod tests {
                 &mut inbound,
                 &mut scratch,
                 Decoded {
+                    epoch: 0,
                     start: 408,
                     pcm: &[0.0; 102],
                     concealed: false
@@ -475,6 +484,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        epoch: 0,
                         start,
                         pcm: &pcm,
                         concealed: false
@@ -505,6 +515,7 @@ mod tests {
                 &mut inbound,
                 &mut scratch,
                 Decoded {
+                    epoch: 0,
                     start: 4096,
                     pcm: &pcm,
                     concealed: false
@@ -524,6 +535,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        epoch: 0,
                         start,
                         pcm: samples,
                         concealed
@@ -546,6 +558,7 @@ mod tests {
                 &mut inbound,
                 &mut scratch,
                 Decoded {
+                    epoch: 0,
                     start: 6176,
                     pcm: remaining,
                     concealed: false
@@ -574,6 +587,7 @@ mod tests {
                     &mut inbound,
                     &mut scratch,
                     Decoded {
+                        epoch: 0,
                         start: 0,
                         pcm: &five_tone(256),
                         concealed: false
@@ -594,6 +608,7 @@ mod tests {
                         &mut inbound,
                         &mut scratch,
                         Decoded {
+                            epoch: 0,
                             start: 416,
                             pcm: &[],
                             concealed: false
@@ -627,6 +642,7 @@ mod tests {
                 &mut inbound,
                 &mut scratch,
                 Decoded {
+                    epoch: 0,
                     start: 0,
                     pcm: &five_tone(256),
                     concealed: false

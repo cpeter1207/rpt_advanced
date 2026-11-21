@@ -113,6 +113,7 @@ pub(in super::super) const INTERFACE: Fields = &[
     ("rx", Rule::Object(INTERFACE_RX)),
     ("parallel", Rule::Object(INTERFACE_PARALLEL)),
     ("serial", Rule::Object(INTERFACE_SERIAL)),
+    ("keyboard", Rule::Object(&[("device", Rule::Value(device))])),
     ("gpio", Rule::Object(INTERFACE_GPIO)),
 ];
 const GENERAL_PARROT: Fields = &[("enabled", Rule::Bool)];

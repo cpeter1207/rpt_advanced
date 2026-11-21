@@ -1,7 +1,8 @@
 //! Checked binding to the released F32 ring; no conversion implementation lives here.
 use crate::abi as ffi;
 use rpt_advanced_core::link::{
-    PeerInput, PeerSignals, ReceivePolicy, SampleProvenance, SourceCoordinate, TimedPeerSample,
+    PeerInput, PeerSignals, ReceivePolicy, RegenerationOrigin, SampleProvenance, SourceCoordinate,
+    TimedPeerSample,
 };
 use std::{
     ffi::CStr,
@@ -95,6 +96,17 @@ struct Shared {
     capacity_samples: u64,
     policy: InboundPolicy,
     finite: AtomicU64,
+    // Each local direction exclusively updates its snapshot from the co-owned RF gate.
+    local_capture_epoch: AtomicU64,
+    local_playout_epoch: AtomicU64,
+    // Only the serial producer advances the native accepted source timeline.
+    writer_frame: AtomicU64,
+    writer_generation: AtomicU64,
+    first_frame: AtomicU64,
+    first_generation: AtomicU64,
+    first_epoch: AtomicU64,
+    played_epoch: AtomicU64,
+    native_real: AtomicU64,
     signals: PeerSignals,
 }
 // SAFETY: exactly one non-cloneable producer and one consumer call the released SPSC API.
@@ -114,7 +126,38 @@ pub struct InboundRing;
 /// Unique network producer; its owner serializes every publish operation.
 pub struct InboundProducer(Arc<Shared>);
 /// Unique native 48 kHz consumer, independent of producer progress.
-pub struct InboundConsumer(Arc<Shared>);
+pub struct InboundConsumer(Arc<Shared>, Option<Box<MarkerReader>>);
+struct OriginMarker {
+    start: u64,
+    origin: Option<RegenerationOrigin>,
+}
+pub(crate) struct RegenerationWriter {
+    pcm: InboundProducer,
+    next: rtrb::Producer<OriginMarker>,
+    retired: rtrb::Consumer<OriginMarker>,
+}
+struct MarkerReader {
+    next: rtrb::Consumer<OriginMarker>,
+    retired: rtrb::Producer<OriginMarker>,
+    current: Option<OriginMarker>,
+}
+impl MarkerReader {
+    fn permits(&mut self, frame: u64) -> bool {
+        while self.next.peek().is_ok_and(|m| m.start <= frame) {
+            if self.current.is_some() && self.retired.is_full() {
+                return false;
+            }
+            if let Some(old) = self.current.take() {
+                // The control-side producer reclaims every retained connection off audio.
+                let _ = self.retired.push(old);
+            }
+            self.current = self.next.pop().ok();
+        }
+        self.current
+            .as_ref()
+            .is_some_and(|m| m.origin.as_ref().is_none_or(RegenerationOrigin::current))
+    }
+}
 /// Read-only diagnostics handle; it cannot consume or publish PCM.
 #[derive(Clone)]
 pub struct InboundObserver(Arc<Shared>);
@@ -152,11 +195,85 @@ impl InboundRing {
         // SAFETY: the linked provider retains its immutable descriptor for process lifetime.
         unsafe { Self::from_descriptor(input_rate, policy, ffi::rpcr3_descriptor()) }
     }
+    /// Prepare a controller ingress only when the actual provider can fence
+    /// buffered output by its original admitted source coordinates.
+    pub(crate) fn open_receiver(
+        input_rate: u32,
+        policy: InboundPolicy,
+    ) -> Result<(InboundProducer, InboundConsumer), RingError> {
+        // SAFETY: process-lifetime linked provider descriptor.
+        unsafe {
+            Self::receiver_from_descriptor(
+                input_rate,
+                policy,
+                ffi::rpcr3_descriptor(),
+                PeerSignals::new(),
+            )
+        }
+    }
+    unsafe fn receiver_from_descriptor(
+        input_rate: u32,
+        policy: InboundPolicy,
+        pointer: *const ffi::rpcr3_descriptor,
+        signals: PeerSignals,
+    ) -> Result<(InboundProducer, InboundConsumer), RingError> {
+        let api = unsafe { checked_descriptor(pointer)? };
+        if api.ring_consumer_render_sample_timed.is_none()
+            || api.ring_producer_push_tagged.is_none()
+        {
+            return Err(RingError);
+        }
+        unsafe { Self::prepare(input_rate, policy, pointer, signals) }
+    }
+    pub(crate) fn regeneration() -> Result<(RegenerationWriter, InboundConsumer), RingError> {
+        Self::prepare_regeneration(Self::open(48000, InboundPolicy::Media)?)
+    }
+    fn prepare_regeneration(
+        (pcm, mut reader): (InboundProducer, InboundConsumer),
+    ) -> Result<(RegenerationWriter, InboundConsumer), RingError> {
+        if pcm.0.api.ring_producer_push_tagged.is_none() || !reader.timing_available() {
+            return Err(RingError);
+        }
+        let (next, receive) = rtrb::RingBuffer::new(128);
+        let (retire, retired) = rtrb::RingBuffer::new(128);
+        let writer = RegenerationWriter { pcm, next, retired };
+        reader.1 = Some(Box::new(MarkerReader {
+            next: receive,
+            retired: retire,
+            current: None,
+        }));
+        Ok((writer, reader))
+    }
+    /// Redirect the same surviving connection without losing its operational receive mute.
+    pub(crate) fn redirected(
+        input_rate: u32,
+        policy: InboundPolicy,
+        reply: &rpt_advanced_core::link::PeerReply,
+    ) -> Result<(InboundProducer, InboundConsumer), RingError> {
+        // SAFETY: same process-lifetime provider descriptor as open().
+        unsafe {
+            Self::receiver_from_descriptor(
+                input_rate,
+                policy,
+                ffi::rpcr3_descriptor(),
+                PeerSignals::redirected(reply),
+            )
+        }
+    }
     // The provider retains the descriptor and callback code until all endpoints are dropped.
     unsafe fn from_descriptor(
         input_rate: u32,
         policy: InboundPolicy,
         pointer: *const ffi::rpcr3_descriptor,
+    ) -> Result<(InboundProducer, InboundConsumer), RingError> {
+        // SAFETY: the caller owns this descriptor for the lifetime of all endpoints.
+        unsafe { Self::prepare(input_rate, policy, pointer, PeerSignals::new()) }
+    }
+    unsafe fn prepare(
+        input_rate: u32,
+        policy: InboundPolicy,
+        pointer: *const ffi::rpcr3_descriptor,
+        signals: PeerSignals,
     ) -> Result<(InboundProducer, InboundConsumer), RingError> {
         let media_rate = matches!(policy, InboundPolicy::Media);
         if input_rate == 0
@@ -238,10 +355,45 @@ impl InboundRing {
                 capacity_samples: capacity,
                 policy,
                 finite: AtomicU64::new(0),
-                signals: PeerSignals::new(),
+                local_capture_epoch: AtomicU64::new(0),
+                local_playout_epoch: AtomicU64::new(0),
+                writer_frame: AtomicU64::new(0),
+                writer_generation: AtomicU64::new(0),
+                first_frame: AtomicU64::new(0),
+                first_generation: AtomicU64::new(0),
+                first_epoch: AtomicU64::new(0),
+                played_epoch: AtomicU64::new(0),
+                native_real: AtomicU64::new(0),
+                signals,
             });
-            Ok((InboundProducer(shared.clone()), InboundConsumer(shared)))
+            Ok((
+                InboundProducer(shared.clone()),
+                InboundConsumer(shared, None),
+            ))
         }
+    }
+}
+impl RegenerationWriter {
+    pub(super) fn output_delay_samples(&self) -> Result<u64, RingError> {
+        self.pcm.output_delay_samples()
+    }
+    pub(super) fn reclaim_origins(&mut self) {
+        while self.retired.pop().is_ok() {}
+    }
+    pub(super) fn mark_origin(&mut self, start: u64, origin: &Option<RegenerationOrigin>) -> bool {
+        self.next
+            .push(OriginMarker {
+                start,
+                origin: origin.clone(),
+            })
+            .is_ok()
+    }
+    pub(super) fn write_generated(
+        &mut self,
+        samples: &[f32],
+        start: u64,
+    ) -> Result<usize, RingError> {
+        self.pcm.write_tagged(samples, 1, start, &[])
     }
 }
 impl InboundProducer {
@@ -257,9 +409,41 @@ impl InboundProducer {
     pub fn signals(&self) -> &PeerSignals {
         &self.0.signals
     }
+    pub(crate) fn local_epoch(&mut self, epoch: u64) {
+        self.0.local_capture_epoch.store(epoch, Ordering::Relaxed);
+    }
+    pub(crate) fn epoch(&self) -> u64 {
+        if matches!(self.0.policy, InboundPolicy::Local { .. }) {
+            self.0.local_capture_epoch.load(Ordering::Relaxed)
+        } else {
+            self.0.signals.receive_epoch()
+        }
+    }
     /// Publish once and return the accepted leading count. Phone writes offer at
     /// most 20ms; the producer retains and retries the complete unaccepted tail.
     pub fn write(&mut self, samples: &[f32]) -> Result<usize, RingError> {
+        self.write_received(samples, self.epoch())
+    }
+    pub(super) fn write_received(
+        &mut self,
+        samples: &[f32],
+        epoch: u64,
+    ) -> Result<usize, RingError> {
+        if self.epoch() != 0 && self.0.api.ring_producer_push_tagged.is_some() {
+            self.write_received_tagged(
+                samples,
+                self.0.writer_generation.load(Ordering::Relaxed),
+                self.0.writer_frame.load(Ordering::Relaxed),
+                &[],
+                epoch,
+            )
+        } else {
+            let n = self.push(samples)?;
+            self.0.writer_frame.fetch_add(n as u64, Ordering::Relaxed);
+            Ok(n)
+        }
+    }
+    fn push(&self, samples: &[f32]) -> Result<usize, RingError> {
         let mut accepted = 0;
         // SAFETY: this noncloneable endpoint is the only producer; the slice is live.
         let code = unsafe {
@@ -291,12 +475,54 @@ impl InboundProducer {
         start: u64,
         spans: &[MuteSpan],
     ) -> Result<usize, RingError> {
+        self.write_received_tagged(samples, generation, start, spans, self.epoch())
+    }
+    pub(super) fn write_received_tagged(
+        &mut self,
+        samples: &[f32],
+        generation: u64,
+        start: u64,
+        spans: &[MuteSpan],
+        epoch: u64,
+    ) -> Result<usize, RingError> {
+        let accepted = self.push_tagged(samples, generation, start, spans)?;
+        if accepted != 0 {
+            self.0
+                .writer_frame
+                .store(start + accepted as u64, Ordering::Relaxed);
+            self.0
+                .writer_generation
+                .store(generation, Ordering::Relaxed);
+            if epoch != 0
+                && epoch & 1 == 0
+                && epoch == self.epoch()
+                && (self.0.first_epoch.load(Ordering::Relaxed) != epoch
+                    || self.0.first_generation.load(Ordering::Relaxed) != generation)
+            {
+                // Publish the first actually accepted fresh coordinate. A reader can
+                // temporarily suppress a just-admitted sample, never authorize an older one.
+                self.0.first_epoch.store(0, Ordering::Release);
+                self.0.first_frame.store(start, Ordering::Relaxed);
+                self.0.first_generation.store(generation, Ordering::Relaxed);
+                self.0.first_epoch.store(epoch, Ordering::Release);
+            }
+        }
+        Ok(accepted)
+    }
+    fn push_tagged(
+        &self,
+        samples: &[f32],
+        generation: u64,
+        start: u64,
+        spans: &[MuteSpan],
+    ) -> Result<usize, RingError> {
         let operation = self.0.api.ring_producer_push_tagged.ok_or(RingError)?;
+        let source_len = samples.len();
         let offered = self.0.producer_prefix(samples.len() as u64);
         let mut prefix_spans =
             [MuteSpan { start: 0, end: 0 }; ffi::RPCR3_MAXIMUM_MUTE_SPANS as usize];
-        let spans = if offered < samples.len() as u64 {
-            let original_end = start.checked_add(samples.len() as u64).ok_or(RingError)?;
+        let spans = if offered < source_len as u64 {
+            let original_end = start.checked_add(source_len as u64).ok_or(RingError)?;
             let oldest = start.saturating_sub(self.0.capacity_samples);
             if spans.len() > prefix_spans.len()
                 || spans.iter().any(|span| {
@@ -372,6 +598,7 @@ impl InboundProducer {
         };
         if code == 0 {
             if accepted != 0 {
+                self.0.writer_frame.fetch_add(accepted, Ordering::Relaxed);
                 self.0.finite.store(0, Ordering::Release);
             }
             Ok(accepted)
@@ -409,6 +636,16 @@ impl Drop for InboundProducer {
     }
 }
 impl PeerInput for InboundConsumer {
+    fn receive_audio_current(&self) -> bool {
+        self.fresh()
+    }
+    fn native_real_count(&self, audible: usize) -> usize {
+        if self.epoch() == 0 {
+            audible
+        } else {
+            self.0.native_real.load(Ordering::Relaxed) as usize
+        }
+    }
     fn source_rate(&self) -> u32 {
         self.0.input_rate
     }
@@ -443,6 +680,21 @@ impl PeerInput for InboundConsumer {
     }
 }
 impl InboundConsumer {
+    pub(crate) fn local_epoch(&mut self, epoch: u64) {
+        self.0.local_playout_epoch.store(epoch, Ordering::Relaxed);
+    }
+    pub(crate) fn fresh(&self) -> bool {
+        let epoch = self.epoch();
+        epoch & 1 == 0 && self.0.played_epoch.load(Ordering::Relaxed) == epoch
+    }
+    fn epoch(&self) -> u64 {
+        if matches!(self.0.policy, InboundPolicy::Local { .. }) {
+            self.0.local_playout_epoch.load(Ordering::Relaxed)
+        } else {
+            self.0.signals.receive_epoch()
+        }
+    }
+
     /// Whether the copied readable descriptor includes the optional timed primitive.
     pub fn timing_available(&self) -> bool {
         self.0.api.ring_consumer_render_sample_timed.is_some()
@@ -490,8 +742,41 @@ impl InboundConsumer {
             muted: timing.flags & ffi::RPCR3_TIMED_MUTED != 0,
             zero_extension: timing.flags & ffi::RPCR3_TIMED_ZERO_EXTENSION != 0,
         };
+        self.0
+            .native_real
+            .store(u64::from(provenance.real), Ordering::Relaxed);
+        let epoch = self.epoch();
+        if epoch != 0 {
+            let fresh_position = epoch & 1 == 0
+                && self.0.first_epoch.load(Ordering::Acquire) == epoch
+                && provenance.position.is_some_and(|p| {
+                    !p.negative
+                        && p.generation == self.0.first_generation.load(Ordering::Relaxed)
+                        && p.frame >= self.0.first_frame.load(Ordering::Relaxed)
+                })
+                && self.0.first_epoch.load(Ordering::Acquire) == epoch;
+            if fresh_position && provenance.real && !provenance.gap && !provenance.zero_extension {
+                self.0.played_epoch.store(epoch, Ordering::Relaxed);
+            }
+            if !self.fresh() || (!fresh_position && !provenance.plc) || self.epoch() != epoch {
+                sample = 0.;
+                provenance.real = false;
+                provenance.muted = true;
+            }
+        }
         if self.0.signals.dtmf_muted() {
             sample = 0.0;
+            provenance.muted = true;
+        }
+        if let Some(markers) = &mut self.1
+            && provenance.real
+            && !provenance
+                .position
+                .filter(|p| p.generation == 1)
+                .is_some_and(|p| markers.permits(if p.negative { 0 } else { p.frame }))
+        {
+            sample = 0.0;
+            provenance.real = false;
             provenance.muted = true;
         }
         Ok(TimedPeerSample {
@@ -502,6 +787,25 @@ impl InboundConsumer {
 
     /// Render with the prepared immutable policy; the library classifies real PCM.
     pub fn render(&mut self, samples: &mut [f32]) -> Result<usize, RingError> {
+        let epoch = self.epoch();
+        // Only the transition into a new unmuted source interval needs
+        // individual coordinates. Stable blocks use the single native bulk call.
+        if self.1.is_some() || (epoch & 1 == 0 && !self.fresh() && self.timing_available()) {
+            let mut real = 0;
+            let mut native = 0;
+            for output in samples.iter_mut() {
+                let timed = self.render_timed_sample()?;
+                *output = timed.sample;
+                native += self.0.native_real.load(Ordering::Relaxed);
+                real += usize::from(timed.provenance.is_some_and(|p| p.real));
+            }
+            self.0.native_real.store(native, Ordering::Relaxed);
+            if self.epoch() != epoch {
+                samples.fill(0.);
+                return Ok(0);
+            }
+            return Ok(real);
+        }
         let mut real = 0;
         // SAFETY: the unique consumer owns conversion state and this output slice.
         let code = unsafe {
@@ -513,6 +817,11 @@ impl InboundConsumer {
             )
         };
         if code == 0 {
+            self.0.native_real.store(real, Ordering::Relaxed);
+            if self.epoch() != epoch || !self.fresh() {
+                samples.fill(0.);
+                return Ok(0);
+            }
             if self.0.signals.dtmf_muted() {
                 samples.fill(0.0);
             }
@@ -524,7 +833,17 @@ impl InboundConsumer {
     }
     /// Render one native sample without creating a synthetic media sample on shortfall.
     pub fn render_sample(&mut self) -> Result<Option<f32>, RingError> {
+        let epoch = self.epoch();
         let mut sample = 0.0;
+        // Only the transition into a new unmuted source interval needs
+        // individual coordinates. Stable blocks use the single native bulk call.
+        if self.1.is_some() || (epoch & 1 == 0 && !self.fresh() && self.timing_available()) {
+            let timed = self.render_timed_sample()?;
+            return Ok(timed
+                .provenance
+                .is_some_and(|p| p.real)
+                .then_some(timed.sample));
+        }
         let mut real = false;
         // SAFETY: this endpoint is the unique consumer and both outputs are writable.
         let code = unsafe {
@@ -535,6 +854,9 @@ impl InboundConsumer {
             )
         };
         if code == 0 {
+            if self.epoch() != epoch || !self.fresh() {
+                return Ok(None);
+            }
             if self.0.signals.dtmf_muted() {
                 sample = 0.0;
             }

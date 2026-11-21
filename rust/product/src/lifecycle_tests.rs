@@ -2058,3 +2058,93 @@ fn ticker_route_and_peer_digits_drive_serialized_background_work() {
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
     crate::fixture::RADIO_READY.store(0, Ordering::Release);
 }
+
+#[test]
+fn registered_uuid_engine_uses_account_at_native_dial_and_preauthorization_boundary() {
+    use std::sync::Mutex;
+    static LOCAL: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+    unsafe extern "C" fn capture(
+        _: *mut c_void,
+        _: *const std::ffi::c_char,
+        _: usize,
+        local: *const std::ffi::c_char,
+        n: usize,
+        _: usize,
+        _: abi::rptadv_current_v1,
+        _: *mut c_void,
+        out: *mut *mut c_void,
+    ) -> i32 {
+        *LOCAL.lock().unwrap() = unsafe { std::slice::from_raw_parts(local.cast(), n) }.to_vec();
+        unsafe { *out = std::ptr::null_mut() };
+        -1
+    }
+    const SLOT: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    let cfg =
+        format!("[{SLOT}]\nradio_channel=usb\nduplex=full\nlink_static_directory_file=fixture\n");
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.peer_dial = Some(capture);
+    assert_eq!(
+        unsafe {
+            descriptor().start.unwrap()(
+                &table,
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                cfg.as_ptr().cast(),
+                cfg.len(),
+            )
+        },
+        0
+    );
+    let (engine, call) = selected().unwrap();
+    for account in [Some(1000), None] {
+        engine
+            .run(move |h| {
+                crate::host::tests::commands::install(
+                    h,
+                    SLOT,
+                    "North é",
+                    account,
+                    serde_json::json!({}),
+                    &[],
+                );
+                Ok(())
+            })
+            .unwrap();
+        let authorization = unsafe {
+            descriptor().authorize_incoming.unwrap()(
+                &crate::fixture::incoming_request(
+                    c"1000".as_ptr(),
+                    4,
+                    c"2000".as_ptr(),
+                    4,
+                    c"127.0.0.1".as_ptr(),
+                    9,
+                ),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(authorization == 0, account.is_some());
+        LOCAL.lock().unwrap().clear();
+        let effect = engine
+            .operation(SLOT, operation(LinkAction::Transceive, "3000"))
+            .unwrap();
+        assert!(matches!(&effect, LinkEffect::Connect(_)));
+        let _ = engine.effect(SLOT.into(), effect, engine.revision.load(Ordering::Acquire));
+        assert_eq!(
+            LOCAL.lock().unwrap().as_slice(),
+            if account.is_some() {
+                b"1000".as_slice()
+            } else {
+                b""
+            }
+        );
+    }
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}

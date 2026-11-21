@@ -1376,3 +1376,54 @@ fn vad_rapid_rekey_retains_first_pcm_without_waiting_for_transmit_reset() {
 
 #[path = "worker_vad_tests.rs"]
 mod vad;
+
+#[test]
+fn registered_local_rf_delay_fences_queued_audio_and_key_before_tx_callback() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut runtime, owners) = audio_owners();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    let port = crate::host::tests::commands::install_with_other(
+        &mut runtime,
+        "1000",
+        "North é",
+        Some(1000),
+        serde_json::json!({}),
+        &[],
+        None,
+    )
+    .unwrap();
+    let action = rpt_advanced_core::command_language::prepare_runtime_action(
+        &serde_json::json!({"action":"rx_mute_toggle","target":"port"}),
+    )
+    .unwrap();
+    let clock = RuntimeClock {
+        now_ms: 10,
+        wall_seconds: 0,
+        wall_subsecond_ms: 0,
+        civil: None,
+    };
+    let mut pcm = [0.; 8];
+    for _ in 0..64 {
+        assert_eq!(rx(&worker, true, &mut [0.625; 8]), 0);
+    }
+    runtime
+        .management_action(port, "mgr", &action, clock)
+        .unwrap();
+    assert_eq!(rx(&worker, true, &mut [0.; 8]), 0);
+    runtime
+        .management_action(port, "mgr", &action, clock)
+        .unwrap();
+    for _ in 0..64 {
+        assert_eq!(tx(&worker, &mut pcm), (0, 0));
+        assert_eq!(pcm, [0.; 8]);
+    }
+    assert!((0..320).any(|_| {
+        assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+        tx(&worker, &mut pcm) == (0, 1) && pcm.iter().any(|v| *v > 0.1)
+    }));
+    drop(worker.stop());
+    assert!(runtime.stop(30));
+}

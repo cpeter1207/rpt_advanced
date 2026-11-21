@@ -42,6 +42,8 @@ struct RuntimeFixture {
     inhibit_history: Mutex<Vec<(Option<String>, Fault)>>,
     inhibits: std::sync::atomic::AtomicUsize,
     warnings: std::sync::atomic::AtomicUsize,
+    resource_warnings:
+        Mutex<Vec<rpt_advanced_core::config::resources::candidate::CandidateWarning>>,
 
     terminal: Mutex<Option<(String, std::sync::mpsc::SyncSender<AdoptionOutcome>)>>,
     hold_dispatch: AtomicBool,
@@ -135,7 +137,10 @@ impl Runtime for RuntimeFixture {
             let _ = site.command(rpt_advanced_core::site::SiteCommand::Inhibit(true), 0);
         }
     }
-    fn diagnostic(&self, _: crate::management::Diagnostic) {
+    fn diagnostic(&self, diagnostic: crate::management::Diagnostic) {
+        if let crate::management::Diagnostic::Resource(warning) = diagnostic {
+            self.resource_warnings.lock().unwrap().push(warning);
+        }
         self.warnings.fetch_add(1, Ordering::AcqRel);
     }
     fn observed(&self) -> Observed {

@@ -151,6 +151,11 @@ impl Engine {
     ) -> Result<LinkEffect, RuntimeError> {
         use rpt_advanced_core::runtime::dtmf::DigitOutcome;
         match outcome {
+            DigitOutcome::Mapped(input) => {
+                let name = local.to_owned();
+                let clock = self.clock();
+                self.run(move |host| host.runtime.dispatch_mapping(&name, input, clock))
+            }
             DigitOutcome::MacroStopped { reply } => {
                 let local = local.to_owned();
                 self.run(move |host| host.runtime.queue_macro_stopped(&local, reply))?;
@@ -163,6 +168,19 @@ impl Engine {
             DigitOutcome::PadTest(report) => {
                 let local = local.to_owned();
                 self.run(move |host| host.runtime.queue_pad_test(&local, &report))?;
+                Ok(LinkEffect::None)
+            }
+            DigitOutcome::ReceivedDigit(symbol, origin) => {
+                let local = local.to_owned();
+                self.run(move |host| {
+                    host.regenerate_digit(
+                        &local,
+                        crate::link::regeneration::RegenerationDigit {
+                            symbol,
+                            origin: Some(origin),
+                        },
+                    )
+                })?;
                 Ok(LinkEffect::None)
             }
             DigitOutcome::Regenerate(digit) => {
@@ -256,18 +274,26 @@ impl Engine {
         let remote = attempt.remote().to_owned();
         let destination_remote = remote.clone();
         let destination = if self.current(revision) && attempt.current(self.elapsed_ms()) {
-            self.run(move |host| host.lookup(&name, &destination_remote, None))
+            self.run(move |host| {
+                Ok((
+                    host.lookup(&name, &destination_remote, None)?,
+                    host.wire_local(&name, &destination_remote)?,
+                ))
+            })
         } else {
             Err(RuntimeError::Rejected)
         };
         let io = destination
             .ok()
             .filter(|_| self.current(revision) && attempt.current(self.elapsed_ms()))
-            .and_then(|destination| {
+            .and_then(|(destination, wire_local)| {
                 self.services
-                    .dial(&destination, &local, crate::host::MAXIMUM_FRAMES, || {
-                        self.current(revision) && attempt.current(self.elapsed_ms())
-                    })
+                    .dial(
+                        &destination,
+                        &wire_local,
+                        crate::host::MAXIMUM_FRAMES,
+                        || self.current(revision) && attempt.current(self.elapsed_ms()),
+                    )
                     .ok()
             });
         let engine = Arc::clone(self);
@@ -518,12 +544,41 @@ impl Engine {
             self.background(local, effect, revision, false)?;
         }
         for (local, operation) in operations {
+            let mapped = matches!(
+                operation,
+                rpt_advanced_core::runtime::dtmf::DigitOutcome::Mapped(_)
+            );
             if self
                 .digit_effect(&local, operation)
                 .and_then(|effect| self.background(local, effect, revision, true))
                 .is_err()
+                && !mapped
             {
                 self.lost_digits.store(true, Ordering::Release);
+            }
+        }
+        let locals = self.run(|host| {
+            Ok(host
+                .runtime
+                .node_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>())
+        })?;
+        for local in locals {
+            let name = local.clone();
+            if let Some((effect, receipt)) =
+                self.run(move |host| host.runtime.advance_commands(&name, clock))?
+            {
+                if let LinkEffect::RemoteBase(operation) = effect {
+                    // This provider returns a completion ticket, independently of queue admission.
+                    // A rejected or abandoned submission drops the receipt and ends the macro.
+                    let _ = self.run(move |host| {
+                        host.submit_command_remote(&local, operation, clock, Some(receipt))
+                    });
+                } else {
+                    receipt.settle(self.background(local, effect, revision, false).is_ok());
+                }
             }
         }
         if schedule {
@@ -848,8 +903,11 @@ unsafe extern "C" fn rptadv_product_start(
         .map_err(|_| RuntimeError::Preparation)?;
         // Mandatory released composition is validated even for a disabled configuration.
         drop(
-            crate::link::ring::InboundRing::open(48000, crate::link::ring::InboundPolicy::Peer)
-                .map_err(|_| RuntimeError::Preparation)?,
+            crate::link::ring::InboundRing::open_receiver(
+                48000,
+                crate::link::ring::InboundPolicy::Peer,
+            )
+            .map_err(|_| RuntimeError::Preparation)?,
         );
         drop(crate::link::egress::Egress::new(48000, 960).map_err(|_| RuntimeError::Preparation)?);
         ToneSequence::provider_ready().map_err(|_| RuntimeError::Preparation)?;
@@ -1011,8 +1069,13 @@ unsafe extern "C" fn rptadv_product_authorize_incoming(
             return Err(RuntimeError::Rejected);
         }
         engine.run(move |host| {
-            host.lookup(&local, &remote, Some(&source))?;
-            host.runtime.authorize_incoming(&local, &remote, true)
+            let owner = host
+                .runtime
+                .network_owner(&local)
+                .ok_or(RuntimeError::MissingNode)?
+                .to_owned();
+            host.lookup(&owner, &remote, Some(&source))?;
+            host.runtime.authorize_incoming(&owner, &remote, true)
         })
     }))
     .ok()

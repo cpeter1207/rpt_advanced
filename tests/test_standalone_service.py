@@ -56,13 +56,13 @@ def test_standalone_requires_current_radio_adapters() -> None:
     control = (ROOT / "debian/control").read_text(encoding="utf-8")
     standalone = package_stanza("rpt-advanced")
     for development, runtime, minimum in (
-        ("librptadvradio-dev", "librptadvradio5", "0.1.0~alpha11"),
+        ("librptadvradio-dev", "librptadvradio5", "0.1.0~alpha13"),
         (
             "librptadv-portaudio-alsa-adapter-dev",
             "librptadv-portaudio-alsa-adapter2",
             "0.2.0~alpha4",
         ),
-        ("librptadv-gpio-adapter-dev", "librptadv-gpio-adapter1", "0.1.0~alpha4"),
+        ("librptadv-gpio-adapter-dev", "librptadv-gpio-adapter1", "0.1.0~alpha5"),
     ):
         assert f"{development} (>= {minimum})" in control
         assert f"{runtime} (>= {minimum})" in standalone

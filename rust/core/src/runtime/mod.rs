@@ -7,8 +7,8 @@ pub mod dtmf;
 mod prepare;
 mod render;
 pub use aggregate::{
-    PreparedAdapter, Runtime, RuntimeAudioOwners, RuntimeClock, RuntimeDispatch, RuntimeNode,
-    RuntimeTransmit,
+    CommandCompletion, CommandReceipt, CommandRenderers, CommandResponse, PreparedAdapter, Runtime,
+    RuntimeAudioOwners, RuntimeClock, RuntimeDispatch, RuntimeNode, RuntimeTransmit,
 };
 pub use prepare::{NativeFilePreparer, NativeMediaPreparer, NativeSpeechPreparer, RuntimeError};
 pub(crate) use render::morse as morse_text;

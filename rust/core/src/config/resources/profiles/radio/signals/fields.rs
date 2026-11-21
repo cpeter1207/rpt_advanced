@@ -59,7 +59,7 @@ const RX_SQUELCH: Fields = &[
     ("hysteresis", Rule::Unsigned(0, 32767)),
     ("noise_filter", Rule::Choice(&["standard", "alternate"])),
     ("inverted", Rule::Bool),
-    ("scancode", Rule::Unsigned(0, 4294967295)),
+    ("scancode", Rule::Unsigned(1, 0x2ff)),
     ("pin", Rule::Value(pins)),
     ("enabled", Rule::Bool),
 ];

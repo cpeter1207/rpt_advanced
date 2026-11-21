@@ -82,6 +82,15 @@ pub(super) fn apply(
             continue;
         }
         let Some(binding) = output else { continue };
+        if binding.source == SignalSource::Serial {
+            if binding.pins.is_empty()
+                || s.tx.ptt.source == SignalSource::Serial
+                    && binding.pins.iter().any(|pin| s.tx.ptt.pins.contains(pin))
+            {
+                return Err(conflict());
+            }
+            continue;
+        }
         let &[pin] = binding.pins.as_slice() else {
             return Err(conflict());
         };
@@ -129,7 +138,12 @@ pub(super) fn reserve(
 ) -> Result<(), RadioProfileError> {
     let mut claim = |field, selector: &str| {
         if !selector.is_empty() {
-            if let Some(previous) = claims.insert((field, selector.to_owned()), owner) {
+            let device_class = if field == "hamlib_device" {
+                "serial_device"
+            } else {
+                field
+            };
+            if let Some(previous) = claims.insert((device_class, selector.to_owned()), owner) {
                 return Err(RadioProfileError {
                     resource: owner,
                     conflicting: Some(previous),
@@ -171,11 +185,52 @@ pub(super) fn reserve(
             claim("parallel_base_address", &port.base_address.to_string())?;
         }
     }
-    if remote.enabled
-        && remote.backend == Some(super::RemoteBackend::Hamlib)
-        && let Some(device) = remote.hamlib_options.get("rig_pathname")
+    let encoder_serial = [
+        (
+            signals.tx.ctcss.enabled,
+            signals.tx.ctcss.source,
+            &signals.tx.ctcss.output,
+        ),
+        (
+            signals.tx.dcs.enabled,
+            signals.tx.dcs.source,
+            &signals.tx.dcs.output,
+        ),
+    ]
+    .iter()
+    .any(|(enabled, source, output)| {
+        *enabled
+            && *source == SignalSource::External
+            && output
+                .as_ref()
+                .is_some_and(|b| b.source == SignalSource::Serial)
+    });
+    let serial = encoder_serial
+        || signals.tx.ptt.source == SignalSource::Serial
+        || signals.rx.squelch.enabled && signals.rx.squelch.binding.source == SignalSource::Serial
+        || signals.rx.ctcss.enabled && signals.rx.ctcss.binding.source == SignalSource::Serial;
+    // Rig, DCD and PTT pathnames can designate the same port within a single
+    // CAT owner. A separately selected modem or another active radio cannot.
+    if remote.enabled && remote.backend == Some(super::RemoteBackend::Hamlib)
+        || signals.tx.ptt.source == SignalSource::Hamlib
     {
-        claim("hamlib_device", device)?;
+        let paths: std::collections::BTreeSet<_> = remote
+            .hamlib_options
+            .iter()
+            .filter(|(name, _)| {
+                matches!(
+                    name.as_str(),
+                    "rig_pathname" | "ptt_pathname" | "dcd_pathname"
+                )
+            })
+            .map(|(_, value)| value.as_str())
+            .collect();
+        for path in paths {
+            claim("hamlib_device", path)?;
+        }
+    }
+    if serial && let Some(path) = &interface.serial.device {
+        claim("serial_device", path)?;
     }
     Ok(())
 }

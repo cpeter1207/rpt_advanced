@@ -2759,6 +2759,9 @@
           "audio": {
             "device_identifier": "example-radio-524953",
             "usb_serial": "EXAMPLE-524953"
+          },
+          "keyboard": {
+            "device": "/dev/input/by-id/example-keyboard-event-kbd"
           }
         }
       },

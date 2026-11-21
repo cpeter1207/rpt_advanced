@@ -7,10 +7,32 @@ use serde_json::Value;
 pub struct SignalBinding {
     /// Selected signal owner.
     pub source: SignalSource,
-    /// One-based GPIO or parallel connector pin numbers. Empty selects a dedicated provider signal.
+    /// Physical connector pin numbers including DTE DB-9 pins for serial. Empty selects a dedicated provider signal.
     pub pins: Vec<u8>,
+    /// Selected Linux evdev EV_KEY code for a held-key observation.
+    pub scancode: Option<u32>,
     /// Applied independently to each raw observation or driven output.
     pub inverted: bool,
+}
+const SERIAL_PINS: [(u8, &str); 6] = [
+    (1, "DCD"),
+    (4, "DTR"),
+    (6, "DSR"),
+    (7, "RTS"),
+    (8, "CTS"),
+    (9, "RI"),
+];
+
+impl SignalBinding {
+    /// Authored order of the selected serial modem line names.
+    pub fn serial_pins(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.pins.iter().filter_map(move |pin| {
+            SERIAL_PINS
+                .iter()
+                .find(|(number, _)| self.source == SignalSource::Serial && number == pin)
+                .map(|(_, name)| *name)
+        })
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Use {
@@ -26,16 +48,40 @@ impl Use {
     fn allows(self, source: SignalSource) -> bool {
         use SignalSource::*;
         match self {
-            Self::Squelch => matches!(source, Dsp | SoundChipGpio | Parallel),
-            Self::Ptt => matches!(source, SoundChipGpio | Parallel | Hamlib),
+            Self::Squelch => matches!(source, Dsp | SoundChipGpio | Parallel | Serial | KeyDown),
+            Self::Ptt => matches!(source, SoundChipGpio | Parallel | Serial | Hamlib),
             Self::Decode => matches!(
                 source,
-                Dsp | SoundChipGpio | Parallel | External | Hamlib | Auto
+                Dsp | SoundChipGpio | Parallel | Serial | External | Hamlib | Auto
             ),
-            Self::Encoder => matches!(source, SoundChipGpio | Parallel),
+            Self::Encoder => matches!(source, SoundChipGpio | Parallel | Serial),
         }
     }
+    pub(super) fn serial_pins(self, raw: &Value) -> Option<Vec<u8>> {
+        let pins = raw
+            .as_array()?
+            .iter()
+            .map(|v| {
+                let name = v.as_str()?;
+                SERIAL_PINS
+                    .iter()
+                    .find(|(number, line)| {
+                        *line == name
+                            && if self.output() {
+                                matches!(number, 4 | 7)
+                            } else {
+                                matches!(number, 1 | 6 | 8 | 9)
+                            }
+                    })
+                    .map(|(number, _)| *number)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!pins.is_empty()).then_some(pins)
+    }
     fn pins(self, source: SignalSource, raw: &Value, wiring: WiringProfile) -> Option<Vec<u8>> {
+        if source == SignalSource::Serial {
+            return self.serial_pins(raw);
+        }
         let list = raw.as_array()?;
         let parse = |v: &Value| match source {
             SignalSource::Parallel => u8::try_from(v.as_u64()?).ok(),
@@ -85,6 +131,7 @@ pub(super) fn resolve(
     let mut selected = default.map(|source| SignalBinding {
         source,
         pins: Vec::new(),
+        scancode: None,
         inverted: false,
     });
     for (object, owner) in v.values(path).collect::<Vec<_>>().into_iter().rev() {
@@ -100,9 +147,45 @@ pub(super) fn resolve(
             warn(w, owner, "source");
             continue;
         }
+        if source == SignalSource::Serial
+            && interface.serial.device.is_none()
+            && !site.defer(owner, "device")
+        {
+            warn(w, owner, "source");
+            continue;
+        }
         let same = old.filter(|b| b.source == source);
+        let scancode = if source == SignalSource::KeyDown {
+            if interface.keyboard_device.is_none() && !site.defer(owner, "device") {
+                warn(w, owner, "source");
+                continue;
+            }
+            let previous = same.and_then(|b| b.scancode);
+            let code = if let Some(value) = object.get("scancode") {
+                let next = value
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| (1..=0x2ff).contains(n));
+                if next.is_none() {
+                    warn(w, owner, "scancode");
+                }
+                next.or(previous)
+            } else {
+                previous
+            };
+            if code.is_none() && !site.defer(owner, "scancode") {
+                warn(w, owner, "scancode");
+                continue;
+            }
+            code
+        } else {
+            None
+        };
         let mut pins = if let Some(pin) = object.get("pin") {
-            if !matches!(source, SignalSource::Parallel | SignalSource::SoundChipGpio) {
+            if !matches!(
+                source,
+                SignalSource::Parallel | SignalSource::SoundChipGpio | SignalSource::Serial
+            ) {
                 Vec::new()
             } else if let Some(pins) = usage.pins(source, pin, interface.gpio.wiring_profile) {
                 pins
@@ -139,7 +222,8 @@ pub(super) fn resolve(
                 Use::Encoder => Vec::new(),
             };
         }
-        if (usage == Use::Encoder || source == SignalSource::Parallel)
+        if (usage == Use::Encoder
+            || matches!(source, SignalSource::Parallel | SignalSource::Serial))
             && pins.is_empty()
             && !site.defer(owner, "pin")
         {
@@ -149,6 +233,7 @@ pub(super) fn resolve(
         selected = Some(SignalBinding {
             source,
             pins,
+            scancode,
             inverted: object
                 .get("inverted")
                 .and_then(Value::as_bool)

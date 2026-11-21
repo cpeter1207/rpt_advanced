@@ -150,6 +150,12 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     fn receive_policy(&self) -> rpt_advanced_core::link::ReceivePolicy {
         self.input.receive_policy()
     }
+    fn receive_audio_current(&self) -> bool {
+        self.input.receive_audio_current()
+    }
+    fn native_real_count(&self, audible: usize) -> usize {
+        self.input.native_real_count(audible)
+    }
     fn source_timing_available(&self) -> bool {
         self.processor.is_none() && self.input.source_timing_available()
     }

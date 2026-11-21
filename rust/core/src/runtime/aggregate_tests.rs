@@ -4666,3 +4666,1349 @@ fn device_reload_rejects_outstanding_work_and_hazards_but_waits_for_quiescence()
         assert!(runtime.stop(0));
     }
 }
+
+fn command_runtime(
+    settings: serde_json::Value,
+    definitions: &[(&str, &str, serde_json::Value)],
+) -> Runtime<()> {
+    command_runtime_named("1000", settings, definitions)
+}
+fn command_runtime_named(
+    local: &str,
+    settings: serde_json::Value,
+    definitions: &[(&str, &str, serde_json::Value)],
+) -> Runtime<()> {
+    command_runtime_media(local, settings, definitions, &Media)
+}
+fn command_runtime_media(
+    local: &str,
+    settings: serde_json::Value,
+    definitions: &[(&str, &str, serde_json::Value)],
+    media: &dyn NativeMediaPreparer,
+) -> Runtime<()> {
+    command_runtime_media_settings(local, "", None, settings, definitions, media)
+}
+fn command_runtime_media_settings(
+    local: &str,
+    node_settings: &str,
+    radio: Option<crate::remote_base_command::RemoteCommandConfiguration>,
+    settings: serde_json::Value,
+    definitions: &[(&str, &str, serde_json::Value)],
+    media: &dyn NativeMediaPreparer,
+) -> Runtime<()> {
+    use crate::config::resources::{
+        PortKey,
+        candidate::{
+            CapturedResource, ModularCandidate, ResourceBinding, ResourceId, ResourceKind,
+            ResourceRegistry, ResourceScope,
+        },
+    };
+
+    let site: ResourceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".parse().unwrap();
+    let port: ResourceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    let owner = ResourceScope::Port(port);
+    let commands = ResourceBinding {
+        scope: owner,
+        kind: ResourceKind::Command,
+        id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".parse().unwrap(),
+    };
+    let account = ResourceBinding {
+        scope: owner,
+        kind: ResourceKind::Allstarlink,
+        id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd".parse().unwrap(),
+    };
+
+    let mut fields = vec![
+        (
+            ResourceBinding {
+                id: site,
+                scope: ResourceScope::Site(site),
+                kind: ResourceKind::Metadata,
+            },
+            serde_json::json!({"name":"Station","inherit_from":null}),
+        ),
+        (
+            ResourceBinding {
+                id: port,
+                scope: owner,
+                kind: ResourceKind::Metadata,
+            },
+            serde_json::json!({"name":"North","inherit_from":"site"}),
+        ),
+        (commands, settings),
+        (account, serde_json::json!({"node_number":1000})),
+    ];
+    let mut kinds = vec!["metadata", "metadata", "command", "allstarlink"];
+    let mut members = Vec::new();
+    for (i, (kind, key, body)) in definitions.iter().enumerate() {
+        let binding = ResourceBinding {
+            id: format!("00000000-0000-4000-8000-{i:012}").parse().unwrap(),
+            scope: owner,
+            kind: match *kind {
+                "macro" => ResourceKind::Macro,
+                "event" => ResourceKind::Event,
+                "message" => ResourceKind::Message,
+                _ => panic!("fixture kind"),
+            },
+        };
+        fields.push((binding, body.clone()));
+        kinds.push(kind);
+        members.push((binding, PortKey::new(*key)));
+    }
+    let registry = ResourceRegistry::with_members(
+        site,
+        &[(port, PortKey::new("North é"))],
+        &[commands, account],
+        &members,
+    )
+    .unwrap();
+    let bodies: Vec<_> = fields
+        .iter()
+        .zip(kinds)
+        .map(|((binding, settings), kind)| {
+            let mut body = if binding.kind == ResourceKind::Event {
+                settings.clone()
+            } else {
+                serde_json::json!({"configuration":settings})
+            };
+            body["id"] = serde_json::json!(binding.id.to_string());
+            body["kind"] = serde_json::json!(kind);
+            if let Some((_, key)) = members.iter().find(|(m, _)| m == binding) {
+                body["key"] = serde_json::json!(key.as_str());
+            }
+            serde_json::to_vec(&body).unwrap()
+        })
+        .collect();
+    let captures: Vec<_> = fields
+        .iter()
+        .zip(&bodies)
+        .map(|((binding, _), json)| CapturedResource {
+            binding: *binding,
+            json,
+        })
+        .collect();
+    let candidate = ModularCandidate::assemble(&registry, &captures).unwrap();
+    let validated = candidate
+        .command_language(owner)
+        .expect("prepared command language");
+    candidate
+        .event_profiles(&validated, Some("UTC"))
+        .expect("prepared event profiles");
+
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(&format!("[{local}]\n{node_settings}")).unwrap(),
+        media,
+        |name, settings| {
+            let mut prepared = adapter(name, settings)?;
+            prepared.remote_commands = radio.clone();
+            Ok(prepared)
+        },
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let node = crate::config::NodeId::new(local).unwrap();
+    let speech = crate::config::ResolvedSpeechSettings::resolve(runtime.document(), &node)
+        .unwrap()
+        .value;
+    let morse = crate::config::ResolvedMorseSettings::resolve(runtime.document(), &node)
+        .unwrap()
+        .value;
+    let language = "en-US".parse().unwrap();
+    let renderers = super::CommandRenderers {
+        catalog: crate::messages::MessageCatalog::load("en-US").unwrap(),
+        language: &language,
+        speech: &speech,
+        morse: &morse,
+    };
+    runtime
+        .node(local)
+        .unwrap()
+        .install_command_profile(&candidate, port, Some("UTC"), clock(), renderers)
+        .unwrap();
+    runtime
+}
+
+#[test]
+fn registered_dtmf_completion_reaches_the_actual_link_owner() {
+    use crate::runtime::dtmf::{DigitEvent, DigitOutcome};
+    let mut runtime = command_runtime(
+        serde_json::json!({"terminator":"D","inactivity_timeout_ms":17,
+                "mappings":{"dial":{"command":"A*","protected":false,"action":"connect"}}}),
+        &[],
+    );
+    for boundary in [
+        DigitEvent::Digit {
+            digit: 'D',
+            now_ms: 9,
+        },
+        DigitEvent::Unkey { now_ms: 9 },
+        DigitEvent::Digit {
+            digit: '\0',
+            now_ms: 17,
+        },
+    ] {
+        for digit in "A*00123".chars() {
+            assert!(
+                runtime
+                    .digit("1000", DigitEvent::Digit { digit, now_ms: 0 })
+                    .is_none()
+            );
+        }
+        assert!(
+            runtime
+                .digit(
+                    "1000",
+                    DigitEvent::Digit {
+                        digit: '\0',
+                        now_ms: 16
+                    }
+                )
+                .is_none()
+        );
+        let Some(DigitOutcome::Mapped(input)) = runtime.digit("1000", boundary) else {
+            panic!("one completed mapping")
+        };
+        let effect = runtime.dispatch_mapping("1000", input, clock()).unwrap();
+        let crate::runtime::links::LinkEffect::Connect(attempt) = effect else {
+            panic!("domain dial")
+        };
+        assert_eq!(attempt.remote(), "00123");
+        runtime
+            .node("1000")
+            .unwrap()
+            .links()
+            .cancel_connect(attempt);
+        assert!(runtime.digit("1000", boundary).is_none());
+    }
+    for digit in "789D".chars() {
+        assert!(
+            runtime
+                .digit("1000", DigitEvent::Digit { digit, now_ms: 19 })
+                .is_none()
+        );
+    }
+    assert!(runtime.stop(20));
+}
+
+#[test]
+fn registered_startup_waits_for_nested_injected_input_and_domain_admission() {
+    use crate::command_language::MacroOutcome;
+    use crate::runtime::links::LinkEffect;
+    use serde_json::json;
+    let mut runtime = command_runtime(
+        json!({"inactivity_timeout_ms":17,"mappings":{
+        "dial":{"command":"A","action":"connect","protected":false}}}),
+        &[
+            (
+                "macro",
+                "root",
+                json!({"actions":[{"action":"call_macro","macro":"child"},{"action":"disconnect","parameter":"00123"}]}),
+            ),
+            (
+                "macro",
+                "child",
+                json!({"actions":[{"action":"pause","timing":{"duration_ms":8}},{"action":"execute_dtmf","digits":"A00123"}]}),
+            ),
+            (
+                "event",
+                "boot",
+                json!({"start":{"at":"controller_start","macro":"root"}}),
+            ),
+        ],
+    );
+    let tick = |delta| RuntimeClock {
+        now_ms: clock().now_ms + delta,
+        ..clock()
+    };
+    for delta in [0, 7, 8, 24] {
+        assert!(
+            runtime
+                .advance_commands("1000", tick(delta))
+                .unwrap()
+                .is_none()
+        );
+    }
+    let Some((LinkEffect::Connect(dial), receipt)) =
+        runtime.advance_commands("1000", tick(25)).unwrap()
+    else {
+        panic!("nested dial")
+    };
+    assert_eq!(dial.remote(), "00123");
+    assert!(
+        runtime
+            .advance_commands("1000", tick(26))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        runtime
+            .finish_connect("1000", dial, true, tick(27))
+            .unwrap()
+    );
+    receipt.settle(true);
+    let Some((LinkEffect::Detach(names), receipt)) =
+        runtime.advance_commands("1000", tick(28)).unwrap()
+    else {
+        panic!("outer disconnect")
+    };
+    assert_eq!(names, ["00123"]);
+    receipt.settle(true);
+    assert!(
+        runtime
+            .advance_commands("1000", tick(29))
+            .unwrap()
+            .is_none()
+    );
+    let node = runtime.node("1000").unwrap();
+    assert_eq!(
+        node.take_command_completion().unwrap().outcome,
+        MacroOutcome::Completed
+    );
+    assert!(
+        runtime
+            .advance_commands("1000", tick(30))
+            .unwrap()
+            .is_none()
+    );
+    runtime.peer_detached("1000", "00123", 1031);
+    assert!(runtime.stop(1031));
+}
+
+#[test]
+fn registered_mute_tracks_exact_sources_and_keeps_phone_commands_live() {
+    use crate::{
+        command_language::prepare_runtime_action,
+        link::{PeerIdentity, PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource, ProtocolId},
+        runtime::dtmf::DigitOutcome,
+    };
+    use serde_json::json;
+    let mut runtime = command_runtime(json!({}), &[]);
+    let port = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    let toggle = |rt: &mut Runtime<()>, action| {
+        let p = prepare_runtime_action(&action).unwrap();
+        rt.management_action(port, "management", &p, clock())
+            .map(|_| ())
+    };
+    let asl = PeerSignals::new();
+    let echo = PeerSignals::new();
+    let phone = PhoneSource::new(
+        PhoneAccountId::new("acct").unwrap(),
+        1,
+        PhoneCallId::new([3; 16]).unwrap(),
+        1,
+        1,
+    )
+    .unwrap();
+    let call = PeerSignals::for_phone(phone.clone());
+    assert!(call.authenticate_phone());
+    for (alias, sig) in [("2000", &asl), ("3000123", &echo)] {
+        runtime.incoming("1000", alias, true).unwrap();
+        runtime
+            .node("1000")
+            .unwrap()
+            .links()
+            .attach_ingress(
+                PeerIdentity::from_operator(alias).unwrap(),
+                sig.reply_target(),
+            )
+            .unwrap();
+    }
+    runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .attach_ingress(
+            PeerIdentity::parse(ProtocolId::Phone, &phone.call_id().to_string()).unwrap(),
+            call.reply_target(),
+        )
+        .unwrap();
+    toggle(
+        &mut runtime,
+        json!({"action":"rx_mute_toggle","target":"peers","link_type":"echolink"}),
+    )
+    .unwrap();
+    assert!(echo.rx_muted() && !asl.rx_muted() && !call.rx_muted());
+    for expected in [true, false] {
+        toggle(
+            &mut runtime,
+            json!({"action":"rx_mute_toggle","target":"peers"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (asl.rx_muted(), echo.rx_muted(), call.rx_muted()),
+            (expected, expected, false)
+        );
+    }
+    toggle(
+        &mut runtime,
+        json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+    )
+    .unwrap();
+    assert!(asl.rx_muted() && !echo.rx_muted());
+    for expected in [true, false] {
+        let cmds = runtime.node("1000").unwrap().links();
+        let mut out = None;
+        for digit in "*99#".chars() {
+            out = cmds.phone_digit(&phone, digit, clock().now_ms, call.reply_target());
+        }
+        let Some(DigitOutcome::Mapped(input)) = out else {
+            panic!("actual authenticated caller")
+        };
+        let retry = input.clone();
+        runtime.dispatch_mapping("1000", input, clock()).unwrap();
+        assert!(runtime.dispatch_mapping("1000", retry, clock()).is_err());
+        assert_eq!(call.rx_muted(), expected);
+        assert!(asl.rx_muted());
+    }
+    call.end();
+    assert!(
+        toggle(
+            &mut runtime,
+            json!({"action":"rx_mute_toggle","target":"phone_patch"})
+        )
+        .is_err()
+    );
+    toggle(
+        &mut runtime,
+        json!({"action":"rx_mute_toggle","target":"port"}),
+    )
+    .unwrap();
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut txg = tx.acquire().unwrap();
+    assert!(!txg.state().controller.admits_local_receive(true));
+    assert!(!txg.state().controller.admits_local_receive(false));
+    toggle(
+        &mut runtime,
+        json!({"action":"rx_mute_toggle","target":"port"}),
+    )
+    .unwrap();
+    assert!(txg.state().controller.admits_local_receive(true));
+    assert!(!txg.state().controller.admits_local_receive(false));
+    drop(txg);
+    for (name, sig) in [("2000", asl), ("3000123", echo)] {
+        sig.end();
+        runtime.node("1000").unwrap().links().ended(name);
+        runtime.peer_detached("1000", name, clock().now_ms);
+    }
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn registered_protected_macro_expiry_cancels_before_its_nested_dial() {
+    use crate::{
+        command_language::MacroOutcome,
+        runtime::dtmf::{DigitEvent, DigitOutcome},
+    };
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use serde_json::json;
+    let mut runtime = command_runtime(
+        json!({"mappings":{
+            "secured":{"command":"B","action":"call_macro","macro":"outer","protected":true}
+        }}),
+        &[
+            (
+                "macro",
+                "outer",
+                json!({"actions":[{"action":"call_macro","macro":"inner"}]}),
+            ),
+            (
+                "macro",
+                "inner",
+                json!({"actions":[{"action":"pause","timing":{"duration_ms":25}},{"action":"connect","parameter":"00200"}]}),
+            ),
+        ],
+    );
+    let tick = |ms| RuntimeClock {
+        now_ms: clock().now_ms + ms,
+        ..clock()
+    };
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .configure_admin(&digest, &digest, 20);
+    let enter = |rt: &mut Runtime<()>, digits: &str, ms| {
+        let mut output = None;
+        for digit in digits.chars() {
+            output = rt.digit(
+                "1000",
+                DigitEvent::Digit {
+                    digit,
+                    now_ms: tick(ms).now_ms,
+                },
+            );
+        }
+        output
+    };
+    assert!(enter(&mut runtime, "B#", 0).is_none());
+    for (digits, t) in [("*8001234#", 0), ("B#", 1)] {
+        let Some(DigitOutcome::Mapped(input)) = enter(&mut runtime, digits, t) else {
+            panic!("mapped")
+        };
+        runtime.dispatch_mapping("1000", input, tick(t)).unwrap();
+    }
+    assert!(runtime.advance_commands("1000", tick(1)).unwrap().is_none());
+    assert!(
+        runtime
+            .advance_commands("1000", tick(26))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        runtime
+            .node("1000")
+            .unwrap()
+            .take_command_completion()
+            .unwrap()
+            .outcome,
+        MacroOutcome::Cancelled
+    );
+    assert!(runtime.stop(tick(27).now_ms));
+}
+
+#[test]
+fn registered_direct_injection_uses_a_private_collector_and_monotonic_deadline() {
+    use crate::{
+        command_language::{MacroOutcome, prepare_runtime_action},
+        runtime::links::LinkEffect,
+    };
+    use serde_json::json;
+    let mut runtime = command_runtime(
+        json!({"inactivity_timeout_ms":10,"mappings":{
+        "dial":{"command":"A","action":"connect","protected":false}}}),
+        &[],
+    );
+    let action =
+        prepare_runtime_action(&json!({"action":"execute_dtmf","digits":"A0002"})).unwrap();
+    let port = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    let tick = |ms| RuntimeClock {
+        now_ms: clock().now_ms + ms,
+        ..clock()
+    };
+    let (_, effect) = runtime
+        .management_action(port, "operator", &action, clock())
+        .unwrap();
+    assert!(matches!(effect, LinkEffect::CommandQueued(_)));
+    assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+    assert!(
+        runtime
+            .advance_commands(
+                "1000",
+                RuntimeClock {
+                    wall_seconds: -1,
+                    civil: None,
+                    ..tick(9)
+                }
+            )
+            .unwrap()
+            .is_none()
+    );
+    let Some((LinkEffect::Connect(dial), receipt)) = runtime
+        .advance_commands(
+            "1000",
+            RuntimeClock {
+                wall_seconds: -1,
+                civil: None,
+                ..tick(10)
+            },
+        )
+        .unwrap()
+    else {
+        panic!("injected dial")
+    };
+    assert_eq!(dial.remote(), "0002");
+    runtime.node("1000").unwrap().links().cancel_connect(dial);
+    receipt.settle(true);
+    assert!(
+        runtime
+            .advance_commands("1000", tick(11))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        runtime
+            .node("1000")
+            .unwrap()
+            .take_command_completion()
+            .unwrap()
+            .outcome,
+        MacroOutcome::Completed
+    );
+    assert!(runtime.stop(tick(12).now_ms));
+}
+
+#[test]
+fn registered_account_rejects_numeric_self_aliases_under_a_private_owner() {
+    use crate::command_language::prepare_runtime_action;
+    use crate::link::AdmissionError;
+    use serde_json::json;
+    let local = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let mut runtime = command_runtime_named(local, json!({}), &[]);
+    for target in ["1000", "01000", "0001000"] {
+        let request =
+            prepare_runtime_action(&json!({"action":"connect","parameter":target})).unwrap();
+        assert!(matches!(
+            runtime.management_action(local.parse().unwrap(), "operator", &request, clock()),
+            Err(RuntimeError::Link(AdmissionError::Loop))
+        ));
+        assert!(matches!(
+            runtime.incoming(local, target, true),
+            Err(RuntimeError::Link(AdmissionError::Loop))
+        ));
+    }
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn registered_command_message_uses_the_port_recipe_and_queue_before_the_next_dial() {
+    use crate::{command_language::prepare_runtime_action, runtime::links::LinkEffect};
+    use serde_json::json;
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = command_runtime_media(
+        "1000",
+        json!({}),
+        &[
+            (
+                "message",
+                "report",
+                json!({"locales":{"en-US":{"text":"Ready","tts":"Ready","morse":"OK"}}}),
+            ),
+            (
+                "macro",
+                "order",
+                json!({"actions":[{"action":"message","message":"{ report }","destination":"local"},{"action":"connect","parameter":"0099"}]}),
+            ),
+        ],
+        &CapturingMedia(log.clone()),
+    );
+    let port = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    let submit = |rt: &mut Runtime<()>, payload| {
+        let action = prepare_runtime_action(&payload).unwrap();
+        rt.management_action(port, "operator", &action, clock())
+            .unwrap();
+    };
+    submit(
+        &mut runtime,
+        json!({"action":"message","message":"{ report }","destination":"peers"}),
+    );
+    assert!(log.lock().unwrap().is_empty());
+    submit(&mut runtime, json!({"action":"call_macro","macro":"order"}));
+    let Some((LinkEffect::None, admitted)) = runtime.advance_commands("1000", clock()).unwrap()
+    else {
+        panic!("queued report")
+    };
+    assert_eq!(*log.lock().unwrap(), ["Ready"]);
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut owner = tx.acquire().unwrap();
+    let mut output = [0.0; 16_000];
+    owner
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut output);
+    assert!(output.iter().any(|sample| *sample != 0.0));
+    assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+    admitted.settle(true);
+    let Some((LinkEffect::Connect(attempt), admitted)) =
+        runtime.advance_commands("1000", clock()).unwrap()
+    else {
+        panic!("next domain action")
+    };
+    assert_eq!(attempt.remote(), "0099");
+    runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .cancel_connect(attempt);
+    admitted.settle(true);
+    assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+    drop(owner);
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn registered_retiring_generation_cancels_a_wait_without_dialing_its_replacement() {
+    use crate::command_language::{MacroOutcome, prepare_runtime_action};
+    use serde_json::json;
+    let mut runtime = command_runtime(
+        json!({}),
+        &[(
+            "macro",
+            "wait",
+            json!({"actions":[
+        {"action":"pause","timing":{"duration_ms":20}},{"action":"connect","parameter":"00204"}]}),
+        )],
+    );
+    let port = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    let call = prepare_runtime_action(&json!({"action":"call_macro","macro":"wait"})).unwrap();
+    let (_, links::LinkEffect::CommandQueued(reply)) = runtime
+        .management_action(port, "operator", &call, clock())
+        .unwrap()
+    else {
+        panic!("macro admission")
+    };
+    assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+    assert!(runtime.stop(clock().now_ms + 1));
+    assert_eq!(reply.outcome(), Some(MacroOutcome::Cancelled));
+}
+
+#[test]
+fn registered_permanent_connect_is_idempotent_only_for_the_owned_active_mode() {
+    use crate::{command_language::prepare_runtime_action, runtime::links::LinkEffect};
+    use serde_json::json;
+    let mut runtime = command_runtime(json!({}), &[]);
+    let port = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    let dial =
+        prepare_runtime_action(&json!({"action":"connect_permanent","parameter":"00220"})).unwrap();
+    let (_, LinkEffect::Connect(attempt)) = runtime
+        .management_action(port, "operator", &dial, clock())
+        .unwrap()
+    else {
+        panic!("first real dial")
+    };
+    assert!(
+        runtime
+            .finish_connect("1000", attempt, true, clock())
+            .unwrap()
+    );
+    assert!(matches!(
+        runtime
+            .management_action(port, "operator", &dial, clock())
+            .unwrap()
+            .1,
+        LinkEffect::None
+    ));
+    let other = prepare_runtime_action(
+        &json!({"action":"connect_permanent","parameter":"00220","mode":"monitor"}),
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .management_action(port, "operator", &other, clock())
+            .is_err()
+    );
+    let pause = prepare_runtime_action(&json!({"action":"pause_permanent_links"})).unwrap();
+    assert!(
+        matches!(runtime.management_action(port,"operator",&pause,clock()).unwrap().1,LinkEffect::Detach(peers) if peers==["00220"])
+    );
+    runtime.peer_detached("1000", "00220", clock().now_ms);
+    let resume = prepare_runtime_action(&json!({"action":"resume_permanent_links"})).unwrap();
+    runtime
+        .management_action(port, "operator", &resume, clock())
+        .unwrap();
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn registered_window_ending_behind_a_real_pending_action_never_runs_either_boundary() {
+    use crate::{command_language::prepare_runtime_action, runtime::links::LinkEffect};
+    use serde_json::json;
+    let dial = |target| json!({"action":"connect","parameter":target});
+    let mut runtime = command_runtime(
+        json!({}),
+        &[
+            ("macro", "block", json!({"actions":[dial("0019")]})),
+            ("macro", "start", json!({"actions":[dial("0011")]})),
+            ("macro", "end", json!({"actions":[dial("0012")]})),
+            (
+                "event",
+                "window",
+                json!({"start":{"at":"every day at 0:02 in UTC","macro":"start"},"end":{"at":"every day at 0:03 in UTC","macro":"end"}}),
+            ),
+        ],
+    );
+    let tick = |second| RuntimeClock {
+        wall_seconds: second,
+        now_ms: clock().now_ms + ((second - 100) as u64) * 1000,
+        ..clock()
+    };
+    let action = prepare_runtime_action(&json!({"action":"call_macro","macro":"block"})).unwrap();
+    runtime
+        .management_action(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap(),
+            "operator",
+            &action,
+            tick(101),
+        )
+        .unwrap();
+    let Some((LinkEffect::Connect(attempt), receipt)) =
+        runtime.advance_commands("1000", tick(101)).unwrap()
+    else {
+        panic!("blocking real dial")
+    };
+    assert!(
+        runtime
+            .advance_commands("1000", tick(122))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        runtime
+            .advance_commands("1000", tick(181))
+            .unwrap()
+            .is_none()
+    );
+    runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .cancel_connect(attempt);
+    receipt.settle(true);
+    for second in [182, 183, 184] {
+        assert!(
+            runtime
+                .advance_commands("1000", tick(second))
+                .unwrap()
+                .is_none()
+        )
+    }
+    assert!(
+        runtime
+            .node("1000")
+            .unwrap()
+            .links()
+            .manager()
+            .snapshot()
+            .is_empty()
+    );
+    assert!(runtime.stop(tick(185).now_ms));
+}
+
+#[test]
+fn registered_management_radio_action_reaches_the_provider_without_rf_authority() {
+    use crate::{command_language::prepare_runtime_action, runtime::links::LinkEffect};
+    let mut runtime = command_runtime(serde_json::json!({}), &[]);
+    let request = prepare_runtime_action(
+        &serde_json::json!({"action":"radio","operation":"status","detail":"short"}),
+    )
+    .unwrap();
+    let (_, LinkEffect::RemoteBase(operation)) = runtime
+        .management_action(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap(),
+            "operator",
+            &request,
+            clock(),
+        )
+        .unwrap()
+    else {
+        panic!("native radio command")
+    };
+    assert!(!operation.receiver_source() && !operation.audible_source());
+    assert!(operation.remote.is_some());
+    drop(operation);
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn registered_scheduler_warning_captures_boundary_arguments_across_a_pause() {
+    use crate::runtime::links::LinkEffect;
+    use serde_json::json;
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = command_runtime_media(
+        "1000",
+        json!({}),
+        &[
+            (
+                "macro",
+                "connect",
+                json!({"actions":[{"action":"connect","parameter":"00200"}]}),
+            ),
+            (
+                "macro",
+                "warn",
+                json!({"actions":[{"action":"pause","timing":{"duration_ms":5000}},{"action":"message","message":"{ scheduled-link-change }","destination":"local"}]}),
+            ),
+            (
+                "event",
+                "dawn",
+                json!({"start":{"at":"every day at 0:04 in UTC","macro":"connect","warnings":[{"at":"every day at 0:02 in UTC","macro":"warn"}]}}),
+            ),
+        ],
+        &CapturingMedia(log.clone()),
+    );
+    let at = |s: i64| RuntimeClock {
+        wall_seconds: s,
+        now_ms: 1000 + ((s - 100) as u64) * 1000,
+        ..clock()
+    };
+    assert!(runtime.advance_commands("1000", at(120)).unwrap().is_none());
+    let Some((LinkEffect::None, receipt)) = runtime.advance_commands("1000", at(130)).unwrap()
+    else {
+        panic!("captured warning")
+    };
+    receipt.settle(true);
+    let spoken = log.lock().unwrap().join(" ");
+    assert!(
+        spoken.contains("2 minutes")
+            && spoken.contains("Connecting")
+            && spoken.contains(&render::telemetry_speech("00200", &["00200"])),
+        "{spoken}"
+    );
+    drop(spoken);
+    assert!(runtime.advance_commands("1000", at(131)).unwrap().is_none());
+    assert!(runtime.stop(at(132).now_ms));
+}
+
+#[test]
+fn registered_mixed_route_warning_preserves_kind_and_deadline_without_inventing_a_single_link() {
+    use crate::runtime::links::LinkEffect;
+    use serde_json::json;
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = command_runtime_media(
+        "1000",
+        json!({}),
+        &[
+            (
+                "message",
+                "when",
+                json!({"locales":{"en-US":{"text":"{ $event-kind } in { $time-remaining }","tts":"{ $event-kind } in { $time-remaining }","morse":"WARN"}}}),
+            ),
+            (
+                "macro",
+                "changes",
+                json!({"actions":[{"action":"connect","parameter":"2000"},{"action":"disconnect_all"}]}),
+            ),
+            (
+                "macro",
+                "announce",
+                json!({"actions":[{"action":"message","message":"{ when }","destination":"local"},{"action":"message","message":"{ scheduled-link-change }","destination":"local"}]}),
+            ),
+            (
+                "event",
+                "test",
+                json!({"start":{"at":"every day at 0:04 in UTC","macro":"changes","warnings":[{"at":"every day at 0:02 in UTC","macro":"announce"}]}}),
+            ),
+        ],
+        &CapturingMedia(log.clone()),
+    );
+    let at = RuntimeClock {
+        wall_seconds: 120,
+        ..clock()
+    };
+    let Some((LinkEffect::None, receipt)) = runtime.advance_commands("1000", at).unwrap() else {
+        panic!("captured event bindings")
+    };
+    receipt.settle(true);
+    assert!(runtime.advance_commands("1000", at).unwrap().is_none());
+    assert_eq!(
+        runtime
+            .node("1000")
+            .unwrap()
+            .take_command_completion()
+            .unwrap()
+            .outcome,
+        crate::command_language::MacroOutcome::Rejected
+    );
+    assert_eq!(
+        log.lock().unwrap().as_slice(),
+        ["start_warning in 2 minutes"]
+    );
+    assert!(runtime.stop(at.now_ms));
+}
+
+#[test]
+fn registered_queued_management_responses_keep_their_individual_terminal_outcomes() {
+    use crate::command_language::{MacroOutcome, prepare_runtime_action};
+    use crate::runtime::links::LinkEffect;
+    use serde_json::json;
+    let mut runtime = command_runtime(
+        json!({}),
+        &[(
+            "macro",
+            "dial",
+            json!({"actions":[{"action":"connect","parameter":"2000"}]}),
+        )],
+    );
+    let action = prepare_runtime_action(&json!({"action":"call_macro","macro":"dial"})).unwrap();
+    let port = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    let mut enqueue = || match runtime
+        .management_action(port, "operator", &action, clock())
+        .unwrap()
+        .1
+    {
+        LinkEffect::CommandQueued(response) => response,
+        _ => panic!("queued result"),
+    };
+    let first = enqueue();
+    let second = enqueue();
+    let third = enqueue();
+    for (response, accept, outcome) in [
+        (&first, false, MacroOutcome::Rejected),
+        (&second, true, MacroOutcome::Completed),
+    ] {
+        assert!(response.outcome().is_none());
+        let Some((LinkEffect::Connect(a), receipt)) =
+            runtime.advance_commands("1000", clock()).unwrap()
+        else {
+            panic!("ordered dial")
+        };
+        runtime.node("1000").unwrap().links().cancel_connect(a);
+        receipt.settle(accept);
+        assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+        assert_eq!(response.outcome(), Some(outcome));
+    }
+    assert_eq!(first.outcome(), Some(MacroOutcome::Rejected));
+    assert!(third.outcome().is_none());
+    assert!(runtime.stop(clock().now_ms));
+    assert_eq!(third.outcome(), Some(MacroOutcome::Cancelled));
+}
+
+#[test]
+fn registered_injected_management_radio_reads_available_owner_without_grant_or_reply() {
+    use crate::{
+        command_language::{MacroOutcome, prepare_runtime_action},
+        remote_base_command::RemoteDtmfAccess,
+        runtime::links::LinkEffect,
+    };
+    use serde_json::json;
+    for (available, protected) in [(true, false), (true, true), (false, false)] {
+        let prepared = available.then(|| crate::remote_base_command::RemoteCommandConfiguration {
+            prefix: String::new(),
+            access: RemoteDtmfAccess::Disabled,
+        });
+        let mut runtime = command_runtime_media_settings(
+            "1000",
+            "",
+            prepared,
+            json!({"mappings":{"check":{"command":"A","action":"radio","operation":"status","detail":"short","protected":protected}}}),
+            &[(
+                "macro",
+                "read",
+                json!({"actions":[{"action":"execute_dtmf","digits":"A"}]}),
+            )],
+            &Media,
+        );
+        let call = prepare_runtime_action(&json!({"action":"call_macro","macro":"read"})).unwrap();
+        let (_, LinkEffect::CommandQueued(response)) = runtime
+            .management_action(
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap(),
+                "manager",
+                &call,
+                clock(),
+            )
+            .unwrap()
+        else {
+            panic!("call")
+        };
+        let mut reached = false;
+        for delta in [0, 3000, 3001, 3002] {
+            let at = RuntimeClock {
+                now_ms: clock().now_ms + delta,
+                ..clock()
+            };
+            if let Some((effect, receipt)) = runtime.advance_commands("1000", at).unwrap() {
+                let LinkEffect::RemoteBase(operation) = effect else {
+                    panic!("radio status")
+                };
+                assert!(
+                    !operation.receiver_source()
+                        && !operation.audible_source()
+                        && operation.reply.is_none()
+                );
+                reached = true;
+                receipt.settle(true);
+            }
+        }
+        assert_eq!(reached, available && !protected);
+        assert_eq!(response.outcome() == Some(MacroOutcome::Completed), reached);
+        assert!(runtime.stop(clock().now_ms + 3003));
+    }
+}
+
+#[test]
+fn registered_peer_macro_keeps_exact_private_radio_collector_through_pause() {
+    use crate::{
+        command_language::MacroOutcome,
+        link::{PeerIdentity, PeerSignals},
+        remote_base_command::RemoteDtmfAccess,
+        runtime::{dtmf::DigitOutcome, links::LinkEffect},
+    };
+    use serde_json::json;
+    for retire in [false, true] {
+        let mut runtime = command_runtime(
+            json!({"mappings":{"call":{"command":"B","protected":false,"action":"call_macro","macro":"read"}}}),
+            &[(
+                "macro",
+                "read",
+                json!({"actions":[{"action":"pause","timing":{"duration_ms":12}},{"action":"radio","operation":"status","detail":"short"}]}),
+            )],
+        );
+        let source = PeerSignals::new().reply_target();
+        runtime.incoming("1000", "2000", true).unwrap();
+        let links = runtime.node("1000").unwrap().links();
+        links.configure_remote("6", RemoteDtmfAccess::Open).unwrap();
+        links
+            .attach_ingress(PeerIdentity::from_operator("2000").unwrap(), source.clone())
+            .unwrap();
+        assert!(links.peer_digit("2000", 'B', 10, source.clone()).is_none());
+        let Some(DigitOutcome::Mapped(input)) = links.peer_digit("2000", '#', 10, source.clone())
+        else {
+            panic!("peer mapping")
+        };
+        let at = |n| RuntimeClock {
+            now_ms: n,
+            ..clock()
+        };
+        let LinkEffect::CommandQueued(response) =
+            runtime.dispatch_mapping("1000", input, at(10)).unwrap()
+        else {
+            panic!("macro receipt")
+        };
+        assert!(runtime.advance_commands("1000", at(10)).unwrap().is_none());
+        let links = runtime.node("1000").unwrap().links();
+        assert!(links.expire_peer_digits(11).is_empty());
+        if retire {
+            links.retire_source(&source);
+        }
+        let effect = runtime.advance_commands("1000", at(22)).unwrap();
+        if retire {
+            assert!(effect.is_none());
+            assert_eq!(response.outcome(), Some(MacroOutcome::Cancelled));
+        } else {
+            let Some((LinkEffect::RemoteBase(op), receipt)) = effect else {
+                panic!("private read from retained collector")
+            };
+            assert_eq!(op.reply.as_ref(), Some(&source));
+            assert!(
+                runtime
+                    .node("1000")
+                    .unwrap()
+                    .links()
+                    .remote_authorized(&op, 22)
+            );
+            receipt.settle(true);
+            assert!(runtime.advance_commands("1000", at(23)).unwrap().is_none());
+            assert_eq!(response.outcome(), Some(MacroOutcome::Completed));
+        }
+        runtime.node("1000").unwrap().links().ended("2000");
+        runtime.peer_detached("1000", "2000", 24);
+        assert!(runtime.stop(24));
+    }
+}
+
+#[test]
+fn registered_non_ingress_selection_preserves_the_receivers_own_target() {
+    use crate::{
+        command_language::{MacroOutcome, prepare_runtime_action},
+        runtime::{
+            dtmf::{DigitEvent, DigitOutcome},
+            links::LinkEffect,
+        },
+    };
+    use serde_json::json;
+    let mut runtime = command_runtime(
+        json!({"mappings":{"select":{"command":"A","protected":false,"action":"select_command_target"}}}),
+        &[
+            (
+                "macro",
+                "steal",
+                json!({"actions":[{"action":"select_command_target","parameter":"3000"}]}),
+            ),
+            (
+                "event",
+                "boot",
+                json!({"start":{"at":"controller_start","macro":"steal"}}),
+            ),
+        ],
+    );
+    runtime.incoming("1000", "2000", true).unwrap();
+    let mut outcome = None;
+    for digit in "A2000#".chars() {
+        outcome = runtime.digit(
+            "1000",
+            DigitEvent::Digit {
+                digit,
+                now_ms: clock().now_ms,
+            },
+        );
+    }
+    let Some(DigitOutcome::Mapped(input)) = outcome else {
+        panic!("local selection")
+    };
+    let LinkEffect::VerifyCommandTarget(op) =
+        runtime.dispatch_mapping("1000", input, clock()).unwrap()
+    else {
+        panic!("directory check")
+    };
+    runtime.command("1000", op, clock(), true).unwrap();
+    let select =
+        prepare_runtime_action(&json!({"action":"select_command_target","parameter":"4000"}))
+            .unwrap();
+    assert!(matches!(
+        runtime.management_action(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap(),
+            "mgr",
+            &select,
+            clock()
+        ),
+        Err(RuntimeError::Unavailable)
+    ));
+    assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+    assert_eq!(
+        runtime
+            .node("1000")
+            .unwrap()
+            .take_command_completion()
+            .unwrap()
+            .outcome,
+        MacroOutcome::Rejected
+    );
+    let Some(DigitOutcome::Operation(op)) = runtime.digit(
+        "1000",
+        DigitEvent::Digit {
+            digit: '5',
+            now_ms: clock().now_ms,
+        },
+    ) else {
+        panic!("RF forwarded digit")
+    };
+    assert_eq!(op.command.node, "2000");
+    runtime.node("1000").unwrap().links().ended("2000");
+    runtime.peer_detached("1000", "2000", clock().now_ms);
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn registered_numeric_alias_waits_for_requester_then_fans_out_only_to_configured_audience() {
+    use crate::{
+        audio::LinkAudioQueue,
+        link::{AudioPeer, LinkAudio, Mode, PeerIdentity, PeerInput, PeerSignals, SourcePosition},
+        runtime::{dtmf::DigitOutcome, links::LinkEffect},
+    };
+    use serde_json::json;
+    struct Input(Arc<PeerSignals>);
+    impl PeerInput for Input {
+        fn source_rate(&self) -> u32 {
+            48000
+        }
+        fn signals(&self) -> &PeerSignals {
+            &self.0
+        }
+        fn available(&self) -> u64 {
+            0
+        }
+        fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+            output.fill(0.);
+            Some(0)
+        }
+    }
+    for route in ["local", "peers", "local_and_links"] {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut rt = command_runtime_media_settings(
+            "1000",
+            "duplex=full\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n",
+            None,
+            json!({"mappings":{"alias":{"command":"A","protected":false,"action":"message"}}}),
+            &[(
+                "message",
+                "report",
+                json!({"dtmf_id":"7","locales":{"en-US":{"text":"Ready","tts":"Ready","morse":"OK"}},"playback":{"destination":route}}),
+            )],
+            &CapturingMedia(log.clone()),
+        );
+        let mut add = |name: &str| {
+            let sig = Arc::new(PeerSignals::new());
+            rt.incoming("1000", name, true).unwrap();
+            rt.node("1000")
+                .unwrap()
+                .links()
+                .attach_ingress(
+                    PeerIdentity::from_operator(name).unwrap(),
+                    sig.reply_target(),
+                )
+                .unwrap();
+            let (out, read) = LinkAudioQueue::new(4096, 64).unwrap().into_endpoints();
+            (
+                AudioPeer::new(name, Mode::TRANSCEIVE, Input(sig.clone()), out, 256, 0).unwrap(),
+                sig,
+                read,
+            )
+        };
+        let (first, caller, mut first_out) = add("2000");
+        let (second, _, mut other_out) = add("3000");
+        // A live token from an unrelated transport cannot impersonate this link's D envelope.
+        assert!(
+            rt.node("1000")
+                .unwrap()
+                .links()
+                .peer_text(
+                    "2000",
+                    b"D 1000 2000 1 A",
+                    PeerSignals::new().reply_target(),
+                    false,
+                    0,
+                    9
+                )
+                .is_err()
+        );
+        let (mut mixer, mut distributor) = LinkAudio::new(vec![first, second], 256).unwrap();
+        let (_, mut tx) = rt.node("1000").unwrap().register_audio().unwrap();
+        let mut owner = tx.acquire().unwrap();
+        let mut outcome = None;
+        for digit in "A7#".chars() {
+            outcome = rt.node("1000").unwrap().links().peer_digit(
+                "2000",
+                digit,
+                10,
+                caller.reply_target(),
+            );
+        }
+        let Some(DigitOutcome::Mapped(input)) = outcome else {
+            panic!("numeric alias")
+        };
+        assert!(matches!(
+            rt.dispatch_mapping("1000", input, clock()),
+            Ok(LinkEffect::None)
+        ));
+        let mut render = || {
+            let mut rf = [0.; 256];
+            let mut a = [0.; 256];
+            let mut b = [0.; 256];
+            let key = mixer
+                .process(
+                    &mut owner.state().controller,
+                    false,
+                    &mut rf,
+                    SourcePosition::default(),
+                )
+                .unwrap();
+            distributor.dispatch(1);
+            first_out.read(&mut a);
+            other_out.read(&mut b);
+            let heard = |x: &[f32]| x.iter().any(|s| (*s - 0.25).abs() < 0.001);
+            (heard(&rf), heard(&a), heard(&b), key)
+        };
+        caller.set_radio_keyed(true);
+        let (rf, a, b, _) = render();
+        assert_eq!((rf, a, b), (false, false, false));
+        caller.set_radio_keyed(false);
+        let mut heard = (false, false, false, false);
+        for _ in 0..128 {
+            let (rf, a, b, key) = render();
+            heard.0 |= rf;
+            heard.1 |= a;
+            heard.2 |= b;
+            heard.3 |= key && (rf || a || b);
+        }
+        assert_eq!(
+            heard,
+            (
+                route != "peers",
+                route != "local",
+                route != "local",
+                route != "peers"
+            ),
+            "{route}"
+        );
+        drop(owner);
+        rt.node("1000").unwrap().links().ended("2000");
+        rt.node("1000").unwrap().links().ended("3000");
+        rt.peer_detached("1000", "2000", 50);
+        rt.peer_detached("1000", "3000", 50);
+        assert!(rt.stop(50));
+    }
+}

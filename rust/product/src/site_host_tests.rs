@@ -727,6 +727,7 @@ fn site_host_publishes_site_replacement_with_runtime_before_post_reload_polling(
             let (mut pending, control) =
                 PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
             host.peers.push(PeerOwner {
+                superseded: false,
                 local: "1000".into(),
                 remote: "2000".into(),
                 mode: Mode::TRANSCEIVE,

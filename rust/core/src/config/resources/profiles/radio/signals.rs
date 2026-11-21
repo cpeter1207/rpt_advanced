@@ -465,27 +465,90 @@ pub(super) fn normalize(
         fields::TX
     };
     let mut map = super::super::normalize::normalize(b, source, schema, w);
-    fn clean(v: Option<&mut Value>) {
+    let mut clean = |v: Option<&mut Value>, usage: Use| {
         let Some(body) = v.and_then(Value::as_object_mut) else {
             return;
         };
-        let Some(source) = body.get("source").and_then(Value::as_str) else {
-            return;
-        };
-        let use_pin = matches!(source, "sound_chip_gpio" | "parallel" | "serial");
-        let use_key = source == "key_down";
-        if !use_pin {
+        let serial = body.get("source").and_then(Value::as_str) == Some("serial");
+        if let Some(source) = body.get("source").and_then(Value::as_str) {
+            let use_pin = matches!(source, "sound_chip_gpio" | "parallel" | "serial");
+            let use_key = source == "key_down";
+            if !use_pin {
+                body.remove("pin");
+            }
+            if !use_key {
+                body.remove("scancode");
+            }
+        }
+        if serial
+            && body
+                .get("pin")
+                .is_some_and(|pin| usage.serial_pins(pin).is_none())
+        {
+            warn(w, b, "pin");
             body.remove("pin");
         }
-        if !use_key {
-            body.remove("scancode");
-        }
-    }
-    for key in ["squelch", "ptt", "ctcss"] {
-        clean(map.get_mut(key))
+    };
+    for (key, usage) in [
+        ("squelch", Use::Squelch),
+        ("ptt", Use::Ptt),
+        ("ctcss", Use::Decode),
+    ] {
+        clean(map.get_mut(key), usage)
     }
     for key in ["ctcss", "dcs"] {
-        clean(map.get_mut(key).and_then(|v| v.get_mut("output")))
+        clean(
+            map.get_mut(key).and_then(|v| v.get_mut("output")),
+            Use::Encoder,
+        )
     }
     map
+}
+
+/// Drop rejected source-less serial pins after the port has selected its usable signal owner.
+/// The typed resolver has already emitted any invalid-pin warning.
+pub(super) fn prune_inherited_serial(
+    fields: &mut serde_json::Map<String, Value>,
+    receive: bool,
+    signals: &RadioSignals,
+) {
+    let clean = |value: Option<&mut Value>, binding: Option<&SignalBinding>, usage: Use| {
+        if !binding.is_some_and(|binding| binding.source == SignalSource::Serial) {
+            return;
+        }
+        let Some(body) = value.and_then(Value::as_object_mut) else {
+            return;
+        };
+        if !body.contains_key("source")
+            && body
+                .get("pin")
+                .is_some_and(|pin| usage.serial_pins(pin).is_none())
+        {
+            body.remove("pin");
+        }
+    };
+    if receive {
+        clean(
+            fields.get_mut("squelch"),
+            Some(&signals.rx.squelch.binding),
+            Use::Squelch,
+        );
+        clean(
+            fields.get_mut("ctcss"),
+            Some(&signals.rx.ctcss.binding),
+            Use::Decode,
+        );
+    } else {
+        clean(fields.get_mut("ptt"), Some(&signals.tx.ptt), Use::Ptt);
+        clean(
+            fields.get_mut("ctcss").and_then(|v| v.get_mut("output")),
+            signals.tx.ctcss.output.as_ref(),
+            Use::Encoder,
+        );
+        clean(
+            fields.get_mut("dcs").and_then(|v| v.get_mut("output")),
+            signals.tx.dcs.output.as_ref(),
+            Use::Encoder,
+        );
+    }
 }

@@ -1,5 +1,6 @@
 //! Actual store and mTLS regressions for mutable dependencies and typed response contracts.
 use super::*;
+mod station;
 use crate::management::ProfileInputs;
 use rpt_advanced_core::config::resources::profiles::equipment::InterfaceCapability;
 use rptadv_peer_support::https::CoordinatorInbox;
@@ -13,7 +14,20 @@ const CASE: &str = "RPTADV_HAL_REVIEW_CASE";
 #[test]
 fn authenticated_review_regressions() {
     let mut failed = Vec::new();
-    for case in ["restore", "reload", "echo", "audio", "schemas", "poll"] {
+    for case in [
+        "restore",
+        "reload",
+        "echo",
+        "audio",
+        "schemas",
+        "poll",
+        "station-keyboard",
+        "station-serial",
+        "station-invalid",
+        "station-sparse-keyboard",
+        "station-invalid-serial",
+        "station-source-fallback",
+    ] {
         let status = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", TEST, "--nocapture"])
             .env(CASE, case)
@@ -370,13 +384,7 @@ fn audio(client: &Client<'_>) {
     }
 }
 
-fn checked_schema(client: &Client<'_>, template: &str, path: &str) -> (Value, Value) {
-    let links = client.get("/api/v1/openapi.json").body;
-    let href=links["paths"][template]["get"]["responses"]["200"]["content"]["application/hal+json"]["schema"]["$ref"].as_str().unwrap();
-    let schema = client.get(href);
-    let doc = client.get(path);
-    assert_eq!(schema.code, 200);
-    assert_eq!(doc.code, 200);
+fn validate_document(schema: &Value, document: &Value) {
     // The staged quality fixture supplies Debian's 2020-12 validator.
     if let Some(python) = std::env::var_os("RPTADV_HAL_SCHEMA_PYTHON") {
         let mut checker=Command::new(python).args(["-c",r#"
@@ -390,16 +398,98 @@ Draft202012Validator(schema,format_checker=Draft202012Validator.FORMAT_CHECKER).
 "#]).stdin(std::process::Stdio::piped()).spawn().unwrap();
         serde_json::to_writer(
             checker.stdin.take().unwrap(),
-            &json!({"schema":schema.body,"document":doc.body}),
+            &json!({"schema":schema,"document":document}),
         )
         .unwrap();
         assert!(
             checker.wait().unwrap().success(),
-            "schema {href} for {path}"
+            "served schema rejected document"
         );
-        eprintln!("Validated complete authenticated response at {path} against {href}");
     }
+}
+fn checked_schema(client: &Client<'_>, template: &str, path: &str) -> (Value, Value) {
+    let links = client.get("/api/v1/openapi.json").body;
+    let href=links["paths"][template]["get"]["responses"]["200"]["content"]["application/hal+json"]["schema"]["$ref"].as_str().unwrap();
+    let schema = client.get(href);
+    let doc = client.get(path);
+    assert_eq!(schema.code, 200);
+    assert_eq!(doc.code, 200);
+    validate_document(&schema.body, &doc.body);
+    eprintln!("Validated complete authenticated response at {path} against {href}");
     (doc.body, schema.body)
+}
+fn audience_schemas(client: &Client<'_>, port: &str) {
+    let create = |at: &str, family: &str, key: &str, configuration: Value| {
+        edit(
+            client,
+            "POST",
+            &format!("{at}telemetry/{family}/"),
+            json!({"key":key,"configuration":configuration}),
+        )
+        .headers["location"]
+            .clone()
+    };
+    let message = create(
+        SITE_PATH,
+        "messages",
+        "notice",
+        json!({"morse":{"text":"CQ"},"playback":{"destination":"peers"}}),
+    );
+    let inherited = create(
+        SITE_PATH,
+        "identifiers",
+        "id",
+        json!({"morse":{"text":"CQ"},"playback":{"destination":"local_and_links"}}),
+    );
+    let id = create(
+        port,
+        "identifiers",
+        "id",
+        json!({"playback":{"destination":"peers","repeat":false}}),
+    );
+    let tail = create(
+        port,
+        "tails",
+        "tail",
+        json!({"content":"{ notice }","playback":{"destination":"peers"}}),
+    );
+    for (resource, route, key, expected) in [
+        (
+            &message,
+            "site/telemetry/messages/{member}/",
+            Some("peers"),
+            "peers",
+        ),
+        (
+            &inherited,
+            "site/telemetry/identifiers/{member}/",
+            Some("local_and_links"),
+            "local_and_links",
+        ),
+        (
+            &id,
+            "ports/{port}/telemetry/identifiers/{member}/",
+            None,
+            "local_and_links",
+        ),
+        (
+            &tail,
+            "ports/{port}/telemetry/tails/{member}/",
+            None,
+            "local",
+        ),
+    ] {
+        let (author, _) = checked_schema(client, &format!("/configuration/{route}"), resource);
+        assert_eq!(
+            author
+                .pointer("/configuration/playback/destination")
+                .and_then(Value::as_str),
+            key
+        );
+        let (current, _) =
+            checked_schema(client, &format!("/effective/{route}"), &effective(resource));
+        assert_eq!(current["effective"]["playback"]["destination"], expected);
+    }
 }
 fn schemas(client: &Client<'_>) {
     let limits = format!("{SITE_PATH}limits/");
@@ -432,6 +522,7 @@ fn schemas(client: &Client<'_>) {
         Some(144.0)
     );
     let port = port(client);
+    audience_schemas(client, &port);
     let accounts = format!("{port}protocols/allstarlink/");
     let loc=edit(client,"POST",&accounts,json!({"configuration":{"node_number":1234,"iax":{"registration_url":""},"status_post":{"url":""}}})).headers["location"].clone();
     let template = "/effective/ports/{port}/protocols/allstarlink/{member}/";
@@ -506,6 +597,12 @@ pub(super) fn run(
         "audio" => scenario.serve(inputs(), |c, _| audio(c)),
         "schemas" => scenario.serve(inputs(), |c, _| schemas(c)),
         "poll" => scenario.serve(inputs(), |c, _| poll(c, fixture)),
+        "station-keyboard" => scenario.serve(inputs(), |c, _| station::keyboard(c)),
+        "station-serial" => scenario.serve(inputs(), |c, _| station::serial(c)),
+        "station-invalid" => scenario.serve(inputs(), station::invalid),
+        "station-sparse-keyboard" => scenario.serve(inputs(), station::sparse_keyboard),
+        "station-invalid-serial" => scenario.serve(inputs(), station::invalid_serial),
+        "station-source-fallback" => scenario.serve(inputs(), station::source_fallback),
         _ => panic!("invalid fixture case"),
     }
 }

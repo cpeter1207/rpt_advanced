@@ -171,8 +171,15 @@ pub trait PeerInput: Send {
     }
     /// Render native F32, returning real samples (not concealment), or None on failure.
     fn render(&mut self, output: &mut [f32]) -> Option<usize>;
-    /// Advance configured processing with silence without consuming input or activity.
-    /// The native owner supplies bounded prepared scratch and discards its output.
+    /// Whether processed output belongs to the current operational receive epoch.
+    fn receive_audio_current(&self) -> bool {
+        true
+    }
+    /// Real samples processed by the native converter, including suppressed receive audio.
+    fn native_real_count(&self, audible: usize) -> usize {
+        audible
+    }
+    /// Advance configured silence processing independently of input admission.
     fn silence(&mut self, _scratch: &mut [f32]) {}
     /// One real media sample; unlike PCM zero, absence cannot demand PTT.
     fn render_sample(&mut self) -> Option<f32> {
@@ -515,9 +522,11 @@ impl<P: PeerInput> LinkAudio<P> {
         if count > self.local.len() {
             return Err(AdmissionError::Invalid);
         }
+        let receiving = controller.admits_local_receive(receiving);
         self.local[..count].copy_from_slice(audio);
         self.mix[..count].fill(0.0);
         for peer in &mut self.peers {
+            let mute_epoch = peer.input.signals().receive_epoch();
             let (pcm_epoch, available, ended) = {
                 let signal = peer.input.signals();
                 (signal.pcm_epoch(), peer.input.available(), signal.ended())
@@ -543,8 +552,11 @@ impl<P: PeerInput> LinkAudio<P> {
                         .should_render(pcm_epoch, available, ended, count)
                         && {
                             render_attempted = true;
-                            peer.receive
-                                .rendered(peer.input.render(&mut peer.audio[..count]), count)
+                            let real = peer
+                                .input
+                                .render(&mut peer.audio[..count])
+                                .map(|n| peer.input.native_real_count(n));
+                            peer.receive.rendered(real, count)
                         }
                 }
             };
@@ -552,12 +564,16 @@ impl<P: PeerInput> LinkAudio<P> {
             if !render_attempted {
                 peer.input.silence(&mut peer.audio[..count]);
             }
-            if !audio_active {
+            let muted = mute_epoch & 1 != 0 || peer.input.signals().receive_epoch() != mute_epoch;
+            if !audio_active || muted {
                 peer.audio[..count].fill(0.0);
             }
             let active = !ended && (audio_active || peer.input.signals().radio_keyed());
-            peer.active = active;
             peer.input.signals().set_active(active);
+            peer.active = !ended
+                && !muted
+                && (peer.input.signals().output_radio_keyed(mute_epoch)
+                    || (audio_active && peer.input.receive_audio_current()));
         }
         let inputs_idle = !receiving && self.peers.iter().all(|peer| !peer.active);
         for (index, group) in self.groups.iter().enumerate() {

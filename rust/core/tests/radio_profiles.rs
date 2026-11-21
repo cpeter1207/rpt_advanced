@@ -1209,3 +1209,47 @@ fn c2_only_the_inheriting_port_projects_its_signaling_pin_onto_the_interface() {
         );
     }
 }
+
+#[test]
+fn dedicated_serial_bindings_preserve_dte_names_and_fall_back_on_wrong_pin_direction() {
+    with_port(
+        &[
+            (
+                false,
+                Kind::Interface,
+                Some(json!({"serial":{"device":"/dev/serial/by-id/example"}})),
+            ),
+            (
+                false,
+                Kind::RxSignaling,
+                Some(json!({"squelch":{"source":"serial","pin":["DSR","CTS"],"inverted":true}})),
+            ),
+            (
+                true,
+                Kind::RxSignaling,
+                Some(json!({"squelch":{"source":"serial","pin":["RTS"]}})),
+            ),
+            (
+                true,
+                Kind::TxSignaling,
+                Some(json!({"ptt":{"source":"serial","pin":["DTR","RTS"]}})),
+            ),
+        ],
+        |candidate| {
+            let profiles = candidate.resolve_radio_profiles().unwrap();
+            let radio = profiles.port(id(2)).unwrap();
+            let carrier = &radio.signals.rx.squelch.binding;
+            assert_eq!(carrier.serial_pins().collect::<Vec<_>>(), ["DSR", "CTS"]);
+            assert_eq!(carrier.pins, [6, 8]);
+            assert!(carrier.inverted);
+            assert_eq!(
+                radio.signals.tx.ptt.serial_pins().collect::<Vec<_>>(),
+                ["DTR", "RTS"]
+            );
+            assert!(profiles.warnings().iter().any(|w| matches!(
+                w.warning,
+                rpt_advanced_core::config::resources::ResourceWarning::InvalidValue("pin")
+            )));
+        },
+    );
+}

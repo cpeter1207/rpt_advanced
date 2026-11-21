@@ -49,7 +49,13 @@ const SCALARS: Fields = &[
         ]),
     ),
 ];
+// Automatic identifiers and tails support local playback with optional link fanout.
+const TELEMETRY_PLAYBACK: Rule = Rule::Object(&[
+    ("destination", Rule::Choice(&["local", "local_and_links"])),
+    ("repeat", Rule::Bool),
+]);
 const ID: Fields = &[
+    ("playback", TELEMETRY_PLAYBACK),
     (
         "timing",
         Rule::Object(&[("interval_ms", Rule::Unsigned(1, u64::MAX / 48))]),
@@ -62,13 +68,16 @@ const ANNOUNCEMENT: Fields = &[(
     "timing",
     Rule::Object(&[("interval_ms", Rule::Unsigned(0, u64::MAX / 48))]),
 )];
-const TAIL: Fields = &[(
-    "timing",
-    Rule::Object(&[
-        ("interval_ms", Rule::Unsigned(0, u64::MAX / 48)),
-        ("delay_ms", Rule::Unsigned(0, u64::MAX / 48)),
-    ]),
-)];
+const TAIL: Fields = &[
+    ("playback", TELEMETRY_PLAYBACK),
+    (
+        "timing",
+        Rule::Object(&[
+            ("interval_ms", Rule::Unsigned(0, u64::MAX / 48)),
+            ("delay_ms", Rule::Unsigned(0, u64::MAX / 48)),
+        ]),
+    ),
+];
 const COURTESY: Fields = &[
     ("input", Rule::Choice(&["receiver", "link"])),
     ("level_db", Rule::Value(level)),
@@ -85,7 +94,7 @@ const COURTESY: Fields = &[
 fn common(family: &str, key: &str) -> bool {
     matches!(key, "file" | "speech" | "morse" | "bindings")
         || (matches!(family, "identifiers" | "tails")
-            && matches!(key, "content" | "dtmf_id" | "playback" | "polite"))
+            && matches!(key, "content" | "dtmf_id" | "polite"))
         || (matches!(family, "courtesies" | "tails") && key == "tone")
 }
 fn normalize_entry(
@@ -441,7 +450,7 @@ impl ScopedTelemetry {
                 canon["morse"]["level_db"] = config.morse_defaults.level_db.into();
             }
             if matches!(family, "identifiers" | "tails") {
-                merge(&mut canon,json!({"playback":{"repeat":config.playback.repeat_during_playback,"destination":match config.playback.destination{PlaybackDestination::Local=>"local",PlaybackDestination::LocalAndLinks=>"local_and_links"}},"polite":{"timing":{"maximum_wait_ms":config.delivery.maximum_wait_ms},"expiry":match config.delivery.expiry{PoliteExpiry::Skip=>"skip",PoliteExpiry::Morse=>"morse"},"busy":match config.delivery.busy{PoliteBusy::Skip=>"skip",PoliteBusy::Wait=>"wait"}}}).as_object().unwrap());
+                merge(&mut canon,json!({"playback":{"repeat":config.playback.repeat_during_playback,"destination":destination_name(config.playback.destination)},"polite":{"timing":{"maximum_wait_ms":config.delivery.maximum_wait_ms},"expiry":match config.delivery.expiry{PoliteExpiry::Skip=>"skip",PoliteExpiry::Morse=>"morse"},"busy":match config.delivery.busy{PoliteBusy::Skip=>"skip",PoliteBusy::Wait=>"wait"}}}).as_object().unwrap());
             }
             let speech_text = config
                 .media
@@ -946,6 +955,83 @@ mod tests {
     }
     fn accepts(entries: Vec<FixtureRow>) -> bool {
         candidate_fixture(entries, |c, scope| prepare_fixture(c, scope).is_ok())
+    }
+
+    #[test]
+    fn peers_audience_is_available_to_named_messages_only() {
+        use ResourceKind::{Identifier, Message, Tail};
+        candidate_fixture(
+            vec![
+                (
+                    false,
+                    Message,
+                    "notice",
+                    json!({"morse":{"text":"CQ"},"playback":{"destination":"peers"}}),
+                ),
+                (
+                    false,
+                    Identifier,
+                    "id",
+                    json!({"morse":{"text":"CQ"},"playback":{"destination":"local_and_links"}}),
+                ),
+                (
+                    true,
+                    Identifier,
+                    "id",
+                    json!({"playback":{"destination":"peers","repeat":false}}),
+                ),
+                (
+                    true,
+                    Tail,
+                    "tail",
+                    json!({"content":"{ notice }","playback":{"destination":"peers"}}),
+                ),
+            ],
+            |candidate, scope| {
+                let (telemetry, messages, media) = prepare_fixture(candidate, scope).unwrap();
+                let (message, fields) = &messages.effective["notice"];
+                assert_eq!(
+                    messages.local[&message.id]["playback"]["destination"],
+                    "peers"
+                );
+                assert_eq!(fields["playback"]["destination"], "peers");
+                assert_eq!(
+                    messages.recipes["notice"]
+                        .settings_for(None)
+                        .playback
+                        .destination,
+                    PlaybackDestination::Peers
+                );
+                for (kind, key, expected) in [
+                    (Identifier, "id", "local_and_links"),
+                    (Tail, "tail", "local"),
+                ] {
+                    let (binding, fields) = &media.members[&(kind, key.into())];
+                    assert!(
+                        telemetry.local[&binding.id]["playback"]
+                            .get("destination")
+                            .is_none()
+                    );
+                    assert_eq!(fields["playback"]["destination"], expected);
+                    assert!(
+                        telemetry
+                            .warnings
+                            .iter()
+                            .any(|warning| warning.resource == *binding
+                                && warning.warning == ResourceWarning::InvalidValue("destination"))
+                    );
+                }
+                assert!(!media.identifiers["id"].playback.repeat_during_playback);
+                assert_eq!(
+                    media.identifiers["id"].playback.destination,
+                    PlaybackDestination::LocalAndLinks
+                );
+                assert_eq!(
+                    media.tails["tail"].message.playback.destination,
+                    PlaybackDestination::Local
+                );
+            },
+        );
     }
 
     #[test]
