@@ -98,6 +98,13 @@ impl Credentials {
     pub(crate) fn reference(&self) -> Option<PrivateReference> {
         self.root
     }
+    /// Physical encrypted references authenticated by this selected account graph.
+    pub(crate) fn references(&self) -> impl Iterator<Item = PrivateReference> + '_ {
+        self.root
+            .into_iter()
+            .chain(self.entries.values().map(|entry| entry.reference))
+    }
+
     /// Lookup a checked credential. A mask or an incomplete/mismatched account is unusable.
     pub fn get(&self, resource: ResourceId, slot: CredentialSlot) -> Option<&SecretBytes> {
         self.selected_entry(resource, slot)?.value.as_deref()
@@ -269,17 +276,39 @@ impl PrivateStore<'_, '_> {
         RecordScope::new(&self.store.to_string(), &record.to_string())
             .map_err(|_| SecretsState::Error)
     }
-    fn open(
+    pub(crate) fn open(
         &self,
         r: PrivateReference,
         remaining: &mut u64,
+    ) -> Result<OpenedPrivateRecord, SecretsState> {
+        self.open_with_witness(r, remaining, None)
+    }
+    pub(crate) fn open_with_witness(
+        &self,
+        r: PrivateReference,
+        remaining: &mut u64,
+        missing_bytes: Option<&[u8]>,
     ) -> Result<OpenedPrivateRecord, SecretsState> {
         let identity = RecordIdentity::new(self.scope(r.record)?, &r.version.to_string())
             .map_err(|_| SecretsState::Error)?;
         let (artifact, sealed) = self.limits(*remaining);
         let opened =
-            self.guard
-                .open_private_record(identity, r.sha256.as_bytes(), artifact, sealed)?;
+            match self
+                .guard
+                .open_private_record(identity, r.sha256.as_bytes(), artifact, sealed)
+            {
+                Err(PrivateRecordError::Read(
+                    rptadv_peer_support::working_files::immutable::ReadError::Store(
+                        rptadv_peer_support::working_files::CaptureError::Missing,
+                    ),
+                )) if missing_bytes.is_some() => OpenedPrivateRecord::from_witness(
+                    identity,
+                    r.sha256.as_bytes(),
+                    missing_bytes.unwrap(),
+                    sealed,
+                )?,
+                value => value?,
+            };
         *remaining -= opened.encoded_len() as u64;
         Ok(opened)
     }
@@ -336,12 +365,23 @@ impl PrivateStore<'_, '_> {
         root: Option<PrivateReference>,
         owners: Result<CredentialOwners, SecretsState>,
     ) -> PrivateSelection {
-        PrivateSelection(owners.and_then(|owners| self.read(root, owners)))
+        self.select_with(root, owners, |reference, remaining| {
+            self.open(reference, remaining)
+        })
+    }
+    pub(crate) fn select_with(
+        &self,
+        root: Option<PrivateReference>,
+        owners: Result<CredentialOwners, SecretsState>,
+        open: impl FnMut(PrivateReference, &mut u64) -> Result<OpenedPrivateRecord, SecretsState>,
+    ) -> PrivateSelection {
+        PrivateSelection(owners.and_then(|owners| self.read(root, owners, open)))
     }
     fn read(
         &self,
         root: Option<PrivateReference>,
         owners: CredentialOwners,
+        mut open: impl FnMut(PrivateReference, &mut u64) -> Result<OpenedPrivateRecord, SecretsState>,
     ) -> Result<Credentials, SecretsState> {
         let invalid = SecretsState::Error;
         let mut result = Credentials {
@@ -354,7 +394,7 @@ impl PrivateStore<'_, '_> {
                 return Err(invalid);
             }
             let mut remaining = self.limits.max_total_bytes;
-            let doc = self.open(root, &mut remaining)?;
+            let doc = open(root, &mut remaining)?;
             if self.write_key.is_some_and(|k| k != doc.key_id()) {
                 return Err(SecretsState::Locked);
             }
@@ -398,7 +438,7 @@ impl PrivateStore<'_, '_> {
                 if !records.insert(r.record) || result.entries.contains_key(&key) {
                     return Err(invalid);
                 }
-                let doc = self.open(r, &mut remaining)?;
+                let doc = open(r, &mut remaining)?;
                 if Some(doc.key_id()) != result.key.as_ref() {
                     return Err(invalid);
                 }

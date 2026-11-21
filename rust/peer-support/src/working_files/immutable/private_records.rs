@@ -36,6 +36,11 @@ impl PreparedPrivateRecord {
         })
     }
 
+    /// Exact ciphertext envelope bytes, safe for manifest/object backup.
+    pub fn sealed_bytes(&self) -> &[u8] {
+        &self.encoded
+    }
+
     /// Number of sealed bytes charged before installation.
     pub fn encoded_len(&self) -> usize {
         self.encoded.len()
@@ -87,11 +92,57 @@ pub struct OpenedPrivateRecord {
     identity: RecordIdentity,
     plaintext: SecretBytes,
     key_id: KeyId,
-    encoded_len: usize,
+    encoded: Vec<u8>,
     warnings: Vec<SealedWarning>,
 }
 
 impl OpenedPrivateRecord {
+    /// Authenticate previously captured ciphertext against a graph-derived identity and digest.
+    pub fn from_witness(
+        identity: RecordIdentity,
+        expected_sha256: &[u8; 32],
+        bytes: &[u8],
+        sealed_limits: SealedLimits,
+    ) -> Result<Self, PrivateRecordError> {
+        if bytes.len() > sealed_limits.max_document_bytes {
+            return Err(PrivateRecordError::Sealed(SealedError::SizeLimit));
+        }
+        if super::artifact_sha256(bytes) != *expected_sha256 {
+            return Err(PrivateRecordError::Read(ReadError::DigestMismatch));
+        }
+        Self::authenticate(identity, bytes, sealed_limits, load_systemd_key)
+    }
+
+    fn authenticate(
+        identity: RecordIdentity,
+        bytes: &[u8],
+        sealed_limits: SealedLimits,
+        load_key: impl FnOnce(&KeyId) -> Result<SecretKey, KeyLoadError>,
+    ) -> Result<Self, PrivateRecordError> {
+        let decoded = SealedRecord::decode(identity, bytes, sealed_limits)
+            .map_err(PrivateRecordError::Sealed)?;
+        let key = load_key(decoded.record.key_id()).map_err(PrivateRecordError::Key)?;
+        let plaintext = decoded
+            .record
+            .open(&key, sealed_limits)
+            .map_err(PrivateRecordError::Sealed)?;
+        Ok(Self {
+            identity,
+            plaintext,
+            key_id: decoded.record.key_id().clone(),
+            encoded: bytes.to_vec(),
+            warnings: decoded.warnings,
+        })
+    }
+
+    /// Retain only the authenticated ciphertext for an exact immutable installation.
+    pub fn into_prepared(self) -> PreparedPrivateRecord {
+        PreparedPrivateRecord {
+            identity: self.identity,
+            encoded: self.encoded,
+        }
+    }
+
     /// The identity against which the envelope was authenticated.
     pub fn identity(&self) -> RecordIdentity {
         self.identity
@@ -109,7 +160,12 @@ impl OpenedPrivateRecord {
 
     /// Exact encrypted size charged to the aggregate read budget.
     pub fn encoded_len(&self) -> usize {
-        self.encoded_len
+        self.encoded.len()
+    }
+
+    /// Exact authenticated ciphertext envelope; plaintext stays in its opaque owner.
+    pub fn sealed_bytes(&self) -> &[u8] {
+        &self.encoded
     }
 
     /// Value-free warnings from decoding the sealed envelope.
@@ -182,6 +238,31 @@ impl EditGuard<'_> {
         Ok(InstalledPrivateRecord { identity, artifact })
     }
 
+    /// Prepare a shard only for an already authenticated source record from this store.
+    pub fn prepare_authenticated_private_parent(
+        &self,
+        store: uuid::Uuid,
+        opened: &OpenedPrivateRecord,
+    ) -> Result<(), super::super::CaptureError> {
+        if opened.identity.scope().store_uuid() != store {
+            return Err(super::super::CaptureError::UnsafePath);
+        }
+        self.prepare_shard("private", opened.identity.scope().record_uuid())
+    }
+
+    /// Restore exact ciphertext from an authenticated opaque record, never raw/decoded bytes.
+    pub fn install_authenticated_private_record(
+        &self,
+        opened: &OpenedPrivateRecord,
+        limits: ArtifactLimits,
+    ) -> Result<InstalledPrivateRecord, PrivateRecordError> {
+        let identity = opened.identity;
+        let artifact = self
+            .install_immutable(&private_target(identity), &opened.encoded, limits)
+            .map_err(PrivateRecordError::Install)?;
+        Ok(InstalledPrivateRecord { identity, artifact })
+    }
+
     /// Verify and authenticate the envelope selected by its trusted identity and digest.
     ///
     /// The caller associates the supplied store UUID with this guarded root.
@@ -216,20 +297,7 @@ impl EditGuard<'_> {
         let artifact = self
             .read(&target, expected_sha256, artifact_limits, || {})
             .map_err(PrivateRecordError::Read)?;
-        let decoded = SealedRecord::decode(identity, artifact.bytes(), sealed_limits)
-            .map_err(PrivateRecordError::Sealed)?;
-        let key = load_key(decoded.record.key_id()).map_err(PrivateRecordError::Key)?;
-        let plaintext = decoded
-            .record
-            .open(&key, sealed_limits)
-            .map_err(PrivateRecordError::Sealed)?;
-        Ok(OpenedPrivateRecord {
-            identity,
-            plaintext,
-            key_id: decoded.record.key_id().clone(),
-            encoded_len: artifact.bytes().len(),
-            warnings: decoded.warnings,
-        })
+        OpenedPrivateRecord::authenticate(identity, artifact.bytes(), sealed_limits, load_key)
     }
 }
 

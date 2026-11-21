@@ -87,6 +87,19 @@ sealed limits before key loading, and authenticate before exposing opaque
 plaintext. Account binding/private manifest adoption still require resolved
 profiles; successful decryption is not configured-state evidence.
 
+Local protected-store maintenance uses the existing product transaction/private
+owners and a separately checked optional dynamic descriptor. Writing, deletion
+and key rotation require the anchored same-directory WriterLease as well as the
+edit guard; a caller boolean is never stop proof. Preserve optional bounded
+retained_recovery roots in every normal state reconstruction. Authenticate history
+for maintenance, but do not require historical keys merely to start a valid
+current graph. Backups copy exact authenticated immutable bytes with keys retained
+separately; corrupt or incomplete graphs cannot prove garbage. Explicit retain/forget
+publishes state and therefore requires the external delivered write-key policy,
+including public-only stores. Read-only backup adds no write-key requirement.
+Rotation refuses unresolved working edits and selected journals; preserve that
+prior evidence and reconcile under old credentials before rotating.
+
 Accepted state selects verified manifests and publication journals by exact digest.
 Only explicit provisioning initializes an empty store; a protected matching UUID marker supports interrupted bootstrap. Keep full-inventory
 capture and final rechecks under the stable guard. Reconcile only recorded

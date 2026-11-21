@@ -57,12 +57,14 @@ rust-build: | build
 	done
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.2"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
+	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced-store" "build/rpt-advanced-store"
 
 standalone-build: | build
-	$(CARGO) build --locked --release -p rpt-advanced-standalone -p rptadv-product \
+	$(CARGO) build --locked --release -p rpt-advanced-standalone -p rptadv-product -p rptadv-store-maintenance \
 		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter -p rptadv-jitter-adapter -p rptadv-gpiod-adapter -p rptadv-hwmon-adapter
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.2"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
+	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced-store" "build/rpt-advanced-store"
 	@set -e; for name in file speech $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" \
 			"build/librptadv_$${name}_adapter.so.1"; \
@@ -214,6 +216,7 @@ install-site-development:
 install: all install-jitter-development install-site-development
 	install -d $(DESTDIR)$(asteriskmoddir) $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -D -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
+	install -D -m 0755 $(RUST_OUTPUT)/rpt-advanced-store $(DESTDIR)$(prefix)/bin/rpt-advanced-store
 	install -m 0755 build/app_rpt_advanced.so $(DESTDIR)$(asteriskmoddir)/
 	install -m 0755 $(INSTALL_LIBRARIES) $(DESTDIR)$(libdir)/
 	ln -sfn librptadv_resolver_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_resolver_adapter.so
@@ -239,6 +242,7 @@ install: all install-jitter-development install-site-development
 standalone-install: standalone-build install-jitter-development install-site-development
 	install -d $(DESTDIR)$(prefix)/bin $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
+	install -m 0755 $(RUST_OUTPUT)/rpt-advanced-store $(DESTDIR)$(prefix)/bin/rpt-advanced-store
 	install -m 0755 build/librptadv_product.so.2 build/librptadv_file_adapter.so.1 \
 		build/librptadv_speech_adapter.so.1 $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES) \
 		$(DESTDIR)$(libdir)/

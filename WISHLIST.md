@@ -48,7 +48,11 @@ Remove controller INI during the coordinated store/provider cutover and retain
 USBRadioPlus INI. Keep remaining resource, storage, API, provider, scheduler,
 action, message and native milestone verification items unchecked until tested.
 Unknown JSON keys and unsupported values warn and fall back; do not add a
-strict unknown-field rejection policy.
+strict unknown-field rejection policy. Local store maintenance is in progress
+against the existing transaction/private owners: explicit bounded recovery roots,
+manifest/object backups, conservative reachability collection and stopped-writer
+rotation. Its independent review and constrained/native checkpoints remain open;
+no installed-store operation or service stop is authorized by that source work.
 
 ### Remove legacy VOX in favor of VAD
 

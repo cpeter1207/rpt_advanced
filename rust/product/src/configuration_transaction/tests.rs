@@ -1,4 +1,5 @@
 //! Real store crash/retry sequence; accepted and observed runtime state remain separate.
+mod maintenance;
 mod private;
 mod review;
 use super::*;
@@ -116,6 +117,16 @@ impl Fixture {
         let store = WorkingFiles::provision(&path, STORE.parse().unwrap()).unwrap();
         (Self(path), store)
     }
+    fn managed_store(
+        &self,
+    ) -> Result<
+        std::sync::Arc<crate::management::ManagedStore>,
+        rpt_advanced_core::runtime::RuntimeError,
+    > {
+        crate::management::ManagedStore::open(&self.0, STORE.parse().unwrap(), LIMITS)
+            .map(std::sync::Arc::new)
+    }
+
     fn put(&self, relative: &str, bytes: &[u8]) {
         use std::{io::Write, os::unix::fs::OpenOptionsExt};
         let path = self.0.join(relative);
@@ -612,7 +623,7 @@ fn management_only_executor_has_no_radio_generation_or_revision_before_adoption(
         // SAFETY: these fixture descriptors and their provider code outlive the drained executor.
         unsafe {
             Engine::start_management(
-                &observer,
+                fixture.managed_store()?,
                 crate::fixture::host_descriptor(),
                 crate::fixture::control_descriptor(),
                 rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),

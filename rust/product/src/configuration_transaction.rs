@@ -1,5 +1,7 @@
 //! Durable cross-resource selection, working publication and read-only startup inspection.
 pub mod import;
+/// Local-only protected-store maintenance; no runtime or HTTP authority.
+pub mod maintenance;
 
 use crate::{
     configuration_manifest::{LoadedPublicManifest, load_public_manifest, load_public_objects},
@@ -69,6 +71,24 @@ pub struct Selected {
     pub warnings: Vec<ResourceWarning>,
     journal: Option<PublicationJournal>,
 }
+impl Selected {
+    /// Roots still eligible for retirement include work carried by the selected journal.
+    fn previous_ports(&self) -> BTreeSet<String> {
+        self.desired
+            .manifest()
+            .registry()
+            .port_keys()
+            .map(|(_, id)| format!("ports/{id}"))
+            .chain(
+                self.journal
+                    .iter()
+                    .flat_map(|j| &j.prune_directories)
+                    .filter_map(|path| port_directory(Path::new(path))),
+            )
+            .collect()
+    }
+}
+
 /// A failure before the desired pointer rename is distinct from uncertain durability.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum TransactionError {
@@ -189,6 +209,21 @@ fn changes(
     prune: &[String],
     limits: CaptureLimits,
 ) -> Result<Vec<WorkingChange>, TransactionError> {
+    changes_sized(
+        snapshot,
+        targets,
+        graph.object_sizes().collect(),
+        prune,
+        limits,
+    )
+}
+fn changes_sized(
+    snapshot: &WorkingSnapshot,
+    targets: &BTreeMap<String, WorkingTarget>,
+    sizes: BTreeMap<ResourceId, usize>,
+    prune: &[String],
+    limits: CaptureLimits,
+) -> Result<Vec<WorkingChange>, TransactionError> {
     let mut dirs: BTreeSet<&Path> = snapshot
         .directories()
         .ok_or(TransactionError::InvalidCandidate)?
@@ -212,7 +247,6 @@ fn changes(
     if targets.len().saturating_add(dirs.len()) > limits.max_paths {
         return Err(TransactionError::InvalidCandidate);
     }
-    let sizes: BTreeMap<_, _> = graph.object_sizes().collect();
     let mut old: BTreeMap<_, _> = snapshot
         .files()
         .map(|(p, b)| (p.to_str().expect("catalog path").to_owned(), hash(b)))
@@ -330,6 +364,10 @@ pub(crate) enum Boundary {
     Pointer,
     Working,
     Clean,
+    Garbage,
+    IntentRename,
+    IntentBarrier,
+    ReceiptRename,
 }
 
 /// The actual runtime coordinator owns this guard across capture, validation, prepare and commit.
@@ -360,6 +398,14 @@ impl<'a, 'store> Transaction<'a, 'store> {
         self
     }
 
+    /// Check the protected maintenance record before an ordinary writer adopts or publishes.
+    pub fn ordinary_writer_admission(
+        &self,
+        trusted_store: ResourceId,
+    ) -> Result<(), TransactionError> {
+        maintenance::Maintenance::new(self.guard, trusted_store, self.limits).admit_ordinary()
+    }
+
     fn private_store(
         &self,
         store: ResourceId,
@@ -381,18 +427,34 @@ impl<'a, 'store> Transaction<'a, 'store> {
         store: ResourceId,
         graph: &LoadedPublicManifest,
     ) -> PrivateSelection {
+        let (store, owners) = self.private_graph_owner(store, graph);
+        store.select(graph.manifest().private(), owners)
+    }
+    fn private_graph_owner(
+        &self,
+        store: ResourceId,
+        graph: &LoadedPublicManifest,
+    ) -> (
+        PrivateStore<'_, 'store>,
+        Result<
+            rpt_advanced_core::config::resources::profiles::credentials::CredentialOwners,
+            SecretsState,
+        >,
+    ) {
         let used = graph.object_sizes().map(|(_, n)| n as u64).sum::<u64>()
             + graph.manifest_bytes().len() as u64;
         let owners = graph
             .assemble_candidate()
             .map_err(|_| SecretsState::Error)
             .and_then(|c| c.credential_owners().map_err(|_| SecretsState::Error));
-        self.private_store(
-            store,
-            used,
-            1 + graph.manifest().registry().bindings().len(),
+        (
+            self.private_store(
+                store,
+                used,
+                1 + graph.manifest().registry().bindings().len(),
+            ),
+            owners,
         )
-        .select(graph.manifest().private(), owners)
     }
 
     /// Exercise a real persistence boundary using the fixture supplied by the caller.
@@ -437,6 +499,13 @@ impl<'a, 'store> Transaction<'a, 'store> {
     }
     /// Inspect only the selector and its verified graphs. Never repairs any file.
     pub fn inspect(&self) -> Result<Selected, TransactionError> {
+        self.inspect_with_working_check(|_| true)
+    }
+
+    fn inspect_with_working_check(
+        &self,
+        accepts: impl FnOnce(&WorkingSnapshot) -> bool,
+    ) -> Result<Selected, TransactionError> {
         let bytes = self
             .guard
             .read_state(self.artifact_limits().max_file_bytes)
@@ -511,7 +580,7 @@ impl<'a, 'store> Transaction<'a, 'store> {
                     || observed_working == Some(expected),
                     |j| reconcilable(&snapshot, j),
                 );
-                if !consistent {
+                if !consistent || !accepts(&snapshot) {
                     StartupStatus::ExternalEdit
                 } else if journal.is_some() || state.activation != Activation::Confirmed {
                     StartupStatus::Interrupted
@@ -621,8 +690,9 @@ impl<'a, 'store> Transaction<'a, 'store> {
         let mut previous_ports = BTreeSet::new();
         let restoring = matches!(admission, Admission::Restore { .. });
         let mut retained_private = Credentials::default();
-        let (store, prior, lkg) = match admission {
+        let (store, prior, lkg, retained_recovery) = match admission {
             Admission::Provision { store } => {
+                self.ordinary_writer_admission(store)?;
                 if self.guard.bootstrap_identity().map_err(capture_error)? != Some(store.uuid())
                     || source.files().next().is_some()
                     || self
@@ -633,10 +703,11 @@ impl<'a, 'store> Transaction<'a, 'store> {
                 {
                     return Err(TransactionError::Conflict);
                 }
-                (store, None, None)
+                (store, None, None, Vec::new())
             }
             _ => {
                 let old = self.inspect()?;
+                self.ordinary_writer_admission(old.state.store)?;
                 if old.status == StartupStatus::StorageFault {
                     return Err(TransactionError::StorageFault);
                 }
@@ -695,20 +766,7 @@ impl<'a, 'store> Transaction<'a, 'store> {
                 if working != Some(source_hash) {
                     return Err(TransactionError::ExternalEdit);
                 }
-                previous_ports.extend(
-                    old.desired
-                        .manifest()
-                        .registry()
-                        .port_keys()
-                        .map(|(_, id)| format!("ports/{id}")),
-                );
-                if let Some(j) = &old.journal {
-                    previous_ports.extend(
-                        j.prune_directories
-                            .iter()
-                            .filter_map(|p| port_directory(Path::new(p))),
-                    );
-                }
+                previous_ports = old.previous_ports();
                 self.guard
                     .confirm_state(
                         old.digest.as_bytes(),
@@ -725,7 +783,12 @@ impl<'a, 'store> Transaction<'a, 'store> {
                 }
                 .into_credentials()
                 .map_err(|_| TransactionError::SecretsUnavailable)?;
-                (old.state.store, Some(old.digest), old.state.last_known_good)
+                (
+                    old.state.store,
+                    Some(old.digest),
+                    old.state.last_known_good,
+                    old.state.retained_recovery,
+                )
             }
         };
         let limits = self.artifact_limits();
@@ -775,7 +838,7 @@ impl<'a, 'store> Transaction<'a, 'store> {
             .iter()
             .map(|(binding, obj)| CapturedResource {
                 binding: *binding,
-                json: obj.bytes(),
+                json: obj.as_slice(),
             })
             .collect::<Vec<_>>();
         let candidate = ModularCandidate::assemble(manifest.registry(), &captures)
@@ -859,6 +922,7 @@ impl<'a, 'store> Transaction<'a, 'store> {
             store,
             desired: r,
             last_known_good: lkg,
+            retained_recovery,
             activation: Activation::Pending,
             journal: Some(JournalRef {
                 id: journal_id,
@@ -932,10 +996,40 @@ impl<'a, 'store> Transaction<'a, 'store> {
             .map_err(write_error)
     }
 
+    /// Sync the exact selector and its directory before acting on the selected graph.
+    fn confirm_selector(
+        &self,
+        digest: ContentHash,
+        store: ResourceId,
+    ) -> Result<(), TransactionError> {
+        self.guard
+            .confirm_state(
+                digest.as_bytes(),
+                store.uuid(),
+                self.artifact_limits().max_file_bytes,
+                || {
+                    #[cfg(test)]
+                    self.at(Boundary::PointerBarrier)
+                        .map_err(|_| InstallError::DurabilityUnknown)?;
+                    Ok(())
+                },
+            )
+            .map_err(write_error)
+    }
+
     /// Publish only selected journal changes and finalize the clean fingerprint.
     /// Repeating after any partial write validates the recorded source or already-target.
     pub fn reconcile(&self) -> Result<(), TransactionError> {
-        let mut selected = self.inspect()?;
+        let selected = self.inspect()?;
+        self.ordinary_writer_admission(selected.state.store)?;
+        self.reconcile_selected(selected, None)
+    }
+
+    fn reconcile_selected(
+        &self,
+        mut selected: Selected,
+        target_directories: Option<&[PathBuf]>,
+    ) -> Result<(), TransactionError> {
         if selected.status == StartupStatus::SecretsUnavailable {
             return Err(TransactionError::SecretsUnavailable);
         }
@@ -945,19 +1039,7 @@ impl<'a, 'store> Transaction<'a, 'store> {
         if selected.status == StartupStatus::ExternalEdit {
             return Err(TransactionError::ExternalEdit);
         }
-        self.guard
-            .confirm_state(
-                selected.digest.as_bytes(),
-                selected.state.store.uuid(),
-                self.artifact_limits().max_file_bytes,
-                || {
-                    #[cfg(test)]
-                    self.at(Boundary::PointerBarrier)
-                        .map_err(|_| InstallError::DurabilityUnknown)?;
-                    Ok(())
-                },
-            )
-            .map_err(write_error)?;
+        self.confirm_selector(selected.digest, selected.state.store)?;
         let Some(j) = selected.journal else {
             return Ok(());
         };
@@ -983,7 +1065,7 @@ impl<'a, 'store> Transaction<'a, 'store> {
             Some(selected.digest),
             &selected.state,
             Some(j.target_working),
-            None,
+            target_directories,
         )?;
         #[cfg(test)]
         self.at(Boundary::Clean)?;
@@ -1042,6 +1124,8 @@ impl<'a, 'store> Transaction<'a, 'store> {
                 error: TransactionError::Conflict,
             });
         }
+        self.ordinary_writer_admission(selected.state.store)
+            .map_err(|error| ActivationWriteError { observed, error })?;
         let result = (|| {
             let current = self.inspect()?;
             if current.status == StartupStatus::SecretsUnavailable {

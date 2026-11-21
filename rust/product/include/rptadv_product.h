@@ -729,6 +729,46 @@ const struct rptadv_product_inspection_v1 *rptadv_product_inspection_descriptor_
  */
 const struct rptadv_product_descriptor_v1 *rptadv_product_descriptor_v1(void);
 
+/** Exact local protected-store maintenance ABI, independent of runtime tables. */
+#define RPTADV_STORE_MAINTENANCE_ABI_VERSION 1U
+/** NUL-padded capability for the optional local-only maintenance descriptor. */
+#define RPTADV_STORE_MAINTENANCE_CAPABILITY "rptadv.store1"
+/** Verify selected graph and report safe hashes/counts. */
+#define RPTADV_STORE_INSPECT 1U
+/** Collect only verified registered unreachable artifacts. */
+#define RPTADV_STORE_GC 2U
+/** Write a verified exact manifest/object backup tree; keys stay separate. */
+#define RPTADV_STORE_BACKUP 3U
+/** Restore a verified backup using a fresh deliberate revision and journal. */
+#define RPTADV_STORE_RESTORE 4U
+/** Re-seal retained graphs using separate delivered old/new key IDs. */
+#define RPTADV_STORE_ROTATE 5U
+/** Explicitly replace bounded physical recovery roots. */
+#define RPTADV_STORE_RETAIN 6U
+
+/** Local offline protected-store entry point; never an HTTP/radio API.
+ * The bounded UTF-8 request contains paths, UUIDs, hashes and symbolic key IDs,
+ * never key or plaintext credential bytes. The product owns all graph/crypto
+ * algorithms and acquires the actual same-root writer lifetime for mutations.
+ * Backup capture needs only its consistent edit snapshot. Roots must already
+ * exist with the protected service-owner mode. Strings/sinks are borrowed only
+ * during this synchronous call; callbacks must not unwind. Zero means durable
+ * completion/publication, never current runtime adoption; negative is a
+ * value-free failure also supplied to the optional sink. Keep the product DSO
+ * loaded through the complete call. No installed-service stop is performed.
+ */
+struct rptadv_store_maintenance_v1 {
+    uint32_t struct_size;   /**< Exact complete table size. */
+    uint32_t abi_version;   /**< Exact RPTADV_STORE_MAINTENANCE_ABI_VERSION. */
+    uint8_t capability[16]; /**< Exact padded RPTADV_STORE_MAINTENANCE_CAPABILITY. */
+    /** Execute a bounded local metadata request using the product-owned algorithms. */
+    int (*run)(uint32_t operation, const char *request, size_t request_length,
+               rptadv_text_sink_v1 sink, void *sink_context);
+};
+
+/** Optional checked maintenance getter, independent of the old product table. */
+const struct rptadv_store_maintenance_v1 *rptadv_product_store_maintenance_descriptor_v1(void);
+
 #ifdef __cplusplus
 }
 #endif

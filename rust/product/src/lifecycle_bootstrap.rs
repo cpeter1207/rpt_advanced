@@ -1,6 +1,6 @@
 //! Shared provisioned startup for native and Asterisk service owners.
 use super::*;
-use crate::management::{Coordinator, ProfileInputs, native::NativeRuntime};
+use crate::management::{Coordinator, ManagedStore, ProfileInputs, native::NativeRuntime};
 use rpt_advanced_core::config::resources::candidate::ResourceId;
 use rptadv_peer_support::{
     https::{
@@ -161,7 +161,7 @@ fn check(bytes: &[u8]) -> Result<crate::management::PreparedConfiguration, Runti
 }
 
 /// Start the checked JSON management service with host-owned immutable provider descriptors.
-/// The service retains one writer lease until a successful product stop.
+/// An admitted service retains its writer lease through successful stop and drain.
 ///
 /// # Safety
 /// The caller owns every descriptor and all code and contexts reachable from them through
@@ -189,18 +189,20 @@ unsafe extern "C" fn start_management(
         if selected.is_some() {
             return Err(RuntimeError::Busy);
         }
-        let store = WorkingFiles::open(&config.store_path)
-            .map_err(|_| RuntimeError::Preparation)?
-            .with_identity(identity.uuid());
+        let store = Arc::new(ManagedStore::open(
+            &config.store_path,
+            identity,
+            STORE_LIMITS,
+        )?);
         let (listener, mut inbox) = config.listener()?;
         // SAFETY: the frontend retains these matched descriptors until confirmed shutdown.
-        let engine = unsafe { Engine::start_management(&store, host, control, file, speech)? };
+        let engine =
+            unsafe { Engine::start_management(Arc::clone(&store), host, control, file, speech)? };
         let service: Result<(), RuntimeError> = (|| {
             engine.start_ticker()?;
             let coordinator = Coordinator::for_service(
                 store,
                 key,
-                STORE_LIMITS,
                 Arc::new(NativeRuntime::new(Arc::clone(&engine))),
                 ProfileInputs::installed(),
             )

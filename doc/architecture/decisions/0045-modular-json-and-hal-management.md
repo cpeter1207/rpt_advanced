@@ -134,6 +134,41 @@ are specified in the linked storage design. Core owns those durable identity
 and path rules. A helper and receiver use identical full-inventory capture.
 A startup with interrupted activation stays management-only until recovery.
 
+Protected-store backup, restore, reachability collection and re-encryption
+belong to the existing product transaction/private owners. Their executable
+consumer uses a separately versioned optional dynamic product descriptor; the
+existing product table and ordinary radio/HTTP resource schemas remain unchanged.
+Read-only backup captures consistent selected immutable bytes under the edit
+guard. Writing/deletion additionally requires the separately opened, same-root
+exclusive directory WriterLease held for the complete offline session.
+
+The service checks ordinary writer admission against its provisioned store UUID
+under the edit guard. A pending or invalid maintenance receipt leaves a fresh
+startup read-only with transmit inhibited and releases its attempted writer
+lease. Management can also serve reads while an offline writer holds the
+directory lease. A competing owner of a verifiably healthy store excludes a
+second writer. When a reader holds the edit guard at opening, the lease is
+provisional. The first guarded admission check promotes it or releases it on
+denial. If the public coordinator cannot inspect at startup, it releases the
+unresolved lease. The native service can finish that inspection at its single
+scheduled cold-start and releases the ownerless lease if still blocked.
+After offline completion, a submitted explicit apply can reacquire the
+lease and check admission before writing its operation ledger. The management
+worker and native runtime share the admitted lease through stop and drain,
+including when native adoption or bookkeeping is uncertain.
+
+The optional bounded format-1 state `retained_recovery` extension persists
+explicit physical manifest roots at the same atomic selector commit. Missing
+means empty for existing stores; unsafe rows fail closed. Ordinary transactions
+preserve roots, but normal startup does not authenticate historical private
+graphs. Maintenance does authenticate them before collection/copy/rotation.
+Rotation refuses unresolved working edits and any selected publication journal;
+it never infers an unrecorded prior private root. After reconciliation it retains
+original physical roots and replacement refs while preserving
+logical revisions and historical activation; it never claims process adoption.
+Old ciphertext and keys remain separately recoverable, and no automatic pruning,
+key export, replacement-key fallback or installed-service operation is implied.
+
 Replace the Unix maintenance socket with loopback HTTPS/HAL. Require authorized
 mTLS on every backend route, with separate proxy and CLI identities. Expose
 GET everywhere, PUT/PATCH on writable resources, and POST/DELETE on creatable

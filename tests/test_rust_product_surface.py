@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from itertools import pairwise
@@ -28,6 +29,7 @@ JITTER = "librptadv_jitter_adapter.so.1"
 GPIOD = "librptadv_gpiod_adapter.so.1"
 HWMON = "librptadv_hwmon_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
+STORE_MAINTENANCE_BINARY = "rpt-advanced-store"
 PRODUCT = "librptadv_product.so.2"
 RING_MINIMUM_VERSION = "3.0.0~alpha6"
 SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha3"
@@ -69,6 +71,7 @@ EXPORTS = {
         "rptadv_product_descriptor_v1",
         "rptadv_product_management_descriptor_v1",
         "rptadv_product_inspection_descriptor_v1",
+        "rptadv_product_store_maintenance_descriptor_v1",
     },
     "librptadv_control_asterisk_adapter.so.1": {"rptadv_control_descriptor_v1"},
     "librptadv_file_adapter.so.1": {"rptadv_file_adapter_descriptor"},
@@ -184,6 +187,7 @@ def staged(
     expected = {
         module,
         Path("usr/bin") / STANDALONE_BINARY,
+        Path("usr/bin") / STORE_MAINTENANCE_BINARY,
         *(library / name for name in LIBRARIES),
         library / STANDALONE_CONTROL,
         library / RESOLVER,
@@ -313,6 +317,15 @@ def staged(
     assert (stage / "usr/bin" / STANDALONE_BINARY).read_bytes() == (
         standalone_binary(root)
     ).read_bytes()
+    maintenance = stage / "usr/bin" / STORE_MAINTENANCE_BINARY
+    mode = maintenance.lstat().st_mode
+    assert stat.S_ISREG(mode) and stat.S_IMODE(mode) == 0o755, (
+        f"incorrect staged executable mode: {maintenance}"
+    )
+    assert (
+        maintenance.read_bytes()
+        == (standalone_binary(root).with_name(STORE_MAINTENANCE_BINARY)).read_bytes()
+    )
     assert (stage / module).read_bytes() == (
         root / "build/app_rpt_advanced.so"
     ).read_bytes()
@@ -1107,8 +1120,10 @@ def verify_stage_policy() -> None:
             write(root, f"build/{name}")
             write(stage, f"{library}/{name}")
         target_directory = "coverage-target"
-        write(root, f"{target_directory}/release/{STANDALONE_BINARY}")
-        write(stage, f"usr/bin/{STANDALONE_BINARY}")
+        for name in (STANDALONE_BINARY, STORE_MAINTENANCE_BINARY):
+            write(root, f"{target_directory}/release/{name}")
+            write(stage, f"usr/bin/{name}")
+        (stage / "usr/bin" / STORE_MAINTENANCE_BINARY).chmod(0o755)
         write(root, "build/app_rpt_advanced.so")
         write(stage, "usr/lib/test-linux-gnu/asterisk/modules/app_rpt_advanced.so")
         write(root, "rust/resolver-adapter/include/rptadv_resolver_adapter.h")

@@ -7,7 +7,7 @@ use rpt_advanced_core::config::resources::{
 };
 use rptadv_peer_support::working_files::{
     CaptureError, CaptureLimits, EditGuard,
-    immutable::{ArtifactLimits, ImmutableArtifact, ImmutableTarget, ReadError},
+    immutable::{ArtifactLimits, ImmutableTarget, ReadError},
 };
 use std::fmt;
 
@@ -48,8 +48,8 @@ impl std::error::Error for PublicLoadError {}
 /// An owned, byte-verified public manifest and its selected immutable objects.
 pub struct LoadedPublicManifest {
     manifest: ResourceResolution<PublicManifest>,
-    raw_manifest: ImmutableArtifact,
-    objects: Vec<(ResourceBinding, ImmutableArtifact)>,
+    raw_manifest: Vec<u8>,
+    objects: Vec<(ResourceBinding, Vec<u8>)>,
 }
 
 impl LoadedPublicManifest {
@@ -60,7 +60,7 @@ impl LoadedPublicManifest {
 
     /// Borrow the exact verified manifest bytes for internal staging.
     pub fn manifest_bytes(&self) -> &[u8] {
-        self.raw_manifest.bytes()
+        &self.raw_manifest
     }
 
     /// Recoverable warnings from interpreting the public manifest.
@@ -79,7 +79,7 @@ impl LoadedPublicManifest {
     > + '_ {
         self.objects
             .iter()
-            .map(|(b, artifact)| (b.id, artifact.bytes()))
+            .map(|(b, artifact)| (b.id, artifact.as_slice()))
     }
 
     /// Exact verified public object sizes, for bounded working publication planning.
@@ -93,7 +93,7 @@ impl LoadedPublicManifest {
     > + '_ {
         self.objects
             .iter()
-            .map(|(binding, artifact)| (binding.id, artifact.bytes().len()))
+            .map(|(binding, artifact)| (binding.id, artifact.len()))
     }
 
     /// Check resource identities and envelopes, resolve local metadata, and stage
@@ -104,7 +104,7 @@ impl LoadedPublicManifest {
             .iter()
             .map(|(binding, artifact)| CapturedResource {
                 binding: *binding,
-                json: artifact.bytes(),
+                json: artifact.as_slice(),
             })
             .collect::<Vec<_>>();
         ModularCandidate::assemble(self.manifest().registry(), &captures)
@@ -128,20 +128,51 @@ pub fn load_public_manifest(
     expected_sha256: &ContentHash,
     limits: CaptureLimits,
 ) -> Result<LoadedPublicManifest, PublicLoadError> {
+    load_public_manifest_with(
+        manifest_id,
+        revision,
+        expected_sha256,
+        limits,
+        |_, target, expected, bounds| read_public(guard, target, expected, bounds),
+    )
+}
+
+fn read_public(
+    guard: &EditGuard<'_>,
+    target: &ImmutableTarget,
+    expected: &ContentHash,
+    limits: ArtifactLimits,
+) -> Result<Vec<u8>, PublicLoadError> {
+    guard
+        .read_immutable(target, expected.as_bytes(), limits)
+        .map(|artifact| artifact.into_bytes())
+        .map_err(PublicLoadError::Read)
+}
+
+pub(crate) fn load_public_manifest_with(
+    manifest_id: &ManifestId,
+    revision: &LogicalRevision,
+    expected_sha256: &ContentHash,
+    limits: CaptureLimits,
+    read: impl Fn(
+        &str,
+        &ImmutableTarget,
+        &ContentHash,
+        ArtifactLimits,
+    ) -> Result<Vec<u8>, PublicLoadError>,
+) -> Result<LoadedPublicManifest, PublicLoadError> {
     let target = ImmutableTarget::manifest(manifest_id.as_str())
         .map_err(|_| PublicLoadError::InvalidTarget)?;
-    let raw_manifest = guard
-        .read_immutable(
-            &target,
-            expected_sha256.as_bytes(),
-            ArtifactLimits {
-                max_file_bytes: limits.max_file_bytes.min(limits.max_total_bytes),
-                max_path_bytes: limits.max_path_bytes,
-            },
-        )
-        .map_err(PublicLoadError::Read)?;
-    let manifest =
-        PublicManifest::decode(raw_manifest.bytes()).map_err(PublicLoadError::Manifest)?;
+    let raw_manifest = read(
+        &format!("manifests/{}.json", manifest_id.as_str()),
+        &target,
+        expected_sha256,
+        ArtifactLimits {
+            max_file_bytes: limits.max_file_bytes.min(limits.max_total_bytes),
+            max_path_bytes: limits.max_path_bytes,
+        },
+    )?;
+    let manifest = PublicManifest::decode(&raw_manifest).map_err(PublicLoadError::Manifest)?;
     if manifest.value.id() != manifest_id {
         return Err(PublicLoadError::ManifestIdMismatch);
     }
@@ -149,12 +180,8 @@ pub fn load_public_manifest(
         return Err(PublicLoadError::RevisionMismatch);
     }
 
-    let objects = load_public_objects(
-        guard,
-        &manifest.value,
-        limits,
-        raw_manifest.bytes().len() as u64,
-    )?;
+    let objects =
+        load_public_objects_with(&read, &manifest.value, limits, raw_manifest.len() as u64)?;
     Ok(LoadedPublicManifest {
         manifest,
         raw_manifest,
@@ -168,7 +195,26 @@ pub(crate) fn load_public_objects(
     manifest: &PublicManifest,
     limits: CaptureLimits,
     used: u64,
-) -> Result<Vec<(ResourceBinding, ImmutableArtifact)>, PublicLoadError> {
+) -> Result<Vec<(ResourceBinding, Vec<u8>)>, PublicLoadError> {
+    load_public_objects_with(
+        &|_, target, expected, bounds| read_public(guard, target, expected, bounds),
+        manifest,
+        limits,
+        used,
+    )
+}
+
+fn load_public_objects_with(
+    read: &impl Fn(
+        &str,
+        &ImmutableTarget,
+        &ContentHash,
+        ArtifactLimits,
+    ) -> Result<Vec<u8>, PublicLoadError>,
+    manifest: &PublicManifest,
+    limits: CaptureLimits,
+    used: u64,
+) -> Result<Vec<(ResourceBinding, Vec<u8>)>, PublicLoadError> {
     let path_count_limit = PublicLoadError::Read(CaptureError::Limits.into());
     if limits.max_paths == 0 {
         return Err(path_count_limit);
@@ -178,23 +224,6 @@ pub(crate) fn load_public_objects(
         .max_total_bytes
         .checked_sub(used)
         .ok_or(path_count_limit)?;
-    let mut read = |target: &ImmutableTarget,
-                    sha256: &ContentHash|
-     -> Result<ImmutableArtifact, PublicLoadError> {
-        let artifact = guard
-            .read_immutable(
-                target,
-                sha256.as_bytes(),
-                ArtifactLimits {
-                    max_path_bytes: limits.max_path_bytes,
-                    max_file_bytes: limits.max_file_bytes.min(remaining),
-                },
-            )
-            .map_err(PublicLoadError::Read)?;
-        remaining -= artifact.bytes().len() as u64;
-        Ok(artifact)
-    };
-
     let bindings = manifest.registry().bindings();
     if bindings.len() >= limits.max_paths {
         return Err(path_count_limit);
@@ -207,8 +236,24 @@ pub(crate) fn load_public_objects(
                 reference.version().as_str(),
             )
             .map_err(|_| PublicLoadError::InvalidTarget)?;
-            let artifact = read(&target, reference.sha256())?;
-            if !crate::configuration_private::public_envelope(binding, artifact.bytes()) {
+            let path = format!(
+                "objects/{}/{}.json",
+                binding.id,
+                reference.version().as_str()
+            );
+            let artifact = read(
+                &path,
+                &target,
+                reference.sha256(),
+                ArtifactLimits {
+                    max_path_bytes: limits.max_path_bytes,
+                    max_file_bytes: limits.max_file_bytes.min(remaining),
+                },
+            )?;
+            remaining = remaining
+                .checked_sub(artifact.len() as u64)
+                .ok_or(path_count_limit)?;
+            if !crate::configuration_private::public_envelope(binding, artifact.as_slice()) {
                 return Err(PublicLoadError::InvalidEnvelope);
             }
             objects.push((binding, artifact));

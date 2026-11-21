@@ -35,7 +35,10 @@ use rpt_advanced_core::{
 use rptadv_peer_support::{
     https::{AdmittedRequest, CoordinatorInbox, HeaderMap, Method, Response, StatusCode},
     sealed_records::KeyId,
-    working_files::{CaptureError, CaptureLimits, WorkingFiles, immutable::artifact_sha256},
+    working_files::{
+        CaptureError, CaptureLimits, EditGuard, WorkingFiles, WriterLease,
+        immutable::artifact_sha256,
+    },
 };
 use serde_json::{Value, json};
 use std::{
@@ -376,13 +379,110 @@ struct Inspection {
     status: StartupStatus,
     bookkeeping_fault: bool,
 }
+/// A lease held during opening stays provisional until its first guarded admission check.
+struct HeldWriter {
+    lease: WriterLease,
+    provisional: bool,
+}
+
+/// The protected store shared by the management worker and the native owner through drain.
+pub struct ManagedStore {
+    files: WorkingFiles,
+    trusted: Id,
+    limits: CaptureLimits,
+    writer: RwLock<Option<HeldWriter>>,
+}
+
+impl ManagedStore {
+    /// Open the externally identified store. A blocked, ownerless startup releases its
+    /// attempted lease so the offline maintenance owner can finish its operation.
+    pub fn open(
+        path: &std::path::Path,
+        trusted: Id,
+        limits: CaptureLimits,
+    ) -> Result<Self, rpt_advanced_core::runtime::RuntimeError> {
+        use rpt_advanced_core::runtime::RuntimeError;
+        let files = WorkingFiles::open(path)
+            .map_err(|_| RuntimeError::Preparation)?
+            .with_identity(trusted.uuid());
+        let lease = match files.try_writer_lease() {
+            Ok(lease) => Some(lease),
+            Err(CaptureError::Busy) => None,
+            Err(_) => return Err(RuntimeError::Preparation),
+        };
+        let writer = match files.try_edit() {
+            Ok(guard)
+                if Transaction::new(&guard, limits)
+                    .ordinary_writer_admission(trusted)
+                    .is_ok() =>
+            {
+                let lease = lease.ok_or(RuntimeError::Busy)?;
+                guard
+                    .check_writer_lease(&lease)
+                    .is_ok()
+                    .then_some(HeldWriter {
+                        lease,
+                        provisional: false,
+                    })
+            }
+            Err(CaptureError::Busy) => lease.map(|lease| HeldWriter {
+                lease,
+                provisional: true,
+            }),
+            _ => None,
+        };
+        Ok(Self {
+            files,
+            trusted,
+            limits,
+            writer: RwLock::new(writer),
+        })
+    }
+
+    /// Verify the lifetime and maintenance record under the guard used for the effect.
+    fn check_writer(
+        &self,
+        guard: &EditGuard<'_>,
+        fresh: Option<&WriterLease>,
+    ) -> Result<(), Fault> {
+        let (proof, provisional) = {
+            let writer = self.writer.read().expect("store writer lifetime");
+            let held = writer.as_ref();
+            let lease = held
+                .map(|owner| &owner.lease)
+                .or(fresh)
+                .ok_or(Fault::Conflict)?;
+            (
+                guard.check_writer_lease(lease).map_err(lock_error),
+                held.is_some_and(|owner| owner.provisional),
+            )
+        };
+        let admission = proof.and_then(|()| {
+            Transaction::new(guard, self.limits)
+                .ordinary_writer_admission(self.trusted)
+                .map_err(Fault::from)
+        });
+        if provisional {
+            // The edit guard serializes admissions. A failed cold-start may have released
+            // the lease while the receipt was being checked.
+            let mut writer = self.writer.write().expect("store writer lifetime");
+            let held = writer.as_mut().ok_or(Fault::Conflict)?;
+            if admission.is_ok() {
+                held.provisional = false;
+            } else {
+                *writer = None;
+            }
+        }
+        admission
+    }
+}
+
 struct Backend<R> {
     stopping: std::sync::atomic::AtomicBool,
     boot: Id,
     ledger: RwLock<Option<Arc<operations::Ledger>>>,
-    store: WorkingFiles,
+    store: Arc<ManagedStore>,
     key: KeyId,
-    limits: CaptureLimits,
     zone: Option<String>,
     inputs: Arc<ProfileInputs>,
     runtime: Arc<R>,
@@ -391,6 +491,16 @@ struct Backend<R> {
 }
 
 impl<R: Runtime> Backend<R> {
+    fn admit_writer(
+        &self,
+        guard: &EditGuard<'_>,
+        fresh: Option<&WriterLease>,
+    ) -> Result<(), Fault> {
+        self.store.check_writer(guard, fresh).inspect_err(|fault| {
+            self.runtime.inhibit_uncertain(None, *fault);
+        })
+    }
+
     fn snapshot(
         &self,
         selected: &Selected,
@@ -450,8 +560,24 @@ impl<R: Runtime> Backend<R> {
     /// Unconfirmed, externally edited or interrupted stores stay management-only.
     fn cold_start(&self) -> Result<(), Fault> {
         let (revision, prepared) = {
-            let guard = self.store.try_edit().map_err(lock_error)?;
-            let tx = Transaction::new(&guard, self.limits).with_write_key(&self.key);
+            let guard = self
+                .store
+                .files
+                .try_edit()
+                .map_err(lock_error)
+                .and_then(|guard| {
+                    self.store.check_writer(&guard, None)?;
+                    Ok(guard)
+                })
+                .inspect_err(|_| {
+                    // No native handoff has started. Leave the directory free for maintenance.
+                    self.store
+                        .writer
+                        .write()
+                        .expect("store writer lifetime")
+                        .take();
+                })?;
+            let tx = Transaction::new(&guard, self.store.limits).with_write_key(&self.key);
             let selected = tx.inspect()?;
             if selected.status != StartupStatus::Ready
                 || selected.bookkeeping_fault
@@ -487,9 +613,13 @@ impl<R: Runtime> Backend<R> {
     }
 
     fn inspect_snapshot(&self, startup: bool) -> Result<(), Fault> {
-        let guard = self.store.try_edit().map_err(lock_error)?;
-        let tx = Transaction::new(&guard, self.limits).with_write_key(&self.key);
-        self.publish_snapshot(&tx, startup).map(|_| ())
+        let guard = self.store.files.try_edit().map_err(lock_error)?;
+        let tx = Transaction::new(&guard, self.store.limits).with_write_key(&self.key);
+        let mut selected = tx.inspect()?;
+        if self.store.check_writer(&guard, None).is_err() {
+            selected.status = StartupStatus::StorageFault;
+        }
+        self.publish_verified(selected, startup, None).map(|_| ())
     }
 
     fn publish_snapshot(
@@ -581,8 +711,9 @@ impl<R: Runtime> Backend<R> {
         p: Parameters<'_>,
         relative: &str,
     ) -> Result<(StatusCode, Value, R::Prepared, String), Fault> {
-        let guard = self.store.try_edit().map_err(lock_error)?;
-        let transaction = Transaction::new(&guard, self.limits).with_write_key(&self.key);
+        let guard = self.store.files.try_edit().map_err(lock_error)?;
+        self.admit_writer(&guard, None)?;
+        let transaction = Transaction::new(&guard, self.store.limits).with_write_key(&self.key);
         let selected = transaction.inspect()?;
         let snapshot = self.snapshot(&selected, None)?;
         let prior = self.api.read(
@@ -797,7 +928,7 @@ impl<R: Runtime> Backend<R> {
         let result = (|| {
             let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
             let guard = loop {
-                match self.store.try_edit() {
+                match self.store.files.try_edit() {
                     Err(CaptureError::Busy)
                         if std::time::Instant::now() < until
                             && !self.stopping.load(std::sync::atomic::Ordering::Acquire) =>
@@ -807,7 +938,8 @@ impl<R: Runtime> Backend<R> {
                     result => break result.map_err(lock_error)?,
                 }
             };
-            let tx = Transaction::new(&guard, self.limits).with_write_key(&self.key);
+            self.admit_writer(&guard, None)?;
+            let tx = Transaction::new(&guard, self.store.limits).with_write_key(&self.key);
             let selected = tx.inspect()?;
             if selected.state.desired.revision.as_str() != revision {
                 return Err(Fault::DurabilityUnknown);
@@ -819,7 +951,7 @@ impl<R: Runtime> Backend<R> {
                 .map_err(|_| Fault::DurabilityUnknown)
         })();
         if result.is_err() {
-            self.store.mark_bookkeeping_fault();
+            self.store.files.mark_bookkeeping_fault();
             self.runtime
                 .inhibit_uncertain(Some(revision), Fault::DurabilityUnknown);
         }
@@ -961,47 +1093,36 @@ pub struct Coordinator<R> {
 impl<R: Runtime> Coordinator<R> {
     /// Open a public management snapshot on the control plane and start one serialized write worker.
     pub fn new(
-        store: WorkingFiles,
+        store: Arc<ManagedStore>,
         key: KeyId,
-        limits: CaptureLimits,
         mount: &str,
         runtime: Arc<R>,
     ) -> Result<Self, Fault> {
-        Self::with_profile_inputs(
-            store,
-            key,
-            limits,
-            mount,
-            runtime,
-            ProfileInputs::installed(),
-        )
+        Self::with_profile_inputs(store, key, mount, runtime, ProfileInputs::installed())
     }
     /// Start the coordinator with the same immutable preparation inputs supplied to the runtime host.
     pub fn with_profile_inputs(
-        store: WorkingFiles,
+        store: Arc<ManagedStore>,
         key: KeyId,
-        limits: CaptureLimits,
         mount: &str,
         runtime: Arc<R>,
         inputs: Arc<ProfileInputs>,
     ) -> Result<Self, Fault> {
-        Self::start(store, key, limits, mount, runtime, inputs, false)
+        Self::start(store, key, mount, runtime, inputs, false)
     }
 
     pub(crate) fn for_service(
-        store: WorkingFiles,
+        store: Arc<ManagedStore>,
         key: KeyId,
-        limits: CaptureLimits,
         runtime: Arc<R>,
         inputs: Arc<ProfileInputs>,
     ) -> Result<Self, Fault> {
-        Self::start(store, key, limits, "/api/v1", runtime, inputs, true)
+        Self::start(store, key, "/api/v1", runtime, inputs, true)
     }
 
     fn start(
-        store: WorkingFiles,
+        store: Arc<ManagedStore>,
         key: KeyId,
-        limits: CaptureLimits,
         mount: &str,
         runtime: Arc<R>,
         inputs: Arc<ProfileInputs>,
@@ -1011,6 +1132,7 @@ impl<R: Runtime> Coordinator<R> {
         let cached = Arc::new(RwLock::new(None));
         let boot = fresh()?;
         let initial = store
+            .files
             .try_edit()
             .ok()
             .and_then(|g| operations::Ledger::read(&g, boot).ok())
@@ -1021,14 +1143,21 @@ impl<R: Runtime> Coordinator<R> {
             ledger: RwLock::new(initial),
             store,
             key,
-            limits,
             zone: crate::schedule_zone::capture(),
             inputs,
             api: Arc::clone(&api),
             runtime: Arc::clone(&runtime),
             cached: Arc::clone(&cached),
         });
-        let _ = backend.refresh(true);
+        if backend.refresh(true).is_err() && !cold_start {
+            // This constructor has no first cold-start attempt left to resolve the lease.
+            backend
+                .store
+                .writer
+                .write()
+                .expect("store writer lifetime")
+                .take_if(|held| held.provisional);
+        }
         let busy = Arc::new(std::sync::atomic::AtomicBool::new(cold_start));
         let pending = busy.clone();
         let (send, recv) = mpsc::sync_channel(1);

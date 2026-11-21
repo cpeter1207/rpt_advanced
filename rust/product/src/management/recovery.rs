@@ -175,8 +175,9 @@ impl<R: Runtime> Backend<R> {
 
     pub(super) fn execute_recovery(&self, mut r: Recovery<R::Prepared>) -> Result<(), Fault> {
         {
-            let guard = self.store.try_edit().map_err(lock_error)?;
-            let tx = Transaction::new(&guard, self.limits).with_write_key(&self.key);
+            let guard = self.store.files.try_edit().map_err(lock_error)?;
+            self.admit_writer(&guard, None)?;
+            let tx = Transaction::new(&guard, self.store.limits).with_write_key(&self.key);
             #[cfg(test)]
             let checkpoint = |point| {
                 if point == crate::configuration_transaction::Boundary::DesiredSync

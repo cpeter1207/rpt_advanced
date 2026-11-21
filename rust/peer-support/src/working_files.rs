@@ -236,6 +236,11 @@ impl WorkingFiles {
         self
     }
 
+    /// Borrow the lifetime proof retained by explicit initial provisioning.
+    pub fn provisioning_writer_lease(&self) -> Option<&WriterLease> {
+        self.bootstrap.as_ref().map(|(_, lease)| lease)
+    }
+
     /// Acquire the directory lease on a fresh file description without waiting or creating files.
     /// Online and offline writers contend here even between individual edit transactions.
     pub fn try_writer_lease(&self) -> Result<WriterLease, CaptureError> {
@@ -299,6 +304,13 @@ impl CapturePath {
 }
 
 impl EditGuard<'_> {
+    /// Validate an opaque writer lifetime against this exact protected directory inode.
+    pub fn check_writer_lease(&self, lease: &WriterLease) -> Result<(), CaptureError> {
+        self.check_lock()?;
+        checked_metadata(&lease.root, self.store.uid, 0o700)?;
+        check_inode(&self.store.root, &lease.root)
+    }
+
     /// Refuse a state pointer belonging to a different service-provisioned store.
     pub fn accepts_identity(&self, id: uuid::Uuid) -> bool {
         self.store

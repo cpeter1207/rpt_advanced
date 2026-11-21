@@ -2,7 +2,7 @@
 use super::*;
 mod native;
 mod station;
-use crate::management::ProfileInputs;
+use crate::management::{ManagedStore, ProfileInputs};
 use rpt_advanced_core::config::resources::profiles::equipment::InterfaceCapability;
 use rptadv_peer_support::https::CoordinatorInbox;
 
@@ -48,6 +48,10 @@ fn authenticated_review_regressions() {
         "native-new-fault",
         "native-local",
         "managed-bootstrap",
+        "managed-maintenance",
+        "managed-offline-first",
+        "managed-backup-first",
+        "public-pending-backup",
         "station-keyboard",
         "station-serial",
         "station-invalid",
@@ -141,11 +145,20 @@ impl Scenario<'_> {
         inputs: ProfileInputs,
         run: impl FnOnce(&Client<'_>, &RuntimeFixture) -> T,
     ) -> T {
+        let store = self.fixture.managed_store().unwrap();
+        self.serve_with_store(store, inputs, run)
+    }
+
+    fn serve_with_store<T>(
+        &mut self,
+        store: Arc<ManagedStore>,
+        inputs: ProfileInputs,
+        run: impl FnOnce(&Client<'_>, &RuntimeFixture) -> T,
+    ) -> T {
         let rt = Arc::new(RuntimeFixture::default());
         let app = Coordinator::with_profile_inputs(
-            WorkingFiles::open(&self.fixture.0).unwrap(),
+            store,
             KeyId::new("example").unwrap(),
-            LIMITS,
             "/api/v1",
             rt.clone(),
             Arc::new(inputs),
@@ -614,6 +627,110 @@ fn poll(client: &Client<'_>, fixture: &Fixture, rt: &RuntimeFixture) {
     assert_eq!(count(), after);
 }
 
+/// A read-only backup has already released its edit guard when the sole cold-start runs.
+fn first_cold_start_after_backup(fixture: &Fixture) {
+    let reader = WorkingFiles::open(&fixture.0).unwrap();
+    let guard = reader.try_edit().unwrap();
+    let store = fixture.managed_store().unwrap();
+    drop(guard);
+    let runtime = Arc::new(RuntimeFixture::default());
+    let coordinator = Coordinator::for_service(
+        store,
+        KeyId::new("example").unwrap(),
+        Arc::clone(&runtime),
+        Arc::new(inputs()),
+    )
+    .unwrap();
+    // Join the sole scheduled worker. This runtime fixture confirms adoption synchronously.
+    drop(coordinator);
+    assert_eq!(
+        runtime.adoptions.load(Ordering::Acquire),
+        1,
+        "released backup edit guard prevented the first cold-start adoption"
+    );
+    assert_eq!(runtime.observed().active_revision.as_deref(), Some("first"));
+    assert!(!fixture.0.join("operations.json").exists());
+}
+
+/// The public constructor has no cold-start worker to release a provisional lease.
+fn public_pending_after_backup(scenario: &mut Scenario<'_>) {
+    use crate::configuration_transaction::maintenance::execute_test_request as maintenance;
+
+    let fixture = scenario.fixture;
+    let root = &fixture.0;
+    let owner = WorkingFiles::open(root).unwrap();
+    let mut request = json!({"store_root":root,"store_uuid":STORE});
+    request["expected_state_sha256"] =
+        maintenance(1, &request, None).unwrap()["state_sha256"].clone();
+    let pending = |point| {
+        if point == Boundary::IntentBarrier {
+            Err(TransactionError::StorageFault)
+        } else {
+            Ok(())
+        }
+    };
+    assert!(maintenance(2, &request, Some(&pending)).is_err());
+    let selector = fs::read(root.join("state.json")).unwrap();
+    let backup = owner.try_edit().unwrap();
+    assert_eq!(
+        Transaction::new(&backup, LIMITS).ordinary_writer_admission(STORE.parse().unwrap()),
+        Err(TransactionError::Conflict)
+    );
+    let store = fixture.managed_store().unwrap();
+    drop(backup);
+    scenario.serve_with_store(store, inputs(), |client, runtime| {
+        let health = client.get("/api/v1/health/");
+        assert_eq!(health.code, 200);
+        assert_eq!(health.body["status"]["storage"], "storage_fault");
+        assert!(health.body["status"]["active_revision"].is_null());
+        assert_eq!(client.get("/api/v1/").code, 200);
+        assert_eq!(client.get(SITE_PATH).code, 200);
+        assert!(runtime.inhibits.load(Ordering::Acquire) > 0);
+        let edit = client.edit(
+            "PUT",
+            SITE_PATH,
+            Some(&json!({"configuration":{"name":"Blocked"}})),
+        );
+        assert!(matches!(edit.code, 409 | 503));
+        assert_eq!(runtime.adoptions.load(Ordering::Acquire), 0);
+        assert_eq!(runtime.dispatched.load(Ordering::Acquire), 0);
+        assert!(!root.join("operations.json").exists());
+        assert_eq!(fs::read(root.join("state.json")).unwrap(), selector);
+
+        let lease = owner
+            .try_writer_lease()
+            .expect("pending public coordinator retained its provisional writer lease");
+        drop(lease);
+        maintenance(2, &request, None).unwrap();
+        assert_eq!(client.get(SITE_PATH).code, 200);
+        assert!(runtime.observed().active_revision.is_none());
+        assert_eq!(runtime.adoptions.load(Ordering::Acquire), 0);
+        assert!(!root.join("operations.json").exists());
+    });
+
+    // A busy initial public refresh can discard only a lease still awaiting admission.
+    for admitted in [false, true] {
+        let checked = admitted.then(|| fixture.managed_store().unwrap());
+        let backup = owner.try_edit().unwrap();
+        let store = checked.unwrap_or_else(|| fixture.managed_store().unwrap());
+        let app = Coordinator::new(
+            store,
+            KeyId::new("example").unwrap(),
+            "/api/v1",
+            Arc::new(RuntimeFixture::default()),
+        )
+        .unwrap();
+        let offline = owner.try_writer_lease();
+        if admitted {
+            assert!(matches!(offline, Err(CaptureError::Busy)));
+        } else {
+            assert!(offline.is_ok());
+        }
+        drop(app);
+        drop(backup);
+    }
+}
+
 pub(super) fn run(
     case: &str,
     fixture: &Fixture,
@@ -635,7 +752,11 @@ pub(super) fn run(
         "poll" => scenario.serve(inputs(), |c, rt| poll(c, fixture, rt)),
         "asterisk-managed" => native::asterisk(&scenario),
         "standalone-managed" => native::standalone(&scenario),
-        "managed-bootstrap" | "inspection-r1" => native::bootstrap(&scenario),
+        "managed-backup-first" => first_cold_start_after_backup(fixture),
+        "public-pending-backup" => public_pending_after_backup(&mut scenario),
+        "managed-bootstrap" | "managed-maintenance" | "managed-offline-first" | "inspection-r1" => {
+            native::bootstrap(&scenario)
+        }
         "native-runtime"
         | "native-site-zero"
         | "native-site-views"

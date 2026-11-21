@@ -103,6 +103,7 @@ impl WorkingFiles {
             } else if NAMESPACES.contains(&name) {
                 protected_directory(root, path, store.uid)?;
             } else if name == EDIT_LOCK
+                || name == "maintenance.json"
                 || name.strip_prefix(".immutable-").is_some_and(|s| {
                     s.len() == 32
                         && s.bytes()
@@ -151,12 +152,20 @@ impl EditGuard<'_> {
         let Some((id, _)) = &self.store.bootstrap else {
             return Ok(None);
         };
+        Ok(self.has_bootstrap_marker(*id)?.then_some(*id))
+    }
+
+    /// Check a protected marker selected by an independently trusted store identity.
+    pub fn has_bootstrap_marker(&self, id: Uuid) -> Result<bool, CaptureError> {
         self.check_lock()?;
-        match protected_directory(&self.store.root, Path::new(&marker(*id)), self.store.uid) {
-            Ok(_) => Ok(Some(*id)),
-            Err(CaptureError::Missing) => Ok(None),
-            Err(e) => Err(e),
-        }
+        let present =
+            match protected_directory(&self.store.root, Path::new(&marker(id)), self.store.uid) {
+                Ok(_) => true,
+                Err(CaptureError::Missing) => false,
+                Err(error) => return Err(error),
+            };
+        self.check_lock()?;
+        Ok(present)
     }
 
     fn retire_marker(&self, id: Uuid) -> Result<(), CaptureError> {
@@ -185,8 +194,19 @@ impl EditGuard<'_> {
         limit: u64,
         before_root_sync: impl FnOnce() -> Result<(), InstallError>,
     ) -> Result<(), InstallError> {
+        self.confirm_root_record(Path::new("state.json"), expected, limit, before_root_sync)?;
+        self.retire_marker(store)
+            .map_err(|_| InstallError::DurabilityUnknown)
+    }
+
+    fn confirm_root_record(
+        &self,
+        path: &Path,
+        expected: &[u8; 32],
+        limit: u64,
+        before_root_sync: impl FnOnce() -> Result<(), InstallError>,
+    ) -> Result<(), InstallError> {
         self.check_lock()?;
-        let path = Path::new("state.json");
         let (file, meta) = file_handle(&self.store.root, path, self.store.uid)?;
         let captured = read_pinned_regular(&file, &meta, limit)?;
         if artifact_sha256(&captured.bytes) != *expected {
@@ -199,9 +219,7 @@ impl EditGuard<'_> {
         sync_directory(&self.store.root).map_err(|_| InstallError::DurabilityUnknown)?;
         let (current, _) = file_handle(&self.store.root, path, self.store.uid)?;
         check_version(&current, &captured.version)?;
-        self.check_lock()?;
-        self.retire_marker(store)
-            .map_err(|_| InstallError::DurabilityUnknown)
+        self.check_lock().map_err(InstallError::from)
     }
 
     /// Bookkeeping failure on this open store inhibits subsequent mutations across edit guards.
@@ -234,7 +252,7 @@ impl EditGuard<'_> {
         self.prepare_shard("private", identity.scope().record_uuid())
     }
 
-    fn prepare_shard(&self, name: &str, id: Uuid) -> Result<(), CaptureError> {
+    pub(super) fn prepare_shard(&self, name: &str, id: Uuid) -> Result<(), CaptureError> {
         self.check_lock()?;
         let namespace = protected_directory(&self.store.root, Path::new(name), self.store.uid)?;
         ensure_dir(&namespace, Path::new(&id.to_string()), self.store.uid)?;
@@ -328,6 +346,49 @@ impl EditGuard<'_> {
                 .map_err(|_| InstallError::DurabilityUnknown)?;
         }
         Ok(())
+    }
+
+    /// Read the offline maintenance reservation, if present, on this protected root.
+    pub fn read_maintenance(&self, limit: u64) -> Result<Option<Vec<u8>>, CaptureError> {
+        self.check_lock()?;
+        let bytes = self.read_leaf(&self.store.root, Path::new("maintenance.json"), limit)?;
+        self.check_lock()?;
+        Ok(bytes)
+    }
+
+    /// Reserve or finish the exact maintenance request under the stopped writer's lease.
+    pub fn replace_maintenance(
+        &self,
+        lease: &WriterLease,
+        expected: Option<&[u8; 32]>,
+        bytes: &[u8],
+        limit: u64,
+        after_rename: impl FnOnce() -> Result<(), InstallError>,
+    ) -> Result<(), InstallError> {
+        self.check_writer_lease(lease)?;
+        self.replace_root_record(
+            Path::new("maintenance.json"),
+            expected,
+            bytes,
+            limit,
+            || self.check_writer_lease(lease).map_err(InstallError::from),
+            after_rename,
+        )
+    }
+
+    /// Sync and recheck the exact record before relying on a recovered reservation.
+    pub fn confirm_maintenance(
+        &self,
+        expected: &[u8; 32],
+        limit: u64,
+        before_root_sync: impl FnOnce() -> Result<(), InstallError>,
+    ) -> Result<(), InstallError> {
+        self.confirm_root_record(
+            Path::new("maintenance.json"),
+            expected,
+            limit,
+            before_root_sync,
+        )
     }
 
     /// Read the bounded management operation ledger under the same protected root and edit lock.

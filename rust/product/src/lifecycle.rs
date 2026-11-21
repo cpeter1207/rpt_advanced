@@ -103,7 +103,7 @@ pub(crate) struct Engine {
     // The service and its management writer both retain this Engine. A failed
     // shutdown keeps the global owner; the last drained owner releases the lease.
     #[cfg(target_os = "linux")]
-    _writer_lease: Option<rptadv_peer_support::working_files::WriterLease>,
+    _managed_store: Option<Arc<crate::management::ManagedStore>>,
     #[cfg(target_os = "linux")]
     management_state: management::ManagementState,
 }
@@ -169,7 +169,7 @@ impl Engine {
             jobs: Mutex::new(Vec::new()),
             site_backends,
             #[cfg(target_os = "linux")]
-            _writer_lease: None,
+            _managed_store: None,
             #[cfg(target_os = "linux")]
             management_state: Default::default(),
         }
@@ -179,22 +179,17 @@ impl Engine {
     /// The process owner retains the descriptors until successful stop and drain.
     #[cfg(target_os = "linux")]
     pub(crate) unsafe fn start_management(
-        store: &rptadv_peer_support::working_files::WorkingFiles,
+        store: Arc<crate::management::ManagedStore>,
         host: *const abi::rptadv_host_services_v10,
         control: *const ControlDescriptor,
         file: *const FileDescriptor,
         speech: *const SpeechDescriptor,
     ) -> Result<Arc<Self>, RuntimeError> {
-        use rptadv_peer_support::working_files::CaptureError;
-        let writer = store.try_writer_lease().map_err(|error| match error {
-            CaptureError::Busy => RuntimeError::Busy,
-            _ => RuntimeError::Preparation,
-        })?;
         // SAFETY: the caller supplies process-lifetime descriptor storage for all four owners.
         let (services, executor, media) = unsafe { host_components(host, control, file, speech) }?;
         let origin = Instant::now();
         let engine = Arc::new(Self {
-            _writer_lease: Some(writer),
+            _managed_store: Some(store),
             ..Self::new(
                 services,
                 executor,

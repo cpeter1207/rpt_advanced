@@ -42,7 +42,7 @@ unsafe extern "C" fn submit_recovery(
 /// Invoked by the real store/PKI harness in its isolated service-credential process.
 pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
     let _serial = fixture::LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
-    let store = WorkingFiles::open(&scenario.fixture.0).unwrap();
+    let store = scenario.fixture.managed_store().unwrap();
     // This mTLS scenario runs alone in its own credential-isolated test process.
     // The C executor contains panics at its ABI boundary, so a join alone cannot expose them.
     let ticker_panicked = Arc::new(AtomicBool::new(false));
@@ -106,7 +106,7 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
     // SAFETY: all fixture descriptors and callback state outlive the confirmed stop below.
     let engine = unsafe {
         Engine::start_management(
-            &store,
+            Arc::clone(&store),
             &host,
             &control,
             rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
@@ -121,7 +121,6 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
     let coordinator = Coordinator::with_profile_inputs(
         store,
         KeyId::new("example").unwrap(),
-        LIMITS,
         "/api/v1",
         runtime.clone(),
         Arc::new(inputs()),
@@ -331,6 +330,10 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
                     health["status"]["active_revision"]
                 );
                 assert!(runtime.observed().owners.contains_key(&port_id));
+                assert!(matches!(
+                    WorkingFiles::open(&path).unwrap().try_writer_lease(),
+                    Err(CaptureError::Busy)
+                ));
                 fixture::REVIEW_CARRIER.store(true, Ordering::Release);
                 wait_until(|| fixture::REVIEW_CALLBACKS.load(Ordering::Acquire) > 8);
                 assert_eq!(fixture::REVIEW_OUTPUT.load(Ordering::Acquire), 0);
@@ -960,11 +963,11 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
         let board = scenario.client.pki.join("site-board");
         assert!(fs::read(board.join("pwm1")).unwrap().starts_with(b"0\n"));
         fs::write(board.join("in_temp_input"), b"unavailable\n").unwrap();
-        let store = WorkingFiles::open(&path).unwrap();
+        let store = scenario.fixture.managed_store().unwrap();
         // Every provider/table remains live until this distinct cold service stops.
         let second = unsafe {
             Engine::start_management(
-                &store,
+                Arc::clone(&store),
                 &host,
                 &control,
                 rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
@@ -976,7 +979,6 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
         let app = Coordinator::for_service(
             store,
             KeyId::new("example").unwrap(),
-            LIMITS,
             rt.clone(),
             Arc::new(inputs()),
         )
@@ -1032,11 +1034,11 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
     if case == "native-cold" {
         let locked = WorkingFiles::open(&path).unwrap();
         let guard = locked.try_edit().unwrap();
-        let store = WorkingFiles::open(&path).unwrap();
+        let store = scenario.fixture.managed_store().unwrap();
         // SAFETY: all borrowed callback tables still live through confirmed stop.
         let second = unsafe {
             Engine::start_management(
-                &store,
+                Arc::clone(&store),
                 &host,
                 fixture::control_descriptor(),
                 rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
@@ -1048,7 +1050,6 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
         let app = Coordinator::for_service(
             store,
             KeyId::new("example").unwrap(),
-            LIMITS,
             rt.clone(),
             Arc::new(inputs()),
         )
@@ -2100,6 +2101,167 @@ pub(super) fn bootstrap(scenario: &Scenario<'_>) {
     let product = unsafe { &*crate::lifecycle::rptadv_product_descriptor_v1() };
     let check = |bytes: &[u8]| managed_check(bytes, None);
     assert_eq!(check(b"[station]"), -1);
+    let offline_first = std::env::var(CASE).as_deref() == Ok("managed-offline-first");
+    if offline_first || std::env::var(CASE).as_deref() == Ok("managed-maintenance") {
+        let bytes = serde_json::to_vec(&provision).unwrap();
+        let root = &scenario.fixture.0;
+        let owner = WorkingFiles::open(root).unwrap();
+        use crate::configuration_transaction::maintenance::execute_test_request as maintenance;
+        let mut request = json!({"store_root":root,"store_uuid":STORE});
+        request["expected_state_sha256"] =
+            maintenance(1, &request, None).unwrap()["state_sha256"].clone();
+        let checkpoint = |point| {
+            if point == Boundary::IntentBarrier {
+                Err(TransactionError::StorageFault)
+            } else {
+                Ok(())
+            }
+        };
+        assert!(maintenance(2, &request, Some(&checkpoint)).is_err());
+        {
+            let guard = owner.try_edit().unwrap();
+            assert_eq!(
+                Transaction::new(&guard, LIMITS).ordinary_writer_admission(STORE.parse().unwrap()),
+                Err(TransactionError::Conflict)
+            );
+        }
+        let selector = fs::read(root.join("state.json")).unwrap();
+        let opens = fixture::RADIO_OPENS.load(Ordering::Acquire);
+        let callbacks = fixture::REVIEW_CALLBACKS.load(Ordering::Acquire);
+        // Keep this observed denial until after offline completion but before its worker starts.
+        let blocked_store = offline_first.then(|| scenario.fixture.managed_store().unwrap());
+        let offline = offline_first.then(|| owner.try_writer_lease().unwrap());
+        assert_eq!(
+            start(&bytes),
+            0,
+            "pending offline owner prevented read-only management startup"
+        );
+        let health = client.get("/api/v1/health/");
+        assert_eq!(health.code, 200);
+        assert_eq!(client.get("/api/v1/").code, 200);
+        if offline.is_some() {
+            assert!(matches!(owner.try_writer_lease(), Err(CaptureError::Busy)));
+        } else {
+            assert!(
+                owner.try_writer_lease().is_ok(),
+                "ownerless pending startup retained the writer lease"
+            );
+        }
+        assert!(health.body["status"]["active_revision"].is_null());
+        assert_eq!(client.get(SITE_PATH).code, 200);
+        assert_eq!(health.body["status"]["storage"], "storage_fault");
+        let apply = || {
+            operation(
+                &client,
+                json!({"submitted":true,
+            "action":{"action":"apply_configuration"}, "desired_etag":client.etag(DESIRED)}),
+            )
+        };
+        for request in [
+            client.edit(
+                "PUT",
+                SITE_PATH,
+                Some(&json!({"configuration":{"name":"Blocked"}})),
+            ),
+            client.edit(
+                "PATCH",
+                SITE_PATH,
+                Some(&json!([{"op":"replace","path":"/configuration/name","value":"Blocked"}])),
+            ),
+            client.edit(
+                "POST",
+                PORTS,
+                Some(&json!({"key":"blocked","configuration":{"enabled":false}})),
+            ),
+            operation(&client, json!({"action":{"action":"apply_configuration"}})),
+            apply(),
+        ] {
+            assert!(matches!(request.code, 409 | 503), "{}", request.body);
+        }
+        assert_eq!(fs::read(root.join("state.json")).unwrap(), selector);
+        assert!(!root.join("operations.json").exists());
+        assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opens);
+        assert_eq!(fixture::REVIEW_CALLBACKS.load(Ordering::Acquire), callbacks);
+        assert_eq!(fixture::REVIEW_OUTPUT.load(Ordering::Acquire), 0);
+        drop(offline);
+        let lease = owner
+            .try_writer_lease()
+            .expect("offline owner can finish pending maintenance");
+        drop(lease);
+        maintenance(2, &request, None).unwrap();
+        if let Some(store) = blocked_store {
+            let runtime = Arc::new(RuntimeFixture::default());
+            let coordinator = Coordinator::for_service(
+                store,
+                KeyId::new("example").unwrap(),
+                Arc::clone(&runtime),
+                Arc::new(inputs()),
+            )
+            .unwrap();
+            drop(coordinator);
+            assert_eq!(runtime.adoptions.load(Ordering::Acquire), 0);
+            assert!(runtime.observed().active_revision.is_none());
+            assert!(!root.join("operations.json").exists());
+        }
+        let stale = operation(
+            &client,
+            json!({"submitted":true,
+            "action":{"action":"apply_configuration"}, "desired_etag":"stale"}),
+        );
+        assert_eq!(stale.code, 412);
+        assert!(!root.join("operations.json").exists());
+        let lease = owner.try_writer_lease().unwrap();
+        assert!(matches!(apply().code, 409 | 503));
+        assert!(!root.join("operations.json").exists());
+        drop(lease);
+        assert_eq!(apply().body["receipt"]["state"], "completed");
+        client.ready();
+        assert!(matches!(owner.try_writer_lease(), Err(CaptureError::Busy)));
+        put(
+            &client,
+            SITE_PATH,
+            json!({"name":"After maintenance","inherit_from":null}),
+        );
+        assert_ne!(client.get(DESIRED).body["desired_revision"], "first");
+        assert_eq!(crate::lifecycle::rptadv_product_stop(), 0);
+        assert_eq!(start(&bytes), 0);
+        client.ready();
+        assert_eq!(
+            client.get(SITE_PATH).body["configuration"]["name"],
+            "After maintenance"
+        );
+        let active = client.get(DESIRED).body["desired_revision"].clone();
+        let ledger = fs::read(root.join("operations.json")).unwrap();
+        scenario.fixture.put("maintenance.json", b"{}");
+        wait_until(|| client.get(STORAGE).body["storage"] == "storage_fault");
+        let health = client.get("/api/v1/health/").body;
+        assert_eq!(health["status"]["storage"], "storage_fault");
+        assert_eq!(health["status"]["active_revision"], active);
+        assert!(matches!(owner.try_writer_lease(), Err(CaptureError::Busy)));
+        assert_eq!(apply().code, 503);
+        assert_eq!(fs::read(root.join("operations.json")).unwrap(), ledger);
+        assert_eq!(crate::lifecycle::rptadv_product_stop(), 0);
+        assert_eq!(start(&bytes), 0);
+        let health = client.get("/api/v1/health/").body;
+        assert!(health["status"]["active_revision"].is_null());
+        assert_eq!(health["status"]["storage"], "storage_fault");
+        assert!(owner.try_writer_lease().is_ok());
+        assert_eq!(fs::read(root.join("operations.json")).unwrap(), ledger);
+        assert_eq!(crate::lifecycle::rptadv_product_stop(), 0);
+        if offline_first {
+            // A live offline transaction can hold both locks during bootstrap.
+            let lease = owner.try_writer_lease().unwrap();
+            let edit = owner.try_edit().unwrap();
+            assert_eq!(start(&bytes), 0);
+            assert_eq!(client.get("/api/v1/health/").code, 200);
+            assert_eq!(client.get("/api/v1/").code, 200);
+            assert_eq!(crate::lifecycle::rptadv_product_stop(), 0);
+            drop(edit);
+            drop(lease);
+        }
+        assert!(owner.try_writer_lease().is_ok());
+        return;
+    }
     for expected in [None, Some("first")] {
         fixture_key_available(expected.is_some());
         let bytes = serde_json::to_vec(&provision).unwrap();

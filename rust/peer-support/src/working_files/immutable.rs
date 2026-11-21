@@ -25,6 +25,8 @@ use std::{
 };
 use uuid::Uuid;
 
+/// Bounded canonical artifact discovery and lease-checked offline operations.
+pub mod maintenance;
 pub mod private_records;
 
 /// Validated immutable artifact location.
@@ -107,6 +109,11 @@ pub struct ImmutableArtifact {
 }
 
 impl ImmutableArtifact {
+    /// Consume verified public readback without copying its stored bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     /// Borrow the exact bytes of the artifact.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes

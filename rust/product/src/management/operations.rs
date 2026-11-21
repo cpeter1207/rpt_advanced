@@ -390,7 +390,7 @@ impl<R: Runtime> Backend<R> {
         }
         // Startup may have found the edit lock busy. Recover the real receipts
         // on demand without accepting a new boot identity or writing the ledger.
-        let guard = self.store.try_edit().map_err(lock_error)?;
+        let guard = self.store.files.try_edit().map_err(lock_error)?;
         let mut slot = self.ledger.write().expect("operation snapshot");
         if let Some(current) = slot.as_ref() {
             return Ok(Arc::clone(current));
@@ -542,8 +542,8 @@ impl<R: Runtime> Backend<R> {
         }
         let key = (boot, request);
         let work = {
-            let guard = self.store.try_edit().map_err(lock_error)?;
-            let tx = Transaction::new(&guard, self.limits).with_write_key(&self.key);
+            let guard = self.store.files.try_edit().map_err(lock_error)?;
+            let tx = Transaction::new(&guard, self.store.limits).with_write_key(&self.key);
             let mut ledger = self.read_ledger(&guard)?;
             let prior = ledger.rows.get(&key);
             if let Some(prior) = prior {
@@ -613,6 +613,22 @@ impl<R: Runtime> Backend<R> {
             let submitted = body["submitted"].as_bool().ok_or(Fault::Invalid)?;
             operands.apply(staged.private_edits)?;
             operands.with_full(&body, |full| validate(full, req.actor, submitted))?;
+            // The edit guard anchors both the verified receipt and every staged request read.
+            // A refused apply drops this provisional lease before returning to read-only service.
+            let fresh_lease = if submitted
+                && body["action"]["action"] == "apply_configuration"
+                && self
+                    .store
+                    .writer
+                    .read()
+                    .expect("store writer lifetime")
+                    .is_none()
+            {
+                Some(self.store.files.try_writer_lease().map_err(lock_error)?)
+            } else {
+                None
+            };
+            self.admit_writer(&guard, fresh_lease.as_ref())?;
             let mut submitted_from = None;
             if let Some(prior) = prior {
                 let doc = ledger.document(&self.api, boot, request)?;
@@ -727,6 +743,17 @@ impl<R: Runtime> Backend<R> {
                     outcomes: BTreeMap::new(),
                 },
             );
+            if let Some(lease) = fresh_lease {
+                // Keep the authorized lease from the first durable intent through native drain.
+                let mut writer = self.store.writer.write().expect("store writer lifetime");
+                if writer.is_some() {
+                    return Err(Fault::Conflict);
+                }
+                *writer = Some(HeldWriter {
+                    lease,
+                    provisional: false,
+                });
+            }
             let admission = ledger.write(&guard, || {
                 #[cfg(test)]
                 if !self.runtime.admission_rename_observed() {
@@ -784,7 +811,8 @@ impl<R: Runtime> Backend<R> {
             },
         };
         let recorded: Result<_, Fault> = (|| {
-            let guard = self.store.try_edit().map_err(lock_error)?;
+            let guard = self.store.files.try_edit().map_err(lock_error)?;
+            self.admit_writer(&guard, None)?;
             let mut ledger = self.read_ledger(&guard)?;
             let r = ledger
                 .rows

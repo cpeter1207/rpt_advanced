@@ -135,6 +135,9 @@ pub struct JournalRef {
     pub sha256: ContentHash,
 }
 
+/// Maximum explicit physical recovery roots in one state selector.
+pub const MAX_RETAINED_RECOVERY: usize = 64;
+
 /// Runtime-independent durable desired/LKG and publication evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatePointer {
@@ -144,6 +147,8 @@ pub struct StatePointer {
     pub desired: ManifestRef,
     /// Last manifest confirmed by the runtime owner.
     pub last_known_good: Option<ManifestRef>,
+    /// Explicit physical recovery roots; ordinary transactions never prune these.
+    pub retained_recovery: Vec<ManifestRef>,
     /// Historical activation outcome.
     pub activation: Activation,
     /// Outstanding publication journal.
@@ -153,6 +158,26 @@ pub struct StatePointer {
 }
 impl StatePointer {
     fn validate(&self) -> Result<()> {
+        if self.retained_recovery.len() > MAX_RETAINED_RECOVERY {
+            return Err(InvalidState);
+        }
+        for (index, reference) in self.retained_recovery.iter().enumerate() {
+            if self.retained_recovery[..index].contains(reference) {
+                return Err(InvalidState);
+            }
+        }
+        let mut identities = std::collections::BTreeMap::new();
+        for reference in std::iter::once(&self.desired)
+            .chain(self.last_known_good.iter())
+            .chain(&self.retained_recovery)
+        {
+            if identities
+                .insert(reference.manifest.as_str(), reference)
+                .is_some_and(|prior| prior != reference)
+            {
+                return Err(InvalidState);
+            }
+        }
         if self.clean_working.is_some() == self.journal.is_some()
             || self.journal.is_some() && self.activation != Activation::Pending
             || self.activation == Activation::Confirmed
@@ -171,6 +196,7 @@ impl StatePointer {
         self.validate()?;
         Ok(json!({"format_version":1,"store_uuid":self.store.to_string(),"desired":self.desired.value(),
             "last_known_good":self.last_known_good.as_ref().map(ManifestRef::value),
+            "retained_recovery":self.retained_recovery.iter().map(ManifestRef::value).collect::<Vec<_>>(),
             "activation":{"state":self.activation.name(),"target_revision":self.desired.revision.as_str()},
             "publication_journal":self.journal.as_ref().map(|r|json!({"id":r.id.to_string(),"sha256":r.sha256.hex()})),
             "clean_working_sha256":self.clean_working.map(|h|h.hex())
@@ -185,6 +211,14 @@ impl StatePointer {
         let last_known_good = nullable(take(&mut f, "last_known_good")?, |v| {
             ManifestRef::decode(v, &mut w)
         })?;
+        let retained_recovery = match f.remove("retained_recovery") {
+            None => Vec::new(),
+            Some(Value::Array(rows)) if rows.len() <= MAX_RETAINED_RECOVERY => rows
+                .into_iter()
+                .map(|row| ManifestRef::decode(row, &mut w))
+                .collect::<Result<Vec<_>>>()?,
+            Some(_) => return Err(InvalidState),
+        };
         let mut a = object(take(&mut f, "activation")?)?;
         let activation = Activation::decode(take(&mut a, "state")?)?;
         if field::<LogicalRevision>(&mut a, "target_revision")? != desired.revision {
@@ -206,6 +240,7 @@ impl StatePointer {
             store,
             desired,
             last_known_good,
+            retained_recovery,
             activation,
             journal,
             clean_working,
@@ -371,5 +406,56 @@ impl PublicationJournal {
         };
         value.validate(max_paths, max_path_bytes)?;
         Ok(ResourceResolution { value, warnings: w })
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+    fn selected() -> Value {
+        json!({
+            "format_version":1,"store_uuid":"31271e86-b1d8-490a-b576-008d69fa0428",
+            "desired":{"manifest":"current","revision":"r2","sha256":"11".repeat(32)},
+            "last_known_good":null,
+            "activation":{"target_revision":"r2","state":"failed"},
+            "publication_journal":null,"clean_working_sha256":"22".repeat(32)
+        })
+    }
+    #[test]
+    fn retained_recovery_roundtrips_without_changing_existing_selectors() {
+        let mut v = selected();
+        let history = json!([{"manifest":"old","revision":"r1","sha256":"33".repeat(32)}]);
+        v["retained_recovery"] = history.clone();
+        let state = StatePointer::decode(&serde_json::to_vec(&v).unwrap())
+            .unwrap()
+            .value;
+        let encoded: Value = serde_json::from_slice(&state.encode().unwrap()).unwrap();
+        assert_eq!(encoded["retained_recovery"], history);
+        assert_eq!(encoded["desired"], v["desired"]);
+        let legacy = StatePointer::decode(&serde_json::to_vec(&selected()).unwrap())
+            .unwrap()
+            .value;
+        let encoded: Value = serde_json::from_slice(&legacy.encode().unwrap()).unwrap();
+        assert!(
+            encoded
+                .get("retained_recovery")
+                .is_none_or(|v| v == &json!([]))
+        );
+    }
+    #[test]
+    fn malformed_or_ambiguous_recovery_roots_cannot_default_to_empty() {
+        for roots in [
+            json!(null),
+            json!({}),
+            json!([{"manifest":"../escape","revision":"r1","sha256":"33".repeat(32)}]),
+            json!([
+                {"manifest":"old","revision":"r1","sha256":"33".repeat(32)},
+                {"manifest":"old","revision":"r1","sha256":"44".repeat(32)}
+            ]),
+        ] {
+            let mut v = selected();
+            v["retained_recovery"] = roots;
+            assert!(StatePointer::decode(&serde_json::to_vec(&v).unwrap()).is_err());
+        }
     }
 }

@@ -604,7 +604,7 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         (Activation::Failed, false),
         (Activation::RecoveryRequired, false),
     ] {
-        let (_startup, handle) = Fixture::new();
+        let (startup, handle) = Fixture::new();
         {
             let guard = handle.try_edit().unwrap();
             let tx = Transaction::new(&guard, LIMITS).with_write_key(&key);
@@ -628,10 +628,10 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
             }
         }
         let probe = Arc::new(RuntimeFixture::default());
+        drop(handle);
         let _controller = Coordinator::new(
-            handle,
+            startup.managed_store().unwrap(),
             KeyId::new("example").unwrap(),
-            LIMITS,
             "/api/v1",
             probe.clone(),
         )
@@ -697,13 +697,19 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         port: listener.local_addr().port(),
         proxy: None,
     };
+    drop(store); // The provisioner releases its anchored lease before a separate service starts.
     if let Ok(case) = std::env::var("RPTADV_HAL_REVIEW_CASE") {
-        drop(store); // The provisioner releases its anchored lease before a separate service starts.
         review::run(&case, &fixture, &listener, &mut inbox, &client);
         return;
     }
     let runtime = Arc::new(RuntimeFixture::default());
-    let app = Coordinator::new(store, key, LIMITS, "/api/v1", runtime.clone()).unwrap();
+    let app = Coordinator::new(
+        fixture.managed_store().unwrap(),
+        key,
+        "/api/v1",
+        runtime.clone(),
+    )
+    .unwrap();
     let done = AtomicBool::new(false);
     let (frozen_bytes, prior_path) = thread::scope(|scope| {
         scope.spawn(|| {
@@ -1616,9 +1622,8 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
     // the actual durable bytes captured while that dispatch was held.
     fixture.put("operations.json", &frozen_bytes);
     let restarted = Coordinator::new(
-        WorkingFiles::open(&fixture.0).unwrap(),
+        fixture.managed_store().unwrap(),
         KeyId::new("missing-test-key").unwrap(),
-        LIMITS,
         "/api/v1",
         runtime.clone(),
     )

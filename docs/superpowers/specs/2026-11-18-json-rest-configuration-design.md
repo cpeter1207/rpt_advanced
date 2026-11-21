@@ -409,6 +409,34 @@ and a null clean fingerprint. Clean publication removes the journal reference
 and sets the complete working fingerprint. Runtime adoption is a separate
 observation supplied by the active process.
 
+The optional format-1 `retained_recovery` member is an explicit array of
+manifest/revision/sha256 selectors in the same shape as desired. An absent
+member means no additional recovery roots; a malformed member is unsafe and
+cannot default to empty. The codec admits at most 64 roots, with maintenance
+also applying its aggregate path/byte limits. Exact physical references are
+deduplicated; different physical manifests may retain the same logical revision
+across re-encryption. A manifest ID cannot select conflicting hashes or revisions.
+Normal transactions preserve this array without pruning or requiring historical
+private keys merely to start the current configuration.
+
+The optional extension preserves existing format-1 fields and reads old stores
+with no additional roots. A writer predating this extension can discard unknown
+members when rewriting state, so downgrading to such a writer after retaining
+roots is unsupported. The coordinated package/source cutover must use a writer
+that preserves the extension; no older-writer compatibility mode is implied.
+
+Only local maintenance changes these explicit roots. Retain/forget requires an
+externally selected delivered write-key ID even for a public-only store, because
+it publishes selected state metadata. Read-only backup needs no new write policy.
+Collection authenticates its graph and holds the real writer lifetime without
+inventing encryption work for unchanged objects.
+
+Rotation atomically retains
+the original physical references as well as their freshly sealed replacements;
+it fails before publication when the bounded union cannot fit. There is no
+automatic retention policy. A future explicit forget/collection operation can
+drop roots; ordinary saves and rotation do not silently discard old-key recovery.
+
 A journal at `journals/<uuid>.json` requires `format_version`, `id`,
 `store_uuid`, `prior_state_sha256`, `desired`, `source_working_sha256`,
 `target_working_sha256`, ordered `changes`, and `prune_directories`. Each row has a unique
@@ -446,6 +474,20 @@ Replacing and syncing `state.json` is the sole atomic cross-resource commit poin
 Logical revisions change for configuration/credential changes and deliberate restoration. Runtime generations and immutable object versions are distinct. Last-known-good advances only after confirmed activation. Re-encryption/activation bookkeeping preserves logical revisions.
 
 Garbage collection removes only objects unreachable from desired, last-known-good, retained recovery history and pending journals. Backups retain manifests plus referenced objects, not one expanded JSON export, and retain corresponding keys separately.
+
+An unresolved selected journal records source working hashes and a prior state
+digest, but not a complete prior private-manifest selector. When that source
+root cannot be established, collection returns a conservative zero-deletion plan
+and preserves all verified registered artifacts until reconciliation. Unknown,
+corrupt, unsupported or incomplete graph data cannot establish garbage.
+
+A backup contains exact immutable manifests, referenced public/sealed objects,
+the selected journal and small selector/role metadata; delivered keys remain
+separately retained. Restoring validates the complete graph and destination
+preconditions before any immutable copy or selector replacement. It creates a
+fresh deliberate-restore revision and publication journal against the actual
+destination working fingerprint. Copied historical activation metadata is never
+evidence that this process adopted the configuration.
 
 ### Private records and systemd keys
 
@@ -538,6 +580,10 @@ Kernel access checks enforce delivered ACLs. Opaque wrappers remain necessary:
 zeroizing buffer types are not automatically safe to print.
 
 A missing/wrong key, unsupported sealed format or authentication failure preserves the store, inhibits affected TX and blocks configuration mutation/import/apply/restore with a sanitized unavailable result. Public fields may remain readable; omit unknown configured flags and report `secrets_state: "locked"` or `"error"` rather than fabricating false.
+
+Key rotation requires a reconciled working tree with no selected publication journal.
+Unresolved edits or an unproven prior private root refuse rotation without rewriting
+journal evidence; reconcile using the old delivered credentials first.
 
 Key rotation is local maintenance. Stop the writer, provide old/new systemd credentials, authenticate retained private objects, write newly sealed objects/manifests, and atomically switch retained state references without changing logical revisions. Retain old keys for recovery/backups. Service credentials are [immutable while the unit runs](https://systemd.io/CREDENTIALS/); refreshing delivered keys requires an owner-unit restart. Ordinary JSON reload remains in-process.
 

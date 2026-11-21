@@ -6,6 +6,12 @@
 #include <stddef.h>
 #include <string.h>
 
+_Static_assert(sizeof(struct rptadv_product_descriptor_v1) == 128,
+               "preserve the original complete product table");
+_Static_assert(sizeof(struct rptadv_store_maintenance_v1) == 32,
+               "maintenance is a separate complete descriptor");
+_Static_assert(RPTADV_STORE_MAINTENANCE_ABI_VERSION == 1,
+               "update the optional maintenance probe deliberately");
 _Static_assert(RPTADV_PRODUCT_ABI_VERSION == 7, "update product ABI probe deliberately");
 _Static_assert(RPTADV_HOST_ABI_VERSION == 10, "update host ABI probe deliberately");
 _Static_assert(RPTADV_PEER_PHONE == 3 && RPTADV_PEER_PRIVATE_CALL == 32,
@@ -78,6 +84,17 @@ int main(int argc, char **argv) {
     assert(product->abi_version == RPTADV_PRODUCT_ABI_VERSION);
     const unsigned char capability[16] = RPTADV_PRODUCT_CAPABILITY;
     assert(memcmp(product->capability, capability, sizeof(capability)) == 0);
+    const struct rptadv_store_maintenance_v1 *(*maintenance_descriptor)(void) =
+        dlsym(library, "rptadv_product_store_maintenance_descriptor_v1");
+    assert(maintenance_descriptor);
+    const struct rptadv_store_maintenance_v1 *maintenance = maintenance_descriptor();
+    assert(maintenance && maintenance->struct_size == sizeof(*maintenance));
+    assert(maintenance->abi_version == RPTADV_STORE_MAINTENANCE_ABI_VERSION);
+    const unsigned char maintenance_capability[16] = RPTADV_STORE_MAINTENANCE_CAPABILITY;
+    assert(memcmp(maintenance->capability, maintenance_capability,
+                  sizeof(maintenance_capability)) == 0);
+    assert(maintenance->run);
+    assert(maintenance->run(999, NULL, 0, NULL, NULL) < 0);
     assert(strcmp(RPTADV_HOST_CAPABILITY, "rptadv.hst10") == 0);
     assert(product->start && product->reload && product->stop && product->authorize_incoming);
     assert(product->incoming && product->link_command && product->link_status && product->digit);

@@ -71,6 +71,15 @@ before returning zeroizing plaintext. Raw-byte callers cannot construct private
 targets. This does not yet implement the account payload schema or private state
 graph.
 
+Local protected-store maintenance is owned by
+`rust/product/src/configuration_transaction/maintenance.rs`, with the existing
+private graph and sealed-record owners. The same edit guard protects consistent
+read-only backups; destructive work also proves an exclusive same-directory
+writer lifetime. A separate optional product descriptor serves the dynamically
+linked executable client. State retains explicit bounded recovery manifests at
+its existing commit point, and normal transactions preserve those roots.
+Maintenance never copies delivered key material or marks a runtime active.
+
 ## System boundary
 
 [ADR 0044](decisions/0044-phone-peers-and-rf-presentation-pacing.md) records the
