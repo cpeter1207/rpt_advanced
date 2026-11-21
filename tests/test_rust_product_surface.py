@@ -35,7 +35,8 @@ TONE_MINIMUM_VERSION = "0.1.0~alpha1"
 MORSE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 DTMF_MINIMUM_VERSION = "0.1.0~alpha3-1"
 TEMPLATE_MINIMUM_VERSION = "0.1.0~alpha1-1"
-SCHEDULE_MINIMUM_VERSION = "0.1.0~alpha2-1"
+SCHEDULE_MINIMUM_VERSION = "0.1.0~alpha3-1"
+USBRADIO_MINIMUM_VERSION = "0.1.0~alpha36-1"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
@@ -352,8 +353,8 @@ def package(control: Path) -> None:
         assert token in contents, f"missing package dependency: {token}"
     for token in (
         f"librate-adjusting-pcm-ring3-dev (>= {RING_MINIMUM_VERSION})",
-        "libusbradioplus-product-dev (>= 0.1.0~alpha34-1)",
-        "libusbradioplus-product1 (>= 0.1.0~alpha34-1)",
+        f"libusbradioplus-product-dev (>= {USBRADIO_MINIMUM_VERSION})",
+        f"libusbradioplus-product1 (>= {USBRADIO_MINIMUM_VERSION})",
         f"librate-adjusting-pcm-ring3 (>= {RING_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter-dev (>= {SAMPLERATE_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter2 (>= {SAMPLERATE_MINIMUM_VERSION})",
@@ -1240,6 +1241,7 @@ def main() -> None:
         coverage(args.coverage)
     else:
         check(root)
+        package(root / "debian/control")
     print("Rust product-surface checks passed")
 
 
