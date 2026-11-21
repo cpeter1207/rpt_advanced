@@ -310,13 +310,23 @@ fn tls_material_is_size_bounded_and_cannot_substitute_the_aead_credential() {
     mode(&fixture.credentials, 0o700);
     fs::remove_file(&tls).unwrap();
     write(&tls, b"fixture TLS bytes");
-    mode(&tls, 0o400);
-    mode(&fixture.credentials, 0o500);
-    assert_eq!(&read().unwrap()[..], b"fixture TLS bytes");
+    for (directory_mode, tls_mode) in [
+        (0o500, 0o400),
+        (0o550, 0o440),
+        (0o500, 0o600),
+        (0o750, 0o640),
+    ] {
+        mode(&fixture.credentials, directory_mode);
+        mode(&tls, tls_mode);
+        assert_eq!(&read().unwrap()[..], b"fixture TLS bytes");
+    }
+    for unsafe_mode in [0o620, 0o602] {
+        mode(&tls, unsafe_mode);
+        assert_eq!(read().err(), Some(KeyLoadError::Invalid));
+    }
     mode(&tls, 0o600);
-    assert!(read().is_err());
     fs::write(&tls, vec![0u8; 65537]).unwrap();
     mode(&tls, 0o400);
-    assert!(read().is_err());
+    assert_eq!(read().err(), Some(KeyLoadError::Invalid));
     assert!(fixture.load().is_ok());
 }
