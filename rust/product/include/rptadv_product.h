@@ -766,7 +766,9 @@ struct rptadv_store_maintenance_v1 {
                rptadv_text_sink_v1 sink, void *sink_context);
 };
 
-/** Optional checked maintenance getter, independent of the old product table. */
+/** Optional checked maintenance getter, independent of the old product table.
+ * @return Immutable descriptor valid while the product library is loaded.
+ */
 const struct rptadv_store_maintenance_v1 *rptadv_product_store_maintenance_descriptor_v1(void);
 
 #ifdef __cplusplus
