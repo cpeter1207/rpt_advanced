@@ -247,8 +247,12 @@ fn explicit_history_blocks_gc_until_forget_and_gc_retries_after_unlink_fault() {
 }
 #[test]
 fn restore_preflights_conflicts_and_replays_a_fresh_pending_revision() {
-    // Public-only restore still requires the explicitly selected delivered write key,
-    // exercised with real keys by the private child fixture.
+    // A public-only restore also needs a delivered write key before immutable preflight.
+    if super::private::maintenance::fix1_keys(
+        "configuration_transaction::tests::maintenance::restore_preflights_conflicts_and_replays_a_fresh_pending_revision",
+    ) {
+        return;
+    }
     let (_source, store) = Fixture::new();
     let guard = store.try_edit().unwrap();
     first(&Transaction::new(&guard, LIMITS));
@@ -270,7 +274,7 @@ fn restore_preflights_conflicts_and_replays_a_fresh_pending_revision() {
             backup,
             None,
             working,
-            &KeyId::new("missing").unwrap()
+            &KeyId::new("example").unwrap()
         )
         .err(),
         Some(MaintenanceError::Conflict)

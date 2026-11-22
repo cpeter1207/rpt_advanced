@@ -365,9 +365,9 @@ fn review_unrepresentable_confirmation_rejected_before_first_selection() {
 fn review_post_promotion_recovery_capacity_before_first_selection() {
     let (m, objects) = graph("base", &[], None);
     let manifest = renamed(&m, "x", &"x".repeat(3171));
-    // Confirmation takes exactly 10,000 bytes. A later recovery_required
-    // retains the promoted LKG and requires eight more bytes.
-    for limit in [10_000, 10_007, 10_008] {
+    // With the explicit empty retained_recovery array, confirmation takes 10,023 bytes.
+    // A later recovery_required retains the promoted LKG and takes eight more bytes.
+    for limit in [10_023, 10_030, 10_031] {
         let (_fixture, store) = Fixture::new();
         let guard = store.try_edit().unwrap();
         let tx = Transaction::new(
@@ -378,16 +378,16 @@ fn review_post_promotion_recovery_capacity_before_first_selection() {
             },
         );
         let result = install(&tx, &manifest, &objects, initial(), JOURNAL);
-        if limit < 10_008 {
+        if limit < 10_031 {
             assert_eq!(result, Err(TransactionError::InvalidCandidate));
             assert!(guard.read_state(limit).unwrap().is_none());
         } else {
             result.unwrap();
             confirmed(&tx);
-            assert_eq!(guard.read_state(limit).unwrap().unwrap().len(), 10_000);
+            assert_eq!(guard.read_state(limit).unwrap().unwrap().len(), 10_023);
             tx.record_activation(&tx.inspect().unwrap(), Activation::RecoveryRequired)
                 .unwrap();
-            assert_eq!(guard.read_state(limit).unwrap().unwrap().len(), 10_008);
+            assert_eq!(guard.read_state(limit).unwrap().unwrap().len(), 10_031);
             let selected = tx.inspect().unwrap();
             assert_eq!(
                 selected.state.last_known_good.as_ref(),

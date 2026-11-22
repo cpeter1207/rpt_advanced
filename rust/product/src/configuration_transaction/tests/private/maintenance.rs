@@ -337,7 +337,7 @@ fn retained_rotation_and_backup_use_real_keys_and_atomic_selectors() {
     }
 }
 
-fn fix1_keys(test: &str) -> bool {
+pub(in crate::configuration_transaction::tests) fn fix1_keys(test: &str) -> bool {
     if std::env::var_os("TASK43_FIX1_KEYS")
         .is_some_and(|dir| std::env::var_os("CREDENTIALS_DIRECTORY") == Some(dir))
     {

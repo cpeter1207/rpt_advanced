@@ -1,6 +1,6 @@
 //! End-to-end encrypted selection and omission across real edit-guard commits.
 
-mod maintenance;
+pub(super) mod maintenance;
 mod review;
 use super::*;
 use crate::configuration_private::{CredentialEdit, SecretsState};
