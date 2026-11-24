@@ -271,12 +271,18 @@ fn exchange(
     if !(200..300).contains(&response.status()) {
         return Err(RegistrationError::HttpStatus(response.status()));
     }
-    read_registration_response(response.into_reader(), target.interval_seconds, remaining)
+    read_registration_response(
+        response.into_reader(),
+        target.interval_seconds,
+        target.node(),
+        remaining,
+    )
 }
 
 fn read_registration_response(
     mut reader: impl Read,
     fallback_seconds: u64,
+    node: &str,
     remaining: impl Fn() -> Duration,
 ) -> Result<Duration, RegistrationError> {
     let capacity = RESPONSE_LIMIT as usize + 1;
@@ -299,7 +305,7 @@ fn read_registration_response(
         }
         Err(RegistrationError::InvalidResponse)
     })?;
-    let refresh = response_refresh(response_body.expose_bytes(), fallback_seconds)?;
+    let refresh = response_refresh(response_body.expose_bytes(), fallback_seconds, node)?;
     positive(remaining()).map_err(|error| RegistrationError::Read(error.kind()))?;
     Ok(refresh)
 }
@@ -449,7 +455,11 @@ impl ManagedRegistrar {
     }
 }
 
-fn response_refresh(body: &[u8], fallback_seconds: u64) -> Result<Duration, RegistrationError> {
+fn response_refresh(
+    body: &[u8],
+    fallback_seconds: u64,
+    node: &str,
+) -> Result<Duration, RegistrationError> {
     let response =
         rptadv_json::decode_value(body).map_err(|_| RegistrationError::InvalidResponse)?;
     let data = response
@@ -464,8 +474,23 @@ fn response_refresh(body: &[u8], fallback_seconds: u64) -> Result<Duration, Regi
         }
         value => value,
     };
-    let status = detail.as_str().or_else(|| detail.get("result")?.as_str());
-    if !status.is_some_and(|text| text.trim().eq_ignore_ascii_case("successfully registered")) {
+    let registered = match detail {
+        // One request registers one node. The public registrar returns its status in an array.
+        serde_json::Value::Array(rows) => match rows.as_slice() {
+            [serde_json::Value::String(row)] => row
+                .strip_prefix(node)
+                .and_then(|suffix| suffix.strip_prefix(" successfully registered @"))
+                .map(|address| address.strip_suffix('.').unwrap_or(address))
+                .and_then(|address| address.parse::<SocketAddr>().ok())
+                .is_some_and(|address| address.port() != 0),
+            _ => false,
+        },
+        _ => detail
+            .as_str()
+            .or_else(|| detail.get("result")?.as_str())
+            .is_some_and(|text| text.trim().eq_ignore_ascii_case("successfully registered")),
+    };
+    if !registered {
         return Err(RegistrationError::Rejected);
     }
     Ok(Duration::from_secs(
@@ -496,13 +521,19 @@ fn post_registration_until(
 
 #[cfg(test)]
 mod tests {
-    use super::{RegistrationError, RegistrationTarget, request_body, response_refresh, targets};
+    use super::{RegistrationError, RegistrationTarget, request_body, targets};
     use crate::secrets::SecretsFile;
     use std::time::Duration;
 
+    const TEST_NODE: &str = "524950";
+
+    fn response_refresh(body: &[u8], fallback_seconds: u64) -> Result<Duration, RegistrationError> {
+        super::response_refresh(body, fallback_seconds, TEST_NODE)
+    }
+
     fn target() -> RegistrationTarget {
         RegistrationTarget {
-            node: "524950".into(),
+            node: TEST_NODE.into(),
             url: "https://register.example/".into(),
             local_port: 4569,
             interval_seconds: 60,
@@ -586,7 +617,10 @@ mod tests {
             let mut body = br#"{"refresh":47,"data":"successfully registered"}"#.to_vec();
             body.resize(length, b' ');
             let mut reader = Cursor::new(body);
-            let result = super::read_registration_response(&mut reader, 60, || super::EXCHANGE_BUDGET);
+            let result =
+                super::read_registration_response(&mut reader, 60, TEST_NODE, || {
+                    super::EXCHANGE_BUDGET
+                });
 
             if length <= limit {
                 assert_eq!(result, Ok(Duration::from_secs(47)));
@@ -673,7 +707,7 @@ mod tests {
                 Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], 443))])
             }).unwrap();
             let mut body = Body { bytes, remaining_ms: &remaining_ms, reads: 0 };
-            let result = super::read_registration_response(&mut body, 60, remaining);
+            let result = super::read_registration_response(&mut body, 60, TEST_NODE, remaining);
             assert_eq!(body.reads, permitted_reads, "response read continued after expiry");
             if on_time {
                 assert_eq!(result, Ok(Duration::from_secs(47)));
@@ -891,6 +925,23 @@ mod tests {
         let result = post_loopback_response(200, br#"{"data":"test-secret registration denied"}"#);
         assert_eq!(result, Err(RegistrationError::Rejected));
         assert!(!format!("{result:?}").contains("test-secret"));
+    }
+
+    #[test]
+    fn registration_accepts_the_selected_node_status_from_asl() {
+        for body in [
+            br#"{"data":["524951 successfully registered @192.0.2.15:4569."]}"#.as_slice(),
+            br#"{"data":["524950 failed authentication. Please check your password and node number."]}"#,
+            br#"{"data":["524950 successfully registered @not-a-socket."]}"#,
+        ] {
+            assert_eq!(post_loopback_response(200, body), Err(RegistrationError::Rejected));
+        }
+
+        let body = br#"{"ipaddr":"192.0.2.15","port":4569,"refresh":179,"data":["524950 successfully registered @192.0.2.15:4569."]}"#;
+        assert_eq!(
+            post_loopback_response(200, body),
+            Ok(Duration::from_secs(179)),
+        );
     }
 
     #[test]
