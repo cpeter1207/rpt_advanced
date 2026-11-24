@@ -1533,7 +1533,9 @@ impl Host {
                 self.authorized_site_command(local, command, clock, Some(&permit))
                     .map_err(|_| RuntimeError::Rejected)
             }
-            LinkEffect::Connect(_) | LinkEffect::PhoneDial(..) => Err(RuntimeError::Rejected),
+            LinkEffect::Connect(_) | LinkEffect::PhoneDial(..) | LinkEffect::PhoneHangup(_) => {
+                Err(RuntimeError::Rejected)
+            }
             LinkEffect::Detach(remotes) => {
                 for remote in remotes {
                     self.detach(local, &remote, clock.now_ms);
@@ -1555,7 +1557,12 @@ impl Host {
             LinkEffect::Digit(outcome) => {
                 if let DigitOutcome::Mapped(input) = outcome {
                     if let Ok(effect) = self.runtime.dispatch_mapping(local, input, clock) {
-                        if matches!(effect, LinkEffect::Connect(_) | LinkEffect::PhoneDial(..)) {
+                        if matches!(
+                            effect,
+                            LinkEffect::Connect(_)
+                                | LinkEffect::PhoneDial(..)
+                                | LinkEffect::PhoneHangup(_)
+                        ) {
                             self.defer_link(local, effect);
                         } else {
                             let _ = self.immediate(local, effect, clock);

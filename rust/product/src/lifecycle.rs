@@ -354,6 +354,16 @@ impl Engine {
             LinkEffect::Connect(attempt) => self.dial(local, Dial::Connect(attempt), revision),
             #[cfg(target_os = "linux")]
             LinkEffect::PhoneDial(number, permit) => self.spawn_phone_dial(local, number, permit, revision, false),
+            #[cfg(target_os = "linux")]
+            LinkEffect::PhoneHangup(permit) => {
+                let engine = Arc::clone(self);
+                self.run(move |host| {
+                    if !engine.current(revision) || !permit.current(Some(engine.elapsed_ms())) {
+                        return Err(RuntimeError::Rejected);
+                    }
+                    host.hangup_outgoing_phone(&local)
+                })
+            }
             effect => {
                 let clock = self.clock();
                 let engine = Arc::clone(self);

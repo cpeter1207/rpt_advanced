@@ -46,6 +46,8 @@ pub enum Action {
     Radio(RadioAction),
     /// Dial the complete parameter on the registered account of this station.
     PhoneDial(ProtectedOperand<String>),
+    /// End the invoking station's sole pending or established outgoing call.
+    PhoneHangup,
     /// Existing site controller.
     Site(SiteCommand),
     /// Existing physical maintenance owner and bounded lease.
@@ -328,6 +330,12 @@ fn prepare(v: &Value, persisted: bool) -> Result<PreparedAction> {
             }
             "execute_dtmf" => Action::ExecuteDtmf(symbols(&mut f)?),
             "phone_dial" => phone_dial(p)?,
+            "phone_hangup" => {
+                if p.is_some() {
+                    return Err(ActionError::Parameter);
+                }
+                Action::PhoneHangup
+            }
             "message" => {
                 let m = f.text("message")?;
                 if m.chars().count() > 65536 {

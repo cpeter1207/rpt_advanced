@@ -273,6 +273,15 @@ impl PhoneCalls {
         expired
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn outgoing_sources(&self, local: &str) -> impl Iterator<Item = &PhoneSource> {
+        self.calls.iter().filter_map(move |call| {
+            let reply = call.signals.reply_target();
+            (call.local == local && reply.outgoing_phone() && !reply.ended())
+                .then_some(&call.source)
+        })
+    }
+
     /// Lookup a provider call without manufacturing a public numeric node alias.
     pub fn source(&self, call: PhoneCallId) -> Option<&PhoneSource> {
         self.calls

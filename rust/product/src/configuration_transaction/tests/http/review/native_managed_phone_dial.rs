@@ -2,6 +2,9 @@
 use super::{managed_asl, phone_caller::Caller, private_phone::{register, registrar}, *};
 use std::{io::ErrorKind, net::{SocketAddr, UdpSocket}, panic::{AssertUnwindSafe, catch_unwind, resume_unwind}};
 
+#[path = "native_phone_hangup.rs"]
+mod hangup;
+
 const MAPPING: &str = "fixture-dial";
 const CONTROL_CODE: &str = "*508";
 const DIAL_CODE: &str = "*509";
@@ -50,9 +53,17 @@ fn await_invite(socket: &UdpSocket, media: &UdpSocket, invite: &mut Option<Invit
     socket.send_to(invite.as_ref().unwrap().answer.as_bytes(), source).unwrap();
 }
 
-fn exercise_dialog(socket: &UdpSocket, media: UdpSocket, invite: &Invite, witness: &Path, forbidden: &str)
-    -> [bool; 5] {
-    socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+fn exercise_dialog(
+    socket: &UdpSocket,
+    media: UdpSocket,
+    invite: &Invite,
+    witness: &Path,
+    forbidden: &str,
+    request_hangup: impl FnOnce() -> Option<bool>,
+) -> [bool; 5] {
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
     let mut wire = [0; 8192];
     let ack = registrar::receive_register(socket, &mut wire).is_ok_and(|(packet, source)| {
         packet.starts_with("ACK ") && source == invite.source
@@ -66,7 +77,14 @@ fn exercise_dialog(socket: &UdpSocket, media: UdpSocket, invite: &Invite, witnes
     assert_ne!(fs::read_to_string(witness).as_deref().ok(), Some("500Hz\n"));
     caller.audio(65, false);
     let phone_pcm = fs::read_to_string(witness).as_deref().ok() == Some("500Hz\n");
-    caller.digits(forbidden);
+    if let Some(local_bye) = request_hangup() {
+        if local_bye {
+            return [ack, station_pcm, phone_pcm, false, caller.media_quiet()];
+        }
+        // Baseline cleanup uses the existing remote BYE only after the local observation closed.
+    } else {
+        caller.digits(forbidden);
+    }
     let contact = invite.source;
     let authority = socket.local_addr().unwrap();
     let bye = format!("BYE sip:desk@{contact} SIP/2.0\r\nVia: SIP/2.0/UDP {authority};branch=z9hG4bK-a5-end;rport\r\nMax-Forwards: 70\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 1 BYE\r\nContent-Length: 0\r\n\r\n",
@@ -121,7 +139,7 @@ fn withdraw(socket: &UdpSocket, contact: SocketAddr, invite: Option<&Invite>) {
     }
 }
 
-pub(in super::super) fn run(scenario: &Scenario<'_>) {
+pub(in super::super) fn run(scenario: &Scenario<'_>, test_hangup: bool) {
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     let authority = socket.local_addr().unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(12))).unwrap();
@@ -156,6 +174,7 @@ pub(in super::super) fn run(scenario: &Scenario<'_>) {
     });
 
     let mut invite = None;
+    let mut hangup_result = hangup::Observation::default();
     let checked = catch_unwind(AssertUnwindSafe(|| {
         assert_eq!(enabled.code, 202, "SIP radio activation");
         managed_asl::confirmed(&client, enabled.body["desired_revision"].as_str().unwrap(), station);
@@ -166,6 +185,9 @@ pub(in super::super) fn run(scenario: &Scenario<'_>) {
         let before = &prior.body["effective"];
         for mapping in before["mappings"].as_object().unwrap().values() {
             let existing = mapping["command"].as_str().unwrap();
+            if test_hangup && !existing.is_empty() {
+                assert!(!hangup::CODE.starts_with(existing) && !existing.starts_with(hangup::CODE));
+            }
             assert!(existing.is_empty() || [CONTROL_CODE, DIAL_CODE].iter().all(|code|
                 !code.starts_with(existing) && !existing.starts_with(*code)));
         }
@@ -202,6 +224,27 @@ pub(in super::super) fn run(scenario: &Scenario<'_>) {
         let view = client.get(&effective_path);
         let mapping = &view.body["effective"]["mappings"][MAPPING];
         let effective = view.code == 200 && mapping["action"] == "phone_dial" && mapping["command"] == DIAL_CODE;
+        if test_hangup {
+            // Keep the independently confirmed dial mapping when this second edit is refused.
+            let mut candidate = authored("phone_dial", DIAL_CODE);
+            candidate["configuration"]["mappings"]["fixture-hangup"] =
+                json!({"action":"phone_hangup","command":hangup::CODE,"protected":false});
+            let reply = client.edit("PUT", &settings, Some(&candidate));
+            hangup_result.mapping_http = reply.code;
+            if reply.code == 202 {
+                managed_asl::confirmed(
+                    &client,
+                    reply.body["desired_revision"].as_str().unwrap(),
+                    station,
+                );
+            }
+            let view = client.get(&effective_path);
+            let entry = &view.body["effective"]["mappings"]["fixture-hangup"];
+            hangup_result.effective = view.code == 200
+                && entry["action"] == "phone_hangup"
+                && entry["command"] == hangup::CODE;
+            active = client.get(health).body["status"]["active_revision"].clone();
+        }
         let submitted = operation(&client, json!({"submitted":true,"targets":[station],
             "expected_active_revision":active,
             "action":{"action":"execute_dtmf","digits":format!("{DIAL_CODE}{NUMBER}{terminator}")}}));
@@ -210,7 +253,18 @@ pub(in super::super) fn run(scenario: &Scenario<'_>) {
         let media = UdpSocket::bind("127.0.0.1:0").unwrap();
         await_invite(&socket, &media, &mut invite);
         let media = invite.as_ref().map_or([false; 5], |call| {
-            exercise_dialog(&socket, media, call, &witness, &format!("{DIAL_CODE}{NUMBER}{terminator}"))
+            exercise_dialog(
+                &socket,
+                media,
+                call,
+                &witness,
+                &format!("{DIAL_CODE}{NUMBER}{terminator}"),
+                || {
+                    test_hangup.then(|| {
+                        hangup_result.request(&client, station, &active, terminator, &socket, call)
+                    })
+                },
+            )
         });
         (mapped.code, selected, view.code, effective, submitted.code, admitted, media)
     }));
@@ -225,6 +279,22 @@ pub(in super::super) fn run(scenario: &Scenario<'_>) {
     let reached_recipient = invite.as_ref().is_some_and(|call| {
         call.source == contact && call.target == format!("sip:{NUMBER}@{authority}")
     });
+    if test_hangup {
+        assert!(
+            mapping_http == 202 && selected && effective && admitted && reached_recipient,
+            "independent original dial mapping must establish the selected recipient"
+        );
+        assert!(
+            ack && station_pcm && phone_pcm,
+            "established call must carry both PCM directions before hangup"
+        );
+        assert!(
+            media_retired,
+            "exact dialog must close and media retire before releasing the foreground"
+        );
+        hangup_result.verify();
+        return;
+    }
     eprintln!(
         "A5_SIP_CLOSED digest_registered=true withdrawal_200=true foreground_joined=true writer_released=true mapping_http={mapping_http} selected={selected} effective_http={effective_http} effective={effective} operation_http={work_http} admitted={admitted} invite={} invite_matches={reached_recipient}",
         invite.is_some()

@@ -104,7 +104,7 @@ pub(super) fn fields(
         "feed_dtmf_symbol" => &["digit"],
         "actual_receiver_unkey" => &[],
         "phone_attach" => &[],
-        "phone_dial" => &[],
+        "phone_dial" | "phone_hangup" => &[],
         "phone_select_command_target" => &[],
         "phone_send_node_digit" => &["digit"],
         "phone_send_telephone_digit" => &["digit"],

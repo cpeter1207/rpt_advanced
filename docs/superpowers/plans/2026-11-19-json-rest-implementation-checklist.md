@@ -72,6 +72,8 @@ Use test-driven development.
 
 [x] - Verify that disabling local TX suppresses RF programme, PTT and CTCSS while ordinary voice still reaches peers, and that disabling local RX preserves independent peer audio to RF and other peers. Both failures reproduced on ARM64 (94982) and the corrected controls passed (79714).
 
+[x] - Verify that the configured station hangup command ends its established outgoing SIP dialog. Run 87591 observed the controller send BYE on the same dialog after both PCM directions were verified, then confirmed media retirement and a clean shutdown.
+
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.
 
 [] - Split controller configuration into site metadata/defaults, port metadata, radio/audio/signaling/interface sections, protocol instances, events, macros, messages, mailboxes and equipment resources.

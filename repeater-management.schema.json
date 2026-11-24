@@ -14609,6 +14609,22 @@
           "x-source-restrictions": [
             "Actual receiver or authenticated management on the owning port."
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "phone_hangup"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false,
+          "description": "End this port's sole pending or active outgoing call. An absent or ambiguous outgoing call rejects the command.",
+          "x-source-restrictions": [
+            "Actual receiver or authenticated management on the owning port, including macros retaining that source."
+          ]
         }
       ]
     },
@@ -17009,6 +17025,22 @@
           },
           "additionalProperties": false,
           "x-action-schema": "#/$defs/phoneCommandAction/oneOf/7"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/phoneCommandAction/oneOf/8/properties/action"
+            },
+            "command": {
+              "$ref": "#/$defs/dtmfCommand"
+            },
+            "protected": {
+              "$ref": "#/$defs/dtmfProtection"
+            }
+          },
+          "additionalProperties": false,
+          "x-action-schema": "#/$defs/phoneCommandAction/oneOf/8"
         },
         {
           "type": "object",

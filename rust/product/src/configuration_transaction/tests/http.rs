@@ -587,7 +587,9 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
             .env("RPTADV_HAL_TEST_CHILD", "1");
         if matches!(
             std::env::var("RPTADV_HAL_REVIEW_CASE").as_deref(),
-            Ok("standalone-managed-phone-dial" | "standalone-managed-phone-incoming")
+            Ok("standalone-managed-phone-dial"
+                | "standalone-managed-phone-hangup"
+                | "standalone-managed-phone-incoming")
         ) {
             child.env("RPTADV_TEST_PHONE_AUDIO", fixture.0.join("phone-programme.txt"));
         }

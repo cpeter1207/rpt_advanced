@@ -104,6 +104,8 @@ pub enum LinkEffect {
     PrivatePhoneControl(PeerReply,crate::command_language::HostAction,super::dtmf::ActionPermit),
     /// Start a retained private outgoing call outside the control owner.
     PhoneDial(crate::command_language::ProtectedOperand<String>, super::dtmf::ActionPermit),
+    /// End the unique outgoing call on the initiating station under this permit.
+    PhoneHangup(super::dtmf::ActionPermit),
     /// Complete source-owned command mode selection using the host's actual directory.
     VerifyCommandTarget(DigitOperation),
     /// Apply through the existing station site controller and its physical submission owner.

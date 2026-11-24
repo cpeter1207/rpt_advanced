@@ -32,6 +32,39 @@ impl Host {
         });
     }
 
+    /// Select and cancel in the same serialized turn so a successor cannot be substituted.
+    pub(crate) fn hangup_outgoing_phone(&mut self, local: &str) -> Result<(), RuntimeError> {
+        enum Outgoing {
+            Pending(Arc<AtomicBool>),
+            Active(PhoneSource),
+        }
+        let selected = {
+            let pending = self
+                .phone_dials
+                .iter()
+                .filter(|attempt| attempt.local == local)
+                .filter_map(|attempt| attempt.current.upgrade())
+                .filter(|current| current.load(Ordering::Acquire))
+                .map(Outgoing::Pending);
+            let active = self
+                .phone_calls
+                .outgoing_sources(local)
+                .cloned()
+                .map(Outgoing::Active);
+            let mut candidates = pending.chain(active);
+            let selected = candidates.next().ok_or(RuntimeError::Rejected)?;
+            if candidates.next().is_some() {
+                return Err(RuntimeError::Rejected);
+            }
+            selected
+        };
+        let ended = match selected {
+            Outgoing::Pending(current) => current.swap(false, Ordering::AcqRel),
+            Outgoing::Active(source) => self.retire_phone(&source),
+        };
+        ended.then_some(()).ok_or(RuntimeError::Rejected)
+    }
+
     pub(crate) fn begin_phone_dial(&mut self, local: &str) -> Result<OutboundPhone, RuntimeError> {
         self.recheck_phone_dials();
         // Limit pending workers separately from the existing bounded media call owner.

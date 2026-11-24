@@ -51,6 +51,7 @@ impl Action {
                 Self::Link(_)
                     | Self::Radio(_)
                     | Self::PhoneDial(_)
+                    | Self::PhoneHangup
                     | Self::Maintenance(_)
                     | Self::Interface(_)
                     | Self::Message(..)
@@ -78,7 +79,7 @@ impl Action {
         Ok(())
     }
 
-    pub(crate) fn permits_phone_dial(source: &CommandSource) -> bool {
+    pub(crate) fn permits_outgoing_phone(source: &CommandSource) -> bool {
         matches!(source, CommandSource::Receiver | CommandSource::Management(_))
     }
 }
@@ -93,7 +94,7 @@ impl PreparedAction {
             CommandSource::Receiver | CommandSource::Connection { .. }
         );
         let allowed = match &self.action {
-            Action::PhoneDial(_) => Action::permits_phone_dial(source),
+            Action::PhoneDial(_) | Action::PhoneHangup => Action::permits_outgoing_phone(source),
             Action::Host(HostAction::PhoneAuthenticate(..) | HostAction::PhoneRetire) => phone,
             _ if matches!(source,CommandSource::Connection{reply:r,..} if r.phone_source().is_some() && !r.phone_authenticated()) => {
                 false

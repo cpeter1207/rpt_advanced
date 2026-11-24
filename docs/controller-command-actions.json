@@ -54,7 +54,7 @@
     },
     {
       "definition": "phoneCommandAction",
-      "variants": 7
+      "variants": 9
     },
     {
       "definition": "phoneSessionAction",
@@ -2258,6 +2258,19 @@
       "required_fields": {},
       "source": "rust/core/src/phone_dtmf.rs:271-281",
       "semantics": "Inert foundation; call-local release; default90."
+    }
+  ],
+  "outgoing_phone_commands": [
+    {
+      "action": "phone_dial",
+      "operand": "Dialed number on the invoking port's registered account."
+    },
+    {
+      "action": "phone_hangup",
+      "legacy_key": "link_command_phone_hangup",
+      "native_default_digits": "",
+      "operand": "None.",
+      "semantics": "A port receiver or authenticated management operator can cancel that port's single pending or active outgoing call. Macros retain the initiating source. Zero or multiple outgoing calls reject the action and preserve all calls. Incoming calls remain under their own session owner."
     }
   ],
   "mailbox_and_phone_sessions": [

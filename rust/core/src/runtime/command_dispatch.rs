@@ -648,10 +648,16 @@ impl<A: Send, C: Send> Runtime<A, C> {
         let dtmf = invocation.origin == ParameterOrigin::Dtmf;
         let mut op = match invocation.action {
             Action::PhoneDial(number) => {
-                if !Action::permits_phone_dial(source) {
+                if !Action::permits_outgoing_phone(source) {
                     return Err(RuntimeError::Rejected);
                 }
                 return Ok(LinkEffect::PhoneDial(number, permit));
+            }
+            Action::PhoneHangup => {
+                if !Action::permits_outgoing_phone(source) {
+                    return Err(RuntimeError::Rejected);
+                }
+                return Ok(LinkEffect::PhoneHangup(permit));
             }
             Action::Link(c) => {
                 let target = if matches!(
