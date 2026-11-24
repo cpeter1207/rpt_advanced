@@ -675,4 +675,6 @@ Run 19781 passed 21 of 22 controls, including AllStarLink, direct EchoLink and r
 
 Run 89099 initialized an empty protected store with one site, zero ports and Pending activation. After interruption at the first pointer, reopening recovered the same desired revision and cleared the journal. The same run reproduced an adapter timing defect with 170 OPTIONS requests and a 106 ms first interval. Run 83152 used the same registration test executable and the corrected SIP adapter from source tree `21a32bc1`. It observed two OPTIONS requests 15,007 ms apart, successful registration and withdrawal, and joined owners.
 
-The full fast checks and hosted CI for this aggregate, the staged release rehearsal and the physical radio trial remain pending.
+Run 26369 built the private ARM64 trial bundle and retained it before five staged rehearsals. The 13 real providers passed descriptor validation. The zero-port store passed independent inspection, authenticated apply and configuration checking. Two SIP OPTIONS arrived 15,010 ms apart. With simulated station hardware, incoming and radio-originated calls both passed audio in both directions and released the writer lease on shutdown. The retained bundle contains 153 members, weighs 22,305,298 bytes and has SHA-256 `568877098f3b898d8a6978ee7243bdbdab2e64031c0cbc1a236da7e1f4e65190`. All 45 staged ELF digests matched their archived files.
+
+The full fast checks and hosted CI for this aggregate and the physical radio trial remain pending.

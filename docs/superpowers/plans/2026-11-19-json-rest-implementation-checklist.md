@@ -68,6 +68,8 @@ Use test-driven development.
 
 [x] - Initialize an empty protected store and recover the first pointer on ARM64 (89099). Verify the corrected SIP adapter sends its second keepalive after the configured interval (83152).
 
+[x] - Build and retain the private ARM64 trial bundle and pass its five staged rehearsals (26369). The staged prefix validated 13 real providers, initialized and applied a zero-port store, and passed SIP cadence and both phone call directions with simulated station hardware.
+
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.
 
 [] - Split controller configuration into site metadata/defaults, port metadata, radio/audio/signaling/interface sections, protocol instances, events, macros, messages, mailboxes and equipment resources.
