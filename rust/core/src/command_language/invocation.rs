@@ -50,6 +50,7 @@ impl Action {
                 self,
                 Self::Link(_)
                     | Self::Radio(_)
+                    | Self::PhoneDial(_)
                     | Self::Maintenance(_)
                     | Self::Interface(_)
                     | Self::Message(..)
@@ -76,6 +77,10 @@ impl Action {
         }
         Ok(())
     }
+
+    pub(crate) fn permits_phone_dial(source: &CommandSource) -> bool {
+        matches!(source, CommandSource::Receiver | CommandSource::Management(_))
+    }
 }
 impl PreparedAction {
     /// Check trust provenance without inventing a live generation. Final admission
@@ -88,14 +93,12 @@ impl PreparedAction {
             CommandSource::Receiver | CommandSource::Connection { .. }
         );
         let allowed = match &self.action {
+            Action::PhoneDial(_) => Action::permits_phone_dial(source),
             Action::Host(HostAction::PhoneAuthenticate(..) | HostAction::PhoneRetire) => phone,
             _ if matches!(source,CommandSource::Connection{reply:r,..} if r.phone_source().is_some() && !r.phone_authenticated()) => {
                 false
             }
-            Action::Host(HostAction::PhoneGrammar(_)) if phone => {
-                return Err(ActionError::Unavailable);
-            }
-            Action::Host(HostAction::PhoneGrammar(_)) => false,
+            Action::Host(HostAction::PhoneGrammar(_)) => phone,
             Action::Host(
                 HostAction::Start
                 | HostAction::Stop

@@ -65,6 +65,7 @@ fn main() {
         ))
         .allowlist_type("rptadv_.*")
         .allowlist_var("RPTADV_SITE_.*")
+        .allowlist_var("RPTADV_IAX2_SERVICE_ONLY")
         .allowlist_var("URP_NATIVE_.*")
         .allowlist_var("URP_AST_.*")
         .allowlist_type("Urp.*")

@@ -853,6 +853,9 @@ impl DtmfCommands {
             || self.pad.is_some()
             || now_ms < self.admin_until_ms.load(Ordering::Acquire)
     }
+    pub(super) fn collecting_input(&self) -> bool {
+        self.mapped.as_ref().map_or_else(||self.collector.active(), MappedCollector::active)
+    }
     pub(super) fn remote_collecting(&self) -> bool {
         self.mapped
             .as_ref()

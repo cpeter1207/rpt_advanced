@@ -302,20 +302,21 @@ fn poll_iax_listeners(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs() as u32);
-    for listener in listeners.values_mut() {
-        report_iax_poll(drain_iax_datagrams(|| unsafe {
+    for (&port, listener) in listeners.iter_mut() {
+        report_iax_poll(port, drain_iax_datagrams(|| unsafe {
             listener.poll(now, Some(authorize_inbound), Some(accept_inbound), pointer)
         }));
     }
 }
 
-fn report_iax_poll(result: Result<(), crate::iax::IaxError>) {
+pub(crate) fn report_iax_poll(port: u16, result: Result<(), crate::iax::IaxError>) {
+    use std::io::Write;
     if let Err(error) = result {
-        eprintln!("IAX2 listener poll failed: {error}");
+        let _ = writeln!(std::io::stderr(), "IAX2 listener on UDP port {port} poll failed: {error}");
     }
 }
 
-fn drain_iax_datagrams(
+pub(crate) fn drain_iax_datagrams(
     mut poll: impl FnMut() -> Result<bool, crate::iax::IaxError>,
 ) -> Result<(), crate::iax::IaxError> {
     for _ in 0..MAX_IAX_DATAGRAMS_PER_POLL {
@@ -331,7 +332,7 @@ struct InboundContext<'a> {
     client: crate::iax::IaxClient,
 }
 
-unsafe fn callback_text<'a>(pointer: *const u8, length: usize) -> Option<&'a str> {
+pub(crate) unsafe fn callback_text<'a>(pointer: *const u8, length: usize) -> Option<&'a str> {
     if pointer.is_null() && length != 0 {
         return None;
     }
@@ -559,8 +560,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn listener_poll_and_signal_install_errors_are_handled() {
-        super::report_iax_poll(Ok(()));
-        super::report_iax_poll(Err(crate::iax::IaxError::Operation));
+        super::report_iax_poll(4569, Ok(()));
+        super::report_iax_poll(4569, Err(crate::iax::IaxError::Operation));
         super::install_signal_handlers_with(|signal| signal != libc::SIGTERM).unwrap_err();
         super::install_signal_handlers_with(|_| true).unwrap();
     }

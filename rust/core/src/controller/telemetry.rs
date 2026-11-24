@@ -375,9 +375,10 @@ pub struct ControllerControl {
     settings: MorseSettings,
     outstanding: usize,
     pub(super) parrot: Option<ParrotCaptureControl>,
-    parrot_pending: Producer<PreparedMedia>,
+    parrot_pending: Producer<QueuedParrot>,
     parrot_completed: Consumer<PreparedMedia>,
     parrot_busy: Arc<AtomicBool>,
+    parrot_epoch: Arc<AtomicU64>,
     pub(super) parrot_enabled: bool,
     parrot_requests: Option<Producer<ParrotRequest>>,
     parrot_acknowledgements: Option<Consumer<ParrotAck>>,
@@ -502,7 +503,14 @@ impl ControllerControl {
 
     /// Take a completed parrot burst without entering the callback owner.
     pub fn take_parrot_capture(&mut self) -> Option<CapturedParrot> {
-        self.parrot.as_mut()?.take_completed()
+        let capture = self.parrot.as_mut()?;
+        while let Some(clip) = capture.take_completed() {
+            if clip.isolation_epoch == self.parrot_epoch.load(Ordering::Acquire) {
+                return Some(clip);
+            }
+            capture.recycle(clip);
+        }
+        None
     }
 
     /// Recycle a capture slot after control/media has finished with its samples.
@@ -527,7 +535,19 @@ impl ControllerControl {
 
     /// Queue one completed recording for serialized parrot playback.
     pub fn queue_prepared_parrot(&mut self, media: PreparedMedia) -> bool {
+        let epoch = self.parrot_epoch.load(Ordering::Acquire);
+        self.queue_parrot(media, epoch)
+    }
+
+    /// Preserve the capture's epoch through any off-audio recording preparation.
+    pub(crate) fn queue_captured_parrot(&mut self, clip: &CapturedParrot, media: PreparedMedia) -> bool {
+        self.queue_parrot(media, clip.isolation_epoch)
+    }
+
+    fn queue_parrot(&mut self, media: PreparedMedia, epoch: u64) -> bool {
         if !self.parrot_enabled
+            || epoch & 1 != 0
+            || epoch != self.parrot_epoch.load(Ordering::Acquire)
             || media.2 != MediaKind::Parrot
             || self
                 .parrot_busy
@@ -536,7 +556,7 @@ impl ControllerControl {
         {
             return false;
         }
-        if self.parrot_pending.push(media).is_err() {
+        if self.parrot_pending.push(QueuedParrot { media, epoch }).is_err() {
             self.parrot_busy.store(false, Ordering::Release);
             return false;
         }
@@ -688,11 +708,17 @@ pub(super) struct TelemetryPlanner {
     pub held_status: bool,
     pending: Consumer<PreparedMedia>,
     completed: Producer<PreparedMedia>,
-    parrot_pending: Consumer<PreparedMedia>,
+    pub(super) parrot_epoch: Arc<AtomicU64>,
+    parrot_pending: Consumer<QueuedParrot>,
     parrot_completed: Producer<PreparedMedia>,
     pub parrot: Option<PreparedMedia>,
     pub gain: f32,
     duck_gain: f32,
+}
+
+struct QueuedParrot {
+    media: PreparedMedia,
+    epoch: u64,
 }
 
 impl TelemetryPlanner {
@@ -704,6 +730,7 @@ impl TelemetryPlanner {
         let (parrot_pending, parrot_consumer) = RingBuffer::new(1);
         let (parrot_completed, parrot_reclaimer) = RingBuffer::new(1);
         let parrot_busy = Arc::new(AtomicBool::new(false));
+        let parrot_epoch = Arc::new(AtomicU64::new(0));
         let rx_muted = Arc::new(AtomicU64::new(0));
         let rx_qualified = Arc::new(AtomicBool::new(false));
         let site_inhibit = Arc::new(AtomicBool::new(false));
@@ -720,6 +747,7 @@ impl TelemetryPlanner {
                 pending,
                 completed,
                 parrot_pending: parrot_consumer,
+                parrot_epoch: Arc::clone(&parrot_epoch),
                 parrot_completed,
                 parrot: None,
                 gain: 1.0,
@@ -740,6 +768,7 @@ impl TelemetryPlanner {
                 parrot_pending,
                 parrot_completed: parrot_reclaimer,
                 parrot_busy,
+                parrot_epoch,
                 parrot_enabled: false,
                 parrot_requests: None,
                 parrot_acknowledgements: None,
@@ -813,14 +842,18 @@ impl TelemetryPlanner {
         self.parrot.is_some() || !self.parrot_pending.is_empty()
     }
     pub fn start_parrot(&mut self) {
-        self.parrot = self.parrot_pending.pop().ok();
-        if let Some(media) = &mut self.parrot {
-            media.0.restart(false);
+        if let Ok(QueuedParrot { mut media, epoch }) = self.parrot_pending.pop() {
+            if epoch == self.parrot_epoch.load(Ordering::Relaxed) {
+                media.0.restart(false);
+                self.parrot = Some(media);
+            } else {
+                self.cancel_parrot(media);
+            }
         }
     }
     pub fn discard_pending_parrot(&mut self) {
-        if let Ok(media) = self.parrot_pending.pop() {
-            let _ = self.parrot_completed.push(media);
+        if let Ok(QueuedParrot { media, .. }) = self.parrot_pending.pop() {
+            self.cancel_parrot(media);
         }
     }
     /// Interrupt live parrot playback and return queued media to control for reclamation.
@@ -828,8 +861,14 @@ impl TelemetryPlanner {
         self.discard_pending_parrot();
         if self.active == Some(Source::Parrot) {
             self.active = None;
-            self.finish_parrot();
+            if let Some(media) = self.parrot.take() {
+                self.cancel_parrot(media);
+            }
         }
+    }
+    fn cancel_parrot(&mut self, mut media: PreparedMedia) {
+        media.0.cancel();
+        let _ = self.parrot_completed.push(media);
     }
     pub fn finish_parrot(&mut self) {
         if let Some(media) = self.parrot.take() {

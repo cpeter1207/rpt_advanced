@@ -9,7 +9,7 @@ use rpt_advanced_core::config::{
     ConfigDocument, EchoLinkSettings, NodeId, ResolvedNodeSettings, Schema,
 };
 #[path = "configuration_echolink.rs"]
-mod echolink;
+pub(crate) mod echolink;
 #[path = "configuration_radio.rs"]
 pub(crate) mod radio;
 use std::{

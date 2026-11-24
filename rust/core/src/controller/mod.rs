@@ -329,9 +329,26 @@ impl NodeController {
 
     /// Feed the already mixed receive tap to the preallocated parrot capture owner.
     pub fn observe_parrot(&mut self, active: bool, samples: &[f32]) {
+        self.observe_parrot_at_epoch(active, samples, self.telemetry.parrot_epoch.load(Ordering::Acquire));
+    }
+
+    /// Cut parrot capture and playback at station isolation boundaries with no PCM handoff.
+    pub(crate) fn observe_parrot_at_epoch(&mut self, active: bool, samples: &[f32], epoch: u64) {
         self.sync_parrot_lifecycle();
+        let changed = self.telemetry.parrot_epoch.load(Ordering::Relaxed) != epoch;
+        if changed {
+            self.telemetry.parrot_epoch.store(epoch, Ordering::Release);
+        }
+        let suspended = changed || epoch & 1 != 0;
+        if suspended {
+            self.telemetry.disable_parrot();
+        }
         if let Some(capture) = &mut self.parrot_capture {
-            capture.observe(active, samples);
+            if suspended {
+                capture.discard(active);
+            } else {
+                capture.observe_at_epoch(active, samples, epoch);
+            }
         }
     }
 

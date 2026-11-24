@@ -647,3 +647,80 @@ fn physical_inverted_sound_chip_roles_visit_validity_aware_native_qualifiers() {
         });
     }
 }
+
+#[test]
+fn exact_alsa_microphone_and_speaker_prepare_without_a_physical_transmitter() {
+    let api = RadioPreparationApi::open().unwrap();
+    for (source, controls) in [
+        ("key_down", json!({"source":"key_down","scancode":42})),
+        ("serial", json!({"source":"serial","pin":["CTS"]})),
+    ] {
+        let resources = [
+            (
+                K::Interface,
+                json!({"audio":{"backend":"alsa","device_identifier":"hw:3,0"},
+                "keyboard":{"device":"/fixture/explicit-event"},"serial":{"device":"/fixture/modem"}}),
+            ),
+            (K::RxSignaling, json!({"squelch":controls})),
+            (K::TxSignaling, json!({"ptt":{"timing":{"settle_ms":500}}})),
+        ];
+        station_with(&resources, |profile| {
+            assert_eq!(profile.signals.rx.squelch.binding.source.as_str(), source);
+            assert_eq!(
+                profile.signals.tx.ptt.source.as_str(),
+                "none",
+                "plain ALSA with no authored actuator uses speaker playback"
+            );
+            let station = api.prepare_station(profile, "6").unwrap();
+            assert!(station.remote_commands().unwrap().is_none());
+        });
+    }
+}
+
+#[test]
+fn remote_fallback_preserves_receive_carrier_and_claims_only_active_rf_outputs() {
+    use rpt_advanced_core::config::resources::ResourceWarning;
+    use rpt_advanced_core::config::resources::profiles::radio::{ParallelInput, ParallelOutput};
+
+    let site = [(
+        K::TxSignaling,
+        json!({"ctcss":{"enabled":true,"source":"external","output":{"source":"parallel","pin":[3]}}}),
+    )];
+    for physical in [false, true] {
+        let tx = if physical {
+            json!({"ptt":{"source":"parallel","pin":[2]}})
+        } else {
+            json!({})
+        };
+        let port = [
+            (K::Control, json!({"enabled":true})),
+            (
+                K::Interface,
+                json!({"audio":{"backend":"alsa","device_identifier":"hw:3,0"}}),
+            ),
+            (
+                K::RxSignaling,
+                json!({"squelch":{"source":"parallel","pin":[10],"inverted":true}}),
+            ),
+            (K::TxSignaling, tx),
+        ];
+        station_inheriting(&site, &port, |profile, warnings| {
+            assert!(!profile.remote.enabled);
+            assert!(warnings.iter().any(|w| w.resource.kind == K::Control
+                && matches!(w.warning, ResourceWarning::InvalidValue("enabled"))));
+            let rx = &profile.signals.rx.squelch;
+            assert!(rx.enabled && rx.binding.inverted);
+            assert_eq!(rx.binding.pins, [10]);
+            assert_eq!(profile.interface.parallel.inputs[0], ParallelInput::Carrier);
+            assert_eq!(profile.signals.tx.ctcss.enabled, physical);
+            let outputs = &profile.interface.parallel.outputs[..2];
+            if physical {
+                assert_eq!(profile.signals.tx.ptt.source.as_str(), "parallel");
+                assert_eq!(outputs, [ParallelOutput::PushToTalk, ParallelOutput::Low]);
+            } else {
+                assert_eq!(profile.signals.tx.ptt.source.as_str(), "none");
+                assert_eq!(outputs, [ParallelOutput::Unassigned; 2]);
+            }
+        });
+    }
+}

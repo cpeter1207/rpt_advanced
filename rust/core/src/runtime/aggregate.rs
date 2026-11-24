@@ -1108,7 +1108,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                                 })
                         })
                         .is_some_and(|prepared| {
-                            node.control.telemetry.queue_prepared_parrot(prepared)
+                            node.control.telemetry.queue_captured_parrot(&clip, prepared)
                         });
                     let _ = queued;
                     node.control.telemetry.recycle_parrot_capture(clip);

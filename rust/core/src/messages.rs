@@ -209,12 +209,18 @@ pub enum Message<'a> {
 /// Private login wording; no account, mailbox or credential arguments are accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhoneAuthenticationPrompt {
-    /// Ask every admitted caller for mailbox and PIN.
+    /// Ask every admitted caller for the mailbox number only.
     Login,
+    /// Ask for the numeric password after the completed mailbox field.
+    Password,
     /// Generic failure, without revealing whether a mailbox exists.
     Retry,
     /// Confirm ordinary private access; this never promises node unlock.
     Authenticated,
+    /// The requested private route or media operation is not currently supported.
+    Unavailable,
+    /// Credential-free failure of the exact caller's requested operation.
+    Failed,
 }
 
 /// Ordered units used by localized compound durations.
@@ -994,6 +1000,9 @@ impl Message<'_> {
                     "state",
                     match prompt {
                         PhoneAuthenticationPrompt::Login => "login",
+                        PhoneAuthenticationPrompt::Password => "password",
+                        PhoneAuthenticationPrompt::Unavailable => "unavailable",
+                        PhoneAuthenticationPrompt::Failed => "failed",
                         PhoneAuthenticationPrompt::Retry => "retry",
                         PhoneAuthenticationPrompt::Authenticated => "authenticated",
                     },

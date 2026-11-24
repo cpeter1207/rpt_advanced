@@ -276,7 +276,7 @@ impl std::error::Error for ProviderError {}
 
 /// All standalone runtime libraries, kept loaded for the product's full lifetime.
 pub struct ProviderSet {
-    _libraries: Vec<Library>,
+    _libraries: std::sync::Arc<[Library]>,
     descriptors: Vec<LoadedProvider>,
     iax: OnceLock<Result<crate::iax::IaxClient, crate::iax::IaxError>>,
 }
@@ -417,7 +417,7 @@ impl ProviderSet {
             libraries.push(library.0);
         }
         Ok(Self {
-            _libraries: libraries,
+            _libraries: libraries.into(),
             descriptors,
             iax: OnceLock::new(),
         })
@@ -425,8 +425,15 @@ impl ProviderSet {
 
     /// Open the selected codec composition once, retaining it across node reloads.
     pub(crate) fn iax_client(&self) -> Result<crate::iax::IaxClient, ProviderError> {
+        self.iax_client_with(|| crate::iax::IaxClient::load(Path::new("librptadviax2.so.2")))
+    }
+
+    fn iax_client_with(
+        &self,
+        load: impl FnOnce() -> Result<crate::iax::IaxClient, crate::iax::IaxError>,
+    ) -> Result<crate::iax::IaxClient, ProviderError> {
         self.iax
-            .get_or_init(|| crate::iax::IaxClient::load(Path::new("librptadviax2.so.2")))
+            .get_or_init(|| load()?.with_provider_libraries(std::sync::Arc::clone(&self._libraries)))
             .clone()
             .map_err(|_| ProviderError::IncompleteDescriptor("librptadviax2.so.2"))
     }
@@ -987,10 +994,53 @@ pub(crate) mod tests {
 
     pub(crate) fn empty_provider_set() -> super::ProviderSet {
         super::ProviderSet {
-            _libraries: Vec::new(),
+            _libraries: std::sync::Arc::from([]),
             descriptors: Vec::new(),
             iax: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Use the real selected-client cache while keeping all fixture code in-process.
+    pub(crate) fn selected_client_for_lifetime_test(
+        destroy: unsafe extern "C" fn(*mut c_void), catalog: *mut c_void,
+    ) -> (super::ProviderSet, crate::iax::IaxClient, std::sync::Weak<[libloading::Library]>) {
+        let providers = empty_provider_set();
+        let lease = std::sync::Arc::downgrade(&providers._libraries);
+        let client = providers.iax_client_with(|| {
+            Ok(crate::iax::tests::client_with_live_catalog(destroy, catalog))
+        }).unwrap();
+        (providers, client, lease)
+    }
+
+    #[test]
+    fn selected_library_lease_covers_peer_destruction() {
+        use std::cell::{Cell, RefCell};
+        use std::sync::{Arc, Weak};
+
+        thread_local! {
+            static SELECTED: RefCell<Option<Weak<[libloading::Library]>>> = const { RefCell::new(None) };
+            static OBSERVED: Cell<Option<bool>> = const { Cell::new(None) };
+        }
+        unsafe extern "C" fn destroy(_: *mut c_void) {
+            let live = SELECTED.with_borrow(|slot| slot.as_ref().and_then(Weak::upgrade).is_some());
+            OBSERVED.set(Some(live));
+        }
+
+        let providers = empty_provider_set();
+        let lease = Arc::downgrade(&providers._libraries);
+        SELECTED.with_borrow_mut(|slot| *slot = Some(lease.clone()));
+        let client = providers
+            .iax_client_with(|| Ok(crate::iax::tests::client_with_destroy(destroy)))
+            .unwrap();
+        // The fake descriptor ignores the opaque token and releases it once on peer drop.
+        let peer = unsafe { client.adopt_inbound(std::ptr::dangling_mut::<c_void>()) }.unwrap();
+        drop(providers);
+        drop(peer);
+        let observed = OBSERVED.replace(None);
+        SELECTED.with_borrow_mut(|slot| *slot = None);
+
+        assert_eq!(observed, Some(true), "peer destroy must retain the selected library lease");
+        assert!(lease.upgrade().is_none(), "final peer drop must release the lease");
     }
 
     /// Current ABI-5 session table prefix; optional profile operations are not consumed.
@@ -1179,7 +1229,7 @@ pub(crate) mod tests {
                 .unwrap();
             // Keep the real client descriptor alive while substituting the async capability.
             let _client_library = std::mem::replace(
-                &mut runtime._libraries[index],
+                &mut std::sync::Arc::get_mut(&mut runtime._libraries).expect("unique fixture owner")[index],
                 unsafe { libloading::Library::new(fixture.path().join(NAME)) }.unwrap(),
             );
             assert_eq!(
@@ -1346,7 +1396,7 @@ pub(crate) mod tests {
         let mut incomplete = api;
         incomplete.native_start = None;
         let providers = Box::leak(Box::new(super::ProviderSet {
-            _libraries: Vec::new(),
+            _libraries: Default::default(),
             iax: std::sync::OnceLock::new(),
             descriptors: vec![loaded_provider(
                 "libusbradioplus_product.so.1",
@@ -1387,7 +1437,7 @@ pub(crate) mod tests {
                     });
             }
             let providers = super::ProviderSet {
-                _libraries: Vec::new(),
+                _libraries: Default::default(),
                 iax: std::sync::OnceLock::new(),
                 descriptors: vec![super::LoadedProvider {
                     library: NAME,

@@ -79,6 +79,11 @@ pub(crate) struct RetainedCredential {
     reference: PrivateReference,
 }
 impl RetainedCredential {
+    /// Immutable record selected after affinity, masking and inheritance checks.
+    pub(crate) fn version(&self) -> ResourceId {
+        self.reference.version
+    }
+
     pub(crate) fn same_version(&self, other: &Self) -> bool {
         self.reference == other.reference
     }

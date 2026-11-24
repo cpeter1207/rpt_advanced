@@ -44,6 +44,7 @@ fn dbfs(level: f64) -> i32 {
 /// Completed native-rate burst transferred to control without copying on the callback.
 pub struct CapturedParrot {
     samples: Vec<f32>,
+    pub(super) isolation_epoch: u64,
 }
 
 impl CapturedParrot {
@@ -135,7 +136,13 @@ impl ParrotCapture {
     }
 
     /// Capture normalized mixed PCM only while at least one input source is active.
+    #[cfg(test)]
     pub(crate) fn observe(&mut self, active: bool, samples: &[f32]) {
+        self.observe_at_epoch(active, samples, 0);
+    }
+
+    /// Continue one capture under a stable station isolation epoch.
+    pub(super) fn observe_at_epoch(&mut self, active: bool, samples: &[f32], isolation_epoch: u64) {
         while let Ok(buffer) = self.recycled.pop() {
             self.free.push(buffer);
         }
@@ -162,13 +169,23 @@ impl ParrotCapture {
                 buffer.clear();
                 self.free.push(buffer);
             } else if let Err(rtrb::PushError::Full(clip)) =
-                self.completed.push(CapturedParrot { samples: buffer })
+                self.completed.push(CapturedParrot { samples: buffer, isolation_epoch })
             {
                 let mut buffer = clip.samples;
                 buffer.clear();
                 self.free.push(buffer);
             }
         }
+        self.active = active;
+    }
+
+    /// Drop an interrupted burst without publishing it or restarting before unkey.
+    pub(super) fn discard(&mut self, active: bool) {
+        if let Some(mut buffer) = self.current.take() {
+            buffer.clear();
+            self.free.push(buffer);
+        }
+        self.recording = false;
         self.active = active;
     }
 }

@@ -10,7 +10,7 @@ const EMPTY: MuteSpan = MuteSpan { start: 0, end: 0 };
 /// Collect valid lookback in this burst's half-open window before opening mute.
 fn collect_mute_start(
     first: &mut Option<u64>,
-    signals: &PeerSignals,
+    signals: Option<&PeerSignals>,
     start: u64,
     end: u64,
     burst_start: u64,
@@ -20,7 +20,7 @@ fn collect_mute_start(
     let to = start.saturating_add_signed(range.end).min(end);
     if from < to {
         *first = Some(first.map_or(from, |old| old.min(from)));
-        signals.set_dtmf_muted(true);
+        if let Some(signals) = signals { signals.set_dtmf_muted(true); }
     }
 }
 
@@ -33,7 +33,7 @@ struct Cached {
     concealed: bool,
 }
 
-pub(super) struct Decoded<'a> {
+pub(in crate::link) struct Decoded<'a> {
     pub start: u64,
     pub pcm: &'a [f32],
     pub epoch: u64,
@@ -42,8 +42,11 @@ pub(super) struct Decoded<'a> {
 
 /// One serial receive owner. Cached metadata describes transformed samples in
 /// PeerSession's existing scratch block; raw rejected PCM remains provider-owned.
-pub(super) struct SourceIngress {
+pub(in crate::link) struct SourceIngress {
     detector: DtmfDetector,
+    partition: usize,
+    private: bool,
+    pending_tone: bool,
     muting: bool,
     command_muted: bool,
     generation: u64,
@@ -73,8 +76,20 @@ fn span(spans: &mut [MuteSpan; 64], count: &mut usize, start: u64, end: u64) {
 
 impl SourceIngress {
     pub(super) fn new(muting: bool) -> Result<Self, Error> {
+        Self::at_rate(muting, 8000, false)
+    }
+
+    pub(in crate::link) fn phone(rate: u32) -> Result<Self, Error> {
+        Self::at_rate(true, rate, true)
+    }
+
+    fn at_rate(muting: bool, rate: u32, private: bool) -> Result<Self, Error> {
+        if !matches!(rate, 8000 | 48000) { return Err(Error::UnsupportedFormat); }
         Ok(Self {
-            detector: DtmfDetector::at_rate(muting, 8000).map_err(|_| Error::UnsupportedFormat)?,
+            detector: DtmfDetector::at_rate(muting, rate).map_err(|_| Error::UnsupportedFormat)?,
+            partition: rate as usize / 125,
+            private,
+            pending_tone: false,
             muting,
             command_muted: false,
             generation: 1,
@@ -93,6 +108,7 @@ impl SourceIngress {
             .map_err(|_| Error::InvalidFrame)?;
         self.generation = self.generation.checked_add(1).ok_or(Error::InvalidFrame)?;
         self.command_muted = false;
+        self.pending_tone = false;
         self.burst_start = None;
         self.cached = None;
         self.span_count = 0;
@@ -120,15 +136,17 @@ impl SourceIngress {
 
     // Loss is not contiguous fresh tone. Complete only an already qualified
     // real digit; never let analysis windows straddle unknown or codec-PLC PCM.
-    fn discontinuity(&mut self, mut emit: impl FnMut(char)) -> Result<(), Error> {
+    pub(in crate::link) fn discontinuity(&mut self, mut emit: impl FnMut(char)) -> Result<(), Error> {
         let command_muted = &mut self.command_muted;
         let muting = self.muting;
+        let private = self.private;
+        self.pending_tone = false;
         self.detector
             .process_spans(
                 false,
                 &mut [],
                 |digit| {
-                    *command_muted = muting && digit != '#';
+                    *command_muted = muting && (private || digit != '#');
                     emit(digit);
                 },
                 std::mem::drop,
@@ -136,15 +154,14 @@ impl SourceIngress {
             .map_err(|_| Error::InvalidFrame)
     }
 
-    pub(super) fn audio(
-        &mut self,
-        inbound: &mut InboundProducer,
-        scratch: &mut [f32],
-        block: Decoded<'_>,
-        mut emit: impl FnMut(char),
-    ) -> Result<usize, Error> {
-        if !self.flush_mute(inbound)? || block.pcm.is_empty() {
-            return Ok(0);
+    /// Detection takes place once, including when the provider retries a suffix on a later read.
+    pub(in crate::link) fn prepare(
+        &mut self, signals: Option<&PeerSignals>, scratch: &mut [f32], block: &Decoded<'_>,
+        mut emit: impl FnMut(char), mut onset: impl FnMut(),
+    ) -> Result<(), Error> {
+        if block.pcm.is_empty() || block.pcm.len() > scratch.len() || block.pcm.len() > 4096
+            || block.start.checked_add(block.pcm.len() as u64).is_none() {
+            return Err(Error::InvalidFrame);
         }
         if self.cached.is_none() {
             // PeerIo bounds input to 4096 samples before entering this method;
@@ -159,8 +176,8 @@ impl SourceIngress {
             self.span_count = 0;
             // Eight-ms partitions bound the end-of-command mute granularity.
             // Each offered source block is detected once, never again on retry.
-            for (part, pcm) in scratch[..block.pcm.len()].chunks_mut(64).enumerate() {
-                let start = block.start + (part * 64) as u64;
+            for (part, pcm) in scratch[..block.pcm.len()].chunks_mut(self.partition).enumerate() {
+                let start = block.start + (part * self.partition) as u64;
                 let end = start + pcm.len() as u64;
                 let was_muted = self.command_muted;
                 let mut digit = None;
@@ -177,7 +194,7 @@ impl SourceIngress {
                             |range| {
                                 collect_mute_start(
                                     &mut first,
-                                    inbound.signals(),
+                                    signals,
                                     start,
                                     end,
                                     burst_start,
@@ -186,6 +203,12 @@ impl SourceIngress {
                             },
                         )
                         .map_err(|_| Error::InvalidFrame)?;
+                }
+                if self.private && !block.concealed {
+                    let pending = if digit.is_some() { self.detector.suppressing() }
+                        else { self.pending_tone || first.is_some() };
+                    if pending && (!self.pending_tone || digit.is_some()) { onset(); }
+                    self.pending_tone = pending;
                 }
                 let muted = self.muting
                     && (was_muted || first.is_some() || digit.is_some() || concealed_muted);
@@ -200,7 +223,7 @@ impl SourceIngress {
                     );
                 }
                 if !block.concealed {
-                    self.command_muted = muted && digit != Some('#');
+                    self.command_muted = muted && (self.private || digit != Some('#'));
                 }
             }
             self.cached = Some(Cached {
@@ -218,6 +241,51 @@ impl SourceIngress {
         {
             return Err(Error::InvalidFrame);
         }
+        Ok(())
+    }
+    pub(in crate::link) fn digit_capacity(&self, len: usize) -> usize {
+        if self.cached.is_some() { 0 } else { len.div_ceil(self.partition) }
+    }
+    pub(in crate::link) fn limit(&self, offered: usize) -> usize {
+        offered.min(self.cached.map_or(4096, |c| c.count - c.next))
+    }
+    pub(in crate::link) fn muted(&self) -> bool {
+        self.command_muted || self.detector.suppressing()
+    }
+    pub(in crate::link) fn hold(&mut self) { self.command_muted = true; }
+    pub(in crate::link) fn release(&mut self) -> bool {
+        if self.pending_tone || self.cached.is_some() { return false; }
+        self.command_muted = false;
+        true
+    }
+    pub(in crate::link) fn earliest_mute(&self) -> Option<u64> {
+        self.spans[..self.span_count].first().map(|span| span.start)
+    }
+    pub(in crate::link) fn accepted(&mut self, len: usize) -> Result<(), Error> {
+        let cached = self.cached.as_mut().ok_or(Error::InvalidFrame)?;
+        if len > cached.count - cached.next { return Err(Error::InvalidFrame); }
+        cached.next += len;
+        if cached.next == cached.count { self.cached = None; }
+        Ok(())
+    }
+    pub(in crate::link) fn abandon(&mut self, emit: impl FnMut(char)) -> Result<(), Error> {
+        self.cached = None;
+        self.burst_start = None;
+        self.discontinuity(emit)
+    }
+
+    pub(super) fn audio(
+        &mut self,
+        inbound: &mut InboundProducer,
+        scratch: &mut [f32],
+        block: Decoded<'_>,
+        mut emit: impl FnMut(char),
+    ) -> Result<usize, Error> {
+        if !self.flush_mute(inbound)? || block.pcm.is_empty() {
+            return Ok(0);
+        }
+        self.prepare(Some(inbound.signals()), scratch, &block, &mut emit, || {})?;
+        let cached = self.cached.as_mut().ok_or(Error::InvalidFrame)?;
         let end = block.start + block.pcm.len() as u64;
         let mut offered = [EMPTY; 64];
         let mut count = 0;
@@ -319,13 +387,13 @@ mod tests {
     fn clipped_empty_spans_are_ignored_and_disjoint_metadata_is_bounded() {
         let signals = PeerSignals::new();
         let mut first = None;
-        collect_mute_start(&mut first, &signals, 100, 164, 100, -64..0);
+        collect_mute_start(&mut first, Some(&signals), 100, 164, 100, -64..0);
         assert_eq!(first, None);
         assert!(!signals.dtmf_muted());
-        collect_mute_start(&mut first, &signals, 100, 164, 100, 32..100);
+        collect_mute_start(&mut first, Some(&signals), 100, 164, 100, 32..100);
         assert_eq!(first, Some(132));
         assert!(signals.dtmf_muted());
-        collect_mute_start(&mut first, &signals, 100, 164, 100, -32..16);
+        collect_mute_start(&mut first, Some(&signals), 100, 164, 100, -32..16);
         assert_eq!(first, Some(100));
         let mut spans = [EMPTY; 64];
         let mut count = 0;

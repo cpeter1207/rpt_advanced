@@ -122,16 +122,9 @@ const TX_PTT: Fields = &[
     ("timing", Rule::Object(TX_PTT_TIMING)),
     (
         "source",
-        Rule::Choice(&[
-            "sound_chip_gpio",
-            "parallel",
-            "serial",
-            "key_down",
-            "hamlib",
-        ]),
+        Rule::Choice(&["sound_chip_gpio", "parallel", "serial", "none", "hamlib"]),
     ),
     ("inverted", Rule::Bool),
-    ("scancode", Rule::Unsigned(0, 4294967295)),
     ("pin", Rule::Value(pins)),
 ];
 const TX_CTCSS_TURNOFF_TIMING: Fields = &[("duration_ms", Rule::Unsigned(40, 32767))];

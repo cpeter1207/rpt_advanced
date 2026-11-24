@@ -320,6 +320,27 @@ pub struct PcmSink {
     pub gap: Option<unsafe extern "C" fn(*mut c_void, u64, u32) -> u32>,
 }
 
+impl PcmSink {
+    /// Copy only the original host source-sink prefix for an EchoLink provider.
+    ///
+    /// # Safety
+    /// A nonnull pointer exposes its size/version prefix and the number of
+    /// readable bytes it declares. Its callbacks remain live for this turn.
+    pub unsafe fn from_host_prefix(raw: *const std::ffi::c_void) -> Result<Option<Self>, Status> {
+        if raw.is_null() {
+            return Ok(None);
+        }
+        let [bytes, version] = unsafe { raw.cast::<[u32; 2]>().read_unaligned() };
+        if (bytes as usize) < std::mem::size_of::<Self>() || version != 1 {
+            return Err(Status::Invalid);
+        }
+        // Echo's ABI1 record has the exact layout of the original host sink.
+        let mut sink = unsafe { raw.cast::<Self>().read_unaligned() };
+        sink.struct_size = std::mem::size_of::<Self>() as u32;
+        Ok(Some(sink))
+    }
+}
+
 /// Human text only; both spans are borrowed for this synchronous callback.
 /// Sender is a represented label, not a substitute for the verified QSO identity.
 pub type TextFn = unsafe extern "C" fn(*mut c_void, ByteSpan, ByteSpan);

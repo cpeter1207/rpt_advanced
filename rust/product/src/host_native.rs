@@ -25,12 +25,25 @@ pub(crate) struct RadioTicket {
 }
 
 impl RadioTicket {
+    pub(crate) fn attempt(&self) -> std::num::NonZeroU64 { self.serial }
+    pub(super) fn reservation(&self) -> Weak<()> { Arc::downgrade(&self.key) }
     pub(super) fn matches(&self, key: &Weak<()>) -> bool {
         key.ptr_eq(&Arc::downgrade(&self.key))
     }
 }
 
+/// Only the candidate owns its new media authority. An unchanged policy keeps the
+/// previously confirmed permit across adapter replacement on the same account.
+pub(super) struct PhonePolicy {
+    pub(super) account: ResourceId,
+    pub(super) settings: rpt_advanced_core::config::resources::profiles::PhonePatchProfileSettings,
+    pub(super) confirmed: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) hold_isolation: bool,
+}
+
 pub(crate) struct RadioPlan {
+    pub(super) media_isolation: Arc<rpt_advanced_core::link::MediaIsolation>,
+    pub(super) phone: Option<PhonePolicy>,
     pub(crate) station: PreparedStation,
     pub(crate) incoming: PreparedRole,
     pub(super) process_incoming: bool,
@@ -54,11 +67,20 @@ pub(super) struct RadioPreparation {
     pub(super) staged: Option<(Weak<()>, Plans)>,
     pub(super) active: Plans,
     pub(super) core: Option<super::modular::CoreCandidate>,
+    pub(super) account_owner: Option<AccountReservation>,
     pub(super) adopting: Option<super::modular::Adopting>,
     pub(super) inputs: Option<Arc<crate::management::ProfileInputs>>,
     pub(super) credentials: Option<Arc<crate::management::native::AccountCredentials>>,
     pub(super) revision: Option<String>,
     pub(super) rollback: Option<String>,
+}
+
+pub(super) struct AccountReservation {
+    pub(super) key: Weak<()>,
+    pub(super) attempt: std::num::NonZeroU64,
+    pub(super) phone: bool,
+    pub(super) asl: bool,
+    pub(super) started: bool,
 }
 
 impl RadioPreparation {
@@ -69,10 +91,22 @@ impl RadioPreparation {
 }
 
 impl Host {
+    /// The serialized native confirmation has accepted this exact policy allocation.
+    pub(crate) fn confirm_private_media(&self) {
+        for plan in self.radio_preparation.active.0.values() {
+            if let Some(policy) = &plan.phone {
+                policy.confirmed.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+
     pub(crate) fn stage_radio_plans(
         &mut self,
         configuration: &RuntimeConfiguration,
     ) -> Result<RadioTicket, RuntimeError> {
+        if !self.reap_abandoned_accounts()? || self.radio_preparation.account_owner.is_some() {
+            return Err(RuntimeError::Busy);
+        }
         let owner = &mut self.radio_preparation;
         if owner
             .staged
@@ -107,9 +141,26 @@ impl Host {
             let incoming = api
                 .prepare_link(profile.processing.link.as_ref())
                 .map_err(|_| RuntimeError::Preparation)?;
+            let configured = configuration.protocols.port(id).ok_or(RuntimeError::MissingNode)?;
+            let phone = configured.phone_patch.as_ref().map(|profile| {
+                let previous = owner.active.0.get(&id).and_then(|plan| plan.phone.as_ref())
+                    .filter(|prior| prior.account == profile.binding.id);
+                let confirmed = previous.filter(|prior| prior.settings == profile.settings)
+                    .map_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)), |prior| Arc::clone(&prior.confirmed));
+                PhonePolicy {
+                    account: profile.binding.id,
+                    settings: profile.settings.clone(),
+                    confirmed,
+                    hold_isolation: profile.settings.isolate_peers || previous.is_some_and(|prior|
+                        prior.settings.isolate_peers || (!prior.confirmed.load(std::sync::atomic::Ordering::Acquire) && prior.hold_isolation)),
+                }
+            });
             plans.0.insert(
                 id,
                 RadioPlan {
+                    media_isolation: owner.active.0.get(&id)
+                        .map_or_else(Default::default, |prior| Arc::clone(&prior.media_isolation)),
+                    phone,
                     station,
                     incoming,
                     process_incoming: profile.processing.link.is_some(),

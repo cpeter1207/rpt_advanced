@@ -348,25 +348,6 @@ impl ModularCandidate<'_> {
         );
         let rx_audio = RxAudio::read(&inputs(ResourceKind::RxAudio));
         let tx_audio = TxAudio::read(&inputs(ResourceKind::TxAudio));
-        let signals = RadioSignals::read(
-            &inputs(ResourceKind::RxSignaling),
-            &inputs(ResourceKind::TxSignaling),
-            &interface,
-            site_only,
-            warnings,
-            diagnostics,
-        );
-        // The site exposes the authored connector roles. A port exposes the actual prepared wiring.
-        let mut projected;
-        let wiring = if site_only {
-            projected = interface.clone();
-            &mut projected
-        } else {
-            &mut interface
-        };
-        if let Err(error) = claims::apply(wiring, &signals, owner) {
-            diagnostics.push(error);
-        }
         let mut role = |kind| {
             let captured = scopes.map(|scope| {
                 scope
@@ -428,6 +409,31 @@ impl ModularCandidate<'_> {
                 field: "enabled",
             });
             remote.enabled = true;
+        }
+        let default_ptt = if !remote.enabled && interface.audio.exact_alsa_pcm() {
+            SignalSource::NoActuator
+        } else {
+            SignalSource::SoundChipGpio
+        };
+        let signals = RadioSignals::read(
+            &inputs(ResourceKind::RxSignaling),
+            &inputs(ResourceKind::TxSignaling),
+            default_ptt,
+            &interface,
+            site_only,
+            warnings,
+            diagnostics,
+        );
+        // The site exposes the authored connector roles. A port exposes the actual prepared wiring.
+        let mut projected;
+        let wiring = if site_only {
+            projected = interface.clone();
+            &mut projected
+        } else {
+            &mut interface
+        };
+        if let Err(error) = claims::apply(wiring, &signals, owner) {
+            diagnostics.push(error);
         }
         let scan_lists = memories::scans(
             layers(ResourceKind::ScanLists),

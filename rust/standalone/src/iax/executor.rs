@@ -2,7 +2,6 @@
 
 use std::{
     ffi::c_void,
-    mem::size_of,
     ptr::{self, NonNull},
 };
 
@@ -20,6 +19,7 @@ pub(crate) enum Error {
 /// One shared non-audio executor. Its host detaches every peer before releasing it.
 pub(crate) struct Executor {
     api: Descriptor,
+    pub(crate) ordinary: Option<super::playout::Set>,
     runtime: NonNull<c_void>,
 }
 // The capability explicitly permits concurrent registration/stop, never concurrent
@@ -32,10 +32,17 @@ unsafe fn checked_descriptor(pointer: *const c_void) -> Result<Descriptor, Error
         return Err(Error::Descriptor);
     }
     let prefix = unsafe { ptr::read_unaligned(pointer.cast::<[u32; 2]>()) };
-    if prefix[0] < size_of::<Descriptor>() as u32 || prefix[1] != 1 {
+    // This repeater executor consumes only the released deadline prefix. Later
+    // private-call operations have their own checked consumer and lifetime.
+    let mut api: Descriptor = unsafe { std::mem::zeroed() };
+    let end = std::mem::offset_of!(Descriptor, peer_set_deadline)
+        + std::mem::size_of_val(&api.peer_set_deadline);
+    if (prefix[0] as usize) < end || prefix[1] != 1 {
         return Err(Error::Descriptor);
     }
-    let api = unsafe { ptr::read_unaligned(pointer.cast::<Descriptor>()) };
+    // All optional function slots are null-valid. Never borrow or copy the
+    // private suffix of a descriptor that did not supply that storage.
+    unsafe { ptr::copy_nonoverlapping(pointer.cast::<u8>(), ptr::from_mut(&mut api).cast(), end) };
     if api.capability != *b"rptadv.iaxasync\0"
         || ![
             api.runtime_create.is_some(),
@@ -71,12 +78,20 @@ impl Executor {
     /// until this owner and all its registrations are destroyed.
     pub(crate) unsafe fn new(pointer: *const c_void) -> Result<Self, Error> {
         let api = unsafe { checked_descriptor(pointer) }?;
+        // An old descriptor can end at either supported prefix. Read exactly the one
+        // optional slot from Task 69's ABI-1 suffix when its complete extent exists.
+        let offset = std::mem::offset_of!(Descriptor, peer_set_private_jitter)
+            + std::mem::size_of_val(&api.peer_set_private_jitter);
+        let ordinary = if api.struct_size as usize >= offset + size_of::<Option<super::playout::Set>>() {
+            unsafe { pointer.cast::<u8>().add(offset).cast::<Option<super::playout::Set>>().read_unaligned() }
+        } else { None };
         let mut runtime = ptr::null_mut();
         if unsafe { api.runtime_create.unwrap()(&mut runtime) } != 0 {
             return Err(Error::Initialize);
         }
         Ok(Self {
             api,
+            ordinary,
             runtime: NonNull::new(runtime).ok_or(Error::Initialize)?,
         })
     }

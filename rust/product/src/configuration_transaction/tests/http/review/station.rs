@@ -243,6 +243,71 @@ pub(super) fn invalid(client: &Client<'_>, rt: &RuntimeFixture) {
         source(&doc, "/squelch/scancode", &site_rx);
         source(&doc, "/squelch/level", &rx);
     }
+    let site_tx = format!("{SITE_PATH}tx/signaling/");
+    let tx = format!("{port}tx/signaling/");
+    put(
+        client,
+        &site_interface,
+        json!({
+            "keyboard":{"device":"/dev/input/by-id/site-event-kbd"},
+            "serial":{"device":"/dev/ttyUSB-station"}
+        }),
+    );
+    put(
+        client,
+        &site_tx,
+        json!({"ptt":{"source":"serial","pin":["RTS"]}}),
+    );
+    let before = rt.warnings.load(Ordering::Acquire);
+    put(
+        client,
+        &tx,
+        json!({"ptt":{
+            "source":"key_down","scancode":57,"timing":{"settle_ms":77}
+        }}),
+    );
+    assert!(rt.warnings.load(Ordering::Acquire) > before);
+    assert_eq!(
+        client.get(&tx).body["configuration"]["ptt"],
+        json!({"timing":{"settle_ms":77}}),
+        "obsolete keyboard PTT fields must be ignored in authored readback"
+    );
+    let (doc, schema) = checked_schema(
+        client,
+        "/effective/ports/{port}/tx/signaling/",
+        &effective(&tx),
+    );
+    assert_eq!(doc["effective"]["ptt"]["source"], "serial");
+    assert_eq!(doc["effective"]["ptt"]["pin"], json!(["RTS"]));
+    assert_eq!(doc["effective"]["ptt"]["timing"]["settle_ms"], 77);
+    source(&doc, "/ptt/source", &site_tx);
+    source(&doc, "/ptt/pin", &site_tx);
+    source(&doc, "/ptt/timing/settle_ms", &tx);
+    assert!(doc["effective"]["ptt"].get("scancode").is_none());
+    let properties = &schema["$defs"]["ptt"]["properties"];
+    assert!(
+        properties["source"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v != "key_down")
+    );
+    assert!(properties.get("scancode").is_none());
+    let rx = client.get(&effective(&rx)).body;
+    assert_eq!(rx["effective"]["squelch"]["source"], "key_down");
+    assert_eq!(rx["effective"]["squelch"]["scancode"], 767);
+    put(client, &tx, json!({"ptt":{"source":"none"}}));
+    let doc = client.get(&effective(&tx)).body;
+    assert_eq!(doc["effective"]["ptt"]["source"], "none");
+    source(&doc, "/ptt/source", &tx);
+    assert!(doc["effective"]["ptt"].get("pin").is_none());
+    assert!(
+        properties["source"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "none")
+    );
 }
 
 pub(super) fn sparse_keyboard(client: &Client<'_>, rt: &RuntimeFixture) {

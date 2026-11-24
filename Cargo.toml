@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust/core", "rust/json", "rust/product", "rust/asterisk", "rust/file-adapter", "rust/speech-adapter", "rust/control-asterisk-adapter", "rust/control-standalone-adapter", "rust/standalone", "rust/resolver-adapter", "rust/jitter-adapter", "rust/jitter-client", "rust/gpiod-adapter", "rust/hwmon-adapter", "rust/peer-support", "rust/store-maintenance"]
+members = ["rust/core", "rust/json", "rust/product", "rust/asterisk", "rust/file-adapter", "rust/speech-adapter", "rust/control-asterisk-adapter", "rust/control-standalone-adapter", "rust/standalone", "rust/resolver-adapter", "rust/jitter-adapter", "rust/jitter-client", "rust/gpiod-adapter", "rust/hwmon-adapter", "rust/peer-support", "rust/store-maintenance", "rust/sip-adapter", "rust/private-phone-host"]
 resolver = "3"
 
 [workspace.package]

@@ -8,7 +8,7 @@ use binding::Use;
 use serde_json::Value;
 
 choices!(/// Source of a carrier, tone, code, or push-to-talk signal.
-SignalSource{Dsp=>"dsp",SoundChipGpio=>"sound_chip_gpio",Parallel=>"parallel",Serial=>"serial",KeyDown=>"key_down",External=>"external",Hamlib=>"hamlib",Auto=>"auto"});
+SignalSource{Dsp=>"dsp",SoundChipGpio=>"sound_chip_gpio",Parallel=>"parallel",Serial=>"serial",KeyDown=>"key_down",External=>"external",Hamlib=>"hamlib",Auto=>"auto",NoActuator=>"none"});
 choices!(/// Carrier noise-filter response.
 NoiseFilter{Standard=>"standard",Alternate=>"alternate"});
 choices!(/// Speech qualification policy.
@@ -300,6 +300,7 @@ impl RxSignals {
 impl TxSignals {
     fn read(
         v: &Inputs<'_>,
+        default_ptt: SignalSource,
         wiring: &super::Interface,
         [ctcss, dcs]: [bool; 2],
         w: &mut Vec<CandidateWarning>,
@@ -319,16 +320,9 @@ impl TxSignals {
             })
             .unwrap_or(0);
         let source = SignalSource::read(v.text(&["ctcss", "source"], "dsp"));
-        let ptt = binding::resolve(
-            v,
-            &["ptt"],
-            Use::Ptt,
-            Some(SignalSource::SoundChipGpio),
-            wiring,
-            w,
-            site,
-        )
-        .expect("built-in PTT");
+        let ptt = binding::resolve(v, &["ptt"], Use::Ptt, Some(default_ptt), wiring, w, site)
+            .expect("built-in PTT");
+        let has_actuator = ptt.source != SignalSource::NoActuator;
         let off_delay_ms = v.uint(&["ptt", "timing", "off_delay_ms"], 0);
         Self {
             ptt,
@@ -339,7 +333,7 @@ impl TxSignals {
             timeout_ms: v.uint(&["ptt", "timing", "timeout_ms"], 180000),
             rx_blanking_ms: v.uint(&["ptt", "timing", "rx_blanking_ms"], 0),
             ctcss: TxCtcss {
-                enabled: ctcss,
+                enabled: has_actuator && ctcss,
                 source,
                 tones: Tones::read(v, source == SignalSource::Dsp, false, w),
                 output: binding::resolve(
@@ -360,7 +354,7 @@ impl TxSignals {
                 hang_ms: tone_hang,
             },
             dcs: TxDcs {
-                enabled: dcs,
+                enabled: has_actuator && dcs,
                 source: SignalSource::read(v.text(&["dcs", "source"], "dsp")),
                 output: binding::resolve(
                     v,
@@ -383,6 +377,7 @@ impl RadioSignals {
     pub(super) fn read(
         rx: &Inputs<'_>,
         tx: &Inputs<'_>,
+        default_ptt: SignalSource,
         wiring: &super::Interface,
         site_only: bool,
         w: &mut Vec<CandidateWarning>,
@@ -393,7 +388,7 @@ impl RadioSignals {
         let mut site = super::SitePrerequisites(site_only.then_some(&mut *diagnostics));
         let mut signals = Self {
             rx: RxSignals::read(rx, wiring, receive, w, &mut site),
-            tx: TxSignals::read(tx, wiring, transmit, w, &mut site),
+            tx: TxSignals::read(tx, default_ptt, wiring, transmit, w, &mut site),
         };
         let use_rx_operating_tone =
             signals.rx.ctcss.enabled && signals.rx.ctcss.binding.source == SignalSource::Dsp;

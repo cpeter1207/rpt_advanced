@@ -536,6 +536,7 @@ unsafe extern "C" fn peer_dial(
 }
 unsafe extern "C" fn peer_rate(_context: *mut c_void, peer: *const c_void) -> u32 {
     boundary(0, || match unsafe { peer.cast::<PeerHandle>().as_ref() } {
+        Some(HostPeer::Phone(call)) => call.rate(),
         Some(HostPeer::Echo(_)) => 8000,
         Some(HostPeer::Iax(peer)) => peer.io.rate(),
         None => 0,
@@ -570,6 +571,7 @@ unsafe extern "C" fn peer_bind_radio(
     })
 }
 unsafe extern "C" fn peer_ready(_context: *mut c_void, peer: *mut c_void) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return i32::from(call.established()); }
     boundary(-1, || {
         let Some(peer) = (unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) }) else {
             return -1;
@@ -625,6 +627,7 @@ unsafe extern "C" fn peer_send_text(
     })
 }
 unsafe extern "C" fn peer_send_digit(_context: *mut c_void, peer: *mut c_void, digit: u8) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return call.send_digit(digit).unwrap_or(-1); }
     boundary(-1, || {
         unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) }
             .ok_or(())
@@ -668,10 +671,14 @@ unsafe fn echo_peer<'a>(
 ) -> Option<&'a std::sync::Arc<rptadv_peer_support::echolink::host::Peer>> {
     match unsafe { peer.cast::<PeerHandle>().as_ref() }? {
         HostPeer::Echo(peer) => Some(peer),
-        HostPeer::Iax(_) => None,
+        HostPeer::Iax(_) | HostPeer::Phone(_) => None,
     }
 }
 
+enum SourceRegistration {
+    Echo(Registration),
+    Phone(rptadv_private_phone_host::calls::Registration),
+}
 unsafe extern "C" fn peer_step_attach(
     _: *mut c_void,
     peer: *mut c_void,
@@ -684,12 +691,19 @@ unsafe extern "C" fn peer_step_attach(
             return -1;
         };
         *output = ptr::null_mut();
+        if let Some(HostPeer::Phone(call))=unsafe{peer.cast::<PeerHandle>().as_ref()} {
+            let Some(step)=step else{return -1;};
+            return match unsafe{call.attach(step,step_context)} {
+                Ok(token)=>{*output=Box::into_raw(Box::new(SourceRegistration::Phone(token))).cast();0}
+                Err(_)=> -1,
+            };
+        }
         let Some(peer) = (unsafe { echo_peer(peer) }).cloned() else {
             return -1;
         };
         match unsafe { peer.attach(step, step_context) } {
             Ok(token) => {
-                *output = Box::into_raw(Box::new(token)).cast();
+                *output = Box::into_raw(Box::new(SourceRegistration::Echo(token))).cast();
                 0
             }
             Err(_) => -1,
@@ -697,21 +711,26 @@ unsafe extern "C" fn peer_step_attach(
     })
 }
 unsafe extern "C" fn peer_step_stop(_: *mut c_void, token: *mut c_void) {
-    if let Some(token) = unsafe { token.cast::<Registration>().as_ref() } {
-        token.stop();
+    match unsafe {token.cast::<SourceRegistration>().as_ref()} {
+        Some(SourceRegistration::Echo(token))=>token.stop(),
+        Some(SourceRegistration::Phone(token))=>token.request_stop(),
+        None=>{}
     }
 }
 unsafe extern "C" fn peer_step_wake(_: *mut c_void, token: *mut c_void) {
-    if let Some(token) = unsafe { token.cast::<Registration>().as_ref() } {
-        token.wake();
+    match unsafe {token.cast::<SourceRegistration>().as_ref()} {
+        Some(SourceRegistration::Echo(token))=>token.wake(),
+        Some(SourceRegistration::Phone(token))=>token.wake(),
+        None=>{}
     }
 }
 unsafe extern "C" fn peer_step_detach(_: *mut c_void, token: *mut c_void) {
     if !token.is_null() {
-        unsafe { drop(Box::from_raw(token.cast::<Registration>())) };
+        unsafe { drop(Box::from_raw(token.cast::<SourceRegistration>())) };
     }
 }
 unsafe extern "C" fn peer_set_deadline(_: *mut c_void, peer: *mut c_void, after: u64) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return call.set_deadline(after).map_or(-1,|()|0); }
     unsafe { echo_peer(peer) }.map_or(-1, |peer| {
         unsafe { peer.set_deadline(after) }.map_or(-1, |()| 0)
     })
@@ -726,6 +745,7 @@ unsafe extern "C" fn peer_prepare_audio(
     flush: u32,
     result: *mut ffi::rptadv_codec_encode_result_v1,
 ) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return unsafe { rptadv_private_phone_host::frontend::prepare_audio(call,pcm,count,output,capacity,flush,result.cast()) }; }
     boundary(-1, || {
         let Some(peer) = (unsafe { echo_peer(peer) }) else {
             return -1;
@@ -755,6 +775,7 @@ unsafe extern "C" fn peer_prepare_audio(
     })
 }
 unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return call.reset_encoder().map_or(-1,|()|0); }
     unsafe { echo_peer(peer) }.map_or(-1, |peer| {
         unsafe { peer.reset_encoder() }.map_or(-1, |()| 0)
     })
@@ -767,6 +788,7 @@ unsafe extern "C" fn peer_send_prepared(
     frames: u32,
     timestamp: u32,
 ) -> i32 {
+    if let Some(HostPeer::Phone(_)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return -1; }
     boundary(-1, || {
         let Some(peer) = (unsafe { echo_peer(peer) }) else {
             return -1;
@@ -787,6 +809,7 @@ unsafe extern "C" fn peer_send_prepared(
     })
 }
 unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return call.elapsed_ms().unwrap_or(u32::MAX); }
     unsafe { echo_peer(peer) }
         .and_then(|peer| peer.elapsed_ms().ok())
         .map_or(0, |value| value.min(u64::from(u32::MAX)) as u32)
@@ -867,6 +890,7 @@ unsafe extern "C" fn peer_read_source(
     text_context: *mut c_void,
     output: *mut ffi::rptadv_peer_source_result_v1,
 ) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return unsafe {rptadv_private_phone_host::frontend::read(call,completion,sink.cast(),output.cast())}; }
     boundary(-1, || {
         if output.is_null()
             || unsafe { ptr::addr_of!((*output).struct_size).read() }
@@ -879,20 +903,11 @@ unsafe extern "C" fn peer_read_source(
             return -1;
         };
         let output = unsafe { &mut *output };
-        let sink = unsafe { sink.as_ref() };
-        if sink.is_some_and(|sink| {
-            sink.struct_size < size_of::<ffi::rptadv_peer_source_sink_v1>() as u32
-                || sink.abi_version != 1
-        }) {
+        // Echo consumes only the original 32-byte source prefix, including when
+        // the sender can also provide ordered private-phone digits and timing.
+        let Ok(sink) = (unsafe { echo::PcmSink::from_host_prefix(sink.cast()) }) else {
             return -1;
-        }
-        let sink = sink.map(|sink| echo::PcmSink {
-            struct_size: size_of::<echo::PcmSink>() as u32,
-            abi_version: 1,
-            context: sink.context,
-            audio: sink.audio,
-            gap: sink.gap,
-        });
+        };
         struct Text {
             callback: ffi::rptadv_peer_source_text_v1,
             context: *mut c_void,
@@ -965,6 +980,7 @@ unsafe extern "C" fn peer_send_human_text(
 /// Stable account context; only control/lifecycle calls inspect this map.
 struct HostContext {
     echo: Mutex<Option<Arc<Accounts>>>,
+    phone: Option<rptadv_private_phone_host::selection::PhoneHost>,
 }
 impl HostContext {
     fn echo_accounts(&self) -> Option<Arc<Accounts>> {
@@ -1013,11 +1029,13 @@ pub(crate) struct HostServicesOwner {
 }
 // The table/context allocations remain stable, and accounts are thread-safe.
 unsafe impl Send for HostServicesOwner {}
+mod private_transport;
 impl HostServicesOwner {
     /// Allocate the callback context before exposing its immutable table.
     pub(crate) fn new() -> Self {
         let mut context = Box::new(HostContext {
             echo: Mutex::new(None),
+            phone: None,
         });
         let mut descriptor = Box::new(SERVICES.0);
         descriptor.context = ptr::from_mut(context.as_mut()).cast();
@@ -1240,6 +1258,9 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v10 {
     radio_quiesce: Some(radio_quiesce),
     radio_ready: Some(radio_ready),
     station_binding: &station_binding::OPS.0,
+    phone_provider: std::ptr::null(),
+    asl_provider: std::ptr::null(),
+        managed_echo_provider: std::ptr::null(),
     radio_remote_submit: Some(radio_remote_submit),
 });
 
@@ -1259,7 +1280,7 @@ pub fn into_raw(peer: PeerIo, local: &str, remote: &str) -> *mut c_void {
     .cast()
 }
 
-type PeerHandle = HostPeer<IaxHandle>;
+type PeerHandle = HostPeer<IaxHandle, rptadv_private_phone_host::calls::PrivateCall>;
 struct IaxHandle {
     io: PeerIo,
     local: String,
@@ -1271,7 +1292,7 @@ struct IaxHandle {
 unsafe fn iax_peer_mut<'a>(peer: *mut c_void) -> Option<&'a mut IaxHandle> {
     match unsafe { peer.cast::<PeerHandle>().as_mut() }? {
         HostPeer::Iax(peer) => Some(peer),
-        HostPeer::Echo(_) => None,
+        HostPeer::Echo(_) | HostPeer::Phone(_) => None,
     }
 }
 
@@ -1295,6 +1316,7 @@ unsafe extern "C" fn peer_info(
         }
         let (protocol, capabilities, account_generation, qso_generation, remote, local, callsign) =
             match peer {
+                HostPeer::Phone(call) => return unsafe { rptadv_private_phone_host::frontend::info(call, output.cast()) },
                 HostPeer::Iax(peer) => (1, 12, 0, 0, peer.remote.as_str(), peer.local.as_str(), ""),
                 HostPeer::Echo(peer) => {
                     let identity = peer.identity();

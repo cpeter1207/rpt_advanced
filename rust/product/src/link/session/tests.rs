@@ -35,7 +35,7 @@ pub(crate) struct State {
     pub(crate) async_stops: usize,
     pub(crate) async_detaches: usize,
     pub(crate) fail_async_attach: bool,
-    no_async_thread: bool,
+    pub(crate) no_async_thread: bool,
     pub(crate) finish_first_step_before_registration: bool,
     pub(crate) continuous_async: bool,
     pub(crate) observe_calls: usize,
@@ -2511,9 +2511,16 @@ fn disconnected_async_peer_is_reaped_before_the_worker_stops() {
     let (session, control, state, _) = make_async_session("1000");
     let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
     worker.attach(session).ok().unwrap();
+    let (healthy, _control, healthy_state, _output) = make_async_session("1001");
+    worker.attach(healthy).ok().unwrap();
     control.stop();
     worker.reap();
-    assert!(worker.async_peers.is_empty());
+    assert_eq!(worker.async_peers.len(), 1);
+    worker.reap();
+    {
+        let alive = healthy_state.lock().unwrap();
+        assert_eq!((alive.async_stops, alive.async_detaches, alive.drops), (0, 0, 0));
+    }
     {
         let state = state.lock().unwrap();
         assert_eq!(
@@ -2523,6 +2530,8 @@ fn disconnected_async_peer_is_reaped_before_the_worker_stops() {
     }
     worker.stop();
     assert_eq!(state.lock().unwrap().drops, 1);
+    let other = healthy_state.lock().unwrap();
+    assert_eq!((other.async_stops, other.async_detaches, other.drops), (1, 1, 1));
 }
 
 #[test]

@@ -131,6 +131,7 @@ def test_standalone_check_builds_the_product_before_loading_it() -> None:
     assert 0 <= build < stage < test, "standalone tests need the current shared product"
     assert "-p rptadv-resolver-adapter" in plan[:test]
     assert "-p rptadv-jitter-adapter" in plan[:test]
+    assert "-p rptadv-sip-adapter" in plan[:test]
     assert "resolver" in plan[stage:test], (
         "resolver must be staged before provider loading"
     )

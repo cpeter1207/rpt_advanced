@@ -21,7 +21,7 @@ HEADERS += rust/gpiod-adapter/include/rptadv_gpiod_adapter.h
 HEADERS += rust/hwmon-adapter/include/rptadv_hwmon_adapter.h
 LOADER := module/app_rpt_advanced_loader.c
 ADAPTERS := asterisk control_asterisk file speech
-STANDALONE_ADAPTERS := control_standalone resolver jitter
+STANDALONE_ADAPTERS := control_standalone resolver jitter sip
 SITE_ADAPTERS := gpiod hwmon
 LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(ADAPTERS)))
 LIBRARIES += build/librptadv_product.so.2
@@ -61,7 +61,7 @@ rust-build: | build
 
 standalone-build: | build
 	$(CARGO) build --locked --release -p rpt-advanced-standalone -p rptadv-product -p rptadv-store-maintenance \
-		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter -p rptadv-jitter-adapter -p rptadv-gpiod-adapter -p rptadv-hwmon-adapter
+		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter -p rptadv-jitter-adapter -p rptadv-sip-adapter -p rptadv-gpiod-adapter -p rptadv-hwmon-adapter
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.2"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced-store" "build/rpt-advanced-store"

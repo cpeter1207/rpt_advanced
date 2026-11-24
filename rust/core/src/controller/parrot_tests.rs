@@ -82,6 +82,7 @@ fn parrot_capture_returns_a_clip_buffer_when_the_completion_queue_is_full() {
     let (mut completed, completed_consumer) = rtrb::RingBuffer::new(1);
     completed
         .push(super::CapturedParrot {
+            isolation_epoch: 0,
             samples: vec![0.25],
         })
         .unwrap();

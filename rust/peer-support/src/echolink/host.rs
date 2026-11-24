@@ -4,7 +4,7 @@ use libloading::Library;
 mod accounts;
 mod observation;
 pub use accounts::{
-    AccountVisitor, Accounts, Preparation, PreparedUpdate, UpdateError, UpdateOutcome,
+    AccountVisitor, Accounts, DirectEntry, Preparation, PreparedUpdate, UpdateError, UpdateOutcome,
 };
 pub use observation::describe_account;
 use std::{
@@ -34,7 +34,7 @@ pub enum Error {
     Product,
 }
 
-fn completed(status: abi::Status) -> Result<(), Error> {
+pub(super) fn completed(status: abi::Status) -> Result<(), Error> {
     if status == abi::Status::Ok {
         Ok(())
     } else {
@@ -60,7 +60,7 @@ unsafe fn text(span: abi::ByteSpan, maximum: usize) -> Result<String, Error> {
 
 /// One dynamically loaded provider and worker context shared by both host adapters.
 pub struct Provider {
-    api: Api,
+    pub(super) api: Api,
     context: NonNull<abi::Context>,
     // Drop only after context_destroy has returned.
     _library: Library,
@@ -122,6 +122,7 @@ impl Provider {
             handle: NonNull::new(handle).ok_or(Error::Contract)?,
             provider: Arc::clone(self),
             local,
+            station: Default::default(),
             stopped: AtomicBool::new(false),
         }))
     }
@@ -134,9 +135,10 @@ impl Drop for Provider {
 
 /// An off-audio account owner; drop only after its host callbacks are quiescent.
 pub struct Account {
-    handle: NonNull<abi::Account>,
-    provider: Arc<Provider>,
-    local: String,
+    pub(super) handle: NonNull<abi::Account>,
+    pub(super) provider: Arc<Provider>,
+    pub(super) local: String,
+    station: std::sync::OnceLock<String>,
     stopped: AtomicBool,
 }
 // Account operations are serialized internally and never called by audio callbacks.
@@ -514,6 +516,11 @@ pub struct Peer {
 unsafe impl Send for Peer {}
 unsafe impl Sync for Peer {}
 impl Peer {
+    /// Product station identity remains backed by the originating account owner.
+    pub fn station(&self) -> &str { self.account.station.get().unwrap_or(&self.identity.local) }
+    /// Require the actual account, including after an account generation counter restarts.
+    pub fn belongs_to(&self, account: &Arc<Account>) -> bool { Arc::ptr_eq(&self.account, account) }
+
     /// Copy this exact QSO's metadata, including its first closing cause.
     /// # Safety
     /// Call only inside this peer's registered serial step, with no concurrent
@@ -795,13 +802,15 @@ impl Drop for Registration {
 
 /// Host-specific native payloads retain their existing implementation. Echo
 /// peers share this owner without creating an Asterisk channel or PCM workspace.
-pub enum HostPeer<Iax> {
+pub enum HostPeer<Iax, Phone = std::convert::Infallible> {
+    /// Unique native private dialog, independent of either public link protocol.
+    Phone(Phone),
     /// Existing host-native IAX/channel owner.
     Iax(Iax),
     /// Verified EchoLink QSO retained through its serial registration.
     Echo(Arc<Peer>),
 }
-impl<Iax> HostPeer<Iax> {
+impl<Iax,Phone> HostPeer<Iax,Phone> {
     /// Validate literal host spans once for both adapters, then use the provider's
     /// existing human-text operation. An IAX handle is never cast to an Echo QSO.
     ///

@@ -529,6 +529,10 @@ impl InboundProducer {
                     span.start >= span.end || span.end > original_end || span.start < oldest
                 })
             {
+                #[cfg(test)]
+                if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
+                    eprintln!("private PHONE write rejected: tagged ring prefix span bounds");
+                }
                 return Err(RingError);
             }
             let prefix_end = start + offered;
@@ -560,6 +564,17 @@ impl InboundProducer {
             )
         };
         if code != 0 {
+            #[cfg(test)]
+            if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
+                let class = if spans.is_empty() {
+                    "unmarked"
+                } else if spans.iter().any(|span| span.start < start.saturating_sub(self.0.capacity_samples)) {
+                    "mark older than ring capacity"
+                } else {
+                    "marked within ring capacity"
+                };
+                eprintln!("private PHONE write rejected: native tagged ring, {class}");
+            }
             return Err(RingError);
         }
         if accepted != 0 {
@@ -606,6 +621,26 @@ impl InboundProducer {
             Err(RingError)
         }
     }
+    /// Fence this private source's retained PCM, including converted samples.
+    /// Keep the SPSC ring and its credited timeline on the same call generation.
+    pub(super) fn retire_phone_media(
+        &mut self,
+        generation: u64,
+        previous_origin: u64,
+    ) -> Result<Option<u64>, RingError> {
+        let end = self.0.writer_frame.load(Ordering::Relaxed);
+        self.0.first_epoch.store(0, Ordering::Release);
+        self.0.played_epoch.store(0, Ordering::Release);
+        let start = previous_origin.max(end.saturating_sub(self.0.capacity_samples));
+        if start < end && self.0.writer_generation.load(Ordering::Relaxed) == generation {
+            let accepted = self.mute(generation, &[MuteSpan { start, end }])?;
+            if accepted == 0 {
+                return Ok(None);
+            }
+        }
+        Ok(Some(end))
+    }
+
     /// Intrinsic resampler delay in native output samples for end-padding finite media.
     pub fn output_delay_samples(&self) -> Result<u64, RingError> {
         self.0.output_delay_samples()

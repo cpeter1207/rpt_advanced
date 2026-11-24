@@ -2725,7 +2725,7 @@
       }
     },
     "keyboard_test": {
-      "name": "Keyboard controlled radio",
+      "name": "Keyboard microphone and speaker",
       "inherit_from": "site",
       "enabled": false,
       "radio": {
@@ -2749,16 +2749,15 @@
           },
           "signaling": {
             "ptt": {
-              "source": "key_down",
-              "scancode": 57,
-              "inverted": false
+              "source": "none"
             }
           }
         },
         "interface": {
           "audio": {
-            "device_identifier": "example-radio-524953",
-            "usb_serial": "EXAMPLE-524953"
+            "backend": "alsa",
+            "device_selection": "exact",
+            "device_identifier": "hw:3,0"
           },
           "keyboard": {
             "device": "/dev/input/by-id/example-keyboard-event-kbd"

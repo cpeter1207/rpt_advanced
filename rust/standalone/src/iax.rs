@@ -1,6 +1,10 @@
 //! Retained provider catalog and generated ABI boundary to standalone IAX2.
 
 pub(crate) mod executor;
+/// Grouped numeric listener ownership for explicitly selected modular accounts.
+pub mod managed;
+/// Live, acknowledged jitter edits over an ordinary managed peer.
+pub mod playout;
 
 use crate::{abi, secrets::SecretsFile};
 use std::{
@@ -118,6 +122,8 @@ struct IaxOwner {
     library: Option<libloading::Library>,
     api: ClientDescriptor,
     catalog: NonNull<c_void>,
+    // Dependent descriptors remain callable through peer and catalog destruction.
+    _provider_libraries: Arc<[libloading::Library]>,
 }
 // SAFETY: the catalog is immutable; the provider retains independent state for
 // each dialed/listening peer. Loaded code remains live through the final owner.
@@ -195,7 +201,18 @@ impl IaxClient {
             library: Some(library),
             api,
             catalog,
+            _provider_libraries: Default::default(),
         })))
+    }
+
+    /// Bind selected code before a newly loaded catalog can escape to peers.
+    pub(crate) fn with_provider_libraries(
+        mut self,
+        libraries: Arc<[libloading::Library]>,
+    ) -> Result<Self, IaxError> {
+        let owner = Arc::get_mut(&mut self.0).ok_or(IaxError::Operation)?;
+        owner._provider_libraries = libraries;
+        Ok(self)
     }
 
     /// Establish one outbound call using the retained bidirectional catalog.
@@ -217,6 +234,7 @@ impl IaxClient {
             timeout_ms,
         )?;
         Ok(IaxPeer {
+            playout: None,
             api: self.0.api,
             _owner: self,
             handle,
@@ -244,6 +262,7 @@ impl IaxClient {
     pub unsafe fn adopt_inbound(self, handle: *mut c_void) -> Result<IaxPeer, IaxError> {
         let handle = NonNull::new(handle).ok_or(IaxError::Operation)?;
         Ok(IaxPeer {
+            playout: None,
             api: self.0.api,
             _owner: self,
             handle,
@@ -376,13 +395,15 @@ fn server_handle(
     nodes: &str,
 ) -> Result<NonNull<c_void>, IaxError> {
     let options = ServerOptions {
-        struct_size: size_of::<ServerOptions>() as u32,
+        struct_size: std::mem::offset_of!(ServerOptions, accounts) as u32,
         abi_version: ABI_VERSION,
         bind_address: address.as_ptr(),
         bind_address_length: address.len(),
         local_nodes: nodes.as_ptr(),
         local_nodes_length: nodes.len(),
         catalog,
+        accounts: std::ptr::null(),
+        account_count: 0,
     };
     let mut handle = std::ptr::null_mut();
     if unsafe { api.bind.unwrap()(&options, &mut handle) } != 0 {
@@ -445,12 +466,16 @@ fn dial_handle(
 
 /// One IAX peer whose calls are serialized by its owning control/media worker.
 pub struct IaxPeer {
+    pub(crate) playout: Option<playout::Owner>,
     _owner: IaxClient,
     api: ClientDescriptor,
     handle: NonNull<c_void>,
 }
 
 impl IaxPeer {
+    pub(crate) fn shares_catalog(&self, client: &IaxClient) -> bool {
+        Arc::ptr_eq(&self._owner.0, &client.0)
+    }
     /// Feed the peer's retained encoder without committing a network packet.
     pub(crate) fn prepare_audio(
         &mut self,
@@ -530,6 +555,10 @@ impl IaxPeer {
 
     /// Poll once without blocking and copy one event into the caller's buffers.
     pub fn poll(&mut self, samples: &mut [f32], text: &mut [u8]) -> Result<IaxEvent, IaxError> {
+        if let Some(owner) = &self.playout {
+            // SAFETY: poll is the existing exclusive native ingress turn.
+            unsafe { owner.step(self.handle.as_ptr()) };
+        }
         let mut kind = 0;
         let mut length = 0;
         // SAFETY: the peer has one mutable owner and both output slices are writable.
@@ -642,6 +671,7 @@ pub(crate) mod tests {
         let mut api = descriptor();
         api.destroy = Some(destroy);
         IaxPeer {
+            playout: None,
             _owner: fixture_client(api),
             api,
             handle: NonNull::dangling(),
@@ -794,6 +824,11 @@ pub(crate) mod tests {
             reset_encoder: Some(hangup),
             send_prepared_audio: Some(send_prepared),
             elapsed_ms: Some(elapsed),
+            dial_account: None,
+            poll_timed: None,
+            send_prepared_audio_timed: None,
+            retire_egress: None,
+            negotiated_format: None,
         }
     }
 
@@ -806,11 +841,37 @@ pub(crate) mod tests {
         0
     }
     unsafe extern "C" fn test_close_catalog(_: *mut c_void) {}
+    pub(crate) fn client_with_destroy(destroy: unsafe extern "C" fn(*mut c_void)) -> IaxClient {
+        let mut api = descriptor();
+        api.destroy = Some(destroy);
+        fixture_client(api)
+    }
+
+    #[test]
+    fn provider_binding_refuses_an_escaped_catalog() {
+        let client = fixture_client(descriptor());
+        let _shared = client.clone();
+        let libraries: Arc<[libloading::Library]> = Arc::from([]);
+        let lease = Arc::downgrade(&libraries);
+        assert!(matches!(client.with_provider_libraries(libraries), Err(IaxError::Operation)));
+        assert!(lease.upgrade().is_none());
+    }
+
+    /// The fixture owns this readable catalog storage through the final client drop.
+    pub(crate) fn client_with_live_catalog(
+        destroy: unsafe extern "C" fn(*mut c_void), catalog: *mut c_void,
+    ) -> IaxClient {
+        let mut client = client_with_destroy(destroy);
+        Arc::get_mut(&mut client.0).unwrap().catalog = NonNull::new(catalog).unwrap();
+        client
+    }
+
     fn fixture_client(api: ClientDescriptor) -> IaxClient {
         IaxClient(Arc::new(IaxOwner {
             library: None,
             api,
             catalog: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
+            _provider_libraries: Default::default(),
         }))
     }
     unsafe extern "C" fn prepare_audio(
@@ -883,16 +944,18 @@ pub(crate) mod tests {
             let flushing = position == samples.len();
             let mut result: abi::rptadv_codec_encode_result_v1 = unsafe { std::mem::zeroed() };
             result.struct_size = size_of::<abi::rptadv_codec_encode_result_v1>() as u32;
-            assert!(
-                peer.prepare_audio(
-                    &samples[position..],
-                    &mut output,
-                    u32::from(flushing),
-                    &mut result
-                ) >= 0
+            let status = peer.prepare_audio(
+                &samples[position..],
+                &mut output,
+                u32::from(flushing),
+                &mut result,
             );
+            // Only Complete and NeedInput can advance this finite PCM segment.
+            assert!(matches!(status, 0 | 1), "encoder prepare status {status}");
+            assert_eq!(result.status, status as u32);
             position += result.consumed_frames;
-            if result.encoded_bytes == 0 && flushing && result.status == 0 {
+            if result.consumed_frames == 0 && result.encoded_bytes == 0 {
+                assert!(flushing && status == 0, "encoder stalled before completing the segment");
                 break;
             }
             if result.encoded_bytes != 0 {
@@ -922,13 +985,14 @@ pub(crate) mod tests {
             api.poll = Some(failed_poll);
         }
         IaxPeer {
+            playout: None,
             _owner: fixture_client(api),
             api,
             handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         }
     }
 
-    fn server_descriptor() -> ServerDescriptor {
+    pub(super) fn server_descriptor() -> ServerDescriptor {
         ServerDescriptor {
             struct_size: size_of::<ServerDescriptor>() as u32,
             abi_version: ABI_VERSION,
@@ -937,6 +1001,13 @@ pub(crate) mod tests {
             poll: Some(server_poll),
             set_local_nodes: Some(server_set_nodes),
             destroy: Some(server_destroy),
+            configure_accounts: None,
+            register_account: None,
+            poll_accounts: None,
+            dial_provider_account: None,
+            prepare_configuration_batch: None,
+            commit_configuration_batch: None,
+            destroy_configuration_batch: None,
         }
     }
 
@@ -1199,6 +1270,7 @@ pub(crate) mod tests {
     fn peer_transfers_audio_text_and_reports_negotiated_rate() {
         let api = descriptor();
         let mut peer = IaxPeer {
+            playout: None,
             _owner: fixture_client(api),
             api,
             handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
@@ -1323,6 +1395,7 @@ pub(crate) mod tests {
         let mut api = descriptor();
         api.poll = Some(failed_poll);
         let mut peer = IaxPeer {
+            playout: None,
             _owner: fixture_client(api),
             api,
             handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),

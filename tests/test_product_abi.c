@@ -37,7 +37,13 @@ _Static_assert(offsetof(struct rptadv_host_services_v10, station_binding) == 400
                "complete old host services prefix");
 _Static_assert(sizeof(struct rptadv_station_request_v1) == 48, "station request");
 _Static_assert(sizeof(struct rptadv_station_binding_v1) == 48, "station binding operations");
-_Static_assert(sizeof(struct rptadv_host_services_v10) == 408,
+_Static_assert(offsetof(struct rptadv_host_services_v10, phone_provider) == 408, "complete station tail");
+_Static_assert(offsetof(struct rptadv_host_services_v10, asl_provider) == 416, "complete phone tail");
+_Static_assert(sizeof(struct rptadv_asl_admission_v1) == 24, "complete admission callbacks");
+_Static_assert(sizeof(struct rptadv_asl_provider_v1) == 40, "complete managed ASL operations");
+_Static_assert(offsetof(struct rptadv_host_services_v10, managed_echo_provider) == 424, "complete ASL tail");
+_Static_assert(sizeof(struct rptadv_managed_echo_provider_v1) == 40, "complete managed Echo operations");
+_Static_assert(sizeof(struct rptadv_host_services_v10) == 432,
                "update the complete ABI-10 size deliberately");
 
 static int node(void *context, const struct rptadv_node_host_configuration *record) {

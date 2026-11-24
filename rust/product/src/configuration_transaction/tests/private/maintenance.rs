@@ -1677,3 +1677,45 @@ fn fix4_restore_authenticates_source_before_first_provisioning() {
     request["store_uuid"] = json!(STORE);
     assert_eq!(command(4, &request, None).unwrap()["status"], "complete");
 }
+
+#[test]
+fn init_reconciles_the_same_revision_after_the_first_pointer() {
+    if fix1_keys(
+        "configuration_transaction::tests::private::maintenance::init_reconciles_the_same_revision_after_the_first_pointer",
+    ) {
+        return;
+    }
+    let (fixture, owner) = Fixture::new();
+    drop(owner);
+    let mut request = fix3_request(&fixture);
+    request["write_key_id"] = json!("example");
+    let published = std::cell::Cell::new(false);
+    let stop = |point| {
+        if point == Boundary::Pointer {
+            published.set(true);
+            Err(TransactionError::StorageFault)
+        } else {
+            Ok(())
+        }
+    };
+    assert!(command(7, &request, Some(&stop)).is_err());
+    assert!(published.get(), "init did not publish its first selector");
+    let before = {
+        let owner = WorkingFiles::open(&fixture.0).unwrap();
+        let guard = owner.try_edit().unwrap();
+        let state = Transaction::new(&guard, LIMITS).inspect().unwrap().state;
+        assert!(state.journal.is_some());
+        state.desired
+    };
+
+    let resumed = command(7, &request, None).unwrap();
+    assert_eq!(resumed["revision"], before.revision.as_str());
+    let owner = WorkingFiles::open(&fixture.0).unwrap();
+    let selected = fix1_capture(&owner);
+    let state = selected.state();
+    assert_eq!(state.desired, before);
+    assert!(state.journal.is_none());
+    assert_eq!(state.activation, Activation::Pending);
+    assert!(state.last_known_good.is_none());
+    assert!(state.clean_working.is_some());
+}

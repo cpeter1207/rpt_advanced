@@ -83,6 +83,27 @@ fn authoritative_static_records_and_authentication_never_fall_back() {
 }
 
 #[test]
+fn managed_directory_proof_rechecks_source_account_and_retired_selection() {
+    let source: IpAddr = "192.0.2.1".parse().unwrap();
+    let unauthorized: IpAddr = "192.0.2.2".parse().unwrap();
+    let row = RegisteredNode::new("registered.example", 4570_u16.try_into().unwrap(), source).unwrap();
+    let selected = Arc::new(ManagedDirectory {
+        station: [1; 16], account: [2; 16], generation: 1_u64.try_into().unwrap(),
+        method: 0, external: "external".into(),
+        registered: Arc::new(BTreeMap::from([("123".to_owned(), row)])),
+    });
+    let proof = selected.resolve(resolver(0).backend, "123", Some(source)).unwrap();
+    assert_eq!(proof.destination(&selected, "123", Some(source)), Some("radio@registered.example:4570/123"));
+    assert!(proof.destination(&selected, "123", Some(unauthorized)).is_none());
+    assert!(proof.destination(&selected, "124", Some(source)).is_none());
+    assert!(matches!(selected.resolve(resolver(0).backend, "123", Some(unauthorized)), Err(DirectoryError::SourceMismatch)));
+    let recreated = Arc::new(ManagedDirectory { account: [3; 16], registered: Arc::new(BTreeMap::new()), ..(*selected).clone() });
+    assert!(proof.destination(&recreated, "123", Some(source)).is_none());
+    let fallback = recreated.resolve(resolver(0).backend, "123", Some(source)).unwrap();
+    assert_eq!(fallback.destination(&recreated, "123", Some(source)), Some("radio@external/123"));
+}
+
+#[test]
 fn dns_precedence_uses_srv_port_any_matching_address_and_ipv6() {
     let mut directory = resolver(0);
     directory.backend.srv = Ok(Some(("srv.example".into(), 4571)));

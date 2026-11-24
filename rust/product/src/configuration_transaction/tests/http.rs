@@ -577,16 +577,21 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         )
         .unwrap();
         fs::set_permissions(&keys, fs::Permissions::from_mode(0o500)).unwrap();
-        let out = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", TEST, "--nocapture"])
             .env("CREDENTIALS_DIRECTORY", &keys)
             .env(
                 "RPTADV_HAL_FIXTURE_KEY",
                 keys.join("rpt-advanced.aead.example"),
             )
-            .env("RPTADV_HAL_TEST_CHILD", "1")
-            .status()
-            .unwrap();
+            .env("RPTADV_HAL_TEST_CHILD", "1");
+        if matches!(
+            std::env::var("RPTADV_HAL_REVIEW_CASE").as_deref(),
+            Ok("standalone-managed-phone-dial" | "standalone-managed-phone-incoming")
+        ) {
+            child.env("RPTADV_TEST_PHONE_AUDIO", fixture.0.join("phone-programme.txt"));
+        }
+        let out = child.status().unwrap();
         fs::set_permissions(keys, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(out.success());
         return;

@@ -46,6 +46,10 @@ fn request(args: &[String]) -> Result<(u32, Vec<u8>), ()> {
         }
     };
     let operation = match (args[0].as_str(), args.len()) {
+        ("init", 4) => {
+            value["write_key_id"] = json!(args[3]);
+            7
+        }
         ("inspect", 3) => 1,
         ("gc", 4) => {
             value["expected_state_sha256"] = expected(&args[3]);
@@ -167,7 +171,7 @@ fn main() -> ExitCode {
         Ok(false) => ExitCode::FAILURE,
         Err(()) => {
             eprintln!(
-                "Protected-store command unavailable or invalid. Use inspect ROOT UUID; gc ROOT UUID STATE; backup ROOT UUID DEST; restore ROOT UUID BACKUP KEY_ID STATE_OR_none WORKING_OR_empty; rotate ROOT UUID OLD_KEY_ID NEW_KEY_ID STATE; retain ROOT UUID STATE KEY_ID ROOTS_JSON."
+                "Protected-store command unavailable or invalid. Use init ROOT UUID KEY_ID; inspect ROOT UUID; gc ROOT UUID STATE; backup ROOT UUID DEST; restore ROOT UUID BACKUP KEY_ID STATE_OR_none WORKING_OR_empty; rotate ROOT UUID OLD_KEY_ID NEW_KEY_ID STATE; retain ROOT UUID STATE KEY_ID ROOTS_JSON."
             );
             ExitCode::FAILURE
         }

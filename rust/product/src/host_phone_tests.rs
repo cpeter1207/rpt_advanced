@@ -14,26 +14,29 @@ fn mailbox_host() -> Host {
     .unwrap()
 }
 
+// These command-owner tests exercise private mailbox and prompt lifecycle below
+// transport admission. Network and account qualification have independent native fixtures.
+fn prepared_login(host:&mut Host,phone:PeerIo)->Result<(),RuntimeError>{
+    let source=host.phone_calls.admit(phone,clock().now_ms).map_err(|_|RuntimeError::Rejected)?;
+    let reply=host.phone_reply(&source).ok_or(RuntimeError::Rejected)?;
+    if let Err(error)=host.prepare_login_prompt(&source,&reply,rpt_advanced_core::messages::PhoneAuthenticationPrompt::Login){
+        host.retire_phone(&source);
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[test]
-fn provider_admission_prepares_an_unauthenticated_private_login_prompt() {
-    let _serial = crate::fixture::LIFECYCLE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let mut host = mailbox_host();
-    let (phone, state) = crate::link::session::tests::phone_peer();
-    let call = phone.identity().call_id().unwrap();
-    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
-    let source = host.phone_source(call).unwrap().clone();
-    let reply = host.phone_reply(&source).unwrap();
-    assert!(!reply.phone_authenticated());
-    assert!(
-        host.take_phone_reply(&source, &reply).unwrap().is_some(),
-        "login must prepare privately before any command or attachment"
-    );
+fn accountless_phone_metadata_cannot_allocate_a_call_or_login_prompt(){
+    let _serial=crate::fixture::LIFECYCLE.lock().unwrap_or_else(|e|e.into_inner());
+    let mut host=mailbox_host();
+    let (phone,state)=crate::link::session::tests::phone_peer();
+    let call=phone.identity().call_id().unwrap();
+    assert!(matches!(host.incoming_peer(phone,"203.0.113.9",clock()),Err(RuntimeError::Rejected)));
+    assert!(host.phone_source(call).is_none());
     assert!(host.peers.is_empty());
-    assert!(state.lock().unwrap().texts.is_empty());
-    assert!(state.lock().unwrap().audio.is_empty());
-    assert!(host.stop(20));
+    assert_eq!(state.lock().unwrap().drops,1);
+    assert!(host.stop(10));
 }
 
 #[test]
@@ -44,7 +47,7 @@ fn real_mailbox_verification_keeps_prompts_private_and_does_not_unlock_node_comm
     let mut host = mailbox_host();
     let (phone, state) = crate::link::session::tests::phone_peer();
     let call = phone.identity().call_id().unwrap();
-    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
     assert_eq!(
@@ -114,7 +117,7 @@ fn exhausted_or_abandoned_login_retires_the_actual_provider_call() {
     let mut host = mailbox_host();
     let (phone, state) = crate::link::session::tests::phone_peer();
     let call = phone.identity().call_id().unwrap();
-    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
     for expected in [PhoneLogin::Retry, PhoneLogin::Retry, PhoneLogin::Closed] {
@@ -127,7 +130,7 @@ fn exhausted_or_abandoned_login_retires_the_actual_provider_call() {
     assert!(reply.ended() && host.phone_source(call).is_none());
     assert_eq!(state.lock().unwrap().drops, 1);
     let (phone, fresh_state) = crate::link::session::tests::phone_peer();
-    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     let fresh = host.phone_source(call).unwrap().clone();
     assert_ne!(source.ingress(), fresh.ingress());
     let new_reply = host.phone_reply(&fresh).unwrap();
@@ -159,7 +162,7 @@ fn private_login_preparation_rejects_node_and_retired_tokens_without_rf_fallback
     );
     let (phone, _) = crate::link::session::tests::phone_peer();
     let call = phone.identity().call_id().unwrap();
-    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
     assert!(matches!(
@@ -203,7 +206,7 @@ fn failed_private_success_prompt_retires_login_authority_and_transport() {
     let mut host = mailbox_host();
     let (phone, state) = crate::link::session::tests::phone_peer();
     let call = phone.identity().call_id().unwrap();
-    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
     for _ in 1..16 {
@@ -308,7 +311,7 @@ fn incoming_prompt_backpressure_reclaims_the_provider_call_without_attachment() 
     let resume = Resume(Some(resume_tx));
     let (phone, _) = crate::link::session::tests::phone_peer();
     let call = phone.identity().call_id().unwrap();
-    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
     let mut initial = host.take_phone_reply(&source, &reply).unwrap().unwrap();
@@ -327,7 +330,7 @@ fn incoming_prompt_backpressure_reclaims_the_provider_call_without_attachment() 
     assert!(host.retire_phone(&source));
     let (phone, rejected) = crate::link::session::tests::phone_peer();
     assert_eq!(
-        host.incoming_peer(phone, "203.0.113.9", clock()),
+        prepared_login(&mut host,phone),
         Err(RuntimeError::Preparation)
     );
     assert!(host.phone_source(call).is_none());
@@ -349,7 +352,7 @@ fn pending_phone_has_no_handshake_topology_or_radio_attachment_and_queues_only_p
     let mut host = mailbox_host();
     let (phone, state) = crate::link::session::tests::phone_peer();
     let call = phone.identity().call_id().unwrap();
-    host.incoming_peer(phone, "203.0.113.9", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     assert!(host.peers.is_empty());
     assert!(
         host.runtime
@@ -451,7 +454,7 @@ fn phone_reload_and_unload_retire_the_actual_call_generation() {
     let mut host = host();
     let (phone, _) = crate::link::session::tests::phone_peer();
     let call = phone.identity().call_id().unwrap();
-    host.incoming_peer(phone, "127.0.0.1", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
     host.reload(document("usb", "ctcss_encode=no\n"), clock())
@@ -459,7 +462,7 @@ fn phone_reload_and_unload_retire_the_actual_call_generation() {
     pump_until(&mut host, |host| host.phone_source(call).is_none());
     assert!(reply.ended());
     let (phone, _) = crate::link::session::tests::phone_peer();
-    host.incoming_peer(phone, "127.0.0.1", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     let fresh = host.phone_source(call).unwrap().clone();
     assert_ne!(fresh.ingress(), source.ingress());
     let reply = host.phone_reply(&fresh).unwrap();
@@ -483,7 +486,7 @@ fn private_prompt_queue_requires_the_exact_live_token_and_never_uses_radio_media
     let mut host = host();
     let (phone, state) = crate::link::session::tests::phone_peer();
     let call = phone.identity().call_id().unwrap();
-    host.incoming_peer(phone, "127.0.0.1", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
     let foreign = rpt_advanced_core::link::PeerSignals::for_phone(source.clone()).reply_target();
@@ -535,7 +538,7 @@ fn removed_node_reload_retires_its_pending_private_call_before_reclaiming_the_no
     let mut host = host();
     let (phone, state) = crate::link::session::tests::phone_peer();
     let call = phone.identity().call_id().unwrap();
-    host.incoming_peer(phone, "127.0.0.1", clock()).unwrap();
+    prepared_login(&mut host,phone).unwrap();
     let source = host.phone_source(call).unwrap().clone();
     let reply = host.phone_reply(&source).unwrap();
     host.reload(

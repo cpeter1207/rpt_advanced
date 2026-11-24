@@ -4,6 +4,7 @@
 #[path = "host_services/echo_tests.rs"]
 pub(crate) mod echo_tests;
 
+
 use crate::{
     abi, directory,
     iax::{IaxClient, IaxError, IaxEvent, IaxPeer},
@@ -34,8 +35,12 @@ pub struct StandaloneHostContext {
     pub(crate) radio: RadioHostContext,
     pub(crate) resolver: Option<directory::Resolver>,
     secrets: SecretsFile,
-    ingress: Option<PeerIngress>,
+    ingress: Option<Arc<PeerIngress>>,
+    managed_network: Arc<std::sync::OnceLock<ManagedNetwork>>,
     echo: Mutex<Option<Arc<Accounts>>>,
+    phone: Option<rptadv_private_phone_host::selection::PhoneHost>,
+    asl: Option<managed_asl::Frontend>,
+    managed_echo: Option<managed_echo::Frontend>,
 }
 
 /// An executor cannot publish peers until its jitter provider is available.
@@ -45,10 +50,149 @@ struct PeerIngress {
     client: IaxClient,
 }
 
+// The resolver and executor must drop before their implementing provider DSOs.
+struct ManagedNetwork {
+    resolver: directory::Resolver,
+    ingress: PeerIngress,
+    _providers: Box<crate::providers::ProviderSet>,
+}
+
+// The selected set holds immutable ABI tables for ordinary IAX, jitter and the
+// thread-safe resolver. Each server and peer still has one exclusive owner.
+unsafe impl Send for ManagedNetwork {}
+unsafe impl Sync for ManagedNetwork {}
+
+#[derive(Clone)]
+struct NetworkAccess {
+    incumbent: Option<Arc<PeerIngress>>,
+    selected: Arc<std::sync::OnceLock<ManagedNetwork>>,
+}
+
+impl StandaloneHostContext {
+    fn selected_ingress(&self) -> Option<&PeerIngress> {
+        self.ingress.as_deref().or_else(|| self.managed_network.get().map(|n| &n.ingress))
+    }
+
+    fn selected_resolver(&self) -> Option<&directory::Resolver> {
+        self.resolver.as_ref().or_else(|| self.managed_network.get().map(|n| &n.resolver))
+    }
+
+    pub(crate) unsafe fn resolver_from_context<'a>(raw: *mut c_void) -> Option<&'a directory::Resolver> {
+        if raw.is_null() { return None; }
+        let context = raw.cast::<Self>();
+        // Borrow only the immutable resolver fields; other callbacks may stage a radio.
+        unsafe { (&*ptr::addr_of!((*context).resolver)).as_ref().or_else(|| {
+            (&*ptr::addr_of!((*context).managed_network)).get().map(|n| &n.resolver)
+        }) }
+    }
+}
+
 /// Owns a complete host-services table and the context it points to.
 pub struct HostServicesOwner {
     context: Box<StandaloneHostContext>,
     descriptor: Box<abi::rptadv_host_services_v10>,
+}
+
+mod private_transport;
+mod managed_asl;
+mod managed_echo;
+impl HostServicesOwner {
+    pub(crate) fn install_managed_echo(&mut self, descriptors: &crate::providers::ProductRuntimeDescriptors)
+        -> Result<(), crate::runtime::RuntimeError> {
+        self.context.managed_echo = Some(managed_echo::Frontend::new(descriptors)?);
+        self.descriptor.managed_echo_provider = &managed_echo::OPERATIONS;
+        Ok(())
+    }
+    pub(crate) fn install_asl(&mut self) -> Result<(), crate::runtime::RuntimeError> {
+        let access = self.network_access().map_err(crate::runtime::RuntimeError::Provider)?;
+        self.context.asl = Some(managed_asl::Frontend::start(access).map_err(|_| crate::runtime::RuntimeError::Start)?);
+        self.descriptor.asl_provider = &managed_asl::OPERATIONS;
+        Ok(())
+    }
+
+    pub(crate) fn open_asl(&self) {
+        if let Some(frontend) = &self.context.asl { frontend.open_ingress(); }
+    }
+
+    pub(crate) fn asl_quiescent(&self) -> bool {
+        self.context.asl.as_ref().is_none_or(managed_asl::Frontend::close_ingress)
+    }
+
+    pub(crate) fn join_asl(&mut self) -> bool {
+        self.context.asl.as_mut().is_none_or(managed_asl::Frontend::join)
+    }
+    /// Load only the ordinary IAX, resolver and jitter providers when the first explicit
+    /// managed authority applies. A management-only process has no such dependency.
+    pub fn managed_iax_client(&self) -> Result<IaxClient, crate::providers::ProviderError> {
+        Ok(self.network_access()?.open()?.client.clone())
+    }
+
+    fn network_access(&self) -> Result<NetworkAccess, crate::providers::ProviderError> {
+        if self.context.ingress.is_some() != self.context.resolver.is_some() {
+            return Err(crate::providers::ProviderError::IncompleteDescriptor("librptadv_resolver_adapter.so.1"));
+        }
+        Ok(NetworkAccess { incumbent: self.context.ingress.clone(), selected: self.context.managed_network.clone() })
+    }
+}
+
+impl NetworkAccess {
+    fn open(&self) -> Result<&PeerIngress, crate::providers::ProviderError> {
+        if let Some(ingress) = self.incumbent.as_deref() {
+            if ingress.executor.ordinary.is_none() {
+                return Err(crate::providers::ProviderError::IncompleteDescriptor("librptadviax2.so.2"));
+            }
+            return Ok(ingress);
+        }
+        if let Some(network) = self.selected.get() { return Ok(&network.ingress); }
+        let providers = Box::new(crate::providers::ProviderSet::load_selected(None, |name| {
+            matches!(name, "librptadv_resolver_adapter.so.1" | "librptadv_jitter_adapter.so.1" | "librptadviax2.so.2")
+        })?);
+        // SAFETY: moving Box keeps its allocation stable. The descriptor borrows remain
+        // internal to ManagedNetwork and both users drop before its retained provider set.
+        let retained = unsafe { &*std::ptr::from_ref(providers.as_ref()) };
+        let ingress = PeerIngress {
+            executor: retained.iax_executor()?, jitter: retained.jitter_descriptor()?,
+            client: retained.iax_client()?,
+        };
+        if ingress.executor.ordinary.is_none() {
+            return Err(crate::providers::ProviderError::IncompleteDescriptor("librptadviax2.so.2"));
+        }
+        let resolver = directory::Resolver::new(retained.resolver_descriptor()?)?;
+        let _ = self.selected.set(ManagedNetwork { resolver, ingress, _providers: providers });
+        Ok(&self.selected.get().expect("installed or concurrently selected").ingress)
+    }
+}
+
+impl HostServicesOwner {
+    /// Configure the negotiated ordinary peer before its first packet or attachment.
+    /// A refusal leaves the uniquely owned peer with the caller for immediate disposal.
+    pub fn prepare_managed_playout(
+        &self, peer: &mut IaxPeer, delays: crate::iax::playout::Delays,
+    ) -> Result<crate::iax::playout::PlayoutControl, IaxError> {
+        let ingress = self.context.selected_ingress().ok_or(IaxError::Operation)?;
+        ingress.prepare_playout(peer, delays)
+    }
+}
+
+impl PeerIngress {
+    fn prepare_playout(&self, peer: &mut IaxPeer, delays: crate::iax::playout::Delays)
+        -> Result<crate::iax::playout::PlayoutControl, IaxError> {
+        if !peer.shares_catalog(&self.client) || peer.playout.is_some() {
+            return Err(IaxError::Operation);
+        }
+        let setter = self.executor.ordinary.ok_or(IaxError::IncompatibleAdapter)?;
+        let raw = peer.raw_handle();
+        // SAFETY: this retained matching client/catalog creates the unique negotiated peer.
+        // The caller has not yet handed it to the shared executor.
+        unsafe {
+            self.executor.configure_jitter(raw, ptr::from_ref(self.jitter).cast())
+                .map_err(|_| IaxError::Operation)?;
+            if !delays.apply(setter, raw) { return Err(IaxError::Operation); }
+        }
+        let (owner, control) = crate::iax::playout::Owner::new(setter);
+        peer.playout = Some(owner);
+        Ok(control)
+    }
 }
 
 impl HostServicesOwner {
@@ -74,8 +218,12 @@ impl HostServicesOwner {
             radio: RadioHostContext::new(radios, providers),
             resolver,
             secrets,
-            ingress,
+            ingress: ingress.map(Arc::new),
+            managed_network: Arc::default(),
             echo: Mutex::new(None),
+            phone: None,
+            asl: None,
+            managed_echo: None,
         });
         let descriptor = Box::new(abi::rptadv_host_services_v10 {
             struct_size: size_of::<abi::rptadv_host_services_v10>() as u32,
@@ -129,6 +277,9 @@ impl HostServicesOwner {
             radio_remote_submit: Some(crate::radio_host::radio_remote_submit),
             radio_ready: Some(crate::radio_host::radio_ready),
             station_binding: &crate::radio_host::station_binding::OPERATIONS.0,
+            phone_provider: std::ptr::null(),
+            asl_provider: std::ptr::null(),
+        managed_echo_provider: std::ptr::null(),
         });
         Ok(Self {
             context,
@@ -234,7 +385,7 @@ impl HostServicesOwner {
         &self,
         listener: &mut crate::iax::IaxServer,
     ) -> Result<(), IaxError> {
-        if let Some(ingress) = &self.context.ingress {
+        if let Some(ingress) = self.context.selected_ingress() {
             listener.enable_async(&ingress.executor)?;
         }
         Ok(())
@@ -333,6 +484,14 @@ unsafe extern "C" fn echo_account_status(
         ) else {
             return -1;
         };
+        if let Some(managed) = &context.managed_echo {
+            let Ok(account) = managed.observe(local) else { return -1; };
+            if let Some(account) = account {
+                let line = rptadv_peer_support::echolink::host::describe_account(local, &account);
+                unsafe { sink(sink_context, line.as_ptr().cast(), line.len()) };
+            }
+            return 0;
+        }
         if let Some(accounts) = context.echo_accounts() {
             match accounts.observe(local) {
                 Ok(Some(record)) => {
@@ -420,7 +579,7 @@ pub(crate) unsafe fn incoming_echo(
         struct_size: size_of::<abi::rptadv_incoming_peer_v1>() as u32,
         abi_version: 1,
         protocol: 2,
-        local: bytes(&peer.identity().local),
+        local: bytes(peer.station()),
         remote: bytes(peer.remote()),
         source: bytes(&source),
     };
@@ -430,17 +589,24 @@ pub(crate) unsafe fn incoming_echo(
     }
 }
 
-type PeerHandle = HostPeer<IaxHandle>;
+type PeerHandle = HostPeer<IaxHandle, rptadv_private_phone_host::calls::PrivateCall>;
 // Native tokens belong to the existing IAX executor; Echo tokens retain their
 // shared provider/QSO owner. Never pass one protocol's token to another runtime.
 enum PeerRegistration {
-    Iax(*mut c_void),
+    Phone(rptadv_private_phone_host::calls::Registration),
+    Iax(*mut c_void, Option<managed_asl::peers::Attach>),
     Echo(Registration),
 }
-struct IaxHandle(IaxPeer, Vec<f32>, String, String);
+struct IaxHandle {
+    peer: IaxPeer,
+    samples: Vec<f32>,
+    local: String,
+    remote: String,
+    managed: Option<managed_asl::peers::Member>,
+}
 impl IaxHandle {
     fn new(peer: IaxPeer, local: &str, remote: &str) -> Self {
-        Self(peer, vec![0.0; 4096], local.into(), remote.into())
+        Self { peer, samples: vec![0.0; 4096], local: local.into(), remote: remote.into(), managed: None }
     }
 }
 
@@ -449,13 +615,13 @@ impl IaxHandle {
 unsafe fn iax_peer_mut<'a>(peer: *mut c_void) -> Option<&'a mut IaxHandle> {
     match unsafe { peer.cast::<PeerHandle>().as_mut() }? {
         HostPeer::Iax(peer) => Some(peer),
-        HostPeer::Echo(_) => None,
+        HostPeer::Echo(_) | HostPeer::Phone(_) => None,
     }
 }
 unsafe fn iax_peer_ref<'a>(peer: *const c_void) -> Option<&'a IaxHandle> {
     match unsafe { peer.cast::<PeerHandle>().as_ref() }? {
         HostPeer::Iax(peer) => Some(peer),
-        HostPeer::Echo(_) => None,
+        HostPeer::Echo(_) | HostPeer::Phone(_) => None,
     }
 }
 
@@ -482,16 +648,18 @@ unsafe extern "C" fn peer_info(
         }
         let (protocol, capabilities, account_generation, qso_generation, remote, local, callsign) =
             match peer {
+                HostPeer::Phone(call) => return unsafe { rptadv_private_phone_host::frontend::info(call, output.cast()) },
                 HostPeer::Iax(peer) => (
                     1,
-                    if context.ingress.is_some() { 15 } else { 12 },
+                    if context.selected_ingress().is_some() { 15 } else { 12 },
                     0,
                     0,
-                    peer.3.as_str(),
-                    peer.2.as_str(),
+                    peer.remote.as_str(),
+                    peer.local.as_str(),
                     "",
                 ),
                 HostPeer::Echo(peer) => {
+                    if context.managed_echo.as_ref().is_some_and(|h| !h.current(peer)) { return -1; }
                     let identity = peer.identity();
                     (
                         2,
@@ -499,7 +667,7 @@ unsafe extern "C" fn peer_info(
                         identity.account_generation,
                         identity.qso_generation,
                         peer.remote(),
-                        identity.local.as_str(),
+                        peer.station(),
                         identity.callsign.as_str(),
                     )
                 }
@@ -548,11 +716,23 @@ unsafe extern "C" fn peer_step_attach(
             return -1;
         };
         *output = ptr::null_mut();
+        if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} {
+            let Some(step)=step else{return -1;};
+            return match unsafe {call.attach(step,step_context)} {
+                Ok(token)=>{*output=Box::into_raw(Box::new(PeerRegistration::Phone(token))).cast();0}
+                Err(_)=> -1,
+            };
+        }
         if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+            let Some(host) = (unsafe { context.cast::<StandaloneHostContext>().as_ref() }) else { return -1; };
+            if host.managed_echo.as_ref().is_some_and(|h| !h.current(peer)) { return -1; }
             // Copy retention before attach, which may immediately reenter this handle.
             let peer = std::sync::Arc::clone(peer);
             return match unsafe { peer.attach(step, step_context) } {
                 Ok(token) => {
+                    if host.managed_echo.as_ref().is_some_and(|h| !h.current(&peer)) {
+                        drop(token); return -1;
+                    }
                     *output = Box::into_raw(Box::new(PeerRegistration::Echo(token))).cast();
                     0
                 }
@@ -565,17 +745,28 @@ unsafe extern "C" fn peer_step_attach(
         ) else {
             return -1;
         };
-        let Some(ingress) = &context.ingress else {
+        let Some(ingress) = context.selected_ingress() else {
             return -1;
         };
         // End the wrapper borrow before attach: its callback may immediately read it.
-        let raw_peer = {
+        let (raw_peer, needs_jitter, member) = {
             let Some(peer) = (unsafe { iax_peer_ref(peer) }) else {
                 return -1;
             };
-            peer.0.raw_handle()
+            let member = match &peer.managed {
+                Some(member) => match member.attaching() {
+                    Some(ticket) => Some(ticket),
+                    None => return -1,
+                },
+                None => None,
+            };
+            (peer.peer.raw_handle(), peer.peer.playout.is_none(), member)
         };
-        if unsafe {
+        if needs_jitter && context.managed_network.get().is_some() && context.ingress.is_none() {
+            // The managed handoff must have applied the selected ordinary tuple first.
+            return -1;
+        }
+        if needs_jitter && unsafe {
             ingress
                 .executor
                 .configure_jitter(raw_peer, ptr::from_ref(ingress.jitter).cast())
@@ -586,20 +777,28 @@ unsafe extern "C" fn peer_step_attach(
         }
         match unsafe { ingress.executor.attach(raw_peer, step, step_context) } {
             Ok(token) => {
-                *output = Box::into_raw(Box::new(PeerRegistration::Iax(token))).cast();
+                let registration = Box::new(PeerRegistration::Iax(token, member));
+                let raw = Box::into_raw(registration);
+                *output = raw.cast();
+                if let PeerRegistration::Iax(_, Some(member)) = unsafe { &*raw } { member.completed(true); }
                 0
             }
-            Err(_) => -1,
+            Err(_) => {
+                if let Some(member) = member { member.completed(false); }
+                -1
+            }
         }
     })
 }
 
 unsafe extern "C" fn peer_step_stop(context: *mut c_void, token: *mut c_void) {
     match unsafe { token.cast::<PeerRegistration>().as_ref() } {
+        Some(PeerRegistration::Phone(token)) => token.request_stop(),
         Some(PeerRegistration::Echo(token)) => token.stop(),
-        Some(PeerRegistration::Iax(token)) => {
+        Some(PeerRegistration::Iax(token, member)) => {
+            if let Some(member) = member { member.retiring(); }
             if let Some(ingress) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
-                .and_then(|context| context.ingress.as_ref())
+                .and_then(StandaloneHostContext::selected_ingress)
             {
                 unsafe { ingress.executor.stop(*token) };
             }
@@ -672,14 +871,14 @@ unsafe extern "C" fn peer_observe(
             return 0;
         }
         let executor = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
-            .and_then(|context| context.ingress.as_ref().map(|ingress| &ingress.executor));
+            .and_then(|context| context.selected_ingress().map(|ingress| &ingress.executor));
         let (Some(executor), Some(peer)) = (executor, unsafe { iax_peer_ref(peer) }) else {
             return -1;
         };
         let mut raw: abi::rptadv_iax2_peer_observation_v1 = unsafe { std::mem::zeroed() };
         raw.struct_size = size_of::<abi::rptadv_iax2_peer_observation_v1>() as u32;
         raw.abi_version = 1;
-        if unsafe { executor.observe(peer.0.raw_handle(), ptr::from_mut(&mut raw).cast()) } != 0
+        if unsafe { executor.observe(peer.peer.raw_handle(), ptr::from_mut(&mut raw).cast()) } != 0
             || raw.struct_size as usize != size_of::<abi::rptadv_iax2_peer_observation_v1>()
             || raw.abi_version != 1
         {
@@ -720,10 +919,12 @@ unsafe extern "C" fn peer_step_detach(context: *mut c_void, token: *mut c_void) 
     }
     let token = unsafe { Box::from_raw(token.cast::<PeerRegistration>()) };
     match *token {
+        PeerRegistration::Phone(token) => drop(token),
         PeerRegistration::Echo(token) => drop(token),
-        PeerRegistration::Iax(token) => {
+        PeerRegistration::Iax(token, member) => {
+            if let Some(member) = member { member.retiring(); }
             if let Some(ingress) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
-                .and_then(|context| context.ingress.as_ref())
+                .and_then(StandaloneHostContext::selected_ingress)
             {
                 unsafe { ingress.executor.detach(token) };
             }
@@ -916,7 +1117,10 @@ unsafe extern "C" fn peer_dial(
             let peer = remote
                 .parse::<u32>()
                 .ok()
-                .and_then(|node| context.echo_accounts()?.account(local)?.dial(node).ok());
+                .and_then(|node| match &context.managed_echo {
+                    Some(managed) => managed.dial(local, node),
+                    None => context.echo_accounts()?.account(local)?.dial(node).ok(),
+                });
             let Some(peer) = peer else {
                 return -1;
             };
@@ -926,10 +1130,13 @@ unsafe extern "C" fn peer_dial(
             *output = Box::into_raw(Box::new(PeerHandle::Echo(peer))).cast();
             return 0;
         }
+        if context.managed_network.get().is_some() && context.ingress.is_none() {
+            // This legacy entry lacks the account generation and playout selection.
+            // Managed numeric calls enter DialedPeer::dial/take with their captured owner.
+            return -1;
+        }
         let Some((address, remote)) = parse_destination(destination, |endpoint| {
-            context
-                .resolver
-                .as_ref()?
+            context.selected_resolver()?
                 .addresses(endpoint)
                 .ok()?
                 .into_iter()
@@ -938,16 +1145,10 @@ unsafe extern "C" fn peer_dial(
             eprintln!("rpt-advanced: IAX2 destination validation or address resolution failed");
             return -1;
         };
-        let Some(ingress) = &context.ingress else {
+        let Some(ingress) = context.selected_ingress() else {
             return -1;
         };
-        let peer = match ingress.client.clone().dial_configured(
-            address,
-            local,
-            &remote,
-            &context.secrets,
-            5000,
-        ) {
+        let peer = match ingress.client.clone().dial_configured(address, local, &remote, &context.secrets, 5000) {
             Ok(peer) => peer,
             Err(error) => {
                 eprintln!("rpt-advanced: IAX2 outbound dial failed: {error}");
@@ -1005,13 +1206,15 @@ fn parse_destination(
 
 unsafe extern "C" fn peer_rate(_: *mut c_void, peer: *const c_void) -> u32 {
     match unsafe { peer.cast::<PeerHandle>().as_ref() } {
+        Some(HostPeer::Phone(call)) => call.rate(),
         Some(HostPeer::Echo(_)) => 8000,
-        Some(HostPeer::Iax(peer)) => peer.0.sample_rate_hz(),
+        Some(HostPeer::Iax(peer)) => peer.peer.sample_rate_hz(),
         None => 0,
     }
 }
 
 unsafe extern "C" fn peer_ready(_: *mut c_void, peer: *mut c_void) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return i32::from(call.established()); }
     if unsafe { iax_peer_ref(peer) }.is_none() {
         return -1;
     }
@@ -1030,19 +1233,19 @@ unsafe extern "C" fn peer_read(
         };
         // Full legal datagram text remains deliverable; local synthesis has its own limit.
         let mut text = [0_u8; 65507];
-        let mut input = peer.0.poll(&mut peer.1, &mut text);
+        let mut input = peer.peer.poll(&mut peer.samples, &mut text);
         if let Ok(IaxEvent::NeedCapacity(required)) = input {
-            if peer.1.try_reserve_exact(required - peer.1.len()).is_err() {
+            if peer.samples.try_reserve_exact(required - peer.samples.len()).is_err() {
                 return -1;
             }
-            peer.1.resize(required, 0.0);
+            peer.samples.resize(required, 0.0);
             // Native decode/PLC was retained, not consumed; retry once on this owner.
-            input = peer.0.poll(&mut peer.1, &mut text);
+            input = peer.peer.poll(&mut peer.samples, &mut text);
         }
         match input {
             Ok(IaxEvent::None) => 0,
             Ok(IaxEvent::Audio(length)) => unsafe {
-                event(event_context, 3, peer.1.as_ptr().cast(), length);
+                event(event_context, 3, peer.samples.as_ptr().cast(), length);
                 0
             },
             Ok(IaxEvent::Gap(length)) => unsafe {
@@ -1082,7 +1285,7 @@ unsafe extern "C" fn peer_send_text(
         }) else {
             return -1;
         };
-        if peer.0.send_text(text.as_bytes()).is_ok() {
+        if peer.peer.send_text(text.as_bytes()).is_ok() {
             0
         } else {
             -1
@@ -1091,8 +1294,9 @@ unsafe extern "C" fn peer_send_text(
 }
 
 unsafe extern "C" fn peer_send_digit(_: *mut c_void, peer: *mut c_void, digit: u8) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return call.send_digit(digit).unwrap_or(-1); }
     unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| {
-        if peer.0.send_digit(digit).is_ok() {
+        if peer.peer.send_digit(digit).is_ok() {
             0
         } else {
             -1
@@ -1118,6 +1322,7 @@ unsafe extern "C" fn peer_prepare_audio(
     flush: u32,
     result: *mut abi::rptadv_codec_encode_result_v1,
 ) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return unsafe { rptadv_private_phone_host::frontend::prepare_audio(call,pcm,count,output,capacity,flush,result.cast()) }; }
     boundary(-1, || {
         if result.is_null()
             || unsafe { ptr::addr_of!((*result).struct_size).read() }
@@ -1144,22 +1349,22 @@ unsafe extern "C" fn peer_prepare_audio(
                 unsafe { peer.prepare_audio(pcm, output, flush, result.cast()) }
                     .map_or(-1, |()| unsafe { (*result).status as i32 })
             }
+            Some(HostPeer::Phone(_)) => -1,
             Some(HostPeer::Iax(_)) => {
-                unsafe { iax_peer_mut(peer) }
-                    .unwrap()
-                    .0
-                    .prepare_audio(pcm, output, flush, unsafe { &mut *result })
+                let peer = unsafe { iax_peer_mut(peer) }.unwrap();
+                peer.peer.prepare_audio(pcm, output, flush, unsafe { &mut *result })
             }
             None => -1,
         }
     })
 }
 unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return call.reset_encoder().map_or(-1,|()|0); }
     boundary(-1, || {
         if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
             return unsafe { peer.reset_encoder() }.map_or(-1, |()| 0);
         }
-        unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| peer.0.reset_encoder())
+        unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| peer.peer.reset_encoder())
     })
 }
 unsafe extern "C" fn peer_send_prepared(
@@ -1170,6 +1375,7 @@ unsafe extern "C" fn peer_send_prepared(
     frames: u32,
     timestamp: u32,
 ) -> i32 {
+    if let Some(HostPeer::Phone(_)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return -1; }
     boundary(-1, || {
         if count > isize::MAX as usize || (bytes.is_null() && count != 0) {
             return -1;
@@ -1183,9 +1389,10 @@ unsafe extern "C" fn peer_send_prepared(
             Some(HostPeer::Echo(peer)) => {
                 unsafe { peer.send_prepared(bytes, frames, timestamp) }.map_err(|_| ())
             }
+            Some(HostPeer::Phone(_)) => return -1,
             Some(HostPeer::Iax(_)) => unsafe { iax_peer_mut(peer) }
                 .unwrap()
-                .0
+                .peer
                 .send_prepared(bytes, frames, timestamp)
                 .map_err(|_| ()),
             None => return -1,
@@ -1198,19 +1405,21 @@ unsafe extern "C" fn peer_send_prepared(
     })
 }
 unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return call.elapsed_ms().unwrap_or(u32::MAX); }
     if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
         return peer
             .elapsed_ms()
             .map_or(0, |value| value.min(u64::from(u32::MAX)) as u32);
     }
-    unsafe { iax_peer_ref(peer) }.map_or(0, |peer| peer.0.elapsed_ms())
+    unsafe { iax_peer_ref(peer) }.map_or(0, |peer| peer.peer.elapsed_ms())
 }
 unsafe extern "C" fn peer_step_wake(context: *mut c_void, registration: *mut c_void) {
     match unsafe { registration.cast::<PeerRegistration>().as_ref() } {
+        Some(PeerRegistration::Phone(token)) => token.wake(),
         Some(PeerRegistration::Echo(token)) => token.wake(),
-        Some(PeerRegistration::Iax(token)) => {
+        Some(PeerRegistration::Iax(token, _)) => {
             if let Some(ingress) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
-                .and_then(|context| context.ingress.as_ref())
+                .and_then(StandaloneHostContext::selected_ingress)
             {
                 unsafe { ingress.executor.wake(*token) };
             }
@@ -1219,6 +1428,7 @@ unsafe extern "C" fn peer_step_wake(context: *mut c_void, registration: *mut c_v
     }
 }
 unsafe extern "C" fn peer_set_deadline(context: *mut c_void, peer: *mut c_void, after: u64) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return call.set_deadline(after).map_or(-1,|()|0); }
     if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
         return unsafe { peer.set_deadline(after) }.map_or(-1, |()| 0);
     }
@@ -1228,8 +1438,8 @@ unsafe extern "C" fn peer_set_deadline(context: *mut c_void, peer: *mut c_void, 
     ) else {
         return -1;
     };
-    context.ingress.as_ref().map_or(-1, |ingress| unsafe {
-        ingress.executor.set_deadline(peer.0.raw_handle(), after)
+    context.selected_ingress().map_or(-1, |ingress| unsafe {
+        ingress.executor.set_deadline(peer.peer.raw_handle(), after)
     })
 }
 
@@ -1242,6 +1452,7 @@ unsafe extern "C" fn peer_read_source(
     text_context: *mut c_void,
     output: *mut abi::rptadv_peer_source_result_v1,
 ) -> i32 {
+    if let Some(HostPeer::Phone(call)) = unsafe {peer.cast::<PeerHandle>().as_ref()} { return unsafe {rptadv_private_phone_host::frontend::read(call,completion,sink.cast(),output.cast())}; }
     boundary(-1, || {
         if output.is_null()
             || unsafe { ptr::addr_of!((*output).struct_size).read() }
@@ -1254,20 +1465,11 @@ unsafe extern "C" fn peer_read_source(
             return -1;
         };
         let output = unsafe { &mut *output };
-        let sink = unsafe { sink.as_ref() };
-        if sink.is_some_and(|sink| {
-            sink.struct_size < size_of::<abi::rptadv_peer_source_sink_v1>() as u32
-                || sink.abi_version != 1
-        }) {
+        // Echo consumes only the original 32-byte source prefix, including when
+        // the sender can also provide ordered private-phone digits and timing.
+        let Ok(sink) = (unsafe { echo::PcmSink::from_host_prefix(sink.cast()) }) else {
             return -1;
-        }
-        let sink = sink.map(|sink| echo::PcmSink {
-            struct_size: size_of::<echo::PcmSink>() as u32,
-            abi_version: 1,
-            context: sink.context,
-            audio: sink.audio,
-            gap: sink.gap,
-        });
+        };
         struct Text {
             callback: abi::rptadv_peer_source_text_v1,
             context: *mut c_void,
@@ -1513,6 +1715,95 @@ mod tests {
             String::from_utf8(output.stderr).unwrap(),
             "rpt-advanced: scheduler queue 50% — Δ\n"
         );
+    }
+
+    #[test]
+    fn managed_playout_retains_libraries_after_both_preparation_outcomes() {
+        use std::{cell::Cell, sync::Weak};
+        struct Probe {
+            lease: Weak<[libloading::Library]>,
+            refusal: bool,
+            configured: Cell<u32>,
+            set: Cell<u32>,
+            destroyed: Cell<u32>,
+            tuple: Cell<Option<(u32, u32, u32)>>,
+            jitter: Cell<*const c_void>,
+            live_at_destroy: Cell<bool>,
+        }
+        unsafe extern "C" fn configure(raw: *mut c_void, jitter: *const c_void) -> i32 {
+            // The outer Box remains live until all synchronous callbacks have returned.
+            let probe = unsafe { &*raw.cast::<Probe>() };
+            probe.configured.set(probe.configured.get() + 1);
+            probe.jitter.set(jitter);
+            0
+        }
+        unsafe extern "C" fn set(raw: *mut c_void, minimum: u32, initial: u32, maximum: u32) -> i32 {
+            let probe = unsafe { &*raw.cast::<Probe>() };
+            probe.set.set(probe.set.get() + 1);
+            probe.tuple.set(Some((minimum, initial, maximum)));
+            if probe.refusal { -1 } else { 0 }
+        }
+        unsafe extern "C" fn destroy(raw: *mut c_void) {
+            let probe = unsafe { &*raw.cast::<Probe>() };
+            probe.destroyed.set(probe.destroyed.get() + 1);
+            probe.live_at_destroy.set(probe.lease.upgrade().is_some());
+        }
+        // The complete ABI-1 table has genuine static storage. Configure records its
+        // identity only; unused jitter operations safely refuse without dereferencing it.
+        unsafe extern "C" fn create(_: *const abi::rptadv_jitter_config_v1, out: *mut *mut c_void) -> i32 {
+            if !out.is_null() { unsafe { out.write(ptr::null_mut()) }; }
+            -1
+        }
+        unsafe extern "C" fn release(_: *mut c_void) {}
+        unsafe extern "C" fn reset(_: *mut c_void) -> i32 { -1 }
+        unsafe extern "C" fn put(_: *mut c_void, _: *const abi::rptadv_jitter_packet_v1) -> i32 { -1 }
+        unsafe extern "C" fn get(_: *mut c_void, _: u64, _: u32, _: *mut u8, _: usize,
+                                 _: *mut abi::rptadv_jitter_result_v1) -> i32 { -1 }
+        unsafe extern "C" fn advance(_: *mut c_void, _: u64, _: u32) -> i32 { -1 }
+        unsafe extern "C" fn observe(_: *const c_void, _: *mut abi::rptadv_jitter_observation_v1) -> i32 { -1 }
+        static JITTER: abi::rptadv_jitter_descriptor_v1 = abi::rptadv_jitter_descriptor_v1 {
+            struct_size: size_of::<abi::rptadv_jitter_descriptor_v1>() as u32,
+            abi_version: 1,
+            capability: *b"rptadv.jitter\0\0\0",
+            create: Some(create), destroy: Some(release), reset: Some(reset), put: Some(put),
+            get: Some(get), advance: Some(advance), observe: Some(observe),
+            // Optional function suffixes are null; only the required prefix is used.
+            ..unsafe { std::mem::zeroed() }
+        };
+        for refusal in [false, true] {
+            // Distinct catalog, peer and executor tokens stay valid through their releases.
+            let mut catalog = Box::new(1_u8);
+            let (providers, client, lease) = crate::providers::tests::selected_client_for_lifetime_test(
+                destroy, ptr::from_mut(catalog.as_mut()).cast(),
+            );
+            let mut probe = Box::new(Probe {
+                lease: lease.clone(), refusal, configured: Cell::new(0), set: Cell::new(0),
+                destroyed: Cell::new(0), tuple: Cell::new(None), jitter: Cell::new(ptr::null()),
+                live_at_destroy: Cell::new(false),
+            });
+            let mut peer = unsafe { client.clone().adopt_inbound(ptr::from_mut(probe.as_mut()).cast()) }.unwrap();
+            let mut host = HostServicesOwner::new(Vec::new(), None, SecretsFile::default()).unwrap();
+            host.context.ingress = Some(std::sync::Arc::new(super::PeerIngress {
+                executor: crate::iax::executor::Executor::playout_fixture(configure, set),
+                jitter: &JITTER, client: client.clone(),
+            }));
+            let control = match host.prepare_managed_playout(&mut peer, crate::iax::playout::Delays::new(20, 40, 100).unwrap()) {
+                Ok(control) => { assert!(!refusal); Some(control) }
+                Err(error) => { assert!(refusal); assert_eq!(error, crate::iax::IaxError::Operation); None }
+            };
+            assert_eq!(peer.playout.is_some(), !refusal);
+            drop(control);
+            drop(host);
+            drop(providers);
+            drop(client);
+            drop(peer);
+            // No callback can access the probe after this point.
+            assert_eq!((probe.configured.get(), probe.set.get(), probe.destroyed.get()), (1, 1, 1));
+            assert_eq!(probe.tuple.get(), Some((20, 40, 100)));
+            assert_eq!(probe.jitter.get(), ptr::from_ref(&JITTER).cast());
+            assert!(probe.live_at_destroy.get(), "both outcomes retain the selected code through peer destruction");
+            assert!(lease.upgrade().is_none());
+        }
     }
 
     #[test]
@@ -2799,7 +3090,7 @@ mod tests {
         let jitter = host.context.ingress.as_ref().unwrap().jitter;
         let mut invalid = *jitter;
         invalid.create = None;
-        host.context.ingress.as_mut().unwrap().jitter = Box::leak(Box::new(invalid));
+        std::sync::Arc::get_mut(host.context.ingress.as_mut().unwrap()).unwrap().jitter = Box::leak(Box::new(invalid));
         assert_eq!(
             unsafe {
                 super::peer_step_attach(
@@ -2814,7 +3105,8 @@ mod tests {
         );
         assert!(token.is_null());
 
-        let ingress = host.context.ingress.as_mut().unwrap();
+        let ingress = std::sync::Arc::get_mut(host.context.ingress.as_mut().unwrap())
+            .expect("fixture owns the only ingress reference");
         ingress.jitter = jitter;
         ingress.executor.reject_attachment_for_test();
         assert_eq!(
@@ -2932,7 +3224,7 @@ mod tests {
             if matching_context {
                 super::peer_step_detach(host.descriptor().context, token);
             } else {
-                let PeerRegistration::Iax(raw) = *token.cast::<PeerRegistration>() else {
+                let PeerRegistration::Iax(raw, _) = *token.cast::<PeerRegistration>() else {
                     panic!("native IAX registration expected")
                 };
                 // A bad foreign context must not dereference an IAX token. Keep
@@ -2992,8 +3284,9 @@ mod tests {
         let mut owner =
             HostServicesOwner::new(Vec::new(), Some(providers), SecretsFile::parse("").unwrap())
                 .unwrap();
-        owner.context.ingress.as_mut().unwrap().executor =
-            unsafe { crate::iax::executor::Executor::new(ptr::from_ref(&api).cast()) }.unwrap();
+        let ingress = std::sync::Arc::get_mut(owner.context.ingress.as_mut().unwrap())
+            .expect("fixture owns the only ingress reference");
+        ingress.executor = unsafe { crate::iax::executor::Executor::new(ptr::from_ref(&api).cast()) }.unwrap();
         let peer = crate::iax::tests::peer_for_host_callback(0, false, false);
         let handle = owner.peer_handle(peer, "1000", "2000");
         for mode in 0..=3 {

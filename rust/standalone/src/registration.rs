@@ -3,18 +3,23 @@
 use crate::configuration::ConfigError;
 use crate::secrets::SecretsFile;
 use crossbeam_queue::ArrayQueue;
+use rptadv_peer_support::sealed_records::SecretBytes;
 use std::{
     io::Read,
+    net::SocketAddr,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 const RESPONSE_LIMIT: u64 = 64 * 1024;
+const EXCHANGE_BUDGET: Duration = Duration::from_secs(15);
 const UPDATE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+mod transport;
 
 /// Safe diagnostics contain no credentials, URLs, or untrusted response text.
 #[derive(Debug, PartialEq, Eq)]
@@ -33,10 +38,22 @@ pub struct RegistrationTarget {
     url: String,
     local_port: u16,
     interval_seconds: u64,
-    secret: String,
+    secret: Arc<SecretBytes>,
+    observation: Option<Arc<AtomicU8>>,
 }
 
 impl RegistrationTarget {
+    /// Publish this attempt's result only while its observation remains current.
+    fn record_observation(&self, registered: bool) -> bool {
+        let Some(observation) = &self.observation else {
+            return true;
+        };
+        let state = if registered { REGISTERED } else { RETRY };
+        observation.fetch_update(Ordering::AcqRel, Ordering::Acquire, |previous| {
+            (previous != WITHDRAWN).then_some(state)
+        }).is_ok()
+    }
+
     /// Node number used as the AllStarLink registration username.
     pub fn node(&self) -> &str {
         &self.node
@@ -80,7 +97,8 @@ pub fn targets(
             url: node.registration_url,
             local_port: node.iax_port,
             interval_seconds: node.registration_interval_seconds,
-            secret: secret.to_owned(),
+            secret: Arc::new(SecretBytes::new(secret.as_bytes().to_vec())),
+            observation: None,
         });
     }
     Ok(targets)
@@ -96,6 +114,15 @@ pub struct RegistrationWorker {
 impl RegistrationWorker {
     /// Start registration immediately for the supplied node set.
     pub fn start(targets: Vec<RegistrationTarget>) -> std::io::Result<Self> {
+        Self::start_with(targets, |target| {
+            exchange(target, Instant::now() + EXCHANGE_BUDGET, transport::agent)
+        })
+    }
+
+    fn start_with(
+        targets: Vec<RegistrationTarget>,
+        register: impl Fn(&RegistrationTarget) -> Result<Duration, RegistrationError> + Send + 'static,
+    ) -> std::io::Result<Self> {
         let updates = Arc::new(ArrayQueue::new(1));
         let stopping = Arc::new(AtomicBool::new(false));
         let thread = thread::Builder::new()
@@ -103,7 +130,7 @@ impl RegistrationWorker {
             .spawn({
                 let updates = Arc::clone(&updates);
                 let stopping = Arc::clone(&stopping);
-                move || registration_loop(updates, stopping, targets)
+                move || registration_loop(updates, stopping, targets, register)
             })?;
         Ok(Self {
             updates,
@@ -145,13 +172,8 @@ fn registration_loop(
     updates: Arc<ArrayQueue<Vec<RegistrationTarget>>>,
     stopping: Arc<AtomicBool>,
     mut targets: Vec<RegistrationTarget>,
+    register: impl Fn(&RegistrationTarget) -> Result<Duration, RegistrationError>,
 ) {
-    let agent = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(15))
-        .timeout_write(Duration::from_secs(15))
-        .build();
     let mut due = vec![Instant::now(); targets.len()];
     let mut registered = vec![false; targets.len()];
 
@@ -173,10 +195,17 @@ fn registration_loop(
             thread::sleep((*deadline - now).min(UPDATE_POLL_INTERVAL));
             continue;
         }
-        let target = targets[index].clone();
+        let target = &targets[index];
         let interval = Duration::from_secs(target.interval_seconds);
 
-        let refresh = match post_registration(&agent, &target) {
+        let result = register(target);
+        if stopping.load(Ordering::Acquire) {
+            return;
+        }
+        if !target.record_observation(result.is_ok()) {
+            return;
+        }
+        let refresh = match result {
             Ok(refresh) => {
                 if !registered[index] {
                     eprintln!("node {}: HTTPS registration succeeded", target.node);
@@ -194,15 +223,47 @@ fn registration_loop(
     }
 }
 
-fn post_registration(
-    agent: &ureq::Agent,
+/// A zero remaining duration expires the exchange, including an answer at its deadline.
+fn positive(remaining: Duration) -> std::io::Result<Duration> {
+    if remaining.is_zero() {
+        return Err(std::io::ErrorKind::TimedOut.into());
+    }
+    Ok(remaining)
+}
+
+/// Accept only timely addresses, preserving the system resolver's candidate order.
+fn resolve_registration(
+    netloc: &str,
+    remaining: impl Fn() -> Duration,
+    lookup: impl FnOnce(&str) -> std::io::Result<Vec<SocketAddr>>,
+) -> std::io::Result<Vec<SocketAddr>> {
+    positive(remaining())?;
+    let addresses = match netloc.parse::<SocketAddr>() {
+        Ok(address) => vec![address],
+        Err(_) => lookup(netloc)?,
+    };
+    positive(remaining())?;
+    Ok(addresses)
+}
+
+/// One attempt owns its request and response through the same monotonic deadline.
+fn exchange(
     target: &RegistrationTarget,
+    deadline: Instant,
+    make_agent: impl FnOnce(Instant) -> std::io::Result<ureq::Agent>,
 ) -> Result<Duration, RegistrationError> {
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+    let io_error = |error: std::io::Error| RegistrationError::Read(error.kind());
+    positive(remaining()).map_err(io_error)?;
     let body = request_body(target);
+    let agent = make_agent(deadline).map_err(io_error)?;
     let response = agent
         .post(&target.url)
+        .timeout(positive(remaining()).map_err(io_error)?)
         .set("Content-Type", "application/json")
-        .send_bytes(&body)
+        .send_bytes(body.expose_bytes());
+    drop(body);
+    let response = response
         .map_err(|error| match error {
             ureq::Error::Status(status, _) => RegistrationError::HttpStatus(status),
             ureq::Error::Transport(transport) => RegistrationError::Transport(transport.kind()),
@@ -210,25 +271,182 @@ fn post_registration(
     if !(200..300).contains(&response.status()) {
         return Err(RegistrationError::HttpStatus(response.status()));
     }
-    let mut response_body = Vec::new();
-    response
-        .into_reader()
-        .take(RESPONSE_LIMIT)
-        .read_to_end(&mut response_body)
-        .map_err(|error| RegistrationError::Read(error.kind()))?;
-    response_refresh(&response_body, target.interval_seconds)
+    read_registration_response(response.into_reader(), target.interval_seconds, remaining)
 }
 
-fn request_body(target: &RegistrationTarget) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "port": target.local_port,
-        "data": {"nodes": {target.node.as_str(): {
-            "node": target.node.as_str(),
-            "passwd": target.secret.as_str(),
-            "remote": 0
-        }}}
-    }))
-    .expect("registration request contains only JSON-compatible values")
+fn read_registration_response(
+    mut reader: impl Read,
+    fallback_seconds: u64,
+    remaining: impl Fn() -> Duration,
+) -> Result<Duration, RegistrationError> {
+    let capacity = RESPONSE_LIMIT as usize + 1;
+    let response_body = SecretBytes::try_fill(capacity, |out| {
+        // Keep the response and the single overflow byte in the same zeroizing allocation.
+        out.resize(capacity, 0);
+        let mut used = 0;
+        while used < capacity {
+            positive(remaining()).map_err(|error| RegistrationError::Read(error.kind()))?;
+            match reader.read(&mut out[used..]) {
+                Ok(0) => {
+                    positive(remaining()).map_err(|error| RegistrationError::Read(error.kind()))?;
+                    out.truncate(used);
+                    return Ok(());
+                }
+                Ok(count) => used += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(RegistrationError::Read(error.kind())),
+            }
+        }
+        Err(RegistrationError::InvalidResponse)
+    })?;
+    let refresh = response_refresh(response_body.expose_bytes(), fallback_seconds)?;
+    positive(remaining()).map_err(|error| RegistrationError::Read(error.kind()))?;
+    Ok(refresh)
+}
+
+fn request_body(target: &RegistrationTarget) -> SecretBytes {
+    use std::io::Write;
+    // A JSON string expands by at most six bytes per UTF-8 byte. Reserve once
+    // before writing any password so reallocation cannot release unwiped bytes.
+    let password = std::str::from_utf8(target.secret.expose_bytes()).expect("validated registrar password");
+    let capacity = 128 + 12 * target.node.len() + 6 * password.len();
+    SecretBytes::try_fill(capacity, |out| -> std::io::Result<()> {
+        write!(out, "{{\"port\":{},\"data\":{{\"nodes\":{{", target.local_port)?;
+        serde_json::to_writer(&mut *out, &target.node)?;
+        out.extend_from_slice(b":{\"node\":");
+        serde_json::to_writer(&mut *out, &target.node)?;
+        out.extend_from_slice(b",\"passwd\":");
+        serde_json::to_writer(&mut *out, password)?;
+        out.extend_from_slice(b",\"remote\":0}}}}");
+        Ok(())
+    }).expect("writing a bounded registrar request to owned memory")
+}
+
+const DORMANT: u8 = 0;
+const PENDING: u8 = 1;
+const REGISTERED: u8 = 2;
+const RETRY: u8 = 3;
+const WITHDRAWN: u8 = 4;
+
+/// One explicitly selected, encrypted-record-bound HTTPS registration attempt.
+/// Each restoration creates a fresh attempt, even if it selects the same record.
+pub struct ManagedRegistrar {
+    identity: RegistrarIdentity,
+    target: RegistrationTarget,
+    state: Arc<AtomicU8>,
+    worker: Option<RegistrationWorker>,
+}
+
+/// Opaque identities from one authenticated product selection; the record version
+/// is never rendered in HTTP, status, errors or logs.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct RegistrarIdentity {
+    /// Registered station UUID.
+    pub station: [u8; 16],
+    /// Explicit AllStarLink resource UUID.
+    pub account: [u8; 16],
+    /// Exact version of the account-bound encrypted registrar credential.
+    pub record_version: [u8; 16],
+    /// Native adoption serial retained by this attempt.
+    pub attempt: std::num::NonZeroU64,
+}
+
+/// Sanitized remote state, independent of local listener adoption.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RegistrarState {
+    /// Prepared without starting network work.
+    Dormant,
+    /// A first request is scheduled or in flight.
+    Pending,
+    /// The selected registrar confirmed this attempt.
+    Registered,
+    /// A failed request will retry at the configured interval.
+    Retry,
+    /// This attempt cannot publish another remote result.
+    Withdrawn,
+}
+
+impl ManagedRegistrar {
+    /// Retain the previous selected target for reversal with a distinct result owner.
+    pub(crate) fn replacement(&self, attempt: std::num::NonZeroU64) -> Self {
+        let state = Arc::new(AtomicU8::new(DORMANT));
+        let mut target = self.target.clone();
+        target.observation = Some(state.clone());
+        Self { identity: RegistrarIdentity { attempt, ..self.identity }, target, state, worker: None }
+    }
+    /// Borrow the resolved HTTPS endpoint and its own authenticated password.
+    /// Missing or masked credentials select no registrar. No peer dial uses these bytes.
+    pub fn prepare(
+        identity: RegistrarIdentity,
+        node: std::num::NonZeroU64,
+        endpoint: Option<&str>,
+        local_port: std::num::NonZeroU16,
+        interval_seconds: u16,
+        password: Option<&str>,
+    ) -> Option<Self> {
+        let endpoint = endpoint.filter(|url| url.starts_with("https://"))?;
+        let password = password.filter(|value| !value.is_empty())?;
+        let state = Arc::new(AtomicU8::new(DORMANT));
+        Some(Self {
+            identity,
+            target: RegistrationTarget {
+                node: node.to_string(),
+                url: endpoint.to_owned(),
+                local_port: local_port.get(),
+                interval_seconds: u64::from(interval_seconds),
+                secret: Arc::new(SecretBytes::new(password.as_bytes().to_vec())),
+                observation: Some(Arc::clone(&state)),
+            },
+            state,
+            worker: None,
+        })
+    }
+
+    /// Match a status or release to this attempt and private record.
+    pub fn selected(&self, identity: RegistrarIdentity) -> bool { self.identity == identity }
+
+    /// Start the selected local worker after admission. Remote HTTP success is asynchronous.
+    pub fn start(&mut self) -> std::io::Result<()> {
+        self.start_with(RegistrationWorker::start)
+    }
+
+    fn start_with(
+        &mut self,
+        start: impl FnOnce(Vec<RegistrationTarget>) -> std::io::Result<RegistrationWorker>,
+    ) -> std::io::Result<()> {
+        if self.worker.is_some() || self.state.load(Ordering::Acquire) != DORMANT {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        self.state.store(PENDING, Ordering::Release);
+        match start(vec![self.target.clone()]) {
+            Ok(worker) => { self.worker = Some(worker); Ok(()) }
+            Err(error) => { self.state.store(DORMANT, Ordering::Release); Err(error) }
+        }
+    }
+
+    /// Observe only this attempt, including when an older request finishes late.
+    pub fn state(&self) -> RegistrarState {
+        match self.state.load(Ordering::Acquire) {
+            DORMANT => RegistrarState::Dormant,
+            PENDING => RegistrarState::Pending,
+            REGISTERED => RegistrarState::Registered,
+            RETRY => RegistrarState::Retry,
+            _ => RegistrarState::Withdrawn,
+        }
+    }
+
+    /// Fence new results and refreshes. Retain this owner while bounded HTTP work drains.
+    pub fn withdraw(&mut self) -> bool {
+        self.state.store(WITHDRAWN, Ordering::Release);
+        if let Some(worker) = &mut self.worker {
+            worker.stopping.store(true, Ordering::Release);
+            if worker.thread.as_ref().is_some_and(|thread| !thread.is_finished()) {
+                return false;
+            }
+            self.worker.take();
+        }
+        true
+    }
 }
 
 fn response_refresh(body: &[u8], fallback_seconds: u64) -> Result<Duration, RegistrationError> {
@@ -237,18 +455,17 @@ fn response_refresh(body: &[u8], fallback_seconds: u64) -> Result<Duration, Regi
     let data = response
         .get("data")
         .ok_or(RegistrationError::InvalidResponse)?;
+    let decoded;
     let detail = match data {
         serde_json::Value::String(value) if value.trim_start().starts_with(['{', '[', '"']) => {
-            rptadv_json::decode_value(value.as_bytes())
-                .map_err(|_| RegistrationError::InvalidResponse)?
+            decoded = rptadv_json::decode_value(value.as_bytes())
+                .map_err(|_| RegistrationError::InvalidResponse)?;
+            &decoded
         }
-        value => value.clone(),
+        value => value,
     };
-    if !detail
-        .to_string()
-        .to_ascii_lowercase()
-        .contains("successfully registered")
-    {
+    let status = detail.as_str().or_else(|| detail.get("result")?.as_str());
+    if !status.is_some_and(|text| text.trim().eq_ignore_ascii_case("successfully registered")) {
         return Err(RegistrationError::Rejected);
     }
     Ok(Duration::from_secs(
@@ -258,6 +475,23 @@ fn response_refresh(body: &[u8], fallback_seconds: u64) -> Result<Duration, Regi
             .filter(|seconds| (1..=86_400).contains(seconds))
             .unwrap_or(fallback_seconds),
     ))
+}
+
+#[cfg(test)]
+fn post_registration(
+    agent: &ureq::Agent,
+    target: &RegistrationTarget,
+) -> Result<Duration, RegistrationError> {
+    post_registration_until(agent, target, Instant::now() + EXCHANGE_BUDGET)
+}
+
+#[cfg(test)]
+fn post_registration_until(
+    agent: &ureq::Agent,
+    target: &RegistrationTarget,
+    deadline: Instant,
+) -> Result<Duration, RegistrationError> {
+    exchange(target, deadline, |_| Ok(agent.clone()))
 }
 
 #[cfg(test)]
@@ -272,7 +506,8 @@ mod tests {
             url: "https://register.example/".into(),
             local_port: 4569,
             interval_seconds: 60,
-            secret: "test-secret".into(),
+            secret: std::sync::Arc::new(rptadv_peer_support::sealed_records::SecretBytes::new(b"test-secret".to_vec())),
+            observation: None,
         }
     }
 
@@ -293,8 +528,8 @@ mod tests {
         assert_eq!(selected[0].interval_seconds(), 60);
         assert_eq!(selected[1].node(), "4000");
         assert_eq!(selected[1].local_port(), 4570);
-        assert_eq!(selected[1].secret, "node-secret");
-        assert_eq!(selected[0].secret, "shared-secret");
+        assert!(selected[1].secret.expose_bytes() == b"node-secret");
+        assert!(selected[0].secret.expose_bytes() == b"shared-secret");
     }
 
     #[test]
@@ -307,7 +542,7 @@ mod tests {
     #[test]
     fn request_uses_the_asl_https_registration_json_shape() {
         let body = request_body(&target());
-        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let request: serde_json::Value = serde_json::from_slice(body.expose_bytes()).unwrap();
 
         assert_eq!(request["port"], 4569);
         assert_eq!(request["data"]["nodes"]["524950"]["node"], "524950");
@@ -325,6 +560,150 @@ mod tests {
             response_refresh(br#"{"refresh":75,"data":"registration denied"}"#, 60),
             Err(RegistrationError::Rejected)
         );
+    }
+
+    #[test]
+    fn registrar_uses_only_the_authoritative_result() {
+        for body in [
+            br#"{"data":"not successfully registered"}"#.as_slice(),
+            br#"{"data":{"result":"denied","detail":"successfully registered"}}"#,
+            br#"{"data":"{\"result\":\"denied\",\"detail\":\"successfully registered\"}"}"#,
+            br#"{"data":{"detail":"successfully registered"}}"#,
+        ] {
+            assert!(response_refresh(body, 60).is_err());
+        }
+
+        let accepted = br#"{"data":{"result":"successfully registered","detail":"previously denied"}}"#;
+        assert_eq!(response_refresh(accepted, 60), Ok(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn registrar_reads_through_eof_at_the_response_limit() {
+        use std::io::Cursor;
+
+        let limit = super::RESPONSE_LIMIT as usize;
+        for length in [limit - 1, limit, limit + 1, limit + 17] {
+            let mut body = br#"{"refresh":47,"data":"successfully registered"}"#.to_vec();
+            body.resize(length, b' ');
+            let mut reader = Cursor::new(body);
+            let result = super::read_registration_response(&mut reader, 60, || super::EXCHANGE_BUDGET);
+
+            if length <= limit {
+                assert_eq!(result, Ok(Duration::from_secs(47)));
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(reader.position(), length.min(limit + 1) as u64);
+        }
+    }
+
+    #[test]
+    fn expired_registrar_exchange_skips_lookup() {
+        use std::{io, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Instant};
+
+        let called = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&called);
+        let agent = ureq::AgentBuilder::new()
+            .redirects(0)
+            .resolver(move |_: &str| -> io::Result<Vec<std::net::SocketAddr>> {
+                seen.store(true, Ordering::Relaxed);
+                Err(io::ErrorKind::NotFound.into())
+            })
+            .build();
+        let mut configured = target();
+        configured.url = "https://fixture.invalid/".into();
+        let result = super::post_registration_until(&agent, &configured, Instant::now());
+        assert!(result.is_err());
+        assert!(!called.load(Ordering::Relaxed), "an expired request entered DNS");
+    }
+
+    #[test]
+    fn registrar_discards_a_lookup_that_consumed_the_exchange_budget() {
+        use std::{cell::Cell, io::ErrorKind, net::SocketAddr};
+
+        let address = SocketAddr::from(([127, 0, 0, 1], 443));
+        for (before_ms, after_ms) in [(5, 2), (5, 0), (0, 0)] {
+            let remaining = Cell::new(Duration::from_millis(before_ms));
+            let calls = Cell::new(0);
+            let result = super::resolve_registration(
+                "fixture.invalid:443",
+                || remaining.get(),
+                |netloc| {
+                    assert_eq!(netloc, "fixture.invalid:443");
+                    calls.set(calls.get() + 1);
+                    remaining.set(Duration::from_millis(after_ms));
+                    Ok(vec![address])
+                },
+            );
+            assert_eq!(calls.get(), if before_ms == 0 { 0 } else { 1 });
+            if after_ms == 0 {
+                assert_eq!(result.err().map(|error| error.kind()), Some(ErrorKind::TimedOut),
+                    "an expired lookup supplied usable addresses");
+            } else {
+                assert_eq!(result.unwrap(), vec![address]);
+            }
+        }
+    }
+
+    #[test]
+    fn registrar_response_consumes_the_budget_left_after_lookup() {
+        use std::{cell::Cell, io::{self, Read}};
+
+        struct Body<'a> {
+            bytes: &'a [u8],
+            remaining_ms: &'a Cell<u64>,
+            reads: usize,
+        }
+        impl Read for Body<'_> {
+            fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                self.remaining_ms.set(self.remaining_ms.get().saturating_sub(1));
+                let size = output.len().min(24);
+                self.bytes.read(&mut output[..size])
+            }
+        }
+
+        // Two in-memory data reads and one EOF read, each costing one logical ms.
+        let bytes = br#"{"refresh":47,"data":"successfully registered"}"#;
+        for (after_lookup_ms, permitted_reads, on_time) in [(4, 3, true), (2, 2, false), (3, 3, false)] {
+            let remaining_ms = Cell::new(5);
+            let remaining = || Duration::from_millis(remaining_ms.get());
+            super::resolve_registration("fixture.invalid:443", remaining, |_| {
+                remaining_ms.set(after_lookup_ms);
+                Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], 443))])
+            }).unwrap();
+            let mut body = Body { bytes, remaining_ms: &remaining_ms, reads: 0 };
+            let result = super::read_registration_response(&mut body, 60, remaining);
+            assert_eq!(body.reads, permitted_reads, "response read continued after expiry");
+            if on_time {
+                assert_eq!(result, Ok(Duration::from_secs(47)));
+            } else {
+                assert!(result.is_err(), "a successful response exceeded the exchange deadline");
+            }
+        }
+    }
+
+    #[test]
+    fn registrar_withdrawal_fences_late_success_and_retry() {
+        use super::{ManagedRegistrar, RegistrarIdentity, RegistrarState};
+
+        let identity = RegistrarIdentity {
+            station: [1; 16], account: [2; 16], record_version: [3; 16],
+            attempt: 1_u64.try_into().unwrap(),
+        };
+        let mut registrar = ManagedRegistrar::prepare(
+            identity, 716701_u64.try_into().unwrap(), Some("https://fixture.invalid/"),
+            4569_u16.try_into().unwrap(), 60, Some("fixture-only"),
+        ).unwrap();
+        let dispatched = registrar.target.clone();
+        registrar.state.store(super::PENDING, super::Ordering::Release);
+        assert!(dispatched.record_observation(false));
+        assert_eq!(registrar.state(), RegistrarState::Retry);
+        assert!(registrar.withdraw());
+        for success in [true, false] {
+            assert!(!dispatched.record_observation(success));
+            assert_eq!(registrar.state(), RegistrarState::Withdrawn);
+        }
     }
 
     #[test]
@@ -529,14 +908,11 @@ mod tests {
                 .unwrap();
             thread::sleep(Duration::from_millis(200));
         });
-        let agent = ureq::AgentBuilder::new()
-            .timeout_read(Duration::from_millis(50))
-            .build();
+        let agent = ureq::AgentBuilder::new().redirects(0).build();
         let started = Instant::now();
-
         assert!(matches!(
-            super::post_registration(&agent, &target),
-            Err(RegistrationError::Read(_))
+            super::post_registration_until(&agent, &target, started + Duration::from_millis(50)),
+            Err(RegistrationError::Read(std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock))
         ));
         assert!(started.elapsed() < Duration::from_millis(500));
         server.join().unwrap();
@@ -547,6 +923,55 @@ mod tests {
         let mut worker = super::RegistrationWorker::start(Vec::new()).unwrap();
         worker.stop();
         assert!(worker.thread.is_none());
+    }
+
+    #[test]
+    fn dormant_registrar_and_withdrawn_inflight_result_have_distinct_owners() {
+        use super::{ManagedRegistrar, RegistrarState};
+        use std::{io::Write, net::TcpListener, sync::mpsc, thread, time::Instant};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let node = 716701_u64.try_into().unwrap();
+        let port = 4569_u16.try_into().unwrap();
+        let endpoint = Some("https://registrar.example/");
+        let owner = super::RegistrarIdentity { station: [1; 16], account: [2; 16], record_version: [3; 16], attempt: 1_u64.try_into().unwrap() };
+        assert!(ManagedRegistrar::prepare(owner, node, endpoint, port, 60, None).is_none());
+        let mut target = ManagedRegistrar::prepare(owner, node, endpoint, port, 60, Some("fixture-only")).unwrap();
+        assert!(target.selected(owner));
+        assert!(!target.selected(super::RegistrarIdentity { record_version: [4; 16], ..owner }));
+        assert_eq!(target.state(), RegistrarState::Dormant);
+        // Exercise the existing local HTTP receiver without external DNS or a trust-store edit.
+        target.target.url = format!("http://{}/", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        listener.set_nonblocking(false).unwrap();
+        let (received, request) = mpsc::sync_channel(1);
+        let (release, waiting) = mpsc::sync_channel(1);
+        let receiver = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&read_registration_body(&mut stream)).unwrap();
+            assert_eq!(request["port"], 4569);
+            let row = &request["data"]["nodes"]["716701"];
+            assert_eq!(row["node"], "716701");
+            assert!(row["passwd"] == "fixture-only");
+            received.send(()).unwrap();
+            waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+            let body = br#"{"refresh":1,"data":"successfully registered"}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+        target.start().unwrap();
+        request.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(target.state(), RegistrarState::Pending);
+        assert!(!target.withdraw());
+        release.send(()).unwrap();
+        receiver.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !target.withdraw() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(target.state(), RegistrarState::Withdrawn);
+        assert!(target.start().is_err());
     }
 
     #[test]
@@ -692,6 +1117,10 @@ mod tests {
     }
 
     fn read_registration_request(stream: &mut std::net::TcpStream) {
+        drop(read_registration_body(stream));
+    }
+
+    fn read_registration_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
         use std::io::{BufRead, BufReader, Read};
 
         let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -712,6 +1141,7 @@ mod tests {
         }
         let mut body = vec![0; content_length];
         reader.read_exact(&mut body).unwrap();
+        body
     }
 
     fn post_loopback_response(

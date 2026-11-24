@@ -716,7 +716,7 @@ fn fixed_numeric_setting_preserves_its_authored_type_for_provider_validation() {
 }
 
 #[test]
-fn authenticated_phone_grammar_reports_its_unavailable_owner() {
+fn phone_grammar_requires_the_current_authenticated_call() {
     use crate::{
         config::resources::candidate::ResourceScope,
         link::{PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource},
@@ -765,10 +765,17 @@ fn authenticated_phone_grammar_reports_its_unavailable_owner() {
 
     assert!(matches!(a.admit(&ctx, false), Err(ActionError::SourceOnly)));
     assert!(phone.authenticate_phone());
-    assert!(matches!(
-        a.admit(&ctx, false),
-        Err(ActionError::Unavailable)
-    ));
+    assert!(a.admit(&ctx,false).is_ok());
+    let commands=CommandLanguage::standard();
+    for (command,target) in [("*3",None),("*31234",Some("1234"))]{
+        let action=commands.match_completed(command).unwrap().admit(&ctx,false,true,false)
+            .expect("authenticated transceive must resolve the private attachment before public node decoding").action;
+        let Action::Host(HostAction::PhoneGrammar(action))=action else {panic!("private attachment must not dial a public link")};
+        assert!(matches!(&*action,crate::phone_dtmf::PhoneDtmfAction::Attach(t) if t.as_ref().map(|t|t.as_str())==target));
+    }
+    let select=commands.match_completed("*41234").unwrap().admit(&ctx,false,true,false).unwrap().action;
+    assert!(matches!(select,Action::Host(HostAction::PhoneGrammar(a))
+        if matches!(&*a,crate::phone_dtmf::PhoneDtmfAction::SelectTarget(target) if target.as_str()=="1234")));
     phone.end();
     assert!(matches!(a.admit(&ctx, false), Err(ActionError::SourceOnly)));
 }

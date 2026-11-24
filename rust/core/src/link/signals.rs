@@ -1,14 +1,48 @@
 //! Bounded lock-free snapshots between one audio consumer and one channel owner.
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
+
+/// Station-local PCM cut shared with prepared peer rings and retained egress.
+#[derive(Debug, Default)]
+pub struct MediaIsolation(AtomicU64);
+
+impl MediaIsolation {
+    const CLAIMS: u64 = 0xffff;
+
+    /// Capture the station media epoch. An odd tag suppresses public programme.
+    pub fn epoch(&self) -> u64 {
+        let state = self.0.load(Ordering::Acquire);
+        (state >> 15 & !1) | u64::from(state & Self::CLAIMS != 0)
+    }
+
+    /// Own one suppression claim independently of other pending or live calls.
+    pub fn hold(self: &Arc<Self>) -> Option<MediaIsolationClaim> {
+        self.0.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            ((state & Self::CLAIMS) < Self::CLAIMS)
+                .then(|| state.wrapping_add(1 << 16) + 1)
+        }).ok()?;
+        Some(MediaIsolationClaim(Arc::clone(self)))
+    }
+}
+
+/// Release only the suppression acquired by this one call.
+pub struct MediaIsolationClaim(Arc<MediaIsolation>);
+
+impl Drop for MediaIsolationClaim {
+    fn drop(&mut self) {
+        self.0.0.fetch_add((1 << 16) - 1, Ordering::AcqRel);
+    }
+}
 
 #[derive(Debug)]
 struct ReplyState {
     phone: Option<super::PhoneSource>,
     phone_authenticated: AtomicBool,
+    phone_media_only: bool,
     rx_muted: Arc<AtomicU64>,
+    media_isolation: OnceLock<Arc<MediaIsolation>>,
     ended: AtomicBool,
     radio_keyed: AtomicBool,
     radio_key_epoch: AtomicU64,
@@ -52,6 +86,10 @@ impl PeerReply {
     pub fn rx_muted(&self) -> bool {
         self.0.rx_muted.load(Ordering::Acquire) & 1 != 0
     }
+    /// Bind the station's programme permit before publishing this peer.
+    pub fn bind_media_isolation(&self, isolation: Arc<MediaIsolation>) {
+        let _ = self.0.media_isolation.set(isolation);
+    }
     pub(crate) fn set_rx_muted(&self, muted: bool) {
         let _ = self
             .0
@@ -67,6 +105,14 @@ impl PeerReply {
     /// Mailbox admission is separate from provider authentication and admin unlock.
     pub fn phone_authenticated(&self) -> bool {
         !self.ended() && self.0.phone_authenticated.load(Ordering::Acquire)
+    }
+    /// Media admission follows either verified mailbox attachment or the outbound leg.
+    pub fn phone_media_allowed(&self) -> bool {
+        !self.ended() && (self.0.phone_media_only || self.0.phone_authenticated.load(Ordering::Acquire))
+    }
+    /// The called party has a PCM route and no command-input lane.
+    pub fn outgoing_phone(&self) -> bool {
+        self.0.phone_media_only
     }
     /// Revoke queued commands and replies before their owner reclaims the connection.
     pub fn retire(&self) {
@@ -116,25 +162,36 @@ impl PeerSignals {
     pub fn for_phone(source: super::PhoneSource) -> Self {
         Self::with_phone(Some(source))
     }
+    /// An outgoing recipient can exchange PCM without any mailbox grant.
+    pub fn for_outgoing_phone(source: super::PhoneSource) -> Self {
+        Self::with_mute(Some(source), Arc::new(AtomicU64::new(0)), true)
+    }
     /// Prepare a fresh media endpoint for the same surviving connection. Reply/edge tokens
     /// remain generation-specific while its operator mute follows the transport.
     pub fn redirected(previous: &PeerReply) -> Self {
-        Self::with_mute(
+        let next = Self::with_mute(
             previous.phone_source().cloned(),
             previous.0.rx_muted.clone(),
-        )
+            previous.0.phone_media_only,
+        );
+        if let Some(isolation) = previous.0.media_isolation.get() {
+            next.reply.bind_media_isolation(Arc::clone(isolation));
+        }
+        next
     }
     fn with_phone(phone: Option<super::PhoneSource>) -> Self {
-        Self::with_mute(phone, Arc::new(AtomicU64::new(0)))
+        Self::with_mute(phone, Arc::new(AtomicU64::new(0)), false)
     }
-    fn with_mute(phone: Option<super::PhoneSource>, rx_muted: Arc<AtomicU64>) -> Self {
+    fn with_mute(phone: Option<super::PhoneSource>, rx_muted: Arc<AtomicU64>, phone_media_only: bool) -> Self {
         Self {
             pcm: AtomicU64::new(0),
             dtmf_muted: AtomicBool::new(false),
             reply: PeerReply(Arc::new(ReplyState {
                 phone,
                 phone_authenticated: AtomicBool::new(false),
+                phone_media_only,
                 rx_muted,
+                media_isolation: OnceLock::new(),
                 ended: AtomicBool::new(false),
                 radio_keyed: AtomicBool::new(false),
                 radio_key_epoch: AtomicU64::new(0),
@@ -150,7 +207,7 @@ impl PeerSignals {
     /// Publish only a mailbox PIN result already verified by serialized control.
     /// This never grants node-administration unlock and is not a PIN verifier.
     pub fn authenticate_phone(&self) -> bool {
-        if self.reply.phone_source().is_none() || self.ended() {
+        if self.reply.phone_source().is_none() || self.reply.0.phone_media_only || self.ended() {
             return false;
         }
         self.reply
@@ -177,7 +234,9 @@ impl PeerSignals {
     }
     /// Read the current source mute without cloning the connection token on audio.
     pub fn receive_epoch(&self) -> u64 {
-        self.reply.0.rx_muted.load(Ordering::Acquire)
+        let muted = self.reply.0.rx_muted.load(Ordering::Acquire);
+        let isolated = self.reply.0.media_isolation.get().map_or(0, |gate| gate.epoch());
+        (muted & !1).wrapping_add(isolated & !1) | ((muted | isolated) & 1)
     }
     /// Whether the source is operationally muted.
     pub fn rx_muted(&self) -> bool {

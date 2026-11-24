@@ -633,17 +633,26 @@ dtmf-macro-stopped =
 
 phone-authentication =
     .text = { $state ->
-        [login] Enter mailbox number and PIN
+        [login] Enter mailbox number followed by pound
+        [password] Enter password followed by pound
         [authenticated] Mailbox authenticated. Protected commands still require node unlock
-       *[retry] Login unsuccessful. Try again
+        [unavailable] Requested operation is unavailable
+        [failed] Command failed
+       *[retry] Login unsuccessful. Enter your mailbox number followed by pound
         }
     .tts = { $state ->
-        [login] Enter your mailbox number and PIN
+        [login] Enter your mailbox number followed by pound
+        [password] Enter your passcode followed by pound
         [authenticated] Mailbox authenticated. Protected commands still require node unlock
-       *[retry] Login unsuccessful. Try again
+        [unavailable] Requested operation is unavailable
+        [failed] Command failed
+       *[retry] Login unsuccessful. Enter your mailbox number followed by pound
         }
     .morse = { $state ->
-        [login] MAILBOX AND PIN
+        [login] MAILBOX POUND
+        [password] PASSWORD POUND
         [authenticated] LOGIN OK UNLOCK SEPARATE
-       *[retry] LOGIN FAILED RETRY
+        [unavailable] OPERATION UNAVAILABLE
+        [failed] COMMAND FAILED
+       *[retry] LOGIN FAILED MAILBOX POUND
         }

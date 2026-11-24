@@ -20,7 +20,7 @@ use rpt_advanced_core::{
     },
 };
 use rtrb::{Consumer, Producer, RingBuffer};
-mod source;
+pub(super) mod source;
 use source::{Decoded, SourceIngress};
 use std::{
     ffi::{CString, c_void},
@@ -275,6 +275,13 @@ impl PeerControl {
         self.wake.notify();
     }
 
+    /// Retain the identity of this stop request until its registration has detached.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn request_retirement(&self) -> Arc<AtomicBool> {
+        self.stop();
+        Arc::clone(&self.stop)
+    }
+
     #[cfg(test)]
     pub(crate) fn owner_thread(&self) -> Option<thread::ThreadId> {
         *self.owner_thread.lock().unwrap()
@@ -378,8 +385,9 @@ struct AsyncPeer {
     services: HostServices,
     registration: NonNull<c_void>,
     stop: Arc<AtomicBool>,
-    observer: InboundObserver,
-    session: NonNull<PeerSession>,
+    reply: PeerReply,
+    session: NonNull<c_void>,
+    destroy: unsafe fn(*mut c_void),
     wake: PeerWake,
 }
 // SAFETY: the stable heap allocation moves only as a raw owner token. The host
@@ -389,7 +397,7 @@ impl AsyncPeer {
     fn signal_stop(&self) {
         self.wake.close();
         self.stop.store(true, Ordering::Release);
-        self.observer.signals().end();
+        self.reply.retire();
         self.services.peer_step_stop(self.registration);
     }
     fn detach(self) {
@@ -399,9 +407,13 @@ impl AsyncPeer {
         }
         self.services.peer_step_detach(self.registration);
         // SAFETY: detach guarantees no callback still borrows this peer.
-        drop(unsafe { Box::from_raw(self.session.as_ptr()) });
+        unsafe { (self.destroy)(self.session.as_ptr()) };
     }
 }
+unsafe fn destroy_session<T>(raw: *mut c_void) {
+    drop(unsafe { Box::from_raw(raw.cast::<T>()) });
+}
+
 unsafe extern "C" fn retained_step(context: *mut c_void) -> i32 {
     let Some(session) = (unsafe { context.cast::<PeerSession>().as_mut() }) else {
         return -1;
@@ -491,33 +503,12 @@ impl PeerIoWorker {
         if self.stop.load(Ordering::Acquire) {
             return Err(session);
         }
-        if let Some((services, peer)) = session.io.async_owner() {
-            if self.async_peers.try_reserve(1).is_err() {
-                return Err(session);
-            }
+        if let Some(owner) = session.io.async_owner() {
             let stop = Arc::clone(&session.stop);
-            let observer = session.inbound.observer();
+            let reply = session.inbound.observer().signals().reply_target();
             let wake = session.wake.clone();
             session.async_epoch = Some(self.epoch);
-            // The host may invoke the callback before attach returns. Keep the
-            // peer allocation raw and stable until detach has quiesced it.
-            let context = Box::into_raw(session);
-            let registration = match unsafe {
-                services.peer_step_attach(peer, Some(retained_step), context.cast())
-            } {
-                Ok(registration) => registration,
-                Err(_) => return Err(unsafe { Box::from_raw(context) }),
-            };
-            services.attach_wake(&wake, registration);
-            self.async_peers.push(AsyncPeer {
-                services,
-                registration,
-                stop,
-                observer,
-                session: NonNull::new(context).unwrap(),
-                wake,
-            });
-            return Ok(());
+            return self.register_session(owner, session, retained_step, stop, reply, wake);
         }
         if self.thread.is_none() {
             let Some(incoming) = self.incoming.take() else {
@@ -542,6 +533,35 @@ impl PeerIoWorker {
         Ok(())
     }
 
+    fn register_session<T>(&mut self, (services, peer): (HostServices, *mut c_void), session: Box<T>,
+        step: unsafe extern "C" fn(*mut c_void) -> i32, stop: Arc<AtomicBool>, reply: PeerReply,
+        wake: PeerWake) -> Result<(), Box<T>> {
+        if self.stop.load(Ordering::Acquire) || self.async_peers.try_reserve(1).is_err() { return Err(session); }
+        // The provider may invoke step before returning. Never borrow a moved
+        // session until the paired host detach has quiesced its registration.
+        let context = Box::into_raw(session);
+        let registration = match unsafe { services.peer_step_attach(peer, Some(step), context.cast()) } {
+            Ok(value) => value,
+            Err(_) => return Err(unsafe { Box::from_raw(context) }),
+        };
+        services.attach_wake(&wake, registration);
+        self.async_peers.push(AsyncPeer { services, registration, stop, reply, wake,
+            session: NonNull::new(context.cast()).unwrap(), destroy: destroy_session::<T> });
+        Ok(())
+    }
+
+    pub(crate) fn attach_private(&mut self, io: PeerIo, reply: PeerReply, capacity: usize)
+        -> Result<super::private_phone::Control, Error> {
+        self.reap();
+        let owner = io.async_owner().ok_or(Error::Admission)?;
+        let (session, control) = super::private_phone::Session::new(io, reply.clone(), self.epoch, capacity)?;
+        let stop = Arc::clone(&session.stop);
+        let wake = session.wake.clone();
+        self.register_session(owner, Box::new(session), super::private_phone::step, stop, reply, wake)
+            .map_err(|_| Error::Thread)?;
+        Ok(control)
+    }
+
     /// Reclaim disconnected async generations off the executor callback.
     pub fn reap(&mut self) {
         let mut index = 0;
@@ -559,6 +579,11 @@ impl PeerIoWorker {
                 index += 1;
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn owns_session(&self, stop: &Arc<AtomicBool>) -> bool {
+        self.async_peers.iter().any(|peer| Arc::ptr_eq(&peer.stop, stop))
     }
 
     /// Signal all owners, then wait off-callback before releasing peer handles.
@@ -687,6 +712,10 @@ impl PeerSession {
     /// Bind the physical stream before publishing this session to its peer owner.
     pub(crate) fn bind_clock(&mut self, clock: Arc<SourceClock>) {
         self.outbound.bind_clock(clock);
+    }
+    pub(crate) fn bind_media_isolation(&mut self, isolation: Arc<rpt_advanced_core::link::MediaIsolation>) {
+        self.inbound.signals().reply_target().bind_media_isolation(Arc::clone(&isolation));
+        self.outbound.bind_media_isolation(isolation);
     }
     fn signal_receipt(&self, step_ms: u64) -> SignalReceipt {
         let at = self.async_epoch.map_or(step_ms, |epoch| {

@@ -157,6 +157,23 @@ pub struct InterfaceAudio {
     pub eeprom_enabled: bool,
 }
 impl InterfaceAudio {
+    /// Recognize the physical provider's exact decimal ALSA card or card/PCM selector.
+    pub(super) fn exact_alsa_pcm(&self) -> bool {
+        if self.backend != AudioBackend::Alsa || self.selection != DeviceSelection::Exact {
+            return false;
+        }
+        let Some(address) = self.device_identifier.strip_prefix("hw:") else {
+            return false;
+        };
+        let number = |s: &str| {
+            !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) && s.parse::<u32>().is_ok()
+        };
+        match address.split_once(',') {
+            Some((card, pcm)) => number(card) && number(pcm),
+            None => number(address),
+        }
+    }
+
     fn read(v: &Inputs<'_>) -> Self {
         let gain = |key| v.get(&["audio", key]).and_then(Value::as_f64);
         Self {

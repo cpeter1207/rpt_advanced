@@ -571,6 +571,30 @@ fn managed_reload_holds_module_until_receipt_and_uncertain_boot_drains() {
     assert_eq!(super::unload(), 0);
     START_RESULT.set(0);
     assert_eq!(load(), 0);
+    {
+        let state = STATE.lock().unwrap();
+        let host = state.as_ref().unwrap().services.descriptor();
+        assert!(host.struct_size as usize >= size_of::<ffi::rptadv_host_services_v10>());
+        // SAFETY: the retained frontend owns both the checked table and its context.
+        let group = unsafe { host.phone_provider.as_ref() }
+            .expect("managed Asterisk must offer its private-call owner before account selection");
+        assert_eq!(group.abi_version, 1);
+        assert!(group.struct_size as usize >= size_of::<ffi::rptadv_phone_provider_v1>());
+        let mut clock = ffi::rptadv_media_clock_reader_v1 {
+            struct_size: size_of::<ffi::rptadv_media_clock_reader_v1>() as u32,
+            abi_version: 1,
+            clock_kind: 0,
+            reserved: 0,
+            read_ns: None,
+        };
+        // SAFETY: the group stays retained and the caller provides the full output record.
+        assert_eq!(unsafe { group.media_clock_reader.unwrap()(host.context, &mut clock) }, 0);
+        assert_eq!(clock.clock_kind, 1);
+        let read = clock.read_ns.expect("native monotonic clock");
+        // SAFETY: both reads complete while the owning frontend code is still loaded.
+        let (first, second) = unsafe { (read(), read()) };
+        assert!(first != 0 && second >= first);
+    }
     assert_eq!(super::reload(), 0);
     assert_eq!(REENTRANT_UNLOAD.get(), Some(-1));
     assert!(
@@ -587,4 +611,16 @@ fn managed_reload_holds_module_until_receipt_and_uncertain_boot_drains() {
     unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(root).unwrap();
+}
+
+#[path="../../private-phone-host/tests/support/frontend_account.rs"]
+mod test_phone_group;
+#[test]
+fn frontend_phone_group_authenticates_and_withdraws_the_actual_sip_socket(){
+    let mut host=crate::services::HostServicesOwner::new();
+    host.install_private(&DESCRIPTOR);
+    let table=host.descriptor();
+    unsafe{test_phone_group::register(table.context,table.phone_provider.cast())};
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(4);
+    while !host.private_stopped(){assert!(std::time::Instant::now()<deadline);std::thread::yield_now();}
 }

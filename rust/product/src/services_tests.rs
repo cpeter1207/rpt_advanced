@@ -706,7 +706,7 @@ fn complete_pre_remote_host_v10_prefix_has_no_remote_callbacks() {
     table.radio_quiesce = Some(service);
     table.radio_remote_submit = Some(submit);
     table.radio_ready = Some(service);
-    assert_eq!(size_of_val(&table), 408);
+    assert_eq!(size_of_val(&table), 432);
     table.struct_size = 400;
     // SAFETY: the advertised old table contains every field through radio_ready.
     let prior = unsafe { HostServices::open(&table) }.unwrap();

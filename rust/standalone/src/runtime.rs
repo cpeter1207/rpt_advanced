@@ -57,6 +57,7 @@ pub struct ProductRuntime {
     composition: Option<crate::providers::ProductRuntimeDescriptors>,
     configuration: Mutex<String>,
     configuration_path: Option<PathBuf>,
+    product_stopped: bool,
 }
 
 impl ProductRuntime {
@@ -141,6 +142,7 @@ impl ProductRuntime {
             composition: None,
             configuration: Mutex::new(configuration.to_owned()),
             configuration_path: None,
+            product_stopped: false,
         })
     }
 
@@ -162,8 +164,11 @@ impl ProductRuntime {
             .map_err(RuntimeError::Provider)?
             .start
             .ok_or(RuntimeError::InvalidDescriptor)?;
-        let host = HostServicesOwner::new(Vec::new(), None, Default::default())
+        let mut host = HostServicesOwner::new(Vec::new(), None, Default::default())
             .map_err(RuntimeError::Provider)?;
+        host.install_private(descriptors.product);
+        host.install_asl()?;
+        host.install_managed_echo(&descriptors)?;
         let reload = descriptors
             .product
             .reload
@@ -187,6 +192,7 @@ impl ProductRuntime {
         if !matches!(status, 0 | -2) {
             return Err(RuntimeError::Start);
         }
+        if status == 0 { host.open_asl(); }
         Ok((
             Self {
                 product: descriptors.product,
@@ -197,6 +203,7 @@ impl ProductRuntime {
                 composition: Some(descriptors),
                 configuration: Mutex::new(String::new()),
                 configuration_path: None,
+                product_stopped: false,
             },
             status == 0,
         ))
@@ -239,6 +246,7 @@ impl ProductRuntime {
             .map_err(RuntimeError::Provider)?;
         let mut host = HostServicesOwner::new(radios, Some(provider_ref), secrets)
             .map_err(RuntimeError::Provider)?;
+        host.install_private(descriptors.product);
         with_echo_preparation(configuration_path, &descriptors, |preparation| {
             unsafe { host.prepare_echo(descriptors.product, configuration, preparation) }
                 .map_err(RuntimeError::Echo)
@@ -389,11 +397,17 @@ impl ProductRuntime {
     /// Stop product workers before releasing host state and provider libraries.
     pub fn stop(&mut self) -> Result<(), RuntimeError> {
         if let Some(host) = &self.host {
+            if !host.asl_quiescent() { return Err(RuntimeError::Stop); }
             host.stop_echo().map_err(RuntimeError::Echo)?;
         }
-        if unsafe { (self.stop)() } != 0 {
+        if !self.product_stopped {
+            if unsafe { (self.stop)() } != 0 { return Err(RuntimeError::Stop); }
+            self.product_stopped = true;
+        }
+        if self.host.as_ref().is_some_and(|host|!host.private_stopped()) {
             return Err(RuntimeError::Stop);
         }
+        if self.host.as_mut().is_some_and(|host| !host.join_asl()) { return Err(RuntimeError::Stop); }
         self.host.take();
         self.composition.take();
         self.providers.take();
@@ -408,6 +422,25 @@ fn with_echo_preparation<T>(
         rptadv_peer_support::echolink::host::Preparation<'_>,
     ) -> Result<T, RuntimeError>,
 ) -> Result<T, RuntimeError> {
+    let incoming = descriptors
+        .product
+        .incoming
+        .expect("validated product composition retains incoming admission");
+    with_echo_resources(|resources| operation(unsafe {
+        rptadv_peer_support::echolink::host::Preparation::new(
+            path,
+            Path::new("librptadv_echolink.so.1"),
+            resources,
+            std::ptr::from_ref(descriptors.control).cast(),
+            move |peer| {
+                crate::host_services::incoming_echo(incoming, peer);
+            },
+        )
+        .with_notice(|message| eprintln!("rpt-advanced: EchoLink: {message}"))
+    }))
+}
+
+pub(crate) fn with_echo_resources<T>(consume: impl FnOnce(&rptadv_peer_support::echolink::abi::RuntimeConfig) -> T) -> T {
     let jitter = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_jitter_adapter.so.1");
     let span = |value: &str| rptadv_peer_support::echolink::abi::ByteSpan {
         data: value.as_ptr(),
@@ -423,22 +456,7 @@ fn with_echo_preparation<T>(
         ),
         ..Default::default()
     };
-    let incoming = descriptors
-        .product
-        .incoming
-        .expect("validated product composition retains incoming admission");
-    operation(unsafe {
-        rptadv_peer_support::echolink::host::Preparation::new(
-            path,
-            Path::new("librptadv_echolink.so.1"),
-            &resources,
-            std::ptr::from_ref(descriptors.control).cast(),
-            move |peer| {
-                crate::host_services::incoming_echo(incoming, peer);
-            },
-        )
-        .with_notice(|message| eprintln!("rpt-advanced: EchoLink: {message}"))
-    })
+    consume(&resources)
 }
 
 fn incoming_request(
@@ -645,6 +663,116 @@ mod tests {
             inspect_secrets: None,
             reload_poll: Some(reload_ready),
         }))
+    }
+
+    #[test]
+    fn frontend_phone_group_authenticates_and_withdraws_the_actual_sip_socket(){
+        let mut product=*descriptor_with_incoming();
+        product.authorize_incoming=Some(authorize);
+        let mut host = HostServicesOwner::new(Vec::new(), None, Default::default()).unwrap();
+        host.install_private(&product);
+        let table=host.descriptor();
+        unsafe{super::test_phone_group::register(table.context,table.phone_provider.cast())};
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(4);
+        while !host.private_stopped(){assert!(std::time::Instant::now()<deadline);std::thread::yield_now();}
+    }
+    #[test]
+    fn scoped_sip_originate_reaches_the_registered_recipient_and_releases_its_dialog() {
+        use super::test_phone_group::registrar::{header, receive_register, response};
+        use std::{io::ErrorKind, net::UdpSocket};
+
+        unsafe extern "C" fn current(_: *mut c_void) -> u32 {
+            1
+        }
+
+        let mut product = *descriptor_with_incoming();
+        product.authorize_incoming = Some(authorize);
+        let mut host = HostServicesOwner::new(Vec::new(), None, Default::default()).unwrap();
+        host.install_private(&product);
+        let table = host.descriptor();
+        // The descriptor belongs to the live HostServicesOwner for this entire case.
+        let provider = unsafe { table.phone_provider.as_ref() }.unwrap();
+        let originate = provider.originate.unwrap();
+        let peer_info = table.peer_info.unwrap();
+        let peer_destroy = table.peer_destroy.unwrap();
+        let mut outcome = None;
+        unsafe {
+            super::test_phone_group::while_registered(table.context, table.phone_provider.cast(), |server, registered| {
+                let authority = server.local_addr().unwrap();
+                let media = UdpSocket::bind("127.0.0.1:0").unwrap();
+                outcome = Some(std::thread::scope(|scope| {
+                    let peer = scope.spawn(|| {
+                        let mut wire = [0; 8192];
+                        let (invite, source) = match receive_register(server, &mut wire) {
+                            Ok(received) => received,
+                            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => return None,
+                            Err(error) => panic!("registrar did not receive a valid INVITE: {error}"),
+                        };
+                        assert!(invite.starts_with("INVITE "));
+                        assert_eq!(source, registered);
+                        let uri = invite.split_whitespace().nth(1).unwrap();
+                        let (scheme, address) = uri.split_once(':').unwrap();
+                        assert!(scheme.eq_ignore_ascii_case("sip"));
+                        let (user, host) = address.split_once('@').unwrap();
+                        assert_eq!(host.parse::<std::net::SocketAddr>().unwrap(), authority);
+                        // Decode the user exactly once. A literal pound is invalid on the wire.
+                        let mut decoded = Vec::new();
+                        let mut wire_user = user.bytes();
+                        while let Some(byte) = wire_user.next() {
+                            if byte == b'%' {
+                                let mut hex = || char::from(wire_user.next().unwrap()).to_digit(16).unwrap() as u8;
+                                decoded.push((hex() << 4) | hex());
+                            } else {
+                                assert!(byte.is_ascii_digit() || byte == b'*');
+                                decoded.push(byte);
+                            }
+                        }
+                        assert_eq!(decoded, b"18*52#");
+                        let dialog = header(&invite, "Call-ID").to_owned();
+                        let answer = format!("v=0\r\no=test 1 1 IN IP4 127.0.0.1\r\ns=private\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\na=sendrecv\r\n", media.local_addr().unwrap().port());
+                        let reply = response(&invite, 200, false).replace("Content-Length: 0\r\n\r\n",
+                            &format!("Contact: <sip:recipient@{authority}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{answer}", answer.len()));
+                        server.send_to(reply.as_bytes(), source).unwrap();
+                        let (ack, from) = receive_register(server, &mut wire).unwrap();
+                        assert!(ack.starts_with("ACK "));
+                        assert_eq!(header(&ack, "Call-ID"), dialog);
+                        assert_eq!(from, registered);
+                        let (bye, from) = receive_register(server, &mut wire).unwrap();
+                        assert!(bye.starts_with("BYE "));
+                        assert_eq!(header(&bye, "Call-ID"), dialog);
+                        assert_eq!(from, registered);
+                        server.send_to(response(&bye, 200, false).as_bytes(), from).unwrap();
+                        Some(())
+                    });
+                    let mut call = std::ptr::null_mut();
+                    let target = b"18*52#";
+                    let dial = abi::rptadv_peer_bytes_v1 { data: target.as_ptr(), length: target.len() };
+                    let status = originate(table.context, [1u8; 16].as_ptr(), [2u8; 16].as_ptr(),
+                        7, dial, 160, Some(current), std::ptr::null_mut(), &mut call);
+                    let metadata = (!call.is_null()).then(|| {
+                        let mut info: abi::rptadv_peer_info_v1 = std::mem::zeroed();
+                        info.struct_size = size_of::<abi::rptadv_peer_info_v1>() as u32;
+                        info.abi_version = 1;
+                        let result = peer_info(table.context, call, &mut info);
+                        peer_destroy(table.context, call);
+                        (result, info.account_generation, info.qso_generation)
+                    });
+                    (status, metadata, peer.join())
+                }));
+            });
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while !host.private_stopped() {
+            assert!(std::time::Instant::now() < deadline, "standalone phone owner did not join");
+            std::thread::yield_now();
+        }
+        eprintln!("standalone SIP account withdrawn and frontend joined");
+        let (status, metadata, dialog) = outcome.unwrap();
+        let dialog = dialog.unwrap();
+        assert_eq!(status, 0, "registered standalone SIP originate returned {status}; wire dialog {}", dialog.is_some());
+        assert!(dialog.is_some(), "registrar did not settle the same SIP dialog");
+        assert!(metadata.is_some_and(|(result, account, qso)| result == 0 && account == 7 && qso != 0),
+            "standalone SIP call did not expose the expected ABI1 metadata");
     }
 
     fn descriptor_with_incoming() -> &'static abi::rptadv_product_descriptor_v1 {
@@ -1568,3 +1696,7 @@ mod tests {
         assert_eq!(FAILED_STOP_ATTEMPTS.load(Ordering::Relaxed), 3);
     }
 }
+
+#[cfg(test)]
+#[path="../../private-phone-host/tests/support/frontend_account.rs"]
+mod test_phone_group;

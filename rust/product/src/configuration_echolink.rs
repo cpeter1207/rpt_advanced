@@ -17,7 +17,7 @@ fn list(value: &[echo::ByteSpan]) -> echo::StringList {
     }
 }
 
-pub(super) fn visit<T>(
+pub(crate) fn visit<T>(
     local: &str,
     settings: &EchoLinkSettings,
     consume: impl FnOnce(&echo::AccountConfig) -> T,

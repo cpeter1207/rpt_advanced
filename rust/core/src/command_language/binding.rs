@@ -23,6 +23,7 @@ pub(super) enum Decoder {
     Fixed(Action),
     Link(LinkAction),
     Radio(Option<radio::RadioDecoder>),
+    PhoneDial,
     Administration(bool),
     MutePeer,
     MutePhone,
@@ -74,6 +75,7 @@ impl Mapping {
                 Decoder::Link(LinkAction::EchoTelemetry)
             }
             "radio" if action.get("operation").is_none() => Decoder::Radio(None),
+            "phone_dial" => Decoder::PhoneDial,
             "rx_mute_toggle"
                 if matches!(action["target"].as_str(), Some("phone_patch" | "peer")) =>
             {
@@ -152,6 +154,7 @@ impl Completed<'_> {
                 return Err(ActionError::Parameter);
             }
             D::Link(a) => action::link(*a, Some(p))?,
+            D::PhoneDial => action::phone_dial(Some(p))?,
             D::Radio(d) => Action::Radio(
                 match d {
                     Some(d) => d.decode(p),
@@ -206,7 +209,19 @@ impl Completed<'_> {
         {
             return Err(ActionError::SourceOnly);
         }
-        let action = self.decode()?;
+        // A real reverse caller selects its attachment or addressed destination via
+        // the port's resolved mappings. A macro or RF sender retains normal link semantics.
+        let action = match (&self.mapping.decoder, phone && !injected) {
+            (Decoder::Link(LinkAction::Transceive),true) => {
+                let target=(!self.parameter.is_empty()).then(||action::node(Some(self.parameter))).transpose()?;
+                Action::Host(super::HostAction::PhoneGrammar(std::sync::Arc::new(crate::phone_dtmf::PhoneDtmfAction::Attach(target))))
+            }
+            (Decoder::Link(LinkAction::Command),true) => {
+                let target=action::node(Some(self.parameter))?;
+                Action::Host(super::HostAction::PhoneGrammar(std::sync::Arc::new(crate::phone_dtmf::PhoneDtmfAction::SelectTarget(target))))
+            }
+            _=>self.decode()?,
+        };
         action.check_scope(&context)?;
         if matches!(action, Action::Maintenance(_))
             && !matches!(source, CommandSource::Management(_) | CommandSource::Host)

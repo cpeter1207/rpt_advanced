@@ -35,12 +35,14 @@ fn main() {
         .allowlist_type("Urp.*")
         .allowlist_function("usbradioplus_product_descriptor_v1")
         .allowlist_function("rpcr3_descriptor")
+        .allowlist_function("rptadv_radio_descriptor")
         .allowlist_function("rptadv_samplerate_adapter_descriptor")
         .allowlist_var("RPCR3_.*")
         .allowlist_var("URP_NATIVE_.*")
         .allowlist_var("URP_AST_.*")
         .allowlist_var("RPTADV_MEDIA_.*")
         .allowlist_var("RPTADV_PEER_EVENT_.*")
+        .allowlist_var("RPTADV_PEER_PHONE_.*")
         .allowlist_var("RPTADV_SITE_.*")
         .allowlist_var("RPTADV_PEER_OBSERVATION_.*")
         .layout_tests(false)
@@ -52,6 +54,7 @@ fn main() {
         .write_to_file(PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("abi.rs"))
         .expect("write product ABI bindings");
     println!("cargo:rustc-link-lib=rate_adjusting_pcm_ring3");
+    println!("cargo:rustc-link-lib=dylib=rptadvradio");
     println!("cargo:rustc-link-lib=rptadv_samplerate_adapter");
     println!("cargo:rustc-link-lib=dylib=usbradioplus_product");
 }

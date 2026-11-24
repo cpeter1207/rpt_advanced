@@ -79,7 +79,7 @@ fn echo_accounts_prepare_before_activation_and_dial_from_the_stable_context() {
 
 #[test]
 fn echo_media_and_registration_dispatch_preserves_the_provider_contract() {
-    let host = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+    let host = HostServicesOwner::new(Vec::new(), None, Default::default()).unwrap();
     unsafe { media::check(host.descriptor().context) };
 }
 

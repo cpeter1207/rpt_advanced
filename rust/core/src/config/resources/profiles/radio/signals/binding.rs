@@ -49,7 +49,10 @@ impl Use {
         use SignalSource::*;
         match self {
             Self::Squelch => matches!(source, Dsp | SoundChipGpio | Parallel | Serial | KeyDown),
-            Self::Ptt => matches!(source, SoundChipGpio | Parallel | Serial | Hamlib),
+            Self::Ptt => matches!(
+                source,
+                SoundChipGpio | Parallel | Serial | Hamlib | NoActuator
+            ),
             Self::Decode => matches!(
                 source,
                 Dsp | SoundChipGpio | Parallel | Serial | External | Hamlib | Auto

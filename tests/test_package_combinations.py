@@ -44,6 +44,8 @@ def test_each_install_set_contains_only_its_entrypoint() -> None:
     adapter = (ROOT / "debian/app-rpt-advanced.install").read_text().splitlines()
 
     assert "usr/bin/rpt-advanced" in standalone
+    sip = "usr/lib/*/rpt_advanced/librptadv_sip_adapter.so.1"
+    assert sip in standalone and sip not in adapter
     assert not any(
         "asterisk/modules/app_rpt_advanced.so" in item for item in standalone
     )
@@ -62,6 +64,7 @@ def test_standalone_package_declares_its_native_runtime_providers() -> None:
         "librptadv-iax2-client2",
         "librptadv-resolver-adapter1",
         "librptadv-jitter-adapter1",
+        "libsofia-sip-ua0 (>= 1.13.19)",
     ):
         assert package in runtime
 

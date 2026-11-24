@@ -41,6 +41,8 @@ impl Mode {
         transmit: false,
         forward: false,
     };
+    /// Receive the attached station's program while controlling caller-to-link forwarding.
+    pub fn phone(forward:bool)->Self { Self{transmit:true,forward} }
     /// Whether this destination receives program audio.
     pub fn transmits(self) -> bool {
         self.transmit

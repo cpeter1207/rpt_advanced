@@ -64,6 +64,7 @@ struct Pending {
     timestamp: u32,
     end_timestamp: u32,
     expires: u64,
+    deadline: Option<u32>,
     stream: u64,
 }
 struct Conversion {
@@ -111,6 +112,9 @@ pub(super) struct Outbound {
     conversion: Option<Conversion>,
     anchor: Option<Anchor>,
     clock: Option<Arc<SourceClock>>,
+    private_reply: Option<rpt_advanced_core::link::PeerReply>,
+    media_isolation: Option<Arc<rpt_advanced_core::link::MediaIsolation>>,
+    isolation_epoch: u64,
     next_audio_ms: u64,
     unkey_ns: Option<u64>,
     idle_timestamp: u32,
@@ -137,14 +141,45 @@ impl Outbound {
             conversion: None,
             anchor: None,
             clock: None,
+            private_reply: None,
+            media_isolation: None,
+            isolation_epoch: 0,
             next_audio_ms: 0,
             unkey_ns: None,
             idle_timestamp: 0,
             sent: false,
         })
     }
+    pub(super) fn private(rate: u32, queue: LinkAudioConsumer, reply: rpt_advanced_core::link::PeerReply) -> Result<Self, Error> {
+        let mut sender = Self::new(rate, queue)?;
+        sender.private_reply = Some(reply);
+        Ok(sender)
+    }
+    /// Select the provenance of the next private segment before feeding the encoder.
+    /// A prompt belongs to the call; station programme additionally belongs to its live RF stream.
+    pub(super) fn private_stream(&mut self, clock: Option<&Arc<SourceClock>>) -> Result<(), Error> {
+        let unchanged = match (self.clock.as_ref(), clock) {
+            (Some(active), Some(next)) => Arc::ptr_eq(active, next),
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
+            self.discard()?;
+            self.clock = clock.cloned();
+        }
+        Ok(())
+    }
+    pub(super) fn ready_for_private_input(&mut self) -> bool {
+        self.pending.is_none() && self.pcm_position == self.pcm_used && self.queue.peek_span().is_none()
+    }
     pub(super) fn bind_clock(&mut self, clock: Arc<SourceClock>) {
         self.clock = Some(clock);
+    }
+    pub(super) fn bind_media_isolation(&mut self, gate: Arc<rpt_advanced_core::link::MediaIsolation>) {
+        self.media_isolation = Some(gate);
+    }
+    fn media_current(&self) -> bool {
+        self.media_isolation.as_ref().is_none_or(|gate| gate.epoch() == self.isolation_epoch)
     }
     pub(super) fn redirect(&mut self, queue: LinkAudioConsumer) -> Result<(), Error> {
         self.retired_rejections = self
@@ -163,17 +198,23 @@ impl Outbound {
         self.converter.reset().map_err(|_| Error::Translation)
     }
     fn current(&self, stream: u64) -> bool {
-        self.clock
-            .as_ref()
-            .is_none_or(|clock| clock.stream() == stream)
+        self.media_current()
+            && self.private_reply.as_ref().is_none_or(|reply| !reply.ended() && (self.clock.is_none() || reply.phone_media_allowed()))
+            && self.clock.as_ref().is_none_or(|clock| clock.stream() == stream)
     }
     /// Return an absolute source/expiry wake. Each call handles at most one media item.
     pub(super) fn step(&mut self, io: &mut PeerIo, now_ms: u64) -> Result<Option<u64>, Error> {
+        let epoch = self.media_isolation.as_ref().map_or(0, |gate| gate.epoch());
+        if self.isolation_epoch != epoch {
+            self.isolation_epoch = epoch;
+            self.discard()?;
+        }
         if !io.prepared_media() {
+            if self.private_reply.is_some() { return Err(Error::Admission); }
             self.pcm_step(io, now_ms)?;
             return Ok(Some(self.next_audio_ms.saturating_mul(1_000_000)));
         }
-        let now = now_ms.saturating_mul(1_000_000);
+        let now = if self.private_reply.is_some() { io.private_now()? } else { now_ms.saturating_mul(1_000_000) };
         self.statistics.rejected.store(
             self.retired_rejections
                 .saturating_add(self.queue.dropped_samples()),
@@ -214,6 +255,7 @@ impl Outbound {
                 .span
                 .born_ns
                 .is_none_or(|born| now >= born.saturating_add(AGE_NS))
+                || read.isolation_epoch != self.isolation_epoch
                 || !self.current(read.span.stream)
             {
                 self.statistics
@@ -272,7 +314,7 @@ impl Outbound {
             // An idle marker is uncommitted media too: keep its source timestamp
             // while waiting for writable, but never retain it indefinitely.
             let expires = deadline.saturating_add(AGE_NS);
-            if self.sent && now < expires && !io.send_prepared(&[], 0, self.idle_timestamp)? {
+            if self.private_reply.is_none() && self.sent && now < expires && !io.send_prepared(&[], 0, self.idle_timestamp)? {
                 return Ok(next.into_iter().chain(Some(expires)).min());
             }
             self.sent = false;
@@ -439,7 +481,14 @@ impl Outbound {
         let end_timestamp = anchor.call_ms.wrapping_add(
             (end_origin as i128 - anchor.source_ns as i128).div_euclid(1_000_000) as u32,
         );
+        let deadline = if self.private_reply.is_some() {
+            let Some(deadline) = io.private_deadline(expires)? else {
+                return self.discard();
+            };
+            Some(deadline)
+        } else { None };
         self.pending = Some(Pending {
+            deadline,
             bytes: result.encoded_bytes,
             frames: result.packet_frames,
             source_frames: result.source_frames,
@@ -452,11 +501,19 @@ impl Outbound {
     }
     fn send(&mut self, io: &mut PeerIo, now: u64) -> Result<(), Error> {
         if let Some(pending) = &self.pending {
-            if io.send_prepared(
-                &self.encoded[..pending.bytes],
-                pending.frames,
-                pending.timestamp,
-            )? {
+            if !self.current(pending.stream) { return self.discard(); }
+            let accepted = if let Some(deadline) = pending.deadline {
+                use crate::services::phone_media::PrivateSend;
+                if io.private_now()? >= pending.expires { return self.discard(); }
+                match io.send_private(&self.encoded[..pending.bytes], pending.frames, pending.timestamp, deadline)? {
+                    PrivateSend::Accepted => true,
+                    PrivateSend::WouldBlock => false,
+                    PrivateSend::Expired => return self.discard(),
+                }
+            } else {
+                io.send_prepared(&self.encoded[..pending.bytes], pending.frames, pending.timestamp)?
+            };
+            if accepted {
                 let age = now.saturating_sub(pending.expires.saturating_sub(AGE_NS));
                 self.statistics.ages[(age / 1_000_000).min(200) as usize]
                     .fetch_add(1, Ordering::Relaxed);
@@ -476,7 +533,10 @@ impl Outbound {
         if now_ms < self.next_audio_ms {
             return Ok(());
         }
-        let real = BLOCK - self.queue.read(&mut self.native);
+        let real = BLOCK - self.queue.read_at_isolation_epoch(&mut self.native, self.isolation_epoch);
+        if !self.media_current() {
+            return self.discard();
+        }
         self.next_audio_ms = if real == 0 || !self.sent {
             now_ms
         } else {

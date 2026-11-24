@@ -100,6 +100,10 @@ pub enum LinkEffect {
     CommandQueued(super::CommandResponse),
     /// Prepared reply for one authenticated caller, without controller TX or peer fanout.
     PrivatePhoneMedia(PeerReply, Box<dyn crate::audio::PcmStreamReader>),
+    /// A private phone action with the exact source token and its execution-time grant.
+    PrivatePhoneControl(PeerReply,crate::command_language::HostAction,super::dtmf::ActionPermit),
+    /// Start a retained private outgoing call outside the control owner.
+    PhoneDial(crate::command_language::ProtectedOperand<String>, super::dtmf::ActionPermit),
     /// Complete source-owned command mode selection using the host's actual directory.
     VerifyCommandTarget(DigitOperation),
     /// Apply through the existing station site controller and its physical submission owner.
@@ -862,6 +866,12 @@ impl NodeLinkControl {
                 )
             })
     }
+    /// A retained grant or paused macro can outlive the actual partial input.
+    /// Check only the collector of this exact private call when releasing digit muting.
+    pub fn phone_input_active(&self, reply: &PeerReply) -> bool {
+        self.peer_commands.iter().any(|(_, source, input)| source == reply && input.collecting_input())
+    }
+
     /// Retire an actual private ingress before reclaiming its collectors and grants.
     /// Already queued work retains this ended token and fails its dispatch fence.
     pub fn retire_source(&mut self, reply: &PeerReply) {

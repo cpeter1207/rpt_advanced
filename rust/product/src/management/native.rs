@@ -91,6 +91,10 @@ impl AccountCredentials {
                 .all(|&(owner, slot)| self.unchanged(next, owner, slot))
     }
 
+    pub(crate) fn version(&self, owner: ResourceId, slot: CredentialSlot) -> Option<ResourceId> {
+        self.0.get(&(owner, slot)).map(RetainedCredential::version)
+    }
+
     pub(crate) fn unchanged(&self, next: &Self, owner: ResourceId, slot: CredentialSlot) -> bool {
         let key = (owner, slot);
         match (self.0.get(&key), next.0.get(&key)) {

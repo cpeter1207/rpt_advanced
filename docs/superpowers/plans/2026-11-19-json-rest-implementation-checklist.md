@@ -62,6 +62,12 @@ Use test-driven development.
 
 [x] - Record approved scheduler policies: pair a start with its next end and skip overlapping starts; ignore the in-progress occurrence when restart_recovery is false; skip missed calendar work while forcing pending monotonic deadlines; cancel without either boundary macro if nominal end arrives before start execution. Preserve existing permanent-route ownership and hold fences.
 
+[x] - Verify keyboard and GPIO microphone carrier input, speaker playback without physical PTT, and existing physical actuator behavior with the matched controller, USBRadioPlus and renderer on ARM64 (75003, 46512, 17954).
+
+[x] - Exercise AllStarLink, direct EchoLink, and incoming and radio-originated SIP in an isolated standalone foreground. All 22 selected controls passed across two runs (19781 and 94404).
+
+[x] - Initialize an empty protected store and recover the first pointer on ARM64 (89099). Verify the corrected SIP adapter sends its second keepalive after the configured interval (83152).
+
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.
 
 [] - Split controller configuration into site metadata/defaults, port metadata, radio/audio/signaling/interface sections, protocol instances, events, macros, messages, mailboxes and equipment resources.
@@ -224,7 +230,7 @@ Use test-driven development.
 
 [] - Remove controller VOX and public raw audio.graph controls; warn and fall back for unsupported qualifier values, rejecting only when no safe deterministic combination remains.
 
-[] - Implement generic sound-chip GPIO, parallel, serial modem-line and key_down sources with domain-specific pin definitions and scancodes.
+[] - Implement sound-chip GPIO, parallel and serial signal bindings and key_down RX carrier. Preserve GPIO microphone input on speaker endpoints and render selected audio without a physical PTT actuator.
 
 [] - Enforce single GPIO pin for squelch/PTT, supported serial pins, flow-control exclusions, shared-device ownership and safe control-line release.
 

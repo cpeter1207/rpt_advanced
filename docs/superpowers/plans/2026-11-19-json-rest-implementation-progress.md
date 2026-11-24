@@ -610,7 +610,7 @@ Telemetry Task 35D round 2 has separately passed review and its 862-test compone
 
 ## Decisions and remaining runtime work
 
-The user clarified that PTT key_down observes a held keyboard key and requests manual PTT; it does not emit a keyboard event for another application. A physical PTT actuator must still be selected explicitly. The follow-up schema choice between a separate manual_key input and an explicit nested output binding is pending. No implicit keyboard or hardware output is selected.
+The user clarified that key_down belongs to RX squelch. A held key or a GPIO microphone switch qualifies microphone input. A radioless node plays selected audio on its always-on speaker. The typed provider and renderer need to carry the actuator-free selection through to playback.
 
 The native station task has reproduced and corrected ordinary ALSA/exclusive parallel operation and per-pin inverted parallel qualification at the real driver/provider boundary. Its additional serial/keyboard and external-tone capabilities remain isolated until reviewed and integrated. The unified runtime task is completing scheduler-specific message context and queued regenerated-DTMF provenance before independent review. Complete typed HAL projections have passed their first full component gate and are finishing field-origin coverage.
 
@@ -666,3 +666,13 @@ All native work used isolated HOME source, targets, synthetic credentials and fi
 The neutral jitter creation/live-policy component is separately reviewed and published. Its IAX private-call consumer subsequently passed 469 Rust cases, real Debian package/C/Asterisk and strict documentation checks on AMD64, and an actual attached ARM64 call preserving queued audio, policy rollback and media epoch. That provider's new source is still under independent review; its pins/releases and production phone participant integration are not claimed complete here. Maintenance review found durable-GC, opaque graph metadata, restore identity/LKG/budget and cross-process retry gaps; their original-owner fixes and real failure reproductions remain open. Shared site-only/inherited equipment routing, complete protocol accounts, CLI/tuner migration, final controller INI/Unix removal and the full coverage/cutover audit continue next.
 
 Current hosted controller checks pass native AMD64/ARM64 build, tests, staged install and packaging. The coverage exporter still fails on inconsistent LLVM function metadata before a current threshold verdict; the existing 100 percent line/branch requirement is unchanged. GPIO PR7's later full hosted gate and measured production coverage passed. Shared-workflows PR20 and GPIO PR7 remain separately unmerged pending their requested user approvals. Actual implementation/runtime cutover is not complete, so continuous execution continues and the requested stopping point has not been reached.
+
+## Standalone radio trial checkpoint
+
+The matched ARM64 renderer, USBRadioPlus and controller passed their focused checks in runs 17954, 46512 and 75003. Holding the keyboard key opens the microphone receive carrier. A GPIO microphone switch can supply that carrier, including with inverted polarity. A speaker-only output renders selected audio without physical PTT confirmation or a key-up delay. The controls also exercised a configured physical radio actuator using simulated device I/O.
+
+Run 19781 passed 21 of 22 controls, including AllStarLink, direct EchoLink and radio-originated SIP. The incoming SIP fixture failed when its BYE reply did not start with SIP/2.0 200. Run 94404 repeated the incoming case on the same foreground executable and product library with a fixture that answered OPTIONS during the call. It measured a 1 kHz station signal at the caller and a 500 Hz caller signal at the station, received 200 for BYE and registration withdrawal, joined the foreground and released its writer lease.
+
+Run 89099 initialized an empty protected store with one site, zero ports and Pending activation. After interruption at the first pointer, reopening recovered the same desired revision and cleared the journal. The same run reproduced an adapter timing defect with 170 OPTIONS requests and a 106 ms first interval. Run 83152 used the same registration test executable and the corrected SIP adapter from source tree `21a32bc1`. It observed two OPTIONS requests 15,007 ms apart, successful registration and withdrawal, and joined owners.
+
+The full fast checks and hosted CI for this aggregate, the staged release rehearsal and the physical radio trial remain pending.

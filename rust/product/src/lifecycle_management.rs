@@ -102,6 +102,31 @@ impl Engine {
         }
     }
 
+    fn poll_private_accounts(self: &Arc<Self>, attempt: std::num::NonZeroU64, reverse: bool) -> Result<(),RuntimeError> {
+        loop {
+            if !self.accepting.load(Ordering::Acquire) { return Err(RuntimeError::Rejected); }
+            if self.run_inner(true,move |host| if reverse { host.restore_private_accounts(attempt) }
+                else { host.apply_private_accounts(attempt) })? { return Ok(()); }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn poll_asl(self: &Arc<Self>, attempt: std::num::NonZeroU64, phase: u32) -> Result<(), RuntimeError> {
+        loop {
+            if !self.accepting.load(Ordering::Acquire) { return Err(RuntimeError::Rejected); }
+            if self.run_inner(true, move |host| host.step_network_accounts(attempt, phase))? { return Ok(()); }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn restore_accounts(self: &Arc<Self>, attempt: std::num::NonZeroU64) -> Result<(), RuntimeError> {
+        self.poll_asl(attempt, 3)?;
+        self.poll_private_accounts(attempt, true)?;
+        self.run_inner(true, move |host| host.finish_private_accounts(attempt, |_, _| true))?;
+        self.poll_asl(attempt, 4)?;
+        self.run_inner(true, move |host| host.finish_asl_selection(attempt))
+    }
+
     fn apply_modular(
         self: &Arc<Self>,
         prepared: Prepared,
@@ -116,8 +141,17 @@ impl Engine {
             fault_epoch,
         } = prepared;
         let credentials = credentials.ok_or(RuntimeError::Rejected)?;
-        self.begin_modular_sites(site)?;
-        let result = self.wait_sites(false).and_then(|()| {
+        let attempt = radio.attempt();
+        // The strong reservation spans native confirmation. A concurrent pump may
+        // reap a genuinely abandoned ticket but cannot retire this one.
+        let retained = radio.clone();
+        let basis = radio.clone();
+        self.run(move |host| host.verify_private_basis(&basis))?;
+        let mut entered_core = false;
+        let result = self.poll_private_accounts(attempt, false)
+            .and_then(|()| self.poll_asl(attempt, 1))
+            .and_then(|()| self.begin_modular_sites(site))
+            .and_then(|()| self.wait_sites(false)).and_then(|()| {
             self.reloading
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| RuntimeError::Busy)?;
@@ -126,6 +160,7 @@ impl Engine {
             let clock = self.clock();
             let name = revision.clone();
             let installed = Arc::clone(&inputs);
+            entered_core = true;
             let mut ready = self.run_inner(true, move |host| {
                 host.begin_core_adoption(radio, name, credentials, installed, clock)
             })?;
@@ -139,20 +174,28 @@ impl Engine {
             }
             Ok(())
         });
-        let physical_success = result.is_ok();
         // Abort uncommitted site changes or collect the committed old workers outside control.
-        let terminal = self.finish_reload(result);
-        if terminal.is_err() {
+        // A failed cleanup leaves the live selection unknown even if the radio rolled back.
+        self.finish_reload_sites(result.is_ok())?;
+        if result.is_err() {
             let attempted = revision.clone();
-            let restored = self.run(move |host| Ok(host.modular_rollback_confirmed(&attempted)))?;
-            if !physical_success && restored && terminal == Err(RuntimeError::Device) {
+            let basis = retained.clone();
+            let restored = self.run(move |host| Ok(if entered_core { host.modular_rollback_confirmed(&attempted) }
+                else { host.verify_private_basis(&basis).is_ok() }))?;
+            if restored {
+                self.restore_accounts(attempt)?;
                 return Ok(AdoptionOutcome::RolledBack);
             }
             // An inconclusive physical transition invalidates our live observation.
             return Err(RuntimeError::Restore);
         }
+        loop {
+        if !self.accepting.load(Ordering::Acquire) { return Err(RuntimeError::Rejected); }
         let engine = Arc::clone(self);
-        self.run(move |host| {
+        let configuration = configuration.clone();
+        let inputs = inputs.clone();
+        let revision = revision.clone();
+        let result = self.run_inner(true, move |host| {
             if !host
                 .runtime
                 .modular_configuration()
@@ -166,12 +209,11 @@ impl Engine {
                 .state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            state.1 = observed;
             if state.0 != fault_epoch
                 || state.0 == u64::MAX
                 || !engine.accepting.load(Ordering::Acquire)
             {
-                return Ok(AdoptionOutcome::RecoveryRequired);
+                return Err(RuntimeError::Restore);
             }
             let gate = engine
                 .management_state
@@ -180,10 +222,31 @@ impl Engine {
                 .ok_or(RuntimeError::Rejected)?;
             // All physical and site handoffs succeeded. Release only this generation's
             // affected stations on the same serialized turn as native confirmation.
+            host.runtime.check_station_confirmation(&configuration)?;
+            let finish_phone = host.prepare_account_release(attempt)?;
+            if !host.step_network_accounts(attempt, 2)? { return Ok(false); }
+            host.begin_account_release(attempt)?;
+            if finish_phone { host.finish_private_accounts(attempt,|local, mailbox| {
+                let Ok(port) = local.parse::<ResourceId>() else { return false };
+                configuration.scopes.get(&ResourceScope::Port(port)).is_some_and(|scope|
+                    scope.mailboxes.effective.values().any(|current|
+                        Some(current.binding.id) == mailbox.binding && current.number == mailbox.id
+                            && current.first_name == mailbox.first_name && current.callsign == mailbox.callsign))
+            })?; }
+            if !host.step_network_accounts(attempt, 4)? { return Ok(false); }
             host.runtime.confirm_station_replacements(&configuration)?;
+            host.confirm_private_media();
+            host.finish_asl_selection(attempt)?;
+            state.1 = observed;
             gate.store(false, Ordering::Release);
-            Ok(AdoptionOutcome::Confirmed)
-        })
+            Ok(true)
+        });
+        match result {
+            Ok(true) => return Ok(AdoptionOutcome::Confirmed),
+            Ok(false) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            Err(error) => return Err(error),
+        }
+        }
     }
 
     pub(crate) fn command_owner(

@@ -42,6 +42,10 @@ use std::{
 type ErasedResult = Box<dyn Any + Send>;
 type HostOperation = Box<dyn FnOnce(&mut Host) -> Result<ErasedResult, RuntimeError> + Send>;
 
+#[cfg(target_os = "linux")]
+#[path = "lifecycle_asl.rs"]
+pub(crate) mod asl;
+
 #[cfg(test)]
 static FAIL_DIAL_THREAD: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
@@ -111,6 +115,11 @@ pub(crate) struct Call(Arc<Engine>);
 enum Dial {
     Connect(ConnectAttempt),
     Retry(RetryWork),
+}
+enum DialTarget {
+    Host { destination: String, wire_local: String },
+    #[cfg(target_os = "linux")]
+    Managed(crate::host::asl::Account),
 }
 struct DialJob {
     local: String,
@@ -341,18 +350,74 @@ impl Engine {
         effect: LinkEffect,
         revision: u64,
     ) -> Result<(), RuntimeError> {
-        if let LinkEffect::Connect(attempt) = effect {
-            self.dial(local, Dial::Connect(attempt), revision)
-        } else {
-            let clock = self.clock();
-            let engine = Arc::clone(self);
-            self.run(move |host| {
-                if !engine.current(revision) {
-                    return Err(RuntimeError::Rejected);
-                }
-                host.immediate(&local, effect, clock)
-            })
+        match effect {
+            LinkEffect::Connect(attempt) => self.dial(local, Dial::Connect(attempt), revision),
+            #[cfg(target_os = "linux")]
+            LinkEffect::PhoneDial(number, permit) => self.spawn_phone_dial(local, number, permit, revision, false),
+            effect => {
+                let clock = self.clock();
+                let engine = Arc::clone(self);
+                self.run(move |host| {
+                    if !engine.current(revision) {
+                        return Err(RuntimeError::Rejected);
+                    }
+                    host.immediate(&local, effect, clock)
+                })
+            }
         }
+    }
+    #[cfg(target_os = "linux")]
+    fn spawn_phone_dial(
+        self: &Arc<Self>, local: String, number: rpt_advanced_core::command_language::ProtectedOperand<String>,
+        permit: rpt_advanced_core::runtime::dtmf::ActionPermit, revision: u64, report: bool,
+    ) -> Result<(), RuntimeError> {
+        let call = self.enter()?;
+        let engine = Arc::clone(self);
+        let name = local.clone();
+        let admission = permit.clone();
+        let attempt = self.run(move |host| {
+            if !engine.current(revision) || !admission.current(Some(engine.elapsed_ms())) {
+                return Err(RuntimeError::Rejected);
+            }
+            host.begin_phone_dial(&name)
+        })?;
+        let engine = Arc::clone(self);
+        let mut jobs = self.jobs.lock().unwrap_or_else(|error| error.into_inner());
+        jobs.try_reserve(1).map_err(|_| RuntimeError::Preparation)?;
+        let thread = std::thread::Builder::new().name("rpt-phone-dial".into()).spawn(move || {
+            let _call = call;
+            let result = engine.finish_phone_dial(&local, &number, permit, revision, attempt);
+            if report { engine.services.command_notice(&local, result.is_ok()); }
+        }).map_err(|_| RuntimeError::Preparation)?;
+        jobs.push(thread);
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    fn finish_phone_dial(
+        self: &Arc<Self>, local: &str, number: &str, permit: rpt_advanced_core::runtime::dtmf::ActionPermit,
+        revision: u64, attempt: crate::host::OutboundPhone,
+    ) -> Result<(), RuntimeError> {
+        let current = || self.current(revision) && attempt.current.load(Ordering::Acquire)
+            && permit.current(Some(self.elapsed_ms()));
+        if !current() { return Err(RuntimeError::Rejected); }
+        let mut io = self.services.originate_phone(&attempt.account, number, current)
+            .map_err(|_| RuntimeError::Rejected)?;
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        // The provider may finish ACK submission before native establishment.
+        loop {
+            if !current() || Instant::now() >= deadline { return Err(RuntimeError::Rejected); }
+            if io.ready().map_err(|_| RuntimeError::Rejected)? { break; }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let local = local.to_owned();
+        let engine = Arc::clone(self);
+        self.run(move |host| {
+            let clock = engine.clock();
+            if !engine.current(revision) || !permit.current(Some(clock.now_ms)) {
+                return Err(RuntimeError::Rejected);
+            }
+            host.complete_phone_dial(&local, attempt, io, clock)
+        })
     }
     fn dial(
         self: &Arc<Self>,
@@ -365,32 +430,42 @@ impl Engine {
         let destination_remote = remote.clone();
         let destination = if self.current(revision) && attempt.current(self.elapsed_ms()) {
             self.run(move |host| {
-                Ok((
-                    host.lookup(&name, &destination_remote, None)?,
-                    host.wire_local(&name, &destination_remote)?,
-                ))
+                #[cfg(target_os = "linux")]
+                if host.runtime.modular_configuration().is_some()
+                    && rpt_advanced_core::link::PeerIdentity::from_operator(&destination_remote)
+                        .map_err(|_| RuntimeError::Rejected)?.protocol() == rpt_advanced_core::link::ProtocolId::AllStarLink
+                {
+                    let account = host.asl_account(name.parse().map_err(|_| RuntimeError::Rejected)?)?;
+                    if !account.permits(&destination_remote) { return Err(RuntimeError::Rejected); }
+                    return Ok(DialTarget::Managed(account));
+                }
+                Ok(DialTarget::Host { destination: host.lookup(&name, &destination_remote, None)?,
+                    wire_local: host.wire_local(&name, &destination_remote)? })
             })
         } else {
             Err(RuntimeError::Rejected)
         };
-        let io = destination
-            .ok()
-            .filter(|_| self.current(revision) && attempt.current(self.elapsed_ms()))
-            .and_then(|(destination, wire_local)| {
-                self.services
-                    .dial(
-                        &destination,
-                        &wire_local,
-                        crate::host::MAXIMUM_FRAMES,
-                        || self.current(revision) && attempt.current(self.elapsed_ms()),
-                    )
-                    .ok()
-            });
+        #[cfg(target_os = "linux")]
+        let mut managed = None;
+        let current = || self.current(revision) && attempt.current(self.elapsed_ms());
+        let io = destination.ok().filter(|_| current()).and_then(|target| match target {
+            DialTarget::Host { destination, wire_local } =>
+                self.services.dial(&destination, &wire_local, crate::host::MAXIMUM_FRAMES, current).ok(),
+            #[cfg(target_os = "linux")]
+            DialTarget::Managed(account) => {
+                let (peer, proof) = asl::Outbound::originate(self, account, &remote, current).ok()?;
+                managed = Some(proof);
+                Some(peer)
+            }
+        });
         let engine = Arc::clone(self);
         self.run_inner(true, move |host| {
             let clock = engine.clock();
             let mode = attempt.mode();
             let current = engine.current(revision);
+            #[cfg(target_os = "linux")]
+            let io = io.filter(|_| managed.as_ref().is_none_or(|proof|
+                current && attempt.current(clock.now_ms) && proof.current(host, &remote)));
             let attached = match attempt {
                 Dial::Connect(attempt) if !current => {
                     if let Some(node) = host.runtime.node(&local) {
@@ -434,14 +509,17 @@ impl Engine {
         revision: u64,
         report: bool,
     ) -> Result<(), RuntimeError> {
-        if let LinkEffect::Connect(attempt) = effect {
-            self.spawn_dial(local, Dial::Connect(attempt), revision, None, report)
-        } else {
-            let result = self.effect(local.clone(), effect, revision);
-            if report {
-                self.services.command_notice(&local, result.is_ok());
+        match effect {
+            LinkEffect::Connect(attempt) => self.spawn_dial(local, Dial::Connect(attempt), revision, None, report),
+            #[cfg(target_os = "linux")]
+            LinkEffect::PhoneDial(number, permit) => self.spawn_phone_dial(local, number, permit, revision, report),
+            effect => {
+                let result = self.effect(local.clone(), effect, revision);
+                if report {
+                    self.services.command_notice(&local, result.is_ok());
+                }
+                result
             }
-            result
         }
     }
     fn spawn_dial(
@@ -945,7 +1023,7 @@ unsafe fn incoming_identity(
     };
     let phone = protocol == rpt_advanced_core::link::ProtocolId::Phone;
     if request.abi_version != 1
-        || request.local.length > if phone { 63 } else { 32 }
+        || request.local.length > if phone { 63 } else if protocol == rpt_advanced_core::link::ProtocolId::EchoLink { 36 } else { 32 }
         || request.remote.length > 32
         || request.source.length > 64
     {
@@ -1169,10 +1247,8 @@ unsafe extern "C" fn rptadv_product_authorize_incoming(
                 return Err(RuntimeError::Rejected);
             }
             return engine.run(move |host| {
-                host.runtime
-                    .settings(&local)
-                    .map(|_| ())
-                    .ok_or(RuntimeError::MissingNode)
+                let (account, generation) = metadata.phone_owner().ok_or(RuntimeError::Rejected)?;
+                host.authorize_phone_owner(&local, account, generation)
             });
         }
         // Echo admission must inspect the live provider QSO. A null/pre-answer

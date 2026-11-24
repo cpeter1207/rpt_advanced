@@ -161,11 +161,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
         self.modular.as_ref()
     }
 
-    /// Release affected TX gates after the native owner confirms this exact prepared configuration.
-    pub fn confirm_station_replacements(
-        &mut self,
-        configuration: &Arc<RuntimeConfiguration>,
-    ) -> Result<(), RuntimeError> {
+    /// Check the final native generation on the same exclusive control turn as
+    /// related participant confirmation. This check leaves station TX gated.
+    pub fn check_station_confirmation(&self, configuration: &Arc<RuntimeConfiguration>) -> Result<(), RuntimeError> {
         if self.stopping
             || self.reload_pending()
             || !self
@@ -175,6 +173,15 @@ impl<A: Send, C: Send> Runtime<A, C> {
         {
             return Err(RuntimeError::Rejected);
         }
+        Ok(())
+    }
+
+    /// Release affected TX gates after the native owner confirms this exact prepared configuration.
+    pub fn confirm_station_replacements(
+        &mut self,
+        configuration: &Arc<RuntimeConfiguration>,
+    ) -> Result<(), RuntimeError> {
+        self.check_station_confirmation(configuration)?;
         for node in &mut self.nodes {
             if node.failed_station_replacement {
                 node.failed_station_replacement = false;

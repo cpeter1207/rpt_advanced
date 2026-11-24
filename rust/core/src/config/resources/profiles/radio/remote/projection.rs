@@ -86,7 +86,7 @@ impl Signal {
             | SignalSource::Parallel
             | SignalSource::Serial
             | SignalSource::External => "external",
-            SignalSource::KeyDown => {
+            SignalSource::KeyDown | SignalSource::NoActuator => {
                 unreachable!("unsupported physical binding normalized")
             }
         };
@@ -175,6 +175,7 @@ impl RadioPortProfile {
             SignalSource::Serial => "serial",
             SignalSource::Parallel => "parallel",
             SignalSource::SoundChipGpio => "usb",
+            SignalSource::NoActuator => return None,
             _ => unreachable!("normalized PTT"),
         };
         let squelch = &self.signals.rx.squelch;

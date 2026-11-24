@@ -647,6 +647,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
         };
         let dtmf = invocation.origin == ParameterOrigin::Dtmf;
         let mut op = match invocation.action {
+            Action::PhoneDial(number) => {
+                if !Action::permits_phone_dial(source) {
+                    return Err(RuntimeError::Rejected);
+                }
+                return Ok(LinkEffect::PhoneDial(number, permit));
+            }
             Action::Link(c) => {
                 let target = if matches!(
                     c.action,
@@ -698,6 +704,13 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     );
                 }
                 return Ok(LinkEffect::SiteCommand(command, permit));
+            }
+            Action::Host(action @ (crate::command_language::HostAction::PhoneGrammar(_)
+                |crate::command_language::HostAction::PhoneAuthenticate(..)
+                |crate::command_language::HostAction::PhoneRetire))=>{
+                let CommandSource::Connection{reply,..}=source else{return Err(RuntimeError::Rejected)};
+                if reply.phone_source().is_none(){return Err(RuntimeError::Rejected);}
+                return Ok(LinkEffect::PrivatePhoneControl(reply.clone(),action,permit));
             }
             Action::Host(crate::command_language::HostAction::LinkStatus) => {
                 return Ok(LinkEffect::Telemetry(

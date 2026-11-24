@@ -91,8 +91,8 @@ Keep the signed repository enabled for other dependencies.
    sudo systemctl stop asterisk
    ```
 
-2. Provision the protected JSON store for the service account. Record its store
-   UUID. Copy the packaged example from
+2. For a new store, create an empty service-owned directory with mode 0700
+   and record the chosen store UUID. Copy the packaged example from
    `/usr/share/doc/rpt-advanced/examples/rpt_advanced.service.json` to
    `/etc/rpt_advanced/rpt_advanced.service.json`. Set the absolute store path,
    its actual UUID, the write key ID, loopback listening address, accepted HTTP
@@ -108,6 +108,11 @@ Keep the signed repository enabled for other dependencies.
    the listener credentials before startup. A missing store key leaves verified
    public configuration readable through authenticated management.
 
+   For a new store, run `rpt-advanced-store init ROOT UUID KEY_ID` as the
+   service account, with the delivered 32-byte store key in the same credential
+   namespace. Use the root, UUID and key ID from the service JSON. This creates
+   the selected zero-port site with activation pending.
+
 4. Start the service and check its log.
 
    ```sh
@@ -117,7 +122,9 @@ Keep the signed repository enabled for other dependencies.
    ```
 
    The authenticated management service starts with zero radio ports. Configure
-   the site, register each port, and select its radio device before enabling it.
+   the new site by first applying its pending desired revision through authenticated
+   management. After confirmation, register each port and select its radio device
+   before enabling it.
    A standalone preflight accepts `rpt-advanced --check-config <service-json>`
    in a process with the service account's access to the store and the same
    systemd credentials. It checks the selected generation without opening radio

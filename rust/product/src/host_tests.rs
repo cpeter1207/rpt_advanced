@@ -67,7 +67,7 @@ fn document(device: &str, extra: &str) -> ConfigDocument {
     ))
     .unwrap()
 }
-fn host() -> Host {
+pub(super) fn host() -> Host {
     Host::start(
         document("usb", ""),
         media(),
@@ -387,7 +387,7 @@ fn echo_ring_policy_survives_prepared_generation() {
     let candidate = prepared(
         "1000",
         host.runtime.settings("1000").unwrap(),
-        &host.peers,
+        (&host.peers, Some(&host.phone_calls)),
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
         host.services,
@@ -2028,7 +2028,7 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
     let candidate = prepared(
         "1000",
         host.runtime.settings("1000").unwrap(),
-        &host.peers,
+        (&host.peers, Some(&host.phone_calls)),
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
         host.services,
@@ -2123,7 +2123,7 @@ fn ended_ingress_is_omitted_and_unknown_peer_events_do_not_change_routes() {
     let candidate = prepared(
         "1000",
         host.runtime.settings("1000").unwrap(),
-        &host.peers,
+        (&host.peers, Some(&host.phone_calls)),
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
         host.services,
@@ -2409,7 +2409,7 @@ fn saturated_media_publication_keeps_the_running_generation() {
             match prepared(
                 "1000",
                 host.runtime.settings("1000").unwrap(),
-                &host.peers,
+                (&host.peers, Some(&host.phone_calls)),
                 media_worker(&mut host.media_workers, "1000").unwrap(),
                 &mut host.text,
                 host.services,

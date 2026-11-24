@@ -26,6 +26,7 @@ ADAPTERS = ("asterisk", "control_asterisk", "file", "speech")
 STANDALONE_CONTROL = "librptadv_control_standalone_adapter.so.1"
 RESOLVER = "librptadv_resolver_adapter.so.1"
 JITTER = "librptadv_jitter_adapter.so.1"
+SIP = "librptadv_sip_adapter.so.1"
 GPIOD = "librptadv_gpiod_adapter.so.1"
 HWMON = "librptadv_hwmon_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
@@ -59,6 +60,7 @@ ELF_DEPENDENCIES = {
     STANDALONE_CONTROL: set(),
     RESOLVER: {"libresolv.so.2"},
     JITTER: {"libspeexdsp.so.1"},
+    SIP: {"libsofia-sip-ua.so.0"},
     GPIOD: {"libgpiod.so.3"},
     HWMON: {"libsensors.so.5"},
 }
@@ -79,6 +81,7 @@ EXPORTS = {
     STANDALONE_CONTROL: {"rptadv_control_standalone_descriptor_v1"},
     RESOLVER: {"rptadv_resolver_adapter_descriptor_v1"},
     JITTER: {"rptadv_jitter_adapter_descriptor_v1"},
+    SIP: {"rptadv_sip_adapter_descriptor_v1"},
     GPIOD: {"rptadv_gpiod_adapter_descriptor_v1"},
     HWMON: {"rptadv_hwmon_adapter_descriptor_v1"},
 }
@@ -192,6 +195,7 @@ def staged(
         library / STANDALONE_CONTROL,
         library / RESOLVER,
         library / JITTER,
+        library / SIP,
         library / GPIOD,
         library / HWMON,
     }

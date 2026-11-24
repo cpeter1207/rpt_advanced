@@ -10252,21 +10252,14 @@
             "sound_chip_gpio",
             "parallel",
             "serial",
-            "key_down",
+            "none",
             "hamlib"
-          ],
-          "default": "sound_chip_gpio"
+          ]
         },
         "inverted": {
           "type": "boolean",
           "default": false,
           "description": "For every selected output: raw state = logical PTT XOR inverted."
-        },
-        "scancode": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 4294967295,
-          "description": "Backend scan code; key_down requires this field. The selected keyboard backend defines the code set."
         },
         "pin": {
           "type": "array",
@@ -10305,8 +10298,7 @@
                   "$ref": "#/$defs/serialOutputPin"
                 },
                 "maxItems": 2
-              },
-              "scancode": false
+              }
             }
           }
         },
@@ -10341,8 +10333,7 @@
                   ]
                 },
                 "maxItems": 8
-              },
-              "scancode": false
+              }
             }
           }
         },
@@ -10359,7 +10350,6 @@
           },
           "then": {
             "properties": {
-              "scancode": false,
               "pin": {
                 "type": "array",
                 "items": {
@@ -10385,40 +10375,20 @@
             "properties": {
               "source": {
                 "enum": [
-                  "hamlib"
+                  "hamlib",
+                  "none"
                 ]
               }
             }
           },
           "then": {
             "properties": {
-              "pin": false,
-              "scancode": false
-            }
-          }
-        },
-        {
-          "if": {
-            "required": [
-              "source"
-            ],
-            "properties": {
-              "source": {
-                "const": "key_down"
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "scancode"
-            ],
-            "properties": {
               "pin": false
             }
           }
         }
       ],
-      "description": "PTT binding. A sound-chip GPIO binding selects exactly one pin. Serial and parallel domains may drive their supported pin arrays together. key_down uses scancode instead of pin."
+      "description": "Selects a physical transmitter output. An ordinary exact ALSA PCM without a selected actuator defaults to none. Sound-chip radios default to GPIO. Select none for speaker playback with a sound-chip microphone switch. A GPIO binding selects one pin. Serial and parallel outputs may drive supported pin arrays together."
     },
     "encoderOutput": {
       "type": "object",
@@ -14618,6 +14588,27 @@
           "x-source-restrictions": [
             "Actual authenticated private call and supported routing owner required; current grammar alone grants no routing/PTT authority."
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "phone_dial"
+            },
+            "parameter": {
+              "type": "string",
+              "pattern": "^[0-9*#+]{1,64}$"
+            }
+          },
+          "required": [
+            "action",
+            "parameter"
+          ],
+          "additionalProperties": false,
+          "description": "Dial on the invoking port's registered SIP account. The called party receives media only.",
+          "x-source-restrictions": [
+            "Actual receiver or authenticated management on the owning port."
+          ]
         }
       ]
     },
@@ -17002,6 +16993,22 @@
           },
           "additionalProperties": false,
           "x-action-schema": "#/$defs/phoneCommandAction/oneOf/6"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/phoneCommandAction/oneOf/7/properties/action"
+            },
+            "command": {
+              "$ref": "#/$defs/dtmfCommand"
+            },
+            "protected": {
+              "$ref": "#/$defs/dtmfProtection"
+            }
+          },
+          "additionalProperties": false,
+          "x-action-schema": "#/$defs/phoneCommandAction/oneOf/7"
         },
         {
           "type": "object",

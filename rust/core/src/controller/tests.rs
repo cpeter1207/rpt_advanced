@@ -1790,6 +1790,33 @@ fn queued_parrot() -> PreparedMedia {
 }
 
 #[test]
+fn parrot_epoch_rejects_delayed_preparation_and_rearms_after_unkey() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings { parrot_enabled: true, ..ControllerSettings::default() },
+        vec![], vec![], CourtesySettings::default(),
+    ).unwrap();
+    node.observe_parrot_at_epoch(true, &[0.25], 0);
+    node.observe_parrot_at_epoch(false, &[], 0);
+    let prior = control.take_parrot_capture().unwrap();
+    assert!(control.queue_captured_parrot(&prior, queued_parrot()));
+
+    node.observe_parrot_at_epoch(true, &[0.875], 1);
+    node.observe_parrot_at_epoch(true, &[0.875], 2);
+    node.observe_parrot_at_epoch(true, &[0.875], 2);
+    node.observe_parrot_at_epoch(false, &[], 2);
+    assert_eq!(control.reclaim().count(), 1);
+    assert!(!control.queue_captured_parrot(&prior, queued_parrot()));
+    control.recycle_parrot_capture(prior);
+    assert!(control.take_parrot_capture().is_none());
+
+    node.observe_parrot_at_epoch(true, &[0.125], 2);
+    node.observe_parrot_at_epoch(false, &[], 2);
+    let fresh = control.take_parrot_capture().unwrap();
+    assert_eq!(fresh.samples(), &[0.125]);
+    assert!(control.queue_captured_parrot(&fresh, queued_parrot()));
+}
+
+#[test]
 fn receive_activity_discards_a_queued_parrot_before_playback() {
     let (mut node, mut control) = NodeController::new(
         ControllerSettings {

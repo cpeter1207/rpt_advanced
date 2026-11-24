@@ -67,16 +67,7 @@ impl Drop for Resolver {
 }
 
 unsafe fn resolver<'a>(context: *mut c_void) -> Option<&'a Resolver> {
-    // Borrow only this immutable field: radio staging in other host callbacks is independent.
-    if context.is_null() {
-        return None;
-    }
-    unsafe {
-        &*std::ptr::addr_of!(
-            (*context.cast::<crate::host_services::StandaloneHostContext>()).resolver
-        )
-    }
-    .as_ref()
+    unsafe { crate::host_services::StandaloneHostContext::resolver_from_context(context) }
 }
 
 fn file_record(path: &str, remote: &str) -> Option<String> {

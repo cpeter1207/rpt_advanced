@@ -44,6 +44,12 @@ use std::{
 #[path = "host_modular.rs"]
 mod modular;
 #[cfg(target_os = "linux")]
+#[path = "host_asl.rs"]
+pub(crate) mod asl;
+#[cfg(target_os = "linux")]
+#[path = "host_echo.rs"]
+mod echo;
+#[cfg(target_os = "linux")]
 #[path = "host_native.rs"]
 mod native;
 #[cfg(target_os = "linux")]
@@ -52,6 +58,11 @@ pub(crate) use site::SiteBasis;
 
 #[path = "host_phone_auth.rs"]
 mod phone_auth;
+#[cfg(target_os = "linux")]
+#[path = "host_phone_dial.rs"]
+mod phone_dial;
+#[cfg(target_os = "linux")]
+pub(crate) use phone_dial::OutboundPhone;
 #[path = "host_remote.rs"]
 mod remote;
 
@@ -274,6 +285,7 @@ pub struct GenerationControl {
     dispatcher: PreparedDispatch,
     status: LinkAudioStatus,
     redirects: Vec<(u64, PeerCommand)>,
+    phones:Vec<crate::link::private_radio::Redirect>,
     awaiting: Vec<(u64, crate::link::ring::InboundObserver)>,
     local_update: Option<LocalRingUpdate>,
     awaiting_local: bool,
@@ -320,6 +332,13 @@ pub struct Host {
     peer_io: PeerIoWorker,
     peers: Vec<PeerOwner>,
     phone_calls: PhoneCalls,
+    phone_accounts: crate::phone::accounts::Participant,
+    #[cfg(target_os = "linux")]
+    phone_dials: Vec<phone_dial::Pending>,
+    #[cfg(target_os = "linux")]
+    asl: asl::Participant,
+    #[cfg(target_os = "linux")]
+    echo: echo::Participant,
     operations: Vec<(String, DigitOutcome)>,
     status_post: StatusPostService,
     site_acquisition: crate::site::acquisition::Acquisition,
@@ -340,7 +359,7 @@ enum StationAudio<'a> {
 fn prepared(
     local: &str,
     settings: &ResolvedNodeSettings,
-    peers: &[PeerOwner],
+    connections: (&[PeerOwner], Option<&PhoneCalls>),
     worker: &mut MediaWorker,
     text: &mut TextExecutor,
     services: HostServices,
@@ -372,6 +391,7 @@ fn prepared(
     let mut redirects = Vec::new();
     let mut awaiting = Vec::new();
     let mut wakes = Vec::new();
+    let (peers,phone_calls)=connections;
     for peer in peers.iter().filter(|peer| peer.local == local) {
         let snapshot = peer
             .control
@@ -438,8 +458,36 @@ fn prepared(
             },
         ));
     }
+    let mut phones=Vec::new();
+    #[cfg(target_os = "linux")]
+    for (caller,activity,control) in phone_calls.into_iter().flat_map(|calls|calls.audio_routes(local)){
+        let StationAudio::Modular(plan)=source else {continue;};
+        let Some(policy)=plan.phone.as_ref().filter(|p| p.account.to_string()==caller.account().as_str()) else {continue;};
+        let settings=&policy.settings;
+        use rpt_advanced_core::config::resources::profiles::PhonePlayoutDestination;
+        use crate::link::{ring::InboundPolicy,private_radio::{Radio,Redirect}};
+        let reply=activity.reply_target();
+        let (inbound,input)=InboundRing::redirected(control.rate,InboundPolicy::Phone,&reply)
+            .map_err(|_|RuntimeError::Preparation)?;
+        let bound=u64::from(settings.timing.maximum_latency_ms).checked_mul(48)
+            .and_then(|samples|usize::try_from(samples).ok()).ok_or(RuntimeError::Preparation)?;
+        let (output,outbound)=LinkAudioQueue::new(bound,64).map_err(|_|RuntimeError::Preparation)?.into_endpoints();
+        let mode=Mode::phone(settings.playout_destination==PhonePlayoutDestination::LocalAndLinks);
+        audio.push(AudioPeer::for_phone(caller,&reply,mode,ProcessedPeer::new(input,None),output,MAXIMUM_FRAMES)
+            .map_err(|_|RuntimeError::Preparation)?.with_phone_policy(settings.isolate_peers,policy.hold_isolation,Arc::clone(&policy.confirmed)));
+        let radio=Radio::new(inbound,outbound,Arc::clone(activity),settings.vad,settings.timing,Arc::clone(&policy.confirmed))
+            .map_err(|_|RuntimeError::Preparation)?;
+        wakes.push(control.wake.clone());
+        phones.push(Redirect::new(reply,control,radio));
+    }
     let (mut audio, dispatcher) =
         LinkAudio::new(audio, MAXIMUM_FRAMES).map_err(|_| RuntimeError::Preparation)?;
+    #[cfg(target_os = "linux")]
+    let mut dispatcher = dispatcher;
+    #[cfg(target_os = "linux")]
+    if let StationAudio::Modular(plan) = source {
+        audio = audio.with_media_isolation(&mut dispatcher, Arc::clone(&plan.media_isolation));
+    }
     audio = audio.with_text(Box::new(TextMix(text_readers)));
     let regeneration = if settings.dtmf_regeneration.enabled {
         let (writer, reader) =
@@ -461,6 +509,7 @@ fn prepared(
             dispatcher,
             status,
             redirects,
+            phones,
             awaiting,
             local_update: None,
             awaiting_local: false,
@@ -563,7 +612,7 @@ impl Host {
                 prepared(
                     name,
                     settings,
-                    &[],
+                    (&[],None),
                     media_worker(&mut host.media_workers, name)?,
                     &mut host.text,
                     services,
@@ -630,6 +679,13 @@ impl Host {
             peer_io,
             peers: Vec::new(),
             phone_calls,
+            phone_accounts: Default::default(),
+            #[cfg(target_os = "linux")]
+            phone_dials: Vec::new(),
+            #[cfg(target_os = "linux")]
+            asl: Default::default(),
+            #[cfg(target_os = "linux")]
+            echo: Default::default(),
             operations: Vec::new(),
             status_post: StatusPostService::default(),
             site_acquisition: Default::default(),
@@ -757,7 +813,7 @@ impl Host {
                 let mut candidate = prepared(
                     name,
                     settings,
-                    peers,
+                    (peers,Some(&self.phone_calls)),
                     media_worker(media_workers, name)?,
                     &mut text,
                     services,
@@ -838,9 +894,13 @@ impl Host {
         #[cfg(target_os = "linux")]
         self.publish_physical_plans();
         self.activated_revision = self.runtime.revision();
-        self.retire_phones();
+        if self.runtime.modular_configuration().is_none() {
+            self.retire_phones();
+        }
         self.activate_dispatchers(clock.now_ms);
-        self.configure_status_posts(clock.now_ms);
+        if self.runtime.modular_configuration().is_none() {
+            self.configure_status_posts(clock.now_ms);
+        }
         self.attach_workers();
         let effects = self.runtime.take_effects();
         for (local, effect) in effects {
@@ -887,6 +947,8 @@ impl Host {
             .ok_or(RuntimeError::MissingNode)?;
         let identity = PeerIdentity::from_operator(remote).map_err(|_| RuntimeError::Rejected)?;
         if identity.protocol() == ProtocolId::EchoLink {
+            #[cfg(target_os = "linux")]
+            if self.runtime.modular_configuration().is_some() && !self.echo.accepts(local) { return Err(RuntimeError::Rejected); }
             return if source.is_none() {
                 Ok(format!(
                     "EchoLink/{}",
@@ -896,6 +958,9 @@ impl Host {
                 Err(RuntimeError::Rejected)
             };
         }
+        // The compatibility transport accepts a destination string and has no
+        // managed authority proof. Managed numeric callers use the ASL participant.
+        if self.runtime.modular_configuration().is_some() { return Err(RuntimeError::Rejected); }
         let method = match settings.link_lookup_method {
             LinkLookupMethod::Both => 0,
             LinkLookupMethod::Dns => 1,
@@ -927,10 +992,12 @@ impl Host {
             io.local()
         }
         .to_owned();
+        #[cfg(target_os = "linux")]
+        if io.identity().protocol() == ProtocolId::EchoLink && self.runtime.modular_configuration().is_some()
+            && !self.echo.accepts(&local) { return Err(RuntimeError::Rejected); }
         if io.identity().protocol() == ProtocolId::Phone {
-            self.runtime
-                .settings(&local)
-                .ok_or(RuntimeError::MissingNode)?;
+            if !io.source_media() || io.async_owner().is_none() { return Err(RuntimeError::Rejected); }
+            self.authorize_phone_owner(&local, io.phone_account().ok_or(RuntimeError::Rejected)?, io.generations().0)?;
             let source = self
                 .phone_calls
                 .admit(io, clock.now_ms)
@@ -939,6 +1006,10 @@ impl Host {
                 .phone_calls
                 .reply(&source)
                 .ok_or(RuntimeError::Rejected)?;
+            if self.phone_calls.start_transport(&source, &reply, &mut self.peer_io).is_err() {
+                self.retire_phone(&source);
+                return Err(RuntimeError::Rejected);
+            }
             if let Err(error) = self.prepare_login_prompt(
                 &source,
                 &reply,
@@ -954,12 +1025,19 @@ impl Host {
             .operator_alias()
             .ok_or(RuntimeError::Rejected)?;
         if io.identity().protocol() == ProtocolId::AllStarLink {
+            if self.runtime.modular_configuration().is_some() { return Err(RuntimeError::Rejected); }
             self.lookup(&local, &remote, Some(source))?;
         }
-        self.runtime.incoming(&local, &remote, true)?;
-        let result = self.attach_peer(&local, &remote, Mode::TRANSCEIVE, io, clock);
+        self.accept_verified_peer(&local, &remote, io, clock)
+    }
+
+    /// Finish ordinary peer admission on control after source and metadata validation.
+    pub(crate) fn accept_verified_peer(&mut self, local: &str, remote: &str, io: PeerIo,
+        clock: RuntimeClock) -> Result<(), RuntimeError> {
+        self.runtime.incoming(local, remote, true)?;
+        let result = self.attach_peer(local, remote, Mode::TRANSCEIVE, io, clock);
         if result.is_err() {
-            self.reject_peer(&local, &remote, clock.now_ms);
+            self.reject_peer(local, remote, clock.now_ms);
         }
         result
     }
@@ -972,6 +1050,9 @@ impl Host {
         mut io: PeerIo,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        #[cfg(target_os = "linux")]
+        if io.identity().protocol() == ProtocolId::EchoLink && self.runtime.modular_configuration().is_some()
+            && (io.local() != local || !self.echo.accepts(local)) { return Err(RuntimeError::Rejected); }
         // Telephone media needs explicit authenticated *3 policy and per-node rings.
         // Pending private calls must never enter this numeric-node/ASL path.
         if io.identity().protocol() == ProtocolId::Phone {
@@ -1020,6 +1101,10 @@ impl Host {
         )
         .map_err(|_| RuntimeError::Preparation)?;
         session.bind_clock(source_clock);
+        #[cfg(target_os = "linux")]
+        if self.runtime.modular_configuration().is_some() {
+            session.bind_media_isolation(Arc::clone(&self.radio_preparation.active_plan(local)?.media_isolation));
+        }
         if let Err(session) = self.peer_io.attach(session) {
             session.stop();
             return Err(RuntimeError::Rejected);
@@ -1085,7 +1170,7 @@ impl Host {
             let candidate = prepared(
                 local,
                 settings,
-                &self.peers,
+                (&self.peers,Some(&self.phone_calls)),
                 media_worker(&mut self.media_workers, local)?,
                 &mut self.text,
                 self.services,
@@ -1437,6 +1522,10 @@ impl Host {
                 let effect = self.runtime.command(local, operation, clock, verified)?;
                 self.immediate(local, effect, clock)
             }
+            LinkEffect::PrivatePhoneControl(reply,action,permit)=>{
+                if !permit.current(Some(clock.now_ms)){return Err(RuntimeError::Rejected);}
+                self.private_action(local,reply,action,clock)
+            }
             LinkEffect::SiteCommand(command, permit) => {
                 if !permit.current(Some(clock.now_ms)) {
                     return Err(RuntimeError::Rejected);
@@ -1444,7 +1533,7 @@ impl Host {
                 self.authorized_site_command(local, command, clock, Some(&permit))
                     .map_err(|_| RuntimeError::Rejected)
             }
-            LinkEffect::Connect(_) => Err(RuntimeError::Rejected),
+            LinkEffect::Connect(_) | LinkEffect::PhoneDial(..) => Err(RuntimeError::Rejected),
             LinkEffect::Detach(remotes) => {
                 for remote in remotes {
                     self.detach(local, &remote, clock.now_ms);
@@ -1466,7 +1555,7 @@ impl Host {
             LinkEffect::Digit(outcome) => {
                 if let DigitOutcome::Mapped(input) = outcome {
                     if let Ok(effect) = self.runtime.dispatch_mapping(local, input, clock) {
-                        if matches!(effect, LinkEffect::Connect(_)) {
+                        if matches!(effect, LinkEffect::Connect(_) | LinkEffect::PhoneDial(..)) {
                             self.defer_link(local, effect);
                         } else {
                             let _ = self.immediate(local, effect, clock);
@@ -1644,6 +1733,13 @@ impl Host {
     }
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        // An ended call may be the last peer. Join stopped registrations on
+        // this control turn without waiting for an unrelated peer admission.
+        self.peer_io.reap();
+        self.reap_abandoned_accounts()?;
+        #[cfg(target_os = "linux")]
+        self.recheck_phone_dials();
+        self.pump_private_input(clock);
         for reply in self.phone_calls.expire_authentication(clock.now_ms) {
             self.retire_phone_source(&reply);
         }
@@ -1853,6 +1949,7 @@ impl Host {
             let Some(generation) = status.active.or(status.retiring) else {
                 continue;
             };
+            let mut confirmed_phone=Vec::new();
             let configured_delay = self
                 .runtime
                 .settings(&local)
@@ -1875,6 +1972,13 @@ impl Host {
                     .find(|(name, _)| name == &local)
                     .expect("runtime node retains its device lease");
                 let mut lease = lease.lock().unwrap_or_else(|error| error.into_inner());
+                if status.active==Some(generation){
+                    control.phones.retain_mut(|route|{
+                        if !route.submit(&lease.status.source_clock){return true;}
+                        if route.grant().phone_authenticated(){confirmed_phone.push(route.grant().clone());}
+                        false
+                    });
+                }
                 if let Some(worker) = &mut lease.worker {
                     let target = configured_delay.max(worker.minimum_delay_ms());
                     if !control.awaiting_local && target != worker.squelch_delay_ms() {
@@ -1911,7 +2015,13 @@ impl Host {
                     peer.local == local && peer.control.connection_generation() == *connection
                 })
             });
-            let redirects_done = control.awaiting.is_empty() && !control.awaiting_local;
+            let redirects_done = control.awaiting.is_empty() && control.phones.is_empty() && !control.awaiting_local;
+            for reply in confirmed_phone {
+                let call=reply.phone_source().ok_or(RuntimeError::Rejected)?.call_id();
+                let id=PeerIdentity::parse(ProtocolId::Phone,&call.to_string()).map_err(|_|RuntimeError::Rejected)?;
+                self.runtime.node(&local).ok_or(RuntimeError::MissingNode)?.links()
+                    .attach_ingress(id,reply).map_err(RuntimeError::Link)?;
+            }
             if let Some(old) = status.retiring {
                 let retired = self
                     .runtime
@@ -1946,6 +2056,8 @@ impl Host {
     /// Gate audio, stop media distribution, quiesce peers, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
         self.retire_phones();
+        if self.phone_accounts.stop(self.services) != Ok(true) { return false; }
+
         self.remote_pending.clear();
         if self.site_shutdown(now_ms) != Ok(true) {
             return false;
@@ -1975,7 +2087,12 @@ impl Host {
                 self.runtime.detached(&local, generation);
             }
         }
-        self.runtime.stop(now_ms)
+        let radio_stopped = self.runtime.stop(now_ms);
+        #[cfg(target_os = "linux")]
+        if self.asl.stop(self.services) != Ok(true) { return false; }
+        #[cfg(target_os = "linux")]
+        if !self.echo.stop(self.services) { return false; }
+        radio_stopped
     }
 
     pub(crate) fn take_status_posts(&mut self) -> StatusPostService {

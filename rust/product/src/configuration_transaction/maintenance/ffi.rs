@@ -139,6 +139,145 @@ fn destination(
         ))
     }
 }
+fn seed_manifest(
+    site: ResourceId,
+    revision: &str,
+) -> Result<(PublicManifest, Vec<u8>), MaintenanceError> {
+    use rpt_advanced_core::config::resources::{
+        candidate::{ResourceBinding, ResourceKind, ResourceScope},
+        manifest::ObjectReference,
+    };
+
+    let envelope = json!({"id": site.to_string(), "kind": "metadata",
+        "configuration": {"name": "Repeater", "inherit_from": null}})
+    .to_string()
+    .into_bytes();
+    let binding = ResourceBinding {
+        id: site,
+        scope: ResourceScope::Site(site),
+        kind: ResourceKind::Metadata,
+    };
+    let object = ObjectReference::new(
+        revision
+            .parse()
+            .map_err(|_| MaintenanceError::InvalidGraph)?,
+        hash(&envelope),
+    );
+    let manifest = PublicManifest::new(
+        revision
+            .parse()
+            .map_err(|_| MaintenanceError::InvalidGraph)?,
+        revision
+            .parse()
+            .map_err(|_| MaintenanceError::InvalidGraph)?,
+        site,
+        &[],
+        [(binding, Some(object))],
+    )
+    .map_err(|_| MaintenanceError::InvalidGraph)?;
+    Ok((manifest, envelope))
+}
+
+/// Recognize an interrupted first publication before replaying its working changes.
+fn initial_publication(selected: &Selected) -> Result<&ManifestRef, MaintenanceError> {
+    let state = &selected.state;
+    let journal = selected
+        .journal
+        .as_ref()
+        .ok_or(MaintenanceError::Conflict)?;
+    let [change] = journal.changes.as_slice() else {
+        return Err(MaintenanceError::Conflict);
+    };
+    if journal.prior.is_some()
+        || journal.source_working != fingerprint(&BTreeMap::new())
+        || !journal.prune_directories.is_empty()
+        || change.source.is_some()
+        || change.target.is_none()
+        || state.activation != Activation::Pending
+        || state.last_known_good.is_some()
+        || !state.retained_recovery.is_empty()
+        || state.clean_working.is_some()
+    {
+        return Err(MaintenanceError::Conflict);
+    }
+    let graph = &selected.desired;
+    let revision: ResourceId = state
+        .desired
+        .revision
+        .as_str()
+        .parse()
+        .map_err(|_| MaintenanceError::Conflict)?;
+    let (seed, _) = seed_manifest(graph.manifest().registry().site_id(), &revision.to_string())?;
+    if seed.encode().as_slice() != graph.manifest_bytes() {
+        return Err(MaintenanceError::Conflict);
+    }
+    Ok(&state.desired)
+}
+
+fn initialize(
+    root: &Path,
+    store: ResourceId,
+    key: &KeyId,
+    #[cfg(test)] checkpoint: Option<&dyn Fn(Boundary) -> Result<(), TransactionError>>,
+) -> Result<Value, MaintenanceError> {
+    // A missing delivered key must leave even the directory layout untouched.
+    load_systemd_key(key).map_err(|_| MaintenanceError::SecretsUnavailable)?;
+    let (owner, lease) = destination(root, store, |_| Ok(()))?;
+    let owner = owner.with_identity(store.uuid());
+    let proof = lease
+        .as_ref()
+        .or_else(|| owner.provisioning_writer_lease())
+        .ok_or(MaintenanceError::Conflict)?;
+    let guard = owner.try_edit().map_err(|_| MaintenanceError::Conflict)?;
+    guard
+        .check_writer_lease(proof)
+        .map_err(|_| MaintenanceError::Conflict)?;
+    let tx = Transaction::new(&guard, LIMITS).with_write_key(key);
+    #[cfg(test)]
+    let tx = if let Some(checkpoint) = checkpoint {
+        tx.with_checkpoint(checkpoint)
+    } else {
+        tx
+    };
+    let desired = if guard
+        .read_state(LIMITS.max_file_bytes)
+        .map_err(|_| MaintenanceError::InvalidGraph)?
+        .is_some()
+    {
+        initial_publication(&tx.inspect()?)?.clone()
+    } else {
+        let id = || -> Result<ResourceId, MaintenanceError> {
+            new_identity()
+                .map_err(|_| MaintenanceError::InvalidGraph)?
+                .to_string()
+                .parse()
+                .map_err(|_| MaintenanceError::InvalidGraph)
+        };
+        let site = id()?;
+        let (manifest, object) = seed_manifest(site, &id()?.to_string())?;
+        tx.commit(
+            Admission::Provision { store },
+            &tx.inventory()?,
+            &manifest,
+            &[(site, &object)],
+            id()?,
+        )?
+        .desired
+    };
+    tx.reconcile()?;
+    let selected = tx.inspect()?;
+    if selected.state.desired != desired
+        || selected.state.journal.is_some()
+        || selected.state.activation != Activation::Pending
+        || selected.status != StartupStatus::Interrupted
+        || selected.state.clean_working.is_none()
+        || selected.state.clean_working != selected.observed_working
+    {
+        return Err(MaintenanceError::Conflict);
+    }
+    Ok(json!({"status":"complete","revision":desired.revision.as_str(),"activation":"pending"}))
+}
+
 pub(crate) fn execute(
     operation: u32,
     value: &Value,
@@ -165,6 +304,17 @@ pub(crate) fn execute(
         .parse()
         .map_err(|_| MaintenanceError::InvalidGraph)?;
     match operation {
+        7 => {
+            let key = KeyId::new(text(value, "write_key_id")?)
+                .map_err(|_| MaintenanceError::InvalidGraph)?;
+            initialize(
+                root,
+                store,
+                &key,
+                #[cfg(test)]
+                checkpoint,
+            )
+        }
         1 => {
             let owner = WorkingFiles::open(root).map_err(|_| MaintenanceError::InvalidGraph)?;
             let guard = owner.try_edit().map_err(|_| MaintenanceError::Conflict)?;

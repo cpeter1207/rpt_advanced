@@ -750,14 +750,20 @@ pub(super) fn run(
         "audio" => scenario.serve(inputs(), |c, _| audio(c)),
         "schemas" => scenario.serve(inputs(), |c, _| schemas(c)),
         "poll" => scenario.serve(inputs(), |c, rt| poll(c, fixture, rt)),
-        "asterisk-managed" => native::asterisk(&scenario),
-        "standalone-managed" => native::standalone(&scenario),
+        "asterisk-managed" | "asterisk-private-pending" => native::asterisk(&scenario, case == "asterisk-private-pending"),
+        "standalone-managed" | "standalone-private-pending" => native::standalone(&scenario, case == "standalone-private-pending"),
+        "standalone-managed-direct-echo" => native::managed_echo::activation(&scenario),
+        "standalone-managed-asl-activation" | "standalone-managed-asl-originate" => native::managed_asl::activation(&scenario),
+        "native-private-authorized" | "native-private-retained-vad" | "native-private-managed-iax" | "native-private-inband" => native::positive_phone(&scenario),
+        "standalone-managed-phone-dial" => native::managed_phone_dial::run(&scenario),
+        "standalone-managed-phone-incoming" => native::managed_phone_incoming::run(&scenario),
         "managed-backup-first" => first_cold_start_after_backup(fixture),
         "public-pending-backup" => public_pending_after_backup(&mut scenario),
         "managed-bootstrap" | "managed-maintenance" | "managed-offline-first" | "inspection-r1" => {
             native::bootstrap(&scenario)
         }
         "native-runtime"
+        | "native-site-resume-uncertain"
         | "native-site-zero"
         | "native-site-views"
         | "native-site-fence"

@@ -11,6 +11,7 @@ struct ConfirmationProbe {
     proceed: std::sync::mpsc::Receiver<bool>,
 }
 static CONFIRMATION: Mutex<Option<ConfirmationProbe>> = Mutex::new(None);
+static REJECT_RESUME: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" fn submit_recovery(
     context: *mut std::ffi::c_void,
@@ -18,6 +19,11 @@ unsafe extern "C" fn submit_recovery(
 ) -> i32 {
     // Other submitters, including the ticker, continue through the real executor.
     if thread::current().name() == Some("rpt-config-adoption") {
+        if fixture::SITE_RESUME_VISIT.get() && REJECT_RESUME.swap(false, Ordering::AcqRel) {
+            // Reject this real serialized resume submission. Subsequent basis
+            // reads and shutdown continue through the actual control executor.
+            return -1;
+        }
         let mut slot = CONFIRMATION.lock().unwrap();
         if let Some(probe) = slot.as_ref()
             && let Some(observed) = probe.engine.upgrade().and_then(|engine| {
@@ -72,7 +78,7 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
     let two_live = confirm || case == "native-two-live" || shared_views;
     // SAFETY: the complete descriptor copy stays alive through the confirmed stop below.
     let mut control = unsafe { *fixture::control_descriptor() };
-    if confirm {
+    if confirm || case == "native-site-resume-uncertain" {
         control.submit = Some(submit_recovery);
     }
     let counters = Counters::default();
@@ -128,7 +134,7 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
     .unwrap();
     let client = scenario.client;
     let stopping = AtomicBool::new(false);
-    thread::scope(|scope| {
+    let mut exercise = || thread::scope(|scope| {
         scope.spawn(|| {
             while !stopping.load(Ordering::Acquire) {
                 if !coordinator.poll_listener(scenario.listener, scenario.inbox) {
@@ -265,13 +271,25 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
         );
         let old = runtime.observed().active_revision.unwrap();
         let before_plans = counters.prepared.load(Ordering::Acquire);
+        REJECT_RESUME.store(case == "native-site-resume-uncertain", Ordering::Release);
         let attempt = client.edit("PUT", &resource, Some(&enable));
         assert!((200..300).contains(&attempt.code), "{}", attempt.body);
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
             let health = client.get("/api/v1/health/").body;
             let state = &health["status"];
-            if state["historical_activation"] == "failed" {
+            if case == "native-site-resume-uncertain"
+                && state["desired_revision"] == attempt.body["desired_revision"]
+                && matches!(state["historical_activation"].as_str(), Some("failed" | "recovery_required")) {
+                assert!(!REJECT_RESUME.load(Ordering::Acquire), "resume rejection was never exercised");
+                assert_eq!(counters.refused.load(Ordering::Acquire), 1, "station open must fail first");
+                assert_eq!(state["last_known_good"], old);
+                assert_eq!(state["historical_activation"], "recovery_required",
+                    "a known radio rollback cannot confirm a rejected site-resume submission");
+                assert!(state["active_revision"].is_null());
+                return;
+            }
+            if case != "native-site-resume-uncertain" && state["historical_activation"] == "failed" {
                 assert_eq!(state["active_revision"], old);
                 assert_eq!(state["last_known_good"], old);
                 assert_ne!(state["desired_revision"], old);
@@ -940,8 +958,18 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
         assert!(inhibited);
         assert_eq!(operation(client, request(&active)).code, 409);
     });
+    let outcome = if case == "native-site-resume-uncertain" {
+        // Preserve the assertion payload until the adoption job has released its callbacks.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(exercise))
+    } else {
+        exercise();
+        Ok(())
+    };
     drop(coordinator);
     assert!(engine.stop());
+    if let Err(failure) = outcome {
+        std::panic::resume_unwind(failure);
+    }
     assert!(
         !ticker_panicked.load(Ordering::Acquire),
         "the owned control ticker panicked during shared-site recovery"
@@ -2461,7 +2489,28 @@ impl Foreground {
     }
 }
 
-pub(super) fn standalone(scenario: &Scenario<'_>) {
+#[path = "native_phone_iax.rs"]
+mod phone_iax;
+#[path = "native_phone_owner.rs"]
+mod phone_owner;
+#[path = "native_phone_caller.rs"]
+mod phone_caller;
+#[path = "native_phone_positive.rs"]
+mod phone_positive;
+pub(super) use phone_positive::positive_phone;
+#[path = "native_private_phone.rs"]
+mod private_phone;
+#[path = "native_managed_asl.rs"]
+pub(super) mod managed_asl;
+#[path = "native_managed_echo.rs"]
+pub(super) mod managed_echo;
+
+#[path = "native_managed_phone_dial.rs"]
+pub(super) mod managed_phone_dial;
+#[path = "native_managed_phone_incoming.rs"]
+pub(super) mod managed_phone_incoming;
+
+pub(super) fn standalone(scenario: &Scenario<'_>, phone: bool) {
     let binary =
         std::env::var_os("RPTADV_TEST_STANDALONE_BIN").expect("actual built foreground binary");
     let (service, address) = provisioning(scenario);
@@ -2487,7 +2536,7 @@ pub(super) fn standalone(scenario: &Scenario<'_>) {
             .spawn()
             .unwrap(),
     );
-    check_frontend_reload(scenario, address, &store, &mut process, |process| {
+    check_frontend_reload(scenario, address, &store, &mut process, phone, |process| {
         process.signal("-HUP")
     });
     process.signal("-TERM");
@@ -2500,6 +2549,7 @@ fn check_frontend_reload(
     address: std::net::SocketAddr,
     store: &WorkingFiles,
     process: &mut Foreground,
+    phone: bool,
     reload: impl FnOnce(&mut Foreground),
 ) {
     let deadline = Instant::now() + Duration::from_secs(12);
@@ -2518,6 +2568,10 @@ fn check_frontend_reload(
         store.try_writer_lease(),
         Err(rptadv_peer_support::working_files::CaptureError::Busy)
     ));
+    if phone {
+        private_phone::check(scenario, &client, process);
+        return;
+    }
     let path = "working/site/metadata.json";
     let mut edited: Value =
         serde_json::from_slice(&fs::read(scenario.fixture.0.join(path)).unwrap()).unwrap();
@@ -2559,7 +2613,7 @@ fn wait_stopped(process: &mut Foreground) {
     }
 }
 
-pub(super) fn asterisk(scenario: &Scenario<'_>) {
+pub(super) fn asterisk(scenario: &Scenario<'_>, phone: bool) {
     let modules = std::path::PathBuf::from(
         std::env::var_os("RPT_TEST_MODULE_DIR").expect("fresh module directory"),
     );
@@ -2588,11 +2642,18 @@ pub(super) fn asterisk(scenario: &Scenario<'_>) {
     configuration.push_str(&format!("astmoddir => {}\n", modules.display()));
     let config = directory.join("asterisk.conf");
     fs::write(&config, configuration).unwrap();
-    fs::write(
-        directory.join("modules.conf"),
-        "[modules]\nautoload=no\nload=app_rpt_advanced.so\n",
-    )
-    .unwrap();
+    let modules_config = if phone {
+        // The independently registered Asterisk channel driver requires one named
+        // legacy driver channel at module load. No modular port uses this name;
+        // this fixture never requests a hardware reservation or a physical device.
+        assert!(modules.join("chan_usbradioplus.so").is_file());
+        assert!(!std::path::Path::new("/dev/snd").exists());
+        fs::write(directory.join("usbradioplus.conf"), "[task48-driver-only]\n").unwrap();
+        "[modules]\nautoload=no\nload=chan_usbradioplus.so\nload=app_rpt_advanced.so\n"
+    } else {
+        "[modules]\nautoload=no\nload=app_rpt_advanced.so\n"
+    };
+    fs::write(directory.join("modules.conf"), modules_config).unwrap();
     let mut process = Foreground(
         Command::new("asterisk")
             .args(["-f", "-C"])
@@ -2610,14 +2671,48 @@ pub(super) fn asterisk(scenario: &Scenario<'_>) {
         assert!(result.status.success(), "isolated module CLI failed");
         String::from_utf8(result.stdout).unwrap()
     };
+    if phone {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        // Management may bind while Asterisk is still processing its module list.
+        while std::net::TcpStream::connect_timeout(&address, Duration::from_millis(40)).is_err() {
+            process.running(deadline);
+        }
+        let mut status = cli("module show like chan_usbradioplus");
+        while !status.contains("Running") {
+            assert!(Instant::now() < deadline, "real driver did not register: {status}");
+            process.running(deadline);
+            status = cli("module show like chan_usbradioplus");
+        }
+        let names = cli("radioplus channel list");
+        assert!(names.lines().any(|line| line.trim() == "task48-driver-only"), "{names}");
+        assert!(cli("core show channels count").contains("0 active channels"));
+        let mappings = fs::read_to_string(format!("/proc/{}/maps", process.0.id())).unwrap();
+        let expected = fs::read_to_string(modules.join("phone-driver-maps.txt")).unwrap();
+        for path in expected.lines() {
+            assert!(mappings.lines().any(|line| line.split_whitespace().last() == Some(path)),
+                "real Asterisk is missing the qualified module or backend {path}");
+        }
+        eprintln!("genuine USBRadioPlus driver registered {names}; zero active channels and all staged backend mappings verified");
+    }
     let store = WorkingFiles::open(&scenario.fixture.0).unwrap();
-    check_frontend_reload(scenario, address, &store, &mut process, |_| {
+    check_frontend_reload(scenario, address, &store, &mut process, phone, |_| {
         assert!(cli("module show like app_rpt_advanced").contains("Running"));
         cli("module reload app_rpt_advanced.so");
     });
-    cli("module unload app_rpt_advanced.so");
-    assert!(cli("module show like app_rpt_advanced").contains("0 modules loaded"));
+    if phone {
+        assert!(cli("module show like chan_usbradioplus").contains("Running"));
+        assert!(cli("radioplus channel list").lines().any(|line| line.trim() == "task48-driver-only"));
+        assert!(cli("core show channels count").contains("0 active channels"));
+    }
+    let unload = cli("module unload app_rpt_advanced.so");
+    let remaining = cli("module show like app_rpt_advanced");
+    assert!(remaining.contains("0 modules loaded"), "{unload}\n{remaining}");
+    if phone { eprintln!("private process loader completed: {unload} {remaining}"); }
     assert!(store.try_writer_lease().is_ok());
+    if phone {
+        cli("module unload chan_usbradioplus.so");
+        assert!(cli("module show like chan_usbradioplus").contains("0 modules loaded"));
+    }
     cli("core stop now");
     wait_stopped(&mut process);
 }

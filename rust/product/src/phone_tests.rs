@@ -67,6 +67,10 @@ fn records() -> Vec<PhoneMailbox> {
 }
 
 fn peer(second: bool) -> PeerIo {
+    peer_with_generation(usize::from(second))
+}
+
+fn peer_with_generation(mode: usize) -> PeerIo {
     unsafe extern "C" fn info(
         context: *mut c_void,
         peer: *const c_void,
@@ -77,7 +81,7 @@ fn peer(second: bool) -> PeerIo {
         output.protocol = 3;
         output.capabilities = 32;
         output.account_generation = 7;
-        output.qso_generation = 9;
+        output.qso_generation = if context.addr() == 1 { 10 } else { 9 };
         output.remote = abi::rptadv_peer_bytes_v1 {
             data: if context.is_null() {
                 b"aabbccddeeff00112233445566778899".as_ptr()
@@ -93,7 +97,7 @@ fn peer(second: bool) -> PeerIo {
         0
     }
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
-    table.context = ptr::without_provenance_mut(usize::from(second));
+    table.context = ptr::without_provenance_mut(mode);
     table.peer_info = Some(info);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     unsafe { services.peer(crate::fixture::peer()) }.unwrap()
@@ -421,4 +425,36 @@ fn retirement_during_private_render_revokes_the_copied_pcm_before_delivery() {
     assert_eq!(prepared.outcome(), PlaybackOutcome::Cancelled);
     assert!(calls.queue_reply(&source, &reply, media()).is_err());
     assert!(calls.take_reply(&source, &reply).is_err());
+}
+
+#[test]
+fn an_existing_native_call_cannot_be_reoffered_under_another_display_id() {
+    let _serial = crate::fixture::LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut calls = PhoneCalls::new(3, 1).unwrap();
+    let incumbent = calls.admit(peer_with_generation(0), 5).unwrap();
+    let reply = calls.reply(&incumbent).unwrap();
+    assert!(calls.admit(peer_with_generation(2), 7).is_err());
+    assert_eq!(calls.reply(&incumbent), Some(reply));
+    assert!(calls.admit(peer_with_generation(1), 9).is_ok());
+}
+
+#[test]
+fn half_entered_private_pin_expires_without_a_later_digit_and_cannot_complete_the_next_login() {
+    let mut calls=PhoneCalls::new(1,2).unwrap();
+    let source=calls.admit(peer(false),0).unwrap();
+    let reply=calls.reply(&source).unwrap();
+    assert!(calls.login_digit(&source,&reply,'4',10,100).unwrap().is_none());
+    assert!(matches!(calls.login_digit(&source,&reply,'#',15,100).unwrap(),Some(LoginField::Password)));
+    assert!(calls.expired_login_fields(114,|_|Some(100)).is_empty());
+    assert_eq!(calls.expired_login_fields(115,|_|Some(100)),vec![(source.clone(),reply.clone())]);
+    assert!(calls.expired_login_fields(116,|_|Some(100)).is_empty());
+    for (i,digit) in "8#12".chars().enumerate() {
+        let field=calls.login_digit(&source,&reply,digit,120+i as u64,100).unwrap();
+        if digit=='#'{assert!(matches!(field,Some(LoginField::Password)));}else{assert!(field.is_none());}
+    }
+    let Some(LoginField::Submitted(number,pin))=calls.login_digit(&source,&reply,'#',125,100).unwrap() else{
+        panic!("a fresh mailbox and PIN must complete on their own terminators")
+    };
+    assert_eq!(number,"8");assert_eq!(pin.as_str(),"12");
+    assert!(calls.expired_login_fields(400,|_|Some(100)).is_empty());
 }

@@ -40,23 +40,11 @@ impl Host {
         configuration: Arc<RuntimeConfiguration>,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
-        // Attached accounts requiring a network participant must enter the same
-        // adoption barrier as the RF device. Until a frontend provides a real
-        // participant, keep the incumbent selected configuration running.
-        if configuration.protocols.ports().any(|(_, port)| {
-            port.metadata.enabled
-                && (port
-                    .allstarlink
-                    .as_ref()
-                    .is_some_and(|account| account.settings.account_identity().is_some())
-                    || port
-                        .echolink
-                        .as_ref()
-                        .is_some_and(|account| account.settings.enabled)
-                    || port.phone_patch.as_ref().is_some_and(|account| {
-                        account.settings.provider.account_identity().is_some()
-                    }))
-        }) {
+        if configuration.protocols.ports().any(|(_, port)| port.metadata.enabled
+            && port.echolink.as_ref().is_some_and(|account| account.settings.enabled)) && self.services.echo_provider().is_err() {
+            return Err(RuntimeError::Preparation);
+        }
+        if crate::directory::account_plans(&configuration).next().is_some() && self.services.asl_provider().is_err() {
             return Err(RuntimeError::Preparation);
         }
         let basis = self.modular_site_basis(ticket)?;
@@ -86,7 +74,7 @@ impl Host {
                 let mut candidate = prepared(
                     &name,
                     settings,
-                    &self.peers,
+                    (&self.peers,Some(&self.phone_calls)),
                     media_worker(&mut self.media_workers, &name)?,
                     &mut text,
                     services,
@@ -192,10 +180,29 @@ impl Host {
         }
         // A fully authenticated final graph may retain the existing zeroizing allocation
         // only when the bound record versions and selected owner set are identical.
-        Ok(match self.radio_preparation.credentials.as_ref() {
+        let credentials = match self.radio_preparation.credentials.as_ref() {
             Some(active) if active.matches_selection(&credentials) => Arc::clone(active),
             _ => Arc::new(credentials),
-        })
+        };
+        self.radio_preparation.account_owner = Some(super::native::AccountReservation {
+            key: ticket.reservation(), attempt: ticket.serial, phone: false, asl: false, started: false,
+        });
+        self.prepare_private_accounts(ticket.serial, domain, &credentials)?;
+        self.radio_preparation.account_owner.as_mut().expect("reserved participants").phone = true;
+        self.asl.prepare(self.services, ticket.serial, domain, &credentials)?;
+        self.radio_preparation.account_owner.as_mut().expect("reserved participants").asl = true;
+        self.echo.prepare(self.services, ticket.serial, domain, &credentials,
+            self.radio_preparation.credentials.as_deref())?;
+        Ok(credentials)
+    }
+
+    pub(crate) fn verify_private_basis(&self, ticket: &RadioTicket) -> Result<(),RuntimeError> {
+        self.staged_plans(ticket)?;
+        if self.runtime.revision() != ticket.base_revision || self.runtime.reload_pending()
+            || self.runtime.revision() != self.activated_revision || self.radio_preparation.adopting.is_some() {
+            return Err(RuntimeError::Rejected);
+        }
+        Ok(())
     }
 
     pub(crate) fn begin_core_adoption(

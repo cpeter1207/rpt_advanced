@@ -3,6 +3,7 @@ Section: hamradio
 Priority: optional
 Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13), cargo (>= 1.88), rustc (>= 1.88),
+ libsofia-sip-ua-dev (>= 1.13.19),
  libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, pkg-config, dh-sequence-asterisk <!standalone>,
  librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha3),
@@ -25,6 +26,7 @@ Rules-Requires-Root: no
 Package: rpt-advanced
 Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
+ libsofia-sip-ua0 (>= 1.13.19),
  librate-adjusting-pcm-ring3 (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha3),
  librptadv-product2 (= ${binary:Version}),

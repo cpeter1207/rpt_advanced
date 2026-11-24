@@ -201,7 +201,8 @@ pub unsafe extern "C" fn rptadv_asterisk_load_management_v1(
         let Ok(bytes) = rptadv_peer_support::working_files::read_service_provisioning(&path) else {
             return 1;
         };
-        let services = crate::services::HostServicesOwner::new();
+        let mut services = crate::services::HostServicesOwner::new();
+        services.install_private(product.descriptor());
         // SAFETY: input is borrowed synchronously and the live host is retained
         // after acceptance or uncertain startup, until the product confirms stop.
         let result = unsafe {
@@ -257,6 +258,7 @@ unsafe extern "C" fn load(
             return 1;
         };
         let mut services = crate::services::HostServicesOwner::new();
+        services.install_private(product.descriptor());
         let prepared =
             with_echo_preparation(&path, product, EchoBackend(control), |preparation| unsafe {
                 services.prepare_echo(product.descriptor(), &configuration, preparation)
@@ -287,7 +289,7 @@ unsafe extern "C" fn load(
                 0
             }
             Err(_) => {
-                if services.stop_echo().is_ok() && product.stop() {
+                if services.stop_echo().is_ok() && product.stop() && services.private_stopped() {
                     1
                 } else {
                     // A live product cannot be abandoned while its callback code unloads.
@@ -366,7 +368,7 @@ extern "C" fn unload() -> i32 {
         let Some(state) = selected.as_ref() else {
             return 0;
         };
-        if state.services.stop_echo().is_err() || !state.product.stop() {
+        if state.services.stop_echo().is_err() || !state.product.stop() || !state.services.private_stopped() {
             return -1;
         }
         let state = selected.take().expect("selected lifecycle remains owned");

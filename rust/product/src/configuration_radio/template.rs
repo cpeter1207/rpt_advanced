@@ -135,17 +135,11 @@ pub(super) fn with_request<T>(
     prefix: &str,
     call: impl FnOnce(&abi::UrpTypedPreparation) -> Result<T>,
 ) -> Result<T> {
-    if !p.remote.enabled {
-        if !matches!(
-            p.signals.tx.ptt.source,
-            SignalSource::SoundChipGpio
-                | SignalSource::Parallel
-                | SignalSource::Serial
-                | SignalSource::Hamlib
-        ) {
-            return Err(rejected("ptt_source"));
-        }
-        if (p.signals.tx.ctcss.enabled
+    if p.remote.enabled && p.signals.tx.ptt.source == SignalSource::NoActuator {
+        return Err(rejected("ptt_source"));
+    }
+    if !p.remote.enabled
+        && ((p.signals.tx.ctcss.enabled
             && !matches!(
                 p.signals.tx.ctcss.source,
                 SignalSource::Dsp | SignalSource::External
@@ -154,10 +148,9 @@ pub(super) fn with_request<T>(
                 && !matches!(
                     p.signals.tx.dcs.source,
                     SignalSource::Dsp | SignalSource::External
-                ))
-        {
-            return Err(PreparationError::Unsupported("encode_source"));
-        }
+                )))
+    {
+        return Err(PreparationError::Unsupported("encode_source"));
     }
     let radio = radio(p)?;
     let a = &p.interface.audio;
@@ -191,7 +184,8 @@ pub(super) fn with_request<T>(
         WiringProfile::Nhrc => 2,
         WiringProfile::Custom => 3,
     };
-    s.ptt_inverted = u32::from(p.signals.tx.ptt.inverted);
+    s.ptt_inverted =
+        u32::from(p.signals.tx.ptt.source != SignalSource::NoActuator && p.signals.tx.ptt.inverted);
     for (i, mode) in g.pins.iter().enumerate() {
         if *mode != GpioMode::Input {
             s.gpio_output_enable_mask |= 1 << i
@@ -266,11 +260,18 @@ fn settings(p: &RadioPortProfile, prefix: &str) -> Result<Vec<u8>> {
     if !p.remote.enabled {
         root["physical"]["ordinary"] = json!({
             "audio_source": if p.interface.audio.backend == AudioBackend::Alsa { "alsa" } else { "cm119" },
-            "ptt_source": match tx.ptt.source {
-                SignalSource::Parallel => "parallel", SignalSource::Serial => "serial",
-                SignalSource::Hamlib => "hamlib", _ => "usb",
-            },
         });
+        let actuator = match tx.ptt.source {
+            SignalSource::SoundChipGpio => Some("usb"),
+            SignalSource::Parallel => Some("parallel"),
+            SignalSource::Serial => Some("serial"),
+            SignalSource::Hamlib => Some("hamlib"),
+            SignalSource::NoActuator => None,
+            _ => return Err(rejected("ptt_source")),
+        };
+        if let Some(source) = actuator {
+            root["physical"]["ordinary"]["ptt_source"] = json!(source);
+        }
     }
     if !p.remote.enabled && tx.ptt.source == SignalSource::Hamlib {
         let control = &p.remote;

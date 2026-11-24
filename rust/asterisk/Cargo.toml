@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 libloading = "0.8"
+rptadv-private-phone-host = { path = "../private-phone-host" }
 rptadv-peer-support = { path = "../peer-support" }
 
 [build-dependencies]

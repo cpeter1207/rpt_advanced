@@ -247,6 +247,31 @@ fn worker_discards_snapshots_from_replaced_config_generations() {
 }
 
 #[test]
+fn managed_station_measurements_publish_the_numeric_wire_identity() {
+    let station = "19847c42-9f16-41ff-beef-facade000001";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/status", listener.local_addr().unwrap());
+    let (send, receive) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 2048];
+        let n = stream.read(&mut request).unwrap();
+        send.send(String::from_utf8_lossy(&request[..n]).into_owned()).unwrap();
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+    });
+    let mut service = super::StatusPostService::default();
+    service.configure_bound([(station.into(), super::PostConfig {
+        node: "716701".into(), url, interval_seconds: 60,
+    })]);
+    service.observe("716701", 0, 90, false, Vec::new());
+    service.observe(station, 1, 91, true, vec![link("716702", Mode::TRANSCEIVE, true)]);
+    let request = receive.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(request.starts_with("GET /status?node=716701&time=91&seqno=1&keyed=1&nodes=T716702 "));
+    assert!(!request.contains(station));
+    server.join().unwrap();
+}
+
+#[test]
 fn submit_drops_when_mailbox_is_busy_instead_of_blocking_the_pump() {
     let worker = super::StatusPostWorker::new().unwrap();
     worker.replace(

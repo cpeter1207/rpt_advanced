@@ -44,6 +44,8 @@ pub enum Action {
     Link(Command<ProtectedOperand<String>>),
     /// Existing radio operating owner.
     Radio(RadioAction),
+    /// Dial the complete parameter on the registered account of this station.
+    PhoneDial(ProtectedOperand<String>),
     /// Existing site controller.
     Site(SiteCommand),
     /// Existing physical maintenance owner and bounded lease.
@@ -103,6 +105,13 @@ fn symbols(f: &mut Fields<'_>) -> Result<ProtectedOperand<String>> {
         return Err(ActionError::Field("digits"));
     }
     Ok(s.into())
+}
+pub(super) fn phone_dial(parameter: Option<&str>) -> Result<Action> {
+    let number = parameter.filter(|number| {
+        (1..=64).contains(&number.len())
+            && number.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'*' | b'#' | b'+'))
+    }).ok_or(ActionError::Parameter)?;
+    Ok(Action::PhoneDial(number.into()))
 }
 pub(super) fn link_action(action: &str, f: &mut Fields<'_>) -> Result<Option<LinkAction>> {
     use LinkAction as L;
@@ -224,7 +233,7 @@ fn host_action(action: &str, f: &mut Fields<'_>, p: Option<&str>) -> Result<Host
         action => {
             use PhoneDtmfAction as P;
             H::PhoneGrammar(Arc::new(match action {
-                "phone_attach" => P::Attach(Some(node(p)?)),
+                "phone_attach" => P::Attach(p.filter(|text|!text.is_empty()).map(|text|node(Some(text))).transpose()?),
                 "phone_select_command_target" => P::SelectTarget(node(p)?),
                 "phone_send_node_digit" => P::NodeDigit {
                     target: node(p)?,
@@ -318,6 +327,7 @@ fn prepare(v: &Value, persisted: bool) -> Result<PreparedAction> {
                 Action::CallMacro(key.into())
             }
             "execute_dtmf" => Action::ExecuteDtmf(symbols(&mut f)?),
+            "phone_dial" => phone_dial(p)?,
             "message" => {
                 let m = f.text("message")?;
                 if m.chars().count() > 65536 {

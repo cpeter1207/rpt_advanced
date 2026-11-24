@@ -75,6 +75,20 @@ static ALLOCATOR: Allocator = Allocator;
 pub static LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub(crate) static REVIEW_CARRIER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+/// Diagnostics from the exact original caller PCM offered to a real private RF route.
+pub(crate) static WATCH_PHONE_PCM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static PHONE_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_FRESH: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_PERMITTED: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_WIRE_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_EVENT_DIGITS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_COMMAND_DIGITS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_MAILBOX_VERIFIED: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_MAILBOX_REJECTED: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_LIVE_SAMPLES: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_GAP_CREDIT: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_ROUTE_INSTALLS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PHONE_ACCEPTED: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static REVIEW_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static REVIEW_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 /// Raw measurements from one registered station's deterministic radio callbacks.
@@ -82,6 +96,7 @@ pub(crate) struct ReviewOutput {
     pub pause_tx: std::sync::atomic::AtomicBool,
     pub skipped_tx: AtomicUsize,
     pub missing_tx_frame: std::sync::atomic::AtomicBool,
+    pub measure_without_carrier: std::sync::atomic::AtomicBool,
     pub value: AtomicUsize,
     pub keyed: AtomicUsize,
     pub dekeyed: AtomicUsize,
@@ -102,6 +117,7 @@ pub(crate) fn watch_output(name: &str) -> std::sync::Arc<ReviewOutput> {
                 pause_tx: false.into(),
                 skipped_tx: 0.into(),
                 missing_tx_frame: false.into(),
+                measure_without_carrier: std::sync::atomic::AtomicBool::new(false),
                 value: AtomicUsize::new(usize::MAX),
                 keyed: AtomicUsize::new(0),
                 dekeyed: AtomicUsize::new(0),
@@ -287,22 +303,28 @@ unsafe extern "C" fn radio_activate(
     let stop = radio.stop.clone();
     let contexts = (receive_context as usize, transmit_context as usize);
     let always = !host_context.is_null();
+    let phone_clock = observed.as_ref().is_some_and(|port| port.measure_without_carrier.load(Ordering::Acquire));
     radio.thread = Some(std::thread::spawn(move || {
         let mut first = 0;
+        let mut deadline = std::time::Instant::now();
         while !stop.load(Ordering::Acquire) {
             if always || RADIO_READY.load(Ordering::Acquire) != 0 {
                 let carrier = REVIEW_CARRIER.load(Ordering::Acquire);
-                let mut samples = [if carrier { 0.3 } else { 0.0 }; 8];
+                let mut backing = [if carrier { 0.3 } else { 0.0 }; 480];
+                // The PHONE observer models the real station's 48 kHz clock. The smaller
+                // callback used by hardware lifecycle fixtures deliberately has no media pace.
+                let count: u32 = if phone_clock { 480 } else { 8 };
+                let samples = &mut backing[..count as usize];
                 let mut keyed = 0;
                 let mut ctcss_enabled = 0;
                 unsafe {
                     receive(
                         contexts.0 as *mut c_void,
-                        &receive_metadata(carrier, first, 8),
+                        &receive_metadata(carrier, first, count),
                         samples.as_mut_ptr(),
-                        8,
+                        count,
                     );
-                    first += 8;
+                    first += u64::from(count);
                     if let Some(output) = &observed
                         && output.pause_tx.load(Ordering::Acquire)
                     {
@@ -316,7 +338,7 @@ unsafe extern "C" fn radio_activate(
                     {
                         0
                     } else {
-                        8
+                        count
                     };
                     transmit(
                         contexts.1 as *mut c_void,
@@ -325,7 +347,7 @@ unsafe extern "C" fn radio_activate(
                         &mut keyed,
                         &mut ctcss_enabled,
                     );
-                    if carrier {
+                    if carrier || observed.as_ref().is_some_and(|port| port.measure_without_carrier.load(Ordering::Acquire)) {
                         let output = usize::from(keyed != 0)
                             | (usize::from(samples.iter().any(|v| v.abs() > 0.01)) << 1);
                         if let Some(observed) = &observed {
@@ -340,12 +362,19 @@ unsafe extern "C" fn radio_activate(
                             .fetch_add(1, Ordering::AcqRel);
                             observed.value.store(output, Ordering::Release);
                         }
-                        REVIEW_OUTPUT.store(output, Ordering::Release);
-                        REVIEW_CALLBACKS.fetch_add(1, Ordering::Release);
+                        if carrier {
+                            REVIEW_OUTPUT.store(output, Ordering::Release);
+                            REVIEW_CALLBACKS.fetch_add(1, Ordering::Release);
+                        }
                     }
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            if phone_clock {
+                deadline += std::time::Duration::from_millis(10);
+                std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }));
     0
@@ -575,6 +604,9 @@ static mut HOST: crate::abi::rptadv_host_services_v10 = crate::abi::rptadv_host_
     radio_remote_submit: None,
     radio_ready: None,
     station_binding: std::ptr::null(),
+    phone_provider: std::ptr::null(),
+    asl_provider: std::ptr::null(),
+        managed_echo_provider: std::ptr::null(),
 };
 
 pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v10 {
@@ -727,4 +759,7 @@ unsafe extern "C" fn radio_control(
     request.command.value = mode;
     request.command.flags = if mode == 0 { 0 } else { 7680 };
     0
+}
+std::thread_local! {
+    pub(crate) static SITE_RESUME_VISIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }

@@ -1,4 +1,5 @@
 usr/bin/rpt-advanced
 usr/bin/rpt-advanced-store
+usr/lib/*/rpt_advanced/librptadv_sip_adapter.so.1
 usr/share/doc/rpt-advanced/**
 usr/share/rpt-advanced/messages/en-US.ftl
