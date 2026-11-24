@@ -724,3 +724,6 @@ fn remote_fallback_preserves_receive_carrier_and_claims_only_active_rf_outputs()
         });
     }
 }
+
+#[path = "radio_preparation/directional_admission.rs"]
+mod directional_admission;

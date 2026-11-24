@@ -90,6 +90,8 @@ impl RuntimeConfiguration {
             .ok_or(RuntimeError::MissingNode)?;
         let telemetry = &scope.telemetry;
         let settings = ControllerSettings {
+            receive_disabled: !radio.rx_audio.enabled,
+            transmit_disabled: !radio.tx_audio.enabled,
             parrot_enabled: radio.general.parrot_enabled,
             full_duplex: radio.general.full_duplex(),
             hang_ms: radio.signals.tx.hang_ms.into(),

@@ -70,6 +70,8 @@ Use test-driven development.
 
 [x] - Build and retain the private ARM64 trial bundle and pass its five staged rehearsals (26369). The staged prefix validated 13 real providers, initialized and applied a zero-port store, and passed SIP cadence and both phone call directions with simulated station hardware.
 
+[x] - Verify that disabling local TX suppresses RF programme, PTT and CTCSS while ordinary voice still reaches peers, and that disabling local RX preserves independent peer audio to RF and other peers. Both failures reproduced on ARM64 (94982) and the corrected controls passed (79714).
+
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.
 
 [] - Split controller configuration into site metadata/defaults, port metadata, radio/audio/signaling/interface sections, protocol instances, events, macros, messages, mailboxes and equipment resources.

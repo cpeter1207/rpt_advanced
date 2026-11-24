@@ -34,6 +34,8 @@ impl ControllerRadioPolicy {
     }
     /// Populate the existing controller's radio settings before preparing its graph.
     pub fn apply(&self, settings: &mut ControllerSettings) {
+        settings.receive_disabled = !self.receive_enabled;
+        settings.transmit_disabled = !self.transmit_enabled;
         settings.parrot_enabled = self.parrot;
         settings.full_duplex = self.full_duplex;
         settings.hang_ms = u64::from(self.hang);

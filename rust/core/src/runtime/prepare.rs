@@ -415,6 +415,8 @@ pub(super) fn controller(
     }
     let (mut controller, mut control) = NodeController::new(
         ControllerSettings {
+            receive_disabled: false,
+            transmit_disabled: false,
             parrot_enabled: settings.parrot_enabled,
             full_duplex: settings.full_duplex,
             hang_ms: settings.hang_ms,

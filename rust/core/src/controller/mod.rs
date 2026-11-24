@@ -60,6 +60,10 @@ pub struct Identifier {
 /// Resolved node timing and transmit settings; native audio is always 48 kHz.
 #[derive(Default)]
 pub struct ControllerSettings {
+    /// Suppress programme and carrier from the local receiver before routing.
+    pub receive_disabled: bool,
+    /// Suppress local transmitter programme, PTT and tone demand.
+    pub transmit_disabled: bool,
     /// Enable fixed-capacity receive burst capture for parrot playback.
     pub parrot_enabled: bool,
     /// Allow local receive while transmitting and repeat local receive audio.
@@ -388,8 +392,10 @@ impl NodeController {
         }
     }
 
-    /// Qualify local audio/keying without changing the receiver/digit detector's raw input.
+    /// Apply configured receive admission before reporting activity or routing local audio.
+    /// The provider and digit detector own their raw input observations.
     pub fn admits_local_receive(&self, qualified: bool) -> bool {
+        let qualified = qualified && !self.settings.receive_disabled;
         self.telemetry
             .rx_qualified
             .store(qualified, Ordering::Release);
@@ -410,7 +416,7 @@ impl NodeController {
     /// Disabled activity scoping preserves the radio's existing tone behavior.
     #[must_use]
     pub fn ctcss_enabled(&self) -> bool {
-        self.ctcss_enabled
+        !self.settings.transmit_disabled && self.ctcss_enabled
     }
 
     fn process_event_with_activity(
@@ -799,7 +805,8 @@ impl NodeController {
         if source_activity && self.telemetry.parrot_pending() {
             self.telemetry.discard_pending_parrot();
         }
-        let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire)
+        let inhibited = self.settings.transmit_disabled
+            || self.telemetry.site_inhibit.load(Ordering::Acquire)
             || self
                 .configuration_inhibit
                 .as_ref()
