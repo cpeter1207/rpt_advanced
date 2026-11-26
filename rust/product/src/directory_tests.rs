@@ -86,21 +86,149 @@ fn authoritative_static_records_and_authentication_never_fall_back() {
 fn managed_directory_proof_rechecks_source_account_and_retired_selection() {
     let source: IpAddr = "192.0.2.1".parse().unwrap();
     let unauthorized: IpAddr = "192.0.2.2".parse().unwrap();
-    let row = RegisteredNode::new("registered.example", 4570_u16.try_into().unwrap(), source).unwrap();
+    let row =
+        AllStarLinkStaticNode::new("registered.example", 4570_u16.try_into().unwrap(), source)
+            .unwrap();
     let selected = Arc::new(ManagedDirectory {
-        station: [1; 16], account: [2; 16], generation: 1_u64.try_into().unwrap(),
-        method: 0, external: "external".into(),
+        station: [1; 16],
+        account: [2; 16],
+        generation: 1_u64.try_into().unwrap(),
+        method: 0,
+        external: "external".into(),
         registered: Arc::new(BTreeMap::from([("123".to_owned(), row)])),
     });
-    let proof = selected.resolve(resolver(0).backend, "123", Some(source)).unwrap();
-    assert_eq!(proof.destination(&selected, "123", Some(source)), Some("radio@registered.example:4570/123"));
-    assert!(proof.destination(&selected, "123", Some(unauthorized)).is_none());
+    let proof = selected
+        .resolve(resolver(0).backend, "123", Some(source))
+        .unwrap();
+    assert_eq!(
+        proof.destination(&selected, "123", Some(source)),
+        Some("radio@registered.example:4570/123")
+    );
+    assert!(
+        proof
+            .destination(&selected, "123", Some(unauthorized))
+            .is_none()
+    );
     assert!(proof.destination(&selected, "124", Some(source)).is_none());
-    assert!(matches!(selected.resolve(resolver(0).backend, "123", Some(unauthorized)), Err(DirectoryError::SourceMismatch)));
-    let recreated = Arc::new(ManagedDirectory { account: [3; 16], registered: Arc::new(BTreeMap::new()), ..(*selected).clone() });
+    assert!(matches!(
+        selected.resolve(resolver(0).backend, "123", Some(unauthorized)),
+        Err(DirectoryError::SourceMismatch)
+    ));
+    let recreated = Arc::new(ManagedDirectory {
+        account: [3; 16],
+        registered: Arc::new(BTreeMap::new()),
+        ..(*selected).clone()
+    });
     assert!(proof.destination(&recreated, "123", Some(source)).is_none());
-    let fallback = recreated.resolve(resolver(0).backend, "123", Some(source)).unwrap();
-    assert_eq!(fallback.destination(&recreated, "123", Some(source)), Some("radio@external/123"));
+    let fallback = recreated
+        .resolve(resolver(0).backend, "123", Some(source))
+        .unwrap();
+    assert_eq!(
+        fallback.destination(&recreated, "123", Some(source)),
+        Some("radio@external/123")
+    );
+}
+
+#[test]
+fn managed_directory_uses_json_rows_before_the_external_feed() {
+    use rpt_advanced_core::config::resources::{
+        PortKey,
+        candidate::{
+            CapturedResource, ModularCandidate, ResourceBinding, ResourceKind, ResourceRegistry,
+            ResourceScope,
+        },
+    };
+    use serde_json::{Value, json};
+
+    let site: ResourceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".parse().unwrap();
+    let station: ResourceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    let account: ResourceId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc".parse().unwrap();
+    let binding = ResourceBinding {
+        id: account,
+        scope: ResourceScope::Port(station),
+        kind: ResourceKind::Allstarlink,
+    };
+    let registry =
+        ResourceRegistry::new(site, &[(station, PortKey::new("1000"))], &[binding]).unwrap();
+    let selected = |static_nodes: Value| {
+        let encoded = registry
+            .bindings()
+            .map(|owner| {
+                let mut body = json!({"id":owner.id.to_string(),"kind":owner.kind.as_str()});
+                body["configuration"] = if owner == binding {
+                    json!({"node_number":1000,"directory_file":"external","static_nodes":static_nodes})
+                } else if owner.id == station {
+                    json!({"name":"Station","inherit_from":"site"})
+                } else {
+                    json!({"name":"Site","inherit_from":null})
+                };
+                if owner.id == station {
+                    body["key"] = json!("1000");
+                }
+                (owner, serde_json::to_vec(&body).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let capture = encoded
+            .iter()
+            .map(|(owner, json)| CapturedResource {
+                binding: *owner,
+                json,
+            })
+            .collect::<Vec<_>>();
+        let profiles = ModularCandidate::assemble(&registry, &capture)
+            .unwrap()
+            .resolve_protocol_profiles()
+            .unwrap();
+        let setting = profiles
+            .port(station)
+            .unwrap()
+            .allstarlink
+            .as_ref()
+            .unwrap();
+        let plan = AccountPlan {
+            station,
+            account: setting.binding.id,
+            wire: setting.settings.node_number.unwrap(),
+            settings: &setting.settings,
+            jitter: &setting.jitter,
+        };
+        Arc::new(ManagedDirectory::for_account(&plan, NonZeroU64::MIN))
+    };
+    let current = selected(json!({
+        "123": {"host":"2001:db8::2","port":4570,"source":"::ffff:192.0.2.2"}
+    }));
+    let source: IpAddr = "192.0.2.2".parse().unwrap();
+    let fallback_source: IpAddr = "192.0.2.1".parse().unwrap();
+    let proof = current
+        .resolve(resolver(0).backend, "123", Some(source))
+        .unwrap();
+    assert_eq!(
+        proof.destination(&current, "123", Some(source)),
+        Some("radio@[2001:db8::2]:4570/123")
+    );
+    assert!(matches!(
+        current.resolve(resolver(0).backend, "123", Some(fallback_source)),
+        Err(DirectoryError::SourceMismatch)
+    ));
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        current
+            .resolve(resolver(0).backend, "123", None)
+            .unwrap()
+            .outbound_endpoint(&resolver(0).backend)
+            .unwrap(),
+        "[2001:db8::2]:4570".parse().unwrap()
+    );
+
+    let cleared = selected(json!({}));
+    assert!(proof.destination(&cleared, "123", Some(source)).is_none());
+    let fallback = cleared
+        .resolve(resolver(0).backend, "123", Some(fallback_source))
+        .unwrap();
+    assert_eq!(
+        fallback.destination(&cleared, "123", Some(fallback_source)),
+        Some("radio@external/123")
+    );
 }
 
 #[test]

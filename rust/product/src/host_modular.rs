@@ -40,11 +40,21 @@ impl Host {
         configuration: Arc<RuntimeConfiguration>,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
-        if configuration.protocols.ports().any(|(_, port)| port.metadata.enabled
-            && port.echolink.as_ref().is_some_and(|account| account.settings.enabled)) && self.services.echo_provider().is_err() {
+        if configuration.protocols.ports().any(|(_, port)| {
+            port.metadata.enabled
+                && port
+                    .echolink
+                    .as_ref()
+                    .is_some_and(|account| account.settings.enabled)
+        }) && self.services.echo_provider().is_err()
+        {
             return Err(RuntimeError::Preparation);
         }
-        if crate::directory::account_plans(&configuration).next().is_some() && self.services.asl_provider().is_err() {
+        if crate::directory::account_plans(&configuration)
+            .next()
+            .is_some()
+            && self.services.asl_provider().is_err()
+        {
             return Err(RuntimeError::Preparation);
         }
         let basis = self.modular_site_basis(ticket)?;
@@ -74,7 +84,7 @@ impl Host {
                 let mut candidate = prepared(
                     &name,
                     settings,
-                    (&self.peers,Some(&self.phone_calls)),
+                    (&self.peers, Some(&self.phone_calls)),
                     media_worker(&mut self.media_workers, &name)?,
                     &mut text,
                     services,
@@ -99,6 +109,7 @@ impl Host {
                 // Its new NodeHost must register its own callback pair on this lease.
                 let lease = Arc::new(Mutex::new(Lease {
                     binding: Default::default(),
+                    maintenance: None,
                     quiesced: false,
                     quiescing: false,
                     owners: None,
@@ -185,21 +196,42 @@ impl Host {
             _ => Arc::new(credentials),
         };
         self.radio_preparation.account_owner = Some(super::native::AccountReservation {
-            key: ticket.reservation(), attempt: ticket.serial, phone: false, asl: false, started: false,
+            key: ticket.reservation(),
+            attempt: ticket.serial,
+            phone: false,
+            asl: false,
+            started: false,
         });
         self.prepare_private_accounts(ticket.serial, domain, &credentials)?;
-        self.radio_preparation.account_owner.as_mut().expect("reserved participants").phone = true;
-        self.asl.prepare(self.services, ticket.serial, domain, &credentials)?;
-        self.radio_preparation.account_owner.as_mut().expect("reserved participants").asl = true;
-        self.echo.prepare(self.services, ticket.serial, domain, &credentials,
-            self.radio_preparation.credentials.as_deref())?;
+        self.radio_preparation
+            .account_owner
+            .as_mut()
+            .expect("reserved participants")
+            .phone = true;
+        self.asl
+            .prepare(self.services, ticket.serial, domain, &credentials)?;
+        self.radio_preparation
+            .account_owner
+            .as_mut()
+            .expect("reserved participants")
+            .asl = true;
+        self.echo.prepare(
+            self.services,
+            ticket.serial,
+            domain,
+            &credentials,
+            self.radio_preparation.credentials.as_deref(),
+        )?;
         Ok(credentials)
     }
 
-    pub(crate) fn verify_private_basis(&self, ticket: &RadioTicket) -> Result<(),RuntimeError> {
+    pub(crate) fn verify_private_basis(&self, ticket: &RadioTicket) -> Result<(), RuntimeError> {
         self.staged_plans(ticket)?;
-        if self.runtime.revision() != ticket.base_revision || self.runtime.reload_pending()
-            || self.runtime.revision() != self.activated_revision || self.radio_preparation.adopting.is_some() {
+        if self.runtime.revision() != ticket.base_revision
+            || self.runtime.reload_pending()
+            || self.runtime.revision() != self.activated_revision
+            || self.radio_preparation.adopting.is_some()
+        {
             return Err(RuntimeError::Rejected);
         }
         Ok(())
@@ -248,6 +280,7 @@ impl Host {
         self.radio_preparation.rollback = None;
         self.reload_failure = None;
         self.reload_text = Some(text);
+        self.cancel_target_selections();
         if let Err(error) = self.runtime.adopt_configuration(core, clock) {
             self.reload_text = None;
             self.core_adoption_error(&error);
@@ -314,6 +347,8 @@ impl Host {
                 observed.owners.insert(port, work.id());
             }
         }
+        self.handoff_status
+            .retain(|id, receipt| observed.owners.get(id) == Some(&receipt.generation));
         Ok(observed)
     }
 

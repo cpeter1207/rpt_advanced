@@ -23,7 +23,7 @@ struct Descriptor {
     run: Option<Run>,
 }
 fn product_valid(header: &Header) -> bool {
-    header.size == 128 && header.abi == 7 && header.capability == *b"rptadv.prod7\0\0\0\0"
+    header.size == 96 && header.abi == 8 && header.capability == *b"rptadv.prod8\0\0\0\0"
 }
 fn maintenance_header_valid(header: &Header) -> bool {
     header.size as usize == std::mem::size_of::<Descriptor>()
@@ -110,7 +110,7 @@ unsafe extern "C" fn output(context: *mut c_void, bytes: *const c_char, length: 
         .extend_from_slice(unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), length) });
 }
 fn execute(operation: u32, request: &[u8]) -> Result<bool, ()> {
-    let path = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_product.so.2");
+    let path = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_product.so.3");
     // Only the installed/private versioned product is loaded; it must obey its getter ABI.
     let library = unsafe { Library::new(path) }.map_err(|_| ())?;
     let product = unsafe {
@@ -213,20 +213,34 @@ mod tests {
         assert!(!maintenance_valid(&api));
     }
     #[test]
-    fn old_product_table_remains_exactly_128_bytes_and_abi_seven() {
-        let mut header = Header {
-            size: 128,
-            abi: 7,
-            capability: *b"rptadv.prod7\0\0\0\0",
+    fn validates_current_product_and_rejects_previous_or_malformed_headers() {
+        let current = Header {
+            size: 96,
+            abi: 8,
+            capability: *b"rptadv.prod8\0\0\0\0",
         };
-        assert!(product_valid(&header));
-        header.size = 136;
-        assert!(!product_valid(&header));
-        header.size = 128;
-        header.abi = 8;
-        assert!(!product_valid(&header));
-        header.abi = 7;
-        header.capability[0] = 0;
-        assert!(!product_valid(&header));
+        assert!(product_valid(&current));
+        for previous_or_malformed in [
+            Header {
+                size: 128,
+                abi: 7,
+                capability: *b"rptadv.prod7\0\0\0\0",
+            },
+            Header {
+                size: 88,
+                ..current
+            },
+            Header {
+                size: 104,
+                ..current
+            },
+            Header { abi: 7, ..current },
+            Header {
+                capability: [0; 16],
+                ..current
+            },
+        ] {
+            assert!(!product_valid(&previous_or_malformed));
+        }
     }
 }

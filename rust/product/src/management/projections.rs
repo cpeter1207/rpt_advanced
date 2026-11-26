@@ -10,11 +10,12 @@ use rpt_advanced_core::config::{
             ModularCandidate, ResourceBinding as Binding, ResourceId as Id, ResourceKind as Kind,
             ResourceScope as Scope,
         },
-        events::{Boundary, Trigger},
+        events::{Boundary, Event, Trigger},
         generation::{RuntimeConfiguration, ScopeConfiguration},
         profiles::*,
     },
 };
+use rpt_advanced_core::schedule::recurrence::Recurrence;
 use serde_json::{Map, Value, json};
 pub(super) use sources::Origin;
 use std::{collections::BTreeMap, sync::Arc};
@@ -23,6 +24,7 @@ pub(super) struct EventLinks {
     pub start: Binding,
     pub end: Option<Binding>,
     pub warnings: Vec<Binding>,
+    pub timezones: BTreeMap<String, String>,
 }
 type Fields = Map<String, Value>;
 #[derive(Default)]
@@ -190,6 +192,12 @@ impl PreparedConfiguration {
                     "directory_file":s.directory_file,"lookup_method":match s.lookup_method{LinkLookupMethod::Both=>"both",LinkLookupMethod::Dns=>"dns",LinkLookupMethod::File=>"file"},
                     "iax":{"local_port":s.local_port,"timing":{"registration_interval_s":s.registration_interval_s}},
                     "status_post":{"timing":{"interval_s":s.status_post_interval_s}}});
+                public["static_nodes"] = Value::Object(
+                    s.static_nodes
+                        .iter()
+                        .map(|(identity, row)| (identity.clone(), row.public_value()))
+                        .collect(),
+                );
                 if let Some(url) = &s.registration_url {
                     public["iax"]["registration_url"] = json!(url);
                 }
@@ -200,9 +208,15 @@ impl PreparedConfiguration {
             }
             if let Some(p) = phone {
                 let s = &p.settings;
+                let numbers = |list: &[rpt_advanced_core::link::MailboxId]| {
+                    list.iter()
+                        .map(|number| number.as_str().to_owned())
+                        .collect::<Vec<_>>()
+                };
                 out.protocol(scope,p,json!({"provider":{"protocol":s.provider.protocol.map(|p|match p{PhoneProtocol::Sip=>"sip",PhoneProtocol::Iax2=>"iax2"}),
                         "server":s.provider.server,"port":s.provider.port,"username":s.provider.username},
                     "playout_destination":match s.playout_destination{PhonePlayoutDestination::Local=>"local",PhonePlayoutDestination::LocalAndLinks=>"local_and_links"},
+                    "allow_mailboxes":numbers(&s.allow_mailboxes),"deny_mailboxes":numbers(&s.deny_mailboxes),
                     "isolate_peers":s.isolate_peers,"timing":{"target_latency_ms":s.timing.target_latency_ms,"maximum_latency_ms":s.timing.maximum_latency_ms},
                     "vad":{"enabled":s.vad.enabled,"mode":match s.vad.mode{VadMode::Continuous=>"continuous",VadMode::Kerchunk=>"kerchunk"},"timing":{"hang_ms":s.vad.hang_ms}}}));
             }
@@ -450,6 +464,7 @@ impl PreparedConfiguration {
                         start: event.start.command.binding,
                         end: event.end.as_ref().map(|end| end.command.binding),
                         warnings,
+                        timezones: event_timezones(event)?,
                     },
                 );
                 let mut body = json!({"start":boundary(&event.start),"restart_recovery":event.restart_recovery});
@@ -482,9 +497,21 @@ impl PreparedConfiguration {
                 },
             );
         }
-        let acquisition =
-            equipment::ScopedEquipment::acquisition_plan(scopes.values().map(|s| &s.equipment))
+        let active = |(scope, state): (&Scope, &ScopeConfiguration)| {
+            matches!(scope, Scope::Site(_)) || state.metadata.enabled
+        };
+        // All authored physical relationships remain checked even when a port is dormant.
+        if scopes.iter().any(|entry| !active(entry)) {
+            equipment::ScopedEquipment::validate_owners(scopes.values().map(|s| &s.equipment))
                 .map_err(|_| Fault::Conflict)?;
+        }
+        let acquisition = equipment::ScopedEquipment::acquisition_plan(
+            scopes
+                .iter()
+                .filter(|entry| active(*entry))
+                .map(|(_, s)| &s.equipment),
+        )
+        .map_err(|_| Fault::Conflict)?;
         out.add_sources(registry);
         let runtime = Arc::new(RuntimeConfiguration {
             registry: registry.clone(),
@@ -534,6 +561,29 @@ impl Projections {
     pub fn normalized(&self, b: Binding) -> Result<Fields, Fault> {
         self.local.get(&b.id).cloned().ok_or(Fault::Unavailable)
     }
+}
+
+/// A calendar expression can select a different zone at each boundary and warning.
+fn event_timezones(event: &Event) -> Result<BTreeMap<String, String>, Fault> {
+    let mut zones = BTreeMap::new();
+    let mut insert = |path, recurrence: &Recurrence| -> Result<(), Fault> {
+        let zone = recurrence
+            .effective_zone()
+            .map_err(|_| Fault::Unavailable)?;
+        zones.insert(path, zone.to_owned());
+        Ok(())
+    };
+    for (path, boundary) in
+        std::iter::once(("/start", &event.start)).chain(event.end.as_ref().map(|end| ("/end", end)))
+    {
+        if let Trigger::Calendar(recurrence) = &boundary.at {
+            insert(format!("{path}/at"), recurrence)?;
+        }
+        for (index, warning) in boundary.warnings.iter().enumerate() {
+            insert(format!("{path}/warnings/{index}/at"), &warning.at)?;
+        }
+    }
+    Ok(zones)
 }
 
 fn boundary(b: &Boundary) -> Value {

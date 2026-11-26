@@ -40,6 +40,10 @@ impl Observation {
         self.controller_bye
     }
 
+    pub(super) fn command_ended_dialog(&self) -> bool {
+        !self.early_bye && self.operation_http == 200 && self.admitted && self.controller_bye
+    }
+
     pub(super) fn verify(&self) {
         eprintln!(
             "RF_HANGUP_CLOSED dial=true ack=true both_pcm=true media_retired=true withdrawal_200=true foreground_joined=true writer_released=true mapping_http={} effective={} operation_http={} admitted={} early_bye={} controller_bye={}",

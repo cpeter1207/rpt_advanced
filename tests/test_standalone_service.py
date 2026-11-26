@@ -26,7 +26,19 @@ def test_standalone_service_runs_as_dedicated_unprivileged_user() -> None:
         in service
     )
     assert "ConditionPathExists=/etc/rpt_advanced/rpt_advanced.service.json" in service
-    assert "ExecReload=/bin/kill -HUP $MAINPID" in service
+    assert "ExecReload=/usr/bin/rpt-advanced-cli " in service
+    assert "Environment=RPT_ADVANCED_API_URL=https://localhost:8443/api/v1/" in service
+    assert "--url ${RPT_ADVANCED_API_URL}" in service
+    for flag, name in (
+        ("ca", "server-ca"),
+        ("cert", "client-cert"),
+        ("key", "client-key"),
+    ):
+        assert f"--{flag} %d/rpt-advanced.cli.{name}" in service
+    assert " reload\n" in service
+    assert "ImportCredential=rpt-advanced.cli.*" in service
+    assert "ExecReload=/bin/kill" not in service
+    assert "rpt-advanced-cli (= ${binary:Version})" in package_stanza("rpt-advanced")
     assert "ImportCredential=rpt-advanced.tls.*" in service
     assert "ImportCredential=rpt-advanced.aead.*" in service
     assert "Restart=on-failure" in service
@@ -126,7 +138,7 @@ def test_standalone_check_builds_the_product_before_loading_it() -> None:
         text=True,
     )
     build = plan.find("build --locked --release -p rpt-advanced-standalone")
-    stage = plan.find('"build/librptadv_product.so.2"')
+    stage = plan.find('"build/librptadv_product.so.3"')
     test = plan.find("test --locked -p rpt-advanced-standalone")
     assert 0 <= build < stage < test, "standalone tests need the current shared product"
     assert "-p rptadv-resolver-adapter" in plan[:test]
@@ -146,9 +158,9 @@ def test_shlibdeps_searches_every_private_adapter_library_directory() -> None:
     assert not any(character.isspace() for character in search_path)
     assert all(path.startswith("$(CURDIR)/debian/") for path in search_path.split(":"))
     for package in (
-        "librptadv-product2",
-        "librptadv-file-adapter1",
-        "librptadv-speech-adapter1",
+        "librptadv-product3",
+        "librptadv-file-adapter2",
+        "librptadv-speech-adapter2",
         "librptadv-resolver-adapter1",
         "librptadv-jitter-adapter1",
         "librptadv-control-asterisk-adapter1",

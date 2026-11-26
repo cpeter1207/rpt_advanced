@@ -1,5 +1,7 @@
 //! Hardware-free configuration and peer preparation from the matched USBRadioPlus product DSO.
 mod lifecycle;
+#[path = "../configuration_radio.rs"]
+mod resolved;
 pub use lifecycle::{NativeBindings, NativeStation, PreparedUpdate, UpdateStatus};
 mod policy;
 pub use policy::ControllerRadioPolicy;
@@ -154,6 +156,10 @@ struct Product {
     station: NonNull<abi::UrpPreparationDescriptor>,
     link: NonNull<abi::UrpLinkPreparationDescriptor>,
     _library: Library,
+    #[cfg(test)]
+    _fixture_descriptor: Option<Box<abi::UrpAstDescriptor>>,
+    #[cfg(test)]
+    _fixture_roles: Option<Box<abi::UrpLinkPreparationDescriptor>>,
 }
 // SAFETY: all three admitted tables are immutable for the full lifetime of the retained DSO.
 // Mutable native objects are accessed through their individually owned, serialized handles.
@@ -226,6 +232,10 @@ impl RadioPreparationApi {
             station,
             link,
             _library: library,
+            #[cfg(test)]
+            _fixture_descriptor: None,
+            #[cfg(test)]
+            _fixture_roles: None,
         };
         let o = p.ordinary();
         let l = p.roles();
@@ -259,5 +269,43 @@ impl RadioPreparationApi {
         Ok(Self {
             product: Arc::new(p),
         })
+    }
+}
+
+/// Build the ordinary typed graph with a retained SDK descriptor containing test callbacks.
+///
+/// # Safety
+/// The substituted callbacks and factory must follow the selected operation's
+/// exact ABI and transfer a unique context whose lifetime extends through destroy.
+#[cfg(test)]
+pub(crate) unsafe fn fixture_native_peer(
+    rate: u32,
+    configure: impl FnOnce(&mut abi::UrpAstDescriptor),
+    prepare: impl FnOnce(*const c_void, *mut *mut c_void) -> i32,
+) -> Result<PreparedPeer> {
+    let api =
+        unsafe { RadioPreparationApi::fixture_descriptors(|ordinary, _| configure(ordinary)) }?;
+    PreparedPeer::create(api.product, rate, prepare)
+}
+
+#[cfg(test)]
+impl RadioPreparationApi {
+    /// Keep the descriptor copies and their original DSO alive for all resulting roles and peers.
+    ///
+    /// # Safety
+    /// Replacements must implement the selected SDK operations and handle lifetimes.
+    pub(crate) unsafe fn fixture_descriptors(
+        configure: impl FnOnce(&mut abi::UrpAstDescriptor, &mut abi::UrpLinkPreparationDescriptor),
+    ) -> Result<Self> {
+        let mut api = Self::open()?;
+        let product = Arc::get_mut(&mut api.product).expect("new provider has one owner");
+        let mut ordinary = Box::new(*product.ordinary());
+        let mut roles = Box::new(*product.roles());
+        configure(&mut ordinary, &mut roles);
+        product.product = NonNull::from(ordinary.as_mut());
+        product.link = NonNull::from(roles.as_mut());
+        product._fixture_descriptor = Some(ordinary);
+        product._fixture_roles = Some(roles);
+        Ok(api)
     }
 }

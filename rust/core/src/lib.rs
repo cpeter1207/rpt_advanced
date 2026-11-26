@@ -35,3 +35,10 @@ mod composition_tests;
 
 #[cfg(test)]
 mod time_tests;
+
+#[cfg(test)]
+#[path = "../tests/support/capture.rs"]
+mod capture;
+#[cfg(test)]
+#[path = "runtime/station_fixture_tests.rs"]
+mod station_fixture;

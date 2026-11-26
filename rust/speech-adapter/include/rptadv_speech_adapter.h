@@ -1,5 +1,5 @@
 /** @file
- * @brief Independently replaceable ABI 2 literal speech streaming capability.
+ * @brief Independently replaceable ABI 3 literal speech streaming capability.
  */
 #ifndef RPTADV_SPEECH_ADAPTER_H
 #define RPTADV_SPEECH_ADAPTER_H
@@ -18,13 +18,15 @@ struct rptadv_speech_descriptor {
     int32_t (*create)(const struct rptadv_media_config *config, void **context);
     /** @brief Destroy after all preparations stop; null is harmless. */
     void (*destroy)(void *context);
-    /** @brief Open a literal speech stream at source rate. */
+    /** @brief Open a literal speech stream; initialize handle to null on error. */
     int32_t (*open_speech)(const void *context, const struct rptadv_media_speech_request *request,
-                           const struct rptadv_media_cancellation *cancellation,
-                           struct rptadv_media_stream *output);
-    /** @brief Read on the media worker; may wait for data, zero count means clean EOF. */
-    int32_t (*read_stream)(void *handle, const struct rptadv_media_cancellation *cancellation,
-                           float *output, size_t capacity, size_t *read_count);
+                           const struct rptadv_media_cancellation *cancellation, void **handle);
+    /** @brief Advance once; only successful SAMPLES makes output consumable.
+     * Provide a nonempty buffer and a separate, writable result. On error the
+     * provider initializes a valid result to PENDING with zero payload fields.
+     */
+    int32_t (*step_stream)(void *handle, const struct rptadv_media_cancellation *cancellation,
+                           float *output, size_t capacity, struct rptadv_media_step *result);
     /** @brief Close this provider's stream exactly once; null is harmless. */
     void (*close_stream)(void *handle);
 };

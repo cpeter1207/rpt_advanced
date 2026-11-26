@@ -1,7 +1,12 @@
+use crate::config::resources::candidate::ResourceKind;
+use crate::station_fixture;
+use serde_json::json;
+use station_fixture::{FOURTH, PORT, SECOND, SITE, THIRD};
+
 use super::*;
 use crate::{
     command::LinkAction,
-    config::{ConfigDocument, ResolvedNodeSettings},
+    config::ResolvedNodeSettings,
     media::{FileRequest, MediaError, PreparedAudio, SpeechRequest, StationMediaSession},
     schedule::{CivilTime, Weekday},
 };
@@ -72,8 +77,8 @@ fn phone_diagnostics_cannot_succeed_in_the_radio_telemetry_queue() {
     use crate::link::{PhoneAccountId, PhoneSource};
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &CapturingMedia(messages.clone()),
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
@@ -94,7 +99,7 @@ fn phone_diagnostics_cannot_succeed_in_the_radio_telemetry_queue() {
     let before = messages.lock().unwrap().clone();
     assert!(matches!(
         runtime.prepare_phone_status(
-            "1000",
+            PORT,
             LinkAction::Status,
             None,
             clock(),
@@ -103,19 +108,19 @@ fn phone_diagnostics_cannot_succeed_in_the_radio_telemetry_queue() {
         Err(RuntimeError::Rejected)
     ));
     assert_eq!(
-        runtime.queue_macro_stopped("1000", Some(reply.clone())),
+        runtime.queue_macro_stopped(PORT, Some(reply.clone())),
         Err(RuntimeError::Rejected)
     );
     assert_eq!(
-        runtime.queue_loop_rejected("1000", "2000", Some(reply.clone())),
+        runtime.queue_loop_rejected(PORT, "2000", Some(reply.clone())),
         Err(RuntimeError::Rejected)
     );
     assert_eq!(
-        runtime.queue_remote_command_unsupported("1000", "2000", Some(reply.clone())),
+        runtime.queue_remote_command_unsupported(PORT, "2000", Some(reply.clone())),
         Err(RuntimeError::Rejected)
     );
     assert_eq!(
-        runtime.queue_status("1000", LinkAction::Status, None, clock(), Some(reply)),
+        runtime.queue_status(PORT, LinkAction::Status, None, clock(), Some(reply)),
         Err(RuntimeError::Rejected)
     );
     assert_eq!(*messages.lock().unwrap(), before);
@@ -124,172 +129,79 @@ fn phone_diagnostics_cannot_succeed_in_the_radio_telemetry_queue() {
 
 #[test]
 fn dtmf_macro_reload_prepares_catalog_and_retires_already_queued_work() {
+    use crate::command_language::MacroOutcome;
     use crate::runtime::dtmf::{DigitEvent, DigitOutcome};
-    let document = ConfigDocument::parse(
-        "[1000]\n[dtmf_macro status]\ntrigger=*95\nprotected=no\ncommands=*41000#*70#,*73#\n",
-    )
-    .unwrap();
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        document,
+    let mut runtime = command_runtime(
+        json!({"mappings":{"status-macro":{"command":"*95","protected":false,"action":"call_macro","macro":"status"}}}),
+        &[(
+            "macro",
+            "status",
+            json!({"actions":[{"action":"pause","timing":{"duration_ms":25}},{"action":"link_status"}]}),
+        )],
+    );
+    let mut admitted = None;
+    for digit in "*95#".chars() {
+        if let Some(DigitOutcome::Mapped(input)) = runtime.digit(
+            PORT,
+            DigitEvent::Digit {
+                digit,
+                now_ms: 1000,
+            },
+        ) {
+            let links::LinkEffect::CommandQueued(reply) =
+                runtime.dispatch_mapping(PORT, input, clock()).unwrap()
+            else {
+                panic!("macro admission")
+            };
+            admitted = Some(reply);
+        }
+    }
+    assert!(runtime.advance_commands(PORT, clock()).unwrap().is_none());
+    let reply = admitted.unwrap();
+    station_fixture::reload(
+        &mut runtime,
+        station_fixture::single_port(true),
         &Media,
         adapter,
-        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
-        clock(),
+        |_, _| Ok(Box::new(Device(Default::default())) as Box<dyn DeviceHandoff>),
+        RuntimeClock {
+            now_ms: 1001,
+            ..clock()
+        },
     )
     .unwrap();
-    assert!(runtime.warnings().is_empty());
-    for digit in "*95".chars() {
-        assert!(
-            runtime
-                .digit(
-                    "1000",
-                    DigitEvent::Digit {
-                        digit,
-                        now_ms: 1000
-                    }
-                )
-                .is_none()
-        );
-    }
-    let queued = runtime.node("1000").unwrap().links().advance_macros(1000);
-    let [DigitOutcome::Operation(operation)] = queued.as_slice() else {
-        panic!("macro prepared before publication")
-    };
-    assert_eq!(operation.command.action, LinkAction::Status);
-    runtime
-        .reload(
-            ConfigDocument::parse("[1000]\n").unwrap(),
-            &Media,
-            adapter,
-            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
-            RuntimeClock {
-                now_ms: 1001,
-                ..clock()
-            },
-        )
-        .unwrap();
+    assert_eq!(reply.outcome(), Some(MacroOutcome::Cancelled));
     assert!(
         runtime
-            .command(
-                "1000",
-                operation.clone(),
+            .advance_commands(
+                PORT,
                 RuntimeClock {
-                    now_ms: 1002,
+                    now_ms: 3000,
                     ..clock()
-                },
-                false
+                }
             )
-            .is_err()
-    );
-    assert!(
-        runtime
-            .node("1000")
             .unwrap()
-            .links()
-            .advance_macros(3000)
-            .is_empty()
+            .is_none()
     );
     assert!(runtime.stop(3001));
 }
 
 #[test]
-fn legacy_event_selectors_share_admission_and_do_not_consume_calendar_or_macros() {
-    for (media, expected, linked) in [
-        ("message=Report\n", "Report", false),
-        ("template=clock\n", "Report 9:07 AM", false),
-        (
-            "message=Report ${link_status}\n",
-            "Report Link node,2,0,0,0 transceive",
-            true,
-        ),
-        ("message=Report ${node}\n", "Report node,1,0,0,0", false),
-        ("message=Report ${callsign}\n", "Report A,B,1,C,D", false),
-        ("message=This is AB1CD\n", "This is A,B,1,C,D", false),
-    ] {
-        let source = format!(
-            "[1000]\ncallsign=AB1CD\n[template clock]\ntext=Report ${{time}}\n[macro attach]\naction=connect\ntarget_node=2000\n[event 1000 report]\nat=daily 09:07\n{media}macro=attach\ndtmf_id=7\n"
-        );
-        let messages = Arc::new(Mutex::new(Vec::new()));
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse(&source).unwrap(),
-            &CapturingMedia(messages.clone()),
-            adapter,
-            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
-            clock(),
-        )
-        .unwrap();
-        if linked {
-            runtime.incoming("1000", "2000", true).unwrap();
-        }
-        let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-        let mut generation = tx.acquire().unwrap();
-        let controller = &mut generation.state().controller;
-        controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
-        assert!(
-            runtime.queue_message("1000", "7", None).is_ok(),
-            "legacy event selector must be registered: {media}"
-        );
-        controller.process_audio(false, false, &[], &mut [0.0]);
-        runtime.prepare_messages(clock());
-        let mut output = [0.0; 20_000];
-        controller.process_audio(false, false, &[], &mut output);
-        assert!(output.iter().all(|sample| *sample == 0.25));
-        assert_eq!(*messages.lock().unwrap(), [expected]);
-        assert_eq!(
-            runtime
-                .node("1000")
-                .unwrap()
-                .links()
-                .manager()
-                .snapshot()
-                .len(),
-            usize::from(linked),
-            "manual media must not execute its action macro"
-        );
-        assert!(
-            runtime.next_event(clock()).unwrap().is_some(),
-            "manual media cannot consume the calendar occurrence"
-        );
-        drop(generation);
-        if linked {
-            runtime.node("1000").unwrap().links().ended("2000");
-            runtime.peer_detached("1000", "2000", 0);
-        }
-        assert!(runtime.stop(0));
-        let collision = format!("{source}[message other]\ncontent=Other\ndtmf_id=7\n");
-        assert!(
-            Runtime::start(
-                ConfigDocument::parse(&collision).unwrap(),
-                &Media,
-                adapter,
-                |_, _| Ok(
-                    Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>
-                ),
-                clock()
-            )
-            .is_err(),
-            "legacy selectors must share collision validation"
-        );
-    }
-}
-
-#[test]
 fn manually_selected_message_does_not_renew_its_polite_wait_after_source_unkey() {
     let messages = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n[message report]\ncontent={media}\nspeech_text=Report\nmorse_text=E\ndtmf_id=1\npolite_maximum_wait_ms=20\npolite_expiry=skip\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(&[(PORT,"1000")], &[(PORT, ResourceKind::Message, "report", json!({"speech": {"text": "Report"}, "morse": {"text": "E"}, "dtmf_id": "1", "polite": {"timing": {"maximum_wait_ms": 20}, "expiry": "skip"}}))]),
         &CapturingMedia(messages.clone()), adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>), clock(),
     ).unwrap();
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut generation = tx.acquire().unwrap();
     let controller = &mut generation.state().controller;
     controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
     let peer = crate::link::PeerSignals::new();
     peer.set_radio_keyed(true);
     runtime
-        .queue_message("1000", "1", Some(peer.reply_target()))
+        .queue_message(PORT, "1", Some(peer.reply_target()))
         .unwrap();
     controller.process_audio(false, false, &[], &mut [0.0; 1920]);
     peer.set_radio_keyed(false);
@@ -308,24 +220,44 @@ fn manually_selected_message_does_not_renew_its_polite_wait_after_source_unkey()
 
 #[test]
 fn manual_identifier_and_tail_success_satisfy_their_automatic_opportunity() {
-    for (family, timing) in [
-        ("identifier", "regardless_of_activity=yes\n"),
-        ("tail", "delay_ms=0\n"),
-    ] {
+    for kind in [ResourceKind::Identifier, ResourceKind::Tail] {
+        let family = kind.as_str();
+        let mut fields = json!({"timing":{"interval_ms":1000},"speech":{"text":"Report"},"morse":{"text":"E"},"dtmf_id":"1"});
+        if kind == ResourceKind::Identifier {
+            fields["regardless_of_activity"] = json!(true);
+        }
         let messages = Arc::new(Mutex::new(Vec::new()));
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse(&format!(
-                "[1000]\nduplex=full\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n[{family} 1000 report]\ninterval_ms=1000\n{timing}speech_text=Report\nmorse_text=E\ndtmf_id=1\n"
-            )).unwrap(),
-            &CapturingMedia(messages.clone()), adapter,
+        let mut runtime = station_fixture::start(
+            station_fixture::configuration(
+                &[(PORT, "radio")],
+                &[
+                    (PORT, ResourceKind::Radio, "", json!({"duplex_mode":"full"})),
+                    (
+                        PORT,
+                        ResourceKind::TxSignaling,
+                        "",
+                        json!({"ptt":{"timing":{"hang_ms":0}}}),
+                    ),
+                    (
+                        PORT,
+                        ResourceKind::RxSignaling,
+                        "",
+                        json!({"timing":{"kerchunk_max_ms":0}}),
+                    ),
+                    (PORT, kind, "report", fields),
+                ],
+            ),
+            &CapturingMedia(messages.clone()),
+            adapter,
             |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
             clock(),
-        ).unwrap();
-        let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        )
+        .unwrap();
+        let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
         let mut generation = tx.acquire().unwrap();
         let controller = &mut generation.state().controller;
         controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
-        runtime.queue_message("1000", "1", None).unwrap();
+        runtime.queue_message(PORT, "1", None).unwrap();
         controller.process_audio(false, false, &[], &mut [0.0]);
         runtime.prepare_messages(clock());
         let mut played = [0.0; 20_000];
@@ -361,24 +293,32 @@ fn manual_identifier_and_tail_success_satisfy_their_automatic_opportunity() {
 
 #[test]
 fn site_manual_command_publishes_inhibit_without_waiting_for_poll() {
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nduplex=full\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Radio,
+                "",
+                json!({"duplex_mode": "full"}),
+            )],
+        ),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut actual = Vec::new();
     for inhibit in [true, false] {
         runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .site_command(crate::site::SiteCommand::Inhibit(inhibit), 0)
             .unwrap();
         runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .advance_site(0, &Default::default(), &Default::default());
         let mut guard = tx.acquire().unwrap();
@@ -396,9 +336,17 @@ fn site_manual_command_publishes_inhibit_without_waiting_for_poll() {
 
 #[test]
 fn site_inhibit_is_seeded_before_reloaded_audio_becomes_available() {
-    let document = ConfigDocument::parse("[1000]\nduplex=full\n").unwrap();
+    let document = station_fixture::configuration(
+        &[(PORT, "1000")],
+        &[(
+            PORT,
+            ResourceKind::Radio,
+            "",
+            json!({"duplex_mode": "full"}),
+        )],
+    );
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
+    let mut runtime = station_fixture::start(
         document.clone(),
         &Media,
         adapter,
@@ -406,20 +354,20 @@ fn site_inhibit_is_seeded_before_reloaded_audio_becomes_available() {
         clock(),
     )
     .unwrap();
-    let node = runtime.node("1000").unwrap();
+    let node = runtime.node(PORT).unwrap();
     node.site()
         .command(crate::site::SiteCommand::Inhibit(true), 0)
         .unwrap();
-    runtime
-        .reload(
-            document,
-            &Media,
-            adapter,
-            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
-            clock(),
-        )
-        .unwrap();
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    station_fixture::reload(
+        &mut runtime,
+        document,
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut generation = rx.acquire_pair(&mut tx).unwrap();
     let mut audio = [0.25; 48];
     generation
@@ -440,19 +388,31 @@ fn site_runtime_reload_keeps_history_and_original_pulse_deadline() {
     use crate::site::{
         FanOutput, Observation, OutputRequest, ReadingQuality, SiteCommand, SiteObservations,
     };
-    let source = "[1000]\n[sensor 1000 supply]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=in1_input\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=/dev/gpiochip0\nline=7\n";
+    let source = |pulse_ms: u64| {
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[
+                (
+                    PORT,
+                    ResourceKind::Sensor,
+                    "supply",
+                    json!({"enabled":true,"source":{"type":"hwmon","device":"/sys/selected","channel":"in1_input"}}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::Output,
+                    "relay",
+                    json!({"enabled":true,"source":{"type":"gpiod","device":"/dev/gpiochip0","line":"7"},"timing":{"pulse_ms":pulse_ms}}),
+                ),
+            ],
+        )
+    };
     let log = Arc::new(Mutex::new(Vec::new()));
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
     };
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(source).unwrap(),
-        &Media,
-        adapter,
-        device,
-        clock(),
-    )
-    .unwrap();
+    let mut runtime =
+        station_fixture::start(source(500), &Media, adapter, device, clock()).unwrap();
     let observations = SiteObservations {
         sensors: [(
             "supply".into(),
@@ -473,7 +433,7 @@ fn site_runtime_reload_keeps_history_and_original_pulse_deadline() {
         .into(),
         ..Default::default()
     };
-    let site = runtime.node("1000").unwrap().site();
+    let site = runtime.node(PORT).unwrap().site();
     site.advance(1000, &observations, &Default::default());
     site.command(
         SiteCommand::Output {
@@ -485,26 +445,18 @@ fn site_runtime_reload_keeps_history_and_original_pulse_deadline() {
     .unwrap();
     let mut now = clock();
     now.now_ms = 1200;
-    runtime
-        .reload(
-            ConfigDocument::parse(&format!("{source}pulse_ms=900\n")).unwrap(),
-            &Media,
-            adapter,
-            device,
-            now,
-        )
-        .unwrap();
-    let snapshot = runtime.node("1000").unwrap().site().snapshot(1200);
+    station_fixture::reload(&mut runtime, source(900), &Media, adapter, device, now).unwrap();
+    let snapshot = runtime.node(PORT).unwrap().site().snapshot(1200);
     assert_eq!(snapshot.outputs["relay"].pulse_deadline_ms, Some(1500));
     assert_eq!(snapshot.sensors["supply"].minimum.unwrap().value, 13.8);
-    assert!(runtime.detached("1000", 1));
+    assert!(runtime.detached(PORT, 1));
     runtime.reclaim();
     runtime
-        .node("1000")
+        .node(PORT)
         .unwrap()
         .site()
         .advance(1500, &observations, &Default::default());
-    assert!(!runtime.node("1000").unwrap().site().snapshot(1500).outputs["relay"].requested_on);
+    assert!(!runtime.node(PORT).unwrap().site().snapshot(1500).outputs["relay"].requested_on);
     assert!(runtime.stop(1600));
 }
 
@@ -517,8 +469,8 @@ fn site_runtime_message_uses_current_measurement_and_reports_stale_as_unavailabl
     ] {
         let messages = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut runtime = Runtime::start(ConfigDocument::parse("[1000]\n[sensor 1000 outdoor]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=temp1_input\n[message temperature]\nmessage_id=site-temperature\narg_temperature=sensor:outdoor\ndtmf_id=1\n").unwrap(), &CapturingMedia(messages.clone()), adapter, |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock()).unwrap();
-        runtime.node("1000").unwrap().site().advance(
+        let mut runtime = station_fixture::start(station_fixture::configuration(&[(PORT,"1000")], &[(PORT, ResourceKind::Sensor, "outdoor", json!({"enabled": true, "source": {"type": "hwmon", "device": "/sys/selected", "channel": "temp1_input"}})), (PORT, ResourceKind::Message, "site-temperature", json!({"bindings": {"temperature": "sensor:outdoor"}, "dtmf_id": "1"}))]), &CapturingMedia(messages.clone()), adapter, |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock()).unwrap();
+        runtime.node(PORT).unwrap().site().advance(
             1000,
             &SiteObservations {
                 sensors: [(
@@ -534,8 +486,8 @@ fn site_runtime_message_uses_current_measurement_and_reports_stale_as_unavailabl
             },
             &Default::default(),
         );
-        runtime.queue_message("1000", "1", None).unwrap();
-        let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        runtime.queue_message(PORT, "1", None).unwrap();
+        let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
         let mut generation = rx.acquire_pair(&mut tx).unwrap();
         generation
             .transmit()
@@ -554,24 +506,24 @@ fn site_runtime_message_uses_current_measurement_and_reports_stale_as_unavailabl
 fn site_report_captures_after_unkey_and_answers_only_the_requesting_peer() {
     use crate::site::{Observation, ReadingQuality, SiteObservations};
     for (selector, now_ms, expected) in [
-        ("1", 1000, "battery is 13.3 volts."),
-        ("1", 6000, "battery is unavailable."),
+        ("1", 1000, "Battery at 1,0,0,0 is 13.3 volts."),
+        ("1", 6000, "Battery at 1,0,0,0 is unavailable."),
         ("2", 1000, "door is inactive."),
         ("99", 1000, "The requested site reading is unavailable."),
     ] {
         let messages = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse("[1000]\n[sensor 1000 battery]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=in1_input\nunit=volts\nprecision=1\ndtmf_id=1\n[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=/dev/gpiochip0\nline=3\ndtmf_id=2\n").unwrap(),
+        let mut runtime = station_fixture::start(
+            station_fixture::configuration(&[(PORT,"1000")], &[(PORT, ResourceKind::Sensor, "battery", json!({"enabled": true, "source": {"type": "hwmon", "device": "/sys/selected", "channel": "in1_input"}, "unit": "volts", "precision": 1, "dtmf_id": "1", "label": "Battery at { $node-key }"})), (PORT, ResourceKind::Input, "door", json!({"enabled": true, "source": {"type": "gpiod", "device": "/dev/gpiochip0", "line": "3"}, "dtmf_id": "2"}))]),
             &CapturingMedia(messages.clone()), adapter,
             |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock(),
         ).unwrap();
         let peer = crate::link::PeerSignals::new();
         peer.set_radio_keyed(true);
         runtime
-            .queue_site_report("1000", selector, Some(peer.reply_target()))
+            .queue_site_report(PORT, selector, Some(peer.reply_target()))
             .unwrap();
-        let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
         let mut generation = rx.acquire_pair(&mut tx).unwrap();
         let mut audio = [0.0; 960];
         generation
@@ -580,7 +532,7 @@ fn site_report_captures_after_unkey_and_answers_only_the_requesting_peer() {
             .process_audio(false, false, &[], &mut audio);
         runtime.prepare_messages(clock());
         assert!(messages.lock().unwrap().is_empty());
-        runtime.node("1000").unwrap().site().advance(
+        runtime.node(PORT).unwrap().site().advance(
             1000,
             &SiteObservations {
                 sensors: [(
@@ -636,7 +588,7 @@ fn site_report_captures_after_unkey_and_answers_only_the_requesting_peer() {
                 .any(|sample| sample.sample != 0.0 && sample.target == peer.reply_identity())
         );
         assert_eq!(
-            runtime.node("1000").unwrap().site().snapshot(1000).sensors["battery"]
+            runtime.node(PORT).unwrap().site().snapshot(1000).sensors["battery"]
                 .current
                 .value,
             Some(13.26),
@@ -649,8 +601,8 @@ fn site_report_captures_after_unkey_and_answers_only_the_requesting_peer() {
 
 #[test]
 fn site_report_rejects_empty_and_noncanonical_selectors_before_admission() {
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
@@ -659,7 +611,7 @@ fn site_report_rejects_empty_and_noncanonical_selectors_before_admission() {
     .unwrap();
     for selector in ["", "0", "01", "unknown"] {
         assert_eq!(
-            runtime.queue_site_report("1000", selector, None),
+            runtime.queue_site_report(PORT, selector, None),
             Err(RuntimeError::Rejected)
         );
     }
@@ -668,10 +620,10 @@ fn site_report_rejects_empty_and_noncanonical_selectors_before_admission() {
         Err(RuntimeError::MissingNode)
     );
     for _ in 0..4 {
-        runtime.queue_site_report("1000", "99", None).unwrap();
+        runtime.queue_site_report(PORT, "99", None).unwrap();
     }
     assert_eq!(
-        runtime.queue_site_report("1000", "99", None),
+        runtime.queue_site_report(PORT, "99", None),
         Err(RuntimeError::Rejected),
         "invalid selectors must not consume reply capacity"
     );
@@ -681,8 +633,16 @@ fn site_report_rejects_empty_and_noncanonical_selectors_before_admission() {
 #[test]
 fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
     let messages = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n[message ready]\ncontent=Ready\ndtmf_id=1\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                SITE,
+                ResourceKind::Message,
+                "ready",
+                json!({"content": "Ready", "dtmf_id": "1"}),
+            )],
+        ),
         &CapturingMedia(messages.clone()),
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
@@ -698,20 +658,20 @@ fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
         Err(RuntimeError::MissingNode)
     );
     assert_eq!(
-        runtime.queue_named_message("1000", "missing"),
+        runtime.queue_named_message(PORT, "missing"),
         Err(RuntimeError::Preparation)
     );
     let peer = crate::link::PeerSignals::new();
     peer.set_radio_keyed(true);
     for _ in 0..4 {
         runtime
-            .queue_message("1000", "1", Some(peer.reply_target()))
+            .queue_message(PORT, "1", Some(peer.reply_target()))
             .unwrap();
     }
-    assert_eq!(runtime.queue_named_message("1000", "ready"), Ok(false));
+    assert_eq!(runtime.queue_named_message(PORT, "ready"), Ok(false));
     runtime.prepare_messages(clock());
     assert!(messages.lock().unwrap().is_empty());
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut generation = rx.acquire_pair(&mut tx).unwrap();
     peer.end();
     generation
@@ -719,7 +679,7 @@ fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
         .controller
         .process_audio(false, false, &[], &mut [0.0; 12001]);
     runtime.prepare_messages(clock());
-    assert_eq!(runtime.queue_named_message("1000", "ready"), Ok(true));
+    assert_eq!(runtime.queue_named_message(PORT, "ready"), Ok(true));
     generation
         .transmit()
         .controller
@@ -746,7 +706,7 @@ fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
     );
     assert!(audio.iter().any(|sample| *sample != 0.0));
     assert!(replies.iter().all(|sample| sample.sample == 0.0));
-    runtime.cancel_message("1000").unwrap();
+    runtime.cancel_message(PORT).unwrap();
     generation
         .transmit()
         .controller
@@ -757,21 +717,106 @@ fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
 }
 
 #[test]
+fn site_alarm_uses_compiled_composition_and_registered_port_identity() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[
+                (PORT, ResourceKind::Metadata, "", json!({"name":"Control room"})),
+                (PORT, ResourceKind::Allstarlink, "", json!({"enabled":true,"node_number":98765})),
+                (PORT, ResourceKind::Input, "door", json!({"enabled":true,"source":{"type":"gpiod","device":"/dev/gpiochip0","line":"3"}})),
+                (
+                    PORT,
+                    ResourceKind::Alarm,
+                    "door-open",
+                    json!({"source":"door","condition":"inactive","trip_message":"{ station-identity }"}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::Message,
+                    "station-identity",
+                    json!({"content": "{ $node-key } { $node-name } { $allstarlink-node-number }"}),
+                ),
+            ],
+        ),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    assert_eq!(
+        runtime.queue_alarm_message(PORT, "door-open", crate::site::AlarmEvent::Trip),
+        Ok(true)
+    );
+    let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0; 12001]);
+    runtime.prepare_messages(clock());
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["1,0,0,0 Control room 9,8,7,6,5"]
+    );
+    drop(generation);
+    assert!(runtime.stop(1000));
+}
+
+#[test]
 fn composition_runtime_ids_and_tails_keep_identification_with_unavailable_meter() {
     use crate::site::{Observation, ReadingQuality, SiteObservations};
     for family in ["identifier", "tail"] {
         for valid in [true, false] {
             let messages = Arc::new(Mutex::new(Vec::new()));
             let log = Arc::new(Mutex::new(Vec::new()));
-            let timing = if family == "identifier" {
-                "interval_ms=1\nregardless_of_activity=yes\n"
+            let mut fields = json!({"content":"Repeater. { site-temperature } { site-time }"});
+            let kind = if family == "identifier" {
+                fields["timing"] = json!({"interval_ms":1});
+                fields["regardless_of_activity"] = json!(true);
+                ResourceKind::Identifier
             } else {
-                ""
+                ResourceKind::Tail
             };
-            let document = ConfigDocument::parse(&format!(
-                "[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n[sensor 1000 outdoor]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=temp1_input\n[{family} 1000 regular]\n{timing}content=Repeater. {{message_macro_temperature}} {{message_macro_time}}\n[message temperature]\nmessage_id=site-temperature\narg_temperature=sensor:outdoor\n[message time]\nmessage_id=site-time\narg_time=time\n"
-            )).unwrap();
-            let mut runtime = Runtime::start(
+            let document = station_fixture::configuration(
+                &[(PORT, "radio")],
+                &[
+                    (
+                        PORT,
+                        ResourceKind::TxSignaling,
+                        "",
+                        json!({"ptt":{"timing":{"hang_ms":0}}}),
+                    ),
+                    (
+                        PORT,
+                        ResourceKind::RxSignaling,
+                        "",
+                        json!({"timing":{"kerchunk_max_ms":0}}),
+                    ),
+                    (
+                        PORT,
+                        ResourceKind::Sensor,
+                        "outdoor",
+                        json!({"enabled":true,"source":{"type":"hwmon","device":"/sys/selected","channel":"temp1_input"}}),
+                    ),
+                    (
+                        PORT,
+                        ResourceKind::Message,
+                        "site-temperature",
+                        json!({"bindings":{"temperature":"sensor:outdoor"}}),
+                    ),
+                    (
+                        PORT,
+                        ResourceKind::Message,
+                        "site-time",
+                        json!({"bindings":{"time":"time"}}),
+                    ),
+                    (PORT, kind, "regular", fields),
+                ],
+            );
+            let mut runtime = station_fixture::start(
                 document,
                 &CapturingMedia(messages.clone()),
                 adapter,
@@ -796,11 +841,11 @@ fn composition_runtime_ids_and_tails_keep_identification_with_unavailable_meter(
                 ..Default::default()
             };
             runtime
-                .node("1000")
+                .node(PORT)
                 .unwrap()
                 .site()
                 .advance(1000, &readings, &Default::default());
-            let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+            let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
             let mut generation = rx.acquire_pair(&mut tx).unwrap();
             generation.transmit().controller.process_audio(
                 family == "tail",
@@ -836,13 +881,44 @@ fn composition_runtime_ids_and_tails_keep_identification_with_unavailable_meter(
 fn composition_runtime_tail_resolves_only_at_each_release_attempt() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n[tail 1000 time]\ncontent={message_macro_time}\n[message time]\nmessage_id=site-time\narg_time=time\n").unwrap(),
-        &CapturingMedia(messages.clone()), adapter,
-        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock(),
-    ).unwrap();
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[
+                (
+                    PORT,
+                    ResourceKind::TxSignaling,
+                    "",
+                    json!({"ptt": {"timing": {"hang_ms": 0}}}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::RxSignaling,
+                    "",
+                    json!({"timing": {"kerchunk_max_ms": 0}}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::Tail,
+                    "time",
+                    json!({"content": "{ time }"}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::Message,
+                    "time",
+                    json!({"content": "{ site-time }", "bindings": {"time": "time"}}),
+                ),
+            ],
+        ),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
     assert!(messages.lock().unwrap().is_empty());
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut generation = rx.acquire_pair(&mut tx).unwrap();
     let mut audio = [0.0; 960];
     for minute in [7, 8] {
@@ -879,13 +955,13 @@ fn composition_runtime_tail_resolves_only_at_each_release_attempt() {
 fn composition_runtime_recurring_id_resolves_at_each_attempt() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n[identifier 1000 regular]\ninterval_ms=1\nregardless_of_activity=yes\ncontent={message_macro_time}\n[message time]\nmessage_id=site-time\narg_time=time\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(&[(PORT,"1000")], &[(PORT, ResourceKind::Identifier, "regular", json!({"timing": {"interval_ms": 1}, "regardless_of_activity": true, "content": "{ time }"})), (PORT, ResourceKind::Message, "time", json!({"content": "{ site-time }", "bindings": {"time": "time"}}))]),
         &CapturingMedia(messages.clone()), adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock(),
     ).unwrap();
     assert!(messages.lock().unwrap().is_empty());
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut generation = rx.acquire_pair(&mut tx).unwrap();
     let mut audio = [0.0; 960];
     generation
@@ -919,11 +995,16 @@ fn composition_runtime_recurring_id_resolves_at_each_attempt() {
 fn composition_runtime_command_waits_for_source_unkey_and_uses_configured_audience() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\n[message time]\nmessage_id=site-time\narg_time=time\ndtmf_id=1\n",
-        )
-        .unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Message,
+                "time",
+                json!({"content": "{ site-time }", "bindings": {"time": "time"}, "dtmf_id": "1"}),
+            )],
+        ),
         &CapturingMedia(messages.clone()),
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
@@ -933,9 +1014,9 @@ fn composition_runtime_command_waits_for_source_unkey_and_uses_configured_audien
     let peer = crate::link::PeerSignals::new();
     peer.set_radio_keyed(true);
     runtime
-        .queue_message("1000", "1", Some(peer.reply_target()))
+        .queue_message(PORT, "1", Some(peer.reply_target()))
         .unwrap();
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut generation = rx.acquire_pair(&mut tx).unwrap();
     let mut audio = [0.0; 960];
     let mut parrot = [0.0; 960];
@@ -973,12 +1054,12 @@ fn composition_runtime_command_waits_for_source_unkey_and_uses_configured_audien
     let other = crate::link::PeerSignals::new();
     peer.end();
     assert_eq!(
-        runtime.queue_message("1000", "1", Some(peer.reply_target())),
+        runtime.queue_message(PORT, "1", Some(peer.reply_target())),
         Err(RuntimeError::Rejected)
     );
     assert!(
         runtime
-            .queue_message("1000", "1", Some(other.reply_target()))
+            .queue_message(PORT, "1", Some(other.reply_target()))
             .is_ok()
     );
     drop(generation);
@@ -989,11 +1070,16 @@ fn composition_runtime_command_waits_for_source_unkey_and_uses_configured_audien
 fn composition_runtime_full_queue_retries_after_adapter_replacement() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\n[message time]\nmessage_id=site-time\narg_time=time\ndtmf_id=1\n",
-        )
-        .unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Message,
+                "time",
+                json!({"content": "{ site-time }", "bindings": {"time": "time"}, "dtmf_id": "1"}),
+            )],
+        ),
         &CapturingMedia(messages.clone()),
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
@@ -1004,35 +1090,35 @@ fn composition_runtime_full_queue_retries_after_adapter_replacement() {
     peer.set_radio_keyed(true);
     for _ in 0..4 {
         runtime
-            .queue_message("1000", "1", Some(peer.reply_target()))
+            .queue_message(PORT, "1", Some(peer.reply_target()))
             .unwrap();
     }
     assert_eq!(
-        runtime.queue_message("1000", "1", None),
+        runtime.queue_message(PORT, "1", None),
         Err(RuntimeError::Rejected)
     );
     assert_eq!(
-        runtime.queue_message("1000", "2", None),
+        runtime.queue_message(PORT, "2", None),
         Err(RuntimeError::Rejected)
     );
     runtime.prepare_messages(clock());
     assert!(messages.lock().unwrap().is_empty());
-    let settings = runtime.settings("1000").unwrap().clone();
+    let settings = runtime.settings(PORT).unwrap().clone();
     assert_eq!(
-        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1001),
+        runtime.replace_adapter(PORT, adapter("1000", &settings).unwrap(), 1001),
         Ok(2)
     );
-    assert!(runtime.detached("1000", 1));
+    assert!(runtime.detached(PORT, 1));
     runtime.reclaim();
     peer.end();
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut generation = rx.acquire_pair(&mut tx).unwrap();
     generation
         .transmit()
         .controller
         .process_audio(false, false, &[], &mut [0.0; 12001]);
     runtime.prepare_messages(clock());
-    runtime.queue_message("1000", "1", None).unwrap();
+    runtime.queue_message(PORT, "1", None).unwrap();
     generation
         .transmit()
         .controller
@@ -1048,44 +1134,75 @@ fn composition_runtime_full_queue_retries_after_adapter_replacement() {
     assert!(runtime.stop(1002));
 }
 
+/// Complete a registered digit sequence through the same collector and dispatch owner as production.
+fn enter_mapping(
+    runtime: &mut Runtime,
+    local: &str,
+    peer: Option<&crate::link::PeerReply>,
+    digits: &str,
+    now_ms: u64,
+) -> Result<links::LinkEffect, RuntimeError> {
+    let mut result = None;
+    for digit in digits.chars() {
+        let outcome = match peer {
+            Some(reply) => runtime.node(local).unwrap().links().peer_digit(
+                "2000",
+                digit,
+                now_ms,
+                reply.clone(),
+            ),
+            None => runtime.digit(local, super::dtmf::DigitEvent::Digit { digit, now_ms }),
+        };
+        if let Some(super::dtmf::DigitOutcome::Mapped(input)) = outcome {
+            assert!(result.is_none());
+            result =
+                Some(runtime.dispatch_mapping(local, input, RuntimeClock { now_ms, ..clock() }));
+        }
+    }
+    result.expect("one completed registered command")
+}
+
 #[test]
 fn pad_test_queues_one_local_stream_after_unkey() {
     use crate::runtime::dtmf::{DigitEvent, DigitOutcome, PadTestResult};
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &CapturingMedia(messages.clone()),
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
-    for digit in "*82*#ABCD".chars() {
+    assert!(matches!(
+        enter_mapping(&mut runtime, PORT, None, "*82#", 1),
+        Ok(links::LinkEffect::None)
+    ));
+    for digit in "*#ABCD".chars() {
         assert!(
             runtime
-                .digit("1000", DigitEvent::Digit { digit, now_ms: 1 })
+                .digit(PORT, DigitEvent::Digit { digit, now_ms: 1 })
                 .is_none()
         );
     }
     assert!(messages.lock().unwrap().is_empty());
-    let Some(DigitOutcome::PadTest(report)) =
-        runtime.digit("1000", DigitEvent::Unkey { now_ms: 2 })
+    let Some(DigitOutcome::PadTest(report)) = runtime.digit(PORT, DigitEvent::Unkey { now_ms: 2 })
     else {
         panic!("pad result")
     };
-    runtime.queue_pad_test("1000", &report).unwrap();
+    runtime.queue_pad_test(PORT, &report).unwrap();
     assert_eq!(*messages.lock().unwrap(), ["star pound A B C D"]);
     assert!(
         runtime
-            .digit("1000", DigitEvent::Unkey { now_ms: 3 })
+            .digit(PORT, DigitEvent::Unkey { now_ms: 3 })
             .is_none()
     );
     for _ in 0..3 {
-        runtime.queue_pad_test("1000", &report).unwrap();
+        runtime.queue_pad_test(PORT, &report).unwrap();
     }
     assert_eq!(
-        runtime.queue_pad_test("1000", &report),
+        runtime.queue_pad_test(PORT, &report),
         Err(RuntimeError::Rejected)
     );
     assert_eq!(
@@ -1094,7 +1211,7 @@ fn pad_test_queues_one_local_stream_after_unkey() {
     );
     assert_eq!(
         runtime.queue_pad_test(
-            "1000",
+            PORT,
             &PadTestResult {
                 digits: "invalid".into(),
                 overflowed: false
@@ -1102,7 +1219,7 @@ fn pad_test_queues_one_local_stream_after_unkey() {
         ),
         Err(RuntimeError::Preparation)
     );
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut generation = rx.acquire_pair(&mut tx).unwrap();
     let mut audio = [0.0; 960];
     for _ in 0..15 {
@@ -1173,110 +1290,89 @@ fn adapter(_: &str, _: &ResolvedNodeSettings) -> Result<PreparedAdapter<()>, Run
 }
 
 #[test]
-fn remote_family_uses_shared_options_and_rejects_collisions_before_device_acquisition() {
+fn registered_radio_mapping_uses_shared_owner_and_rejects_collisions_before_device_acquisition() {
     use crate::{
         remote_base_command::{RemoteCommand, RemoteCommandConfiguration, RemoteDtmfAccess},
         runtime::dtmf::{DigitEvent, DigitOutcome},
     };
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let device = |_: &str, _: &ResolvedNodeSettings| {
-        Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
-    };
-    for (override_prefix, effective) in [("", "65"), ("66", "66")] {
-        let prepare = |name: &str, settings: &ResolvedNodeSettings| {
-            let mut prepared = adapter(name, settings)?;
-            prepared.remote_commands = Some(RemoteCommandConfiguration {
-                prefix: "65".into(),
-                access: RemoteDtmfAccess::Open,
-            });
-            Ok(prepared)
-        };
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse(&format!(
-                "[1000]\nlink_command_remote_base={override_prefix}\n"
-            ))
-            .unwrap(),
+    for key in ["*651", "*6651"] {
+        let config = station_fixture::configuration(
+            &[(PORT, "radio")],
+            &[(
+                PORT,
+                ResourceKind::Command,
+                "",
+                json!({"mappings":{"radio_status_51":{"command":key,"protected":false,"action":"radio","operation":"status","detail":"long"}}}),
+            )],
+        );
+        let mut runtime = station_fixture::start(
+            config,
             &Media,
-            prepare,
-            device,
+            |n, s| {
+                let mut adapter = adapter(n, s)?;
+                adapter.remote_commands = Some(RemoteCommandConfiguration {
+                    prefix: "65".into(),
+                    access: RemoteDtmfAccess::Open,
+                });
+                Ok(adapter)
+            },
+            |_, _| Ok(Box::new(Device(Default::default())) as Box<dyn DeviceHandoff>),
             clock(),
         )
         .unwrap();
-        let feed = |runtime: &mut Runtime, text: &str| {
-            text.chars()
-                .filter_map(|digit| {
-                    runtime.digit(
-                        "1000",
-                        DigitEvent::Digit {
-                            digit,
-                            now_ms: 1001,
-                        },
-                    )
-                })
-                .last()
+        let mut mapped = None;
+        for digit in key.chars().chain(['#']) {
+            mapped = runtime.digit(
+                PORT,
+                DigitEvent::Digit {
+                    digit,
+                    now_ms: 1000,
+                },
+            );
+        }
+        let Some(DigitOutcome::Mapped(input)) = mapped else {
+            panic!("complete radio mapping")
         };
-        assert!(
-            matches!(feed(&mut runtime, &format!("*{effective}51#")), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: true }))
-        );
-        assert!(
-            matches!(feed(&mut runtime, &format!("*{effective}61#")), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Mode(1)))
-        );
-        assert!(feed(&mut runtime, &format!("*{effective}5")).is_none());
-        let revision = runtime.revision();
-        assert!(
-            runtime
-                .reload(
-                    ConfigDocument::parse("[1000]\nlink_command_remote_base=7\n").unwrap(),
-                    &Media,
-                    prepare,
-                    device,
-                    clock()
-                )
-                .is_err()
-        );
-        assert_eq!(runtime.revision(), revision);
-        assert!(
-            matches!(feed(&mut runtime, "1#"), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: true }))
-        );
-        assert!(feed(&mut runtime, &format!("*{effective}5")).is_none());
-        runtime
-            .replace_adapter(
-                "1000",
-                adapter("1000", runtime.settings("1000").unwrap()).unwrap(),
-                1001,
-            )
-            .unwrap();
-        assert!(
-            matches!(feed(&mut runtime, "1#"), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: true }))
-        );
-        assert!(runtime.detached("1000", 1));
-        runtime
-            .reload(
-                ConfigDocument::parse("[1000]\n").unwrap(),
-                &Media,
-                adapter,
-                device,
-                clock(),
-            )
-            .unwrap();
-        assert!(feed(&mut runtime, &format!("*{effective}51#")).is_none());
+        let links::LinkEffect::RemoteBase(op) =
+            runtime.dispatch_mapping(PORT, input, clock()).unwrap()
+        else {
+            panic!("radio owner")
+        };
+        assert_eq!(op.remote, Some(RemoteCommand::Status { long: true }));
         assert!(runtime.stop(1002));
     }
-    log.lock().unwrap().clear();
-    let collision = |name: &str, settings: &ResolvedNodeSettings| {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let duplicate = crate::capture::Fixture::new(
+        &[(PORT, "radio")],
+        &[(
+            PORT,
+            ResourceKind::Command,
+            "",
+            json!({"mappings":{
+                "radio_status_51":{"command":"*70","protected":false,"action":"radio","operation":"status","detail":"long"}
+            }}),
+        )],
+    );
+    assert!(matches!(
+        duplicate.candidate().command_language(
+            crate::config::resources::candidate::ResourceScope::Port(PORT.parse().unwrap())
+        ),
+        Err(crate::command_language::LanguageError::CodeCollision)
+    ));
+    let bad = |name: &str, settings: &ResolvedNodeSettings| {
         let mut prepared = adapter(name, settings)?;
         prepared.remote_commands = Some(RemoteCommandConfiguration {
-            prefix: "7".into(),
+            prefix: "#".into(),
             access: RemoteDtmfAccess::Open,
         });
         Ok(prepared)
     };
     assert!(
-        Runtime::start(
-            ConfigDocument::parse("[1000]\n").unwrap(),
+        station_fixture::start(
+            station_fixture::single_port(true),
             &Media,
-            collision,
-            device,
+            bad,
+            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
             clock()
         )
         .is_err()
@@ -1286,10 +1382,7 @@ fn remote_family_uses_shared_options_and_rejects_collisions_before_device_acquis
 
 #[test]
 fn remote_completions_renew_only_the_requesting_peer_and_compose_its_reply() {
-    use crate::{
-        remote_base_command::{RemoteCommand, RemoteDtmfAccess, RemoteReplyPart},
-        runtime::dtmf::DigitOutcome,
-    };
+    use crate::remote_base_command::{RemoteCommand, RemoteDtmfAccess, RemoteReplyPart};
     use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
 
     let digest = Argon2::default()
@@ -1297,49 +1390,60 @@ fn remote_completions_renew_only_the_requesting_peer_and_compose_its_reply() {
         .unwrap()
         .to_string();
     let messages = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n[echolink]\ntelemetry=demand\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "radio")],
+            &[(
+                PORT,
+                ResourceKind::Echolink,
+                "",
+                json!({"telemetry":"demand"}),
+            )],
+        ),
         &CapturingMedia(messages.clone()),
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
-    runtime.incoming("1000", "2000", true).unwrap();
+    runtime.incoming(PORT, "2000", true).unwrap();
     let reply = crate::link::PeerSignals::new().reply_target();
-    let operation = {
-        let links = runtime.node("1000").unwrap().links();
-        links.configure_admin(&digest, &digest, 100);
-        links
-            .configure_remote("6", RemoteDtmfAccess::Locked)
-            .unwrap();
-        for digit in "*8001234#".chars() {
-            assert!(
-                links
-                    .peer_digit("2000", digit, 1001, reply.clone())
-                    .is_none()
-            );
-        }
-        let outcome = "*661#"
-            .chars()
-            .filter_map(|digit| links.peer_digit("2000", digit, 1002, reply.clone()))
-            .last();
-        let Some(DigitOutcome::Operation(operation)) = outcome else {
-            panic!("authorized remote request")
-        };
-        operation
+    let links = runtime.node(PORT).unwrap().links();
+    links.configure_admin(&digest, &digest, 100);
+    links
+        .configure_radio_owner(Some(
+            &crate::remote_base_command::RemoteCommandConfiguration {
+                prefix: "6".into(),
+                access: RemoteDtmfAccess::Locked,
+            },
+        ))
+        .unwrap();
+    links
+        .attach_ingress(
+            crate::link::PeerIdentity::from_operator("2000").unwrap(),
+            reply.clone(),
+        )
+        .unwrap();
+    assert!(matches!(
+        enter_mapping(&mut runtime, PORT, Some(&reply), "*8001234#", 1001),
+        Ok(links::LinkEffect::None)
+    ));
+    let links::LinkEffect::RemoteBase(operation) =
+        enter_mapping(&mut runtime, PORT, Some(&reply), "*661#", 1002).unwrap()
+    else {
+        panic!("authorized remote request")
     };
     let revision = runtime.revision();
-    assert!(runtime.remote_command_authorized("1000", revision, &operation, 1003));
-    assert!(!runtime.remote_command_authorized("1000", revision + 1, &operation, 1003));
+    assert!(runtime.remote_command_authorized(PORT, revision, &operation, 1003));
+    assert!(!runtime.remote_command_authorized(PORT, revision + 1, &operation, 1003));
     assert!(!runtime.remote_command_authorized("missing", revision, &operation, 1003));
     runtime.complete_remote_command("missing", &operation, 1050);
-    runtime.complete_remote_command("1000", &operation, 1050);
-    assert!(runtime.remote_command_authorized("1000", revision, &operation, 1149));
+    runtime.complete_remote_command(PORT, &operation, 1050);
+    assert!(runtime.remote_command_authorized(PORT, revision, &operation, 1149));
     let mut query = operation.clone();
     query.remote = Some(RemoteCommand::Status { long: true });
-    runtime.complete_remote_command("1000", &query, 1149);
-    assert!(!runtime.remote_command_authorized("1000", revision, &operation, 1150));
+    runtime.complete_remote_command(PORT, &query, 1149);
+    assert!(!runtime.remote_command_authorized(PORT, revision, &operation, 1150));
     let parts = [
         RemoteReplyPart {
             id: "remote-applied",
@@ -1351,17 +1455,17 @@ fn remote_completions_renew_only_the_requesting_peer_and_compose_its_reply() {
         },
     ];
     runtime
-        .queue_remote_reply("1000", &parts, Some(reply.clone()), 1151)
+        .queue_remote_reply(PORT, &parts, Some(reply.clone()), 1151)
         .unwrap();
     assert_eq!(
         messages.lock().unwrap().last().map(String::as_str),
         Some("Remote radio command completed. Remote radio command completed.")
     );
-    assert!(runtime.echo_telemetry_allows("1000", &reply, 1151));
-    runtime.node("1000").unwrap().links().ended("2000");
-    runtime.peer_detached("1000", "2000", 1152);
+    assert!(runtime.echo_telemetry_allows(PORT, &reply, 1151));
+    runtime.node(PORT).unwrap().links().ended("2000");
+    runtime.peer_detached(PORT, "2000", 1152);
     assert!(runtime.stop(1152));
-    assert!(!runtime.remote_command_authorized("1000", revision, &query, 1153));
+    assert!(!runtime.remote_command_authorized(PORT, revision, &query, 1153));
 }
 
 struct SnapshotDevice {
@@ -1385,11 +1489,24 @@ impl DeviceHandoff for SnapshotDevice {
 #[test]
 fn runtime_passes_resolved_snapshot_interval_to_each_device_generation() {
     let snapshots = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[general]\nstatus_snapshot_interval_ms=80\n[1000]\n[2000]\nstatus_snapshot_interval_ms=25\n",
-        )
-        .unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000"), (SECOND, "2000")],
+            &[
+                (
+                    SITE,
+                    ResourceKind::Radio,
+                    "",
+                    json!({"timing": {"status_snapshot_interval_ms": 80}}),
+                ),
+                (
+                    SECOND,
+                    ResourceKind::Radio,
+                    "",
+                    json!({"timing": {"status_snapshot_interval_ms": 25}}),
+                ),
+            ],
+        ),
         &Media,
         adapter,
         |name, _| {
@@ -1404,13 +1521,14 @@ fn runtime_passes_resolved_snapshot_interval_to_each_device_generation() {
 
     assert_eq!(
         *snapshots.lock().unwrap(),
-        vec![("1000".to_owned(), 80), ("2000".to_owned(), 25)]
+        vec![(PORT.to_owned(), 80), (SECOND.to_owned(), 25)]
     );
     assert!(runtime.stop(0));
 }
 
 #[test]
 fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failure() {
+    let mut devices = station_fixture::DevicePlans::default();
     struct OpeningDevice {
         current: String,
         ready: Arc<AtomicUsize>,
@@ -1463,21 +1581,52 @@ fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failu
                 log: log.clone(),
             }) as Box<dyn DeviceHandoff>)
         };
-        let initial =
-            ConfigDocument::parse("[1000]\nradio_channel=first\n[2000]\nradio_channel=other\n")
-                .unwrap();
-        let mut runtime = Runtime::start(initial, &Media, adapter, device, clock()).unwrap();
+        let initial = station_fixture::configuration(
+            &[(PORT, "1000"), (SECOND, "2000")],
+            &[
+                (
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "first"}}),
+                ),
+                (
+                    SECOND,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "other"}}),
+                ),
+            ],
+        );
+        let mut runtime = devices
+            .start(initial, &Media, adapter, device, clock())
+            .unwrap();
         let revision = runtime.revision();
-        let candidate =
-            ConfigDocument::parse("[1000]\nradio_channel=second\n[2000]\nradio_channel=other\n")
-                .unwrap();
-        runtime
-            .reload(candidate, &Media, adapter, device, clock())
+        let candidate = station_fixture::configuration(
+            &[(PORT, "1000"), (SECOND, "2000")],
+            &[
+                (
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "second"}}),
+                ),
+                (
+                    SECOND,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "other"}}),
+                ),
+            ],
+        );
+        devices
+            .reload(&mut runtime, candidate, &Media, adapter, device, clock())
             .unwrap();
         assert!(runtime.reload_pending());
         assert_eq!(
-            runtime.reload(
-                ConfigDocument::parse("[1000]\n").unwrap(),
+            devices.reload(
+                &mut runtime,
+                station_fixture::single_port(true),
                 &Media,
                 adapter,
                 device,
@@ -1488,10 +1637,13 @@ fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failu
         );
         assert_eq!(runtime.revision(), revision);
         assert_eq!(runtime.poll_reload(clock()), Ok(false));
-        assert_eq!(runtime.settings("1000").unwrap().channel, "first");
+        assert_eq!(
+            station_fixture::selected_device(runtime.modular_configuration().unwrap(), PORT),
+            "first"
+        );
         // An unrelated active node keeps its control/link path during this wait.
         runtime.tick_links(clock());
-        assert!(runtime.node("2000").unwrap().status(0).active.is_some());
+        assert!(runtime.node(SECOND).unwrap().status(0).active.is_some());
         let Some(success) = success else {
             assert!(!runtime.stop(0));
             assert!(runtime.reload_pending());
@@ -1517,7 +1669,10 @@ fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failu
         if success {
             assert_eq!(runtime.poll_reload(clock()), Ok(true));
             assert_eq!(runtime.revision(), revision + 1);
-            assert_eq!(runtime.settings("1000").unwrap().channel, "second");
+            assert_eq!(
+                station_fixture::selected_device(runtime.modular_configuration().unwrap(), PORT),
+                "second"
+            );
         } else {
             assert_eq!(
                 runtime.poll_reload(clock()),
@@ -1528,7 +1683,10 @@ fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failu
             release.store(true, Ordering::Release);
             assert_eq!(runtime.poll_reload(clock()), Err(RuntimeError::Device));
             assert_eq!(runtime.revision(), revision);
-            assert_eq!(runtime.settings("1000").unwrap().channel, "first");
+            assert_eq!(
+                station_fixture::selected_device(runtime.modular_configuration().unwrap(), PORT),
+                "first"
+            );
             assert!(
                 log.lock()
                     .unwrap()
@@ -1543,25 +1701,36 @@ fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failu
 
 #[test]
 fn changed_radio_settings_reopen_the_device_during_configuration_reload() {
+    let mut devices = station_fixture::DevicePlans::default();
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut fallback = Device(log.clone());
     assert_eq!(fallback.finish_update(false), Ok(()));
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
     };
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
-        &Media,
-        adapter,
-        device,
-        clock(),
-    )
-    .unwrap();
+    let mut runtime = devices
+        .start(
+            station_fixture::single_port(true),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
     log.lock().unwrap().clear();
 
-    runtime
+    devices
         .reload(
-            ConfigDocument::parse("[1000]\n[radio 1000]\ncm119_profile=nhrc\n").unwrap(),
+            &mut runtime,
+            station_fixture::configuration(
+                &[(PORT, "1000")],
+                &[(
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"gpio": {"wiring_profile": "nhrc"}}),
+                )],
+            ),
             &Media,
             adapter,
             device,
@@ -1571,19 +1740,24 @@ fn changed_radio_settings_reopen_the_device_during_configuration_reload() {
 
     let events = log.lock().unwrap().clone();
     assert_eq!(events, ["quiesce", "close", "1000"]);
-    assert!(
+    assert_eq!(
         runtime
-            .settings("1000")
+            .modular_configuration()
             .unwrap()
             .radio
-            .processing_configuration
-            .contains("cm119_profile=nhrc")
+            .port(PORT.parse().unwrap())
+            .unwrap()
+            .interface
+            .gpio
+            .wiring_profile,
+        crate::config::resources::profiles::radio::WiringProfile::Nhrc
     );
     assert!(runtime.stop(0));
 }
 
 #[test]
 fn reload_retains_new_leases_until_reverse_order_cleanup_is_safe() {
+    let mut devices = station_fixture::DevicePlans::default();
     struct StagedDevice {
         channel: String,
         release: Arc<AtomicBool>,
@@ -1613,14 +1787,30 @@ fn reload_retains_new_leases_until_reverse_order_cleanup_is_safe() {
             log: log.clone(),
         }) as Box<dyn DeviceHandoff>)
     };
-    let initial = ConfigDocument::parse("[1000]\n").unwrap();
-    let mut runtime = Runtime::start(initial.clone(), &Media, adapter, device, clock()).unwrap();
-    runtime
+    let initial = station_fixture::single_port(true);
+    let mut runtime = devices
+        .start(initial.clone(), &Media, adapter, device, clock())
+        .unwrap();
+    devices
         .reload(
-            ConfigDocument::parse(
-                "[1000]\n[2000]\nradio_channel=pending\n[3000]\nradio_channel=fail\n",
-            )
-            .unwrap(),
+            &mut runtime,
+            station_fixture::configuration(
+                &[(PORT, "1000"), (SECOND, "2000"), (THIRD, "3000")],
+                &[
+                    (
+                        SECOND,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "pending"}}),
+                    ),
+                    (
+                        THIRD,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "fail"}}),
+                    ),
+                ],
+            ),
             &Media,
             adapter,
             device,
@@ -1628,10 +1818,13 @@ fn reload_retains_new_leases_until_reverse_order_cleanup_is_safe() {
         )
         .unwrap();
     assert!(runtime.reload_pending());
-    assert_eq!(runtime.document(), &initial);
+    assert!(Arc::ptr_eq(
+        runtime.modular_configuration().unwrap(),
+        &initial
+    ));
     assert_eq!(runtime.revision(), 1);
     assert!(log.lock().unwrap().is_empty());
-    assert!(runtime.node("1000").unwrap().status(0).active.is_some());
+    assert!(runtime.node(PORT).unwrap().status(0).active.is_some());
     release.store(true, Ordering::Release);
     assert_eq!(runtime.poll_reload(clock()), Err(RuntimeError::Device));
     assert_eq!(*log.lock().unwrap(), ["fail", "pending"]);
@@ -1641,6 +1834,7 @@ fn reload_retains_new_leases_until_reverse_order_cleanup_is_safe() {
 
 #[test]
 fn reload_waits_for_restored_readiness_and_retains_failed_restoration_until_safe() {
+    let mut devices = station_fixture::DevicePlans::default();
     struct RestoringDevice {
         channel: String,
         opens: usize,
@@ -1684,13 +1878,31 @@ fn reload_waits_for_restored_readiness_and_retains_failed_restoration_until_safe
                 release: release.clone(),
             }) as Box<dyn DeviceHandoff>)
         };
-        let initial = ConfigDocument::parse("[1000]\nradio_channel=old\n").unwrap();
-        let mut runtime =
-            Runtime::start(initial.clone(), &Media, adapter, device, clock()).unwrap();
-        let (mut rx, _tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-        runtime
+        let initial = station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Interface,
+                "",
+                json!({"audio": {"device_identifier": "old"}}),
+            )],
+        );
+        let mut runtime = devices
+            .start(initial.clone(), &Media, adapter, device, clock())
+            .unwrap();
+        let (mut rx, _tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+        devices
             .reload(
-                ConfigDocument::parse("[1000]\nradio_channel=fail\n").unwrap(),
+                &mut runtime,
+                station_fixture::configuration(
+                    &[(PORT, "1000")],
+                    &[(
+                        PORT,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "fail"}}),
+                    )],
+                ),
                 &Media,
                 adapter,
                 device,
@@ -1700,10 +1912,13 @@ fn reload_waits_for_restored_readiness_and_retains_failed_restoration_until_safe
         assert!(runtime.reload_pending());
         assert!(rx.acquire().is_none());
         assert!(
-            runtime.node("1000").unwrap().work().is_none(),
+            runtime.node(PORT).unwrap().work().is_none(),
             "restoration admitted incumbent work before physical readiness"
         );
-        assert_eq!(runtime.document(), &initial);
+        assert!(Arc::ptr_eq(
+            runtime.modular_configuration().unwrap(),
+            &initial
+        ));
         ready.store(if success { 1 } else { 2 }, Ordering::Release);
         if !success {
             assert_eq!(runtime.poll_reload(clock()), Ok(false));
@@ -1720,17 +1935,16 @@ fn reload_waits_for_restored_readiness_and_retains_failed_restoration_until_safe
             })
         );
         assert_eq!(runtime.revision(), 1);
-        assert_eq!(runtime.document(), &initial);
+        assert!(Arc::ptr_eq(
+            runtime.modular_configuration().unwrap(),
+            &initial
+        ));
         assert_eq!(rx.acquire().is_some(), success);
         assert_eq!(
-            runtime
-                .node("1000")
-                .unwrap()
-                .work()
-                .map(|permit| permit.id()),
+            runtime.node(PORT).unwrap().work().map(|permit| permit.id()),
             success.then_some(1)
         );
-        runtime.detached("1000", 1);
+        runtime.detached(PORT, 1);
         assert!(runtime.stop(0));
     }
 }
@@ -1772,15 +1986,23 @@ fn reload_waits_for_a_callback_acquired_during_device_quiescence() {
             closes: closes.clone(),
         }) as Box<dyn DeviceHandoff>)
     };
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nradio_channel=old\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Interface,
+                "",
+                json!({"audio": {"device_identifier": "old"}}),
+            )],
+        ),
         &Media,
         adapter,
         device,
         clock(),
     )
     .unwrap();
-    let (mut rx, _tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut rx, _tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     armed.store(true, Ordering::Release);
     std::thread::scope(|scope| {
         let callback = scope.spawn(|| {
@@ -1790,29 +2012,41 @@ fn reload_waits_for_a_callback_acquired_during_device_quiescence() {
             release.wait();
             drop(guard);
         });
-        runtime
-            .reload(
-                ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
-                &Media,
-                adapter,
-                device,
-                clock(),
-            )
-            .unwrap();
+        station_fixture::reload(
+            &mut runtime,
+            station_fixture::configuration(
+                &[(PORT, "1000")],
+                &[(
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "new"}}),
+                )],
+            ),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
         assert!(runtime.reload_pending());
         assert_eq!(closes.load(Ordering::Relaxed), 0);
         release.wait();
         callback.join().unwrap();
     });
     assert_eq!(runtime.poll_reload(clock()), Ok(true));
-    assert_eq!(runtime.settings("1000").unwrap().channel, "new");
+    assert_eq!(
+        station_fixture::selected_device(runtime.modular_configuration().unwrap(), PORT),
+        "new"
+    );
     assert_eq!(closes.load(Ordering::Relaxed), 1);
-    assert!(runtime.detached("1000", 1));
+    assert!(runtime.detached(PORT, 1));
     assert!(runtime.stop(0));
 }
 
 #[test]
 fn supported_radio_updates_keep_the_device_and_rollback_if_a_later_open_fails() {
+    let mut devices = station_fixture::DevicePlans::default();
     struct LiveDevice {
         name: String,
         log: Arc<Mutex<Vec<String>>>,
@@ -1870,16 +2104,57 @@ fn supported_radio_updates_keep_the_device_and_rollback_if_a_later_open_fails() 
         let log = Arc::new(Mutex::new(Vec::new()));
         let device = |name: &str, _: &ResolvedNodeSettings| {
             Ok(Box::new(LiveDevice {
-                name: name.to_owned(),
+                name: if name == PORT {
+                    "1000".into()
+                } else if name == SECOND {
+                    "2000".into()
+                } else if name == THIRD {
+                    "3000".into()
+                } else {
+                    "4000".into()
+                },
                 log: log.clone(),
                 failure,
             }) as Box<dyn DeviceHandoff>)
         };
-        let initial = "[1000]\nradio_channel=first\n[2000]\nradio_channel=second\n[3000]\nradio_channel=third\n";
+        let configuration = |second: &str, gain: i32, fourth: bool| {
+            let mut ports = vec![(PORT, "1000"), (SECOND, "2000"), (THIRD, "3000")];
+            let mut resources = vec![
+                (
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio":{"device_identifier":"first","input_gain_db":gain}}),
+                ),
+                (
+                    SECOND,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio":{"device_identifier":second}}),
+                ),
+                (
+                    THIRD,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio":{"device_identifier":"third"}}),
+                ),
+            ];
+            if fourth {
+                ports.push((FOURTH, "4000"));
+                resources.push((
+                    FOURTH,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio":{"device_identifier":"fourth"}}),
+                ));
+            }
+            station_fixture::configuration(&ports, &resources)
+        };
+        let initial = configuration("second", 0, false);
         let candidate_bounds = std::cell::Cell::new(false);
         let runtime_adapter = |name: &str, settings: &ResolvedNodeSettings| {
             let mut prepared = adapter(name, settings)?;
-            if candidate_bounds.get() && name == "1000" {
+            if candidate_bounds.get() && name == PORT {
                 match failure {
                     5 => prepared.receive_maximum += 1,
                     6 => prepared.transmit_maximum += 1,
@@ -1888,31 +2163,25 @@ fn supported_radio_updates_keep_the_device_and_rollback_if_a_later_open_fails() 
             }
             Ok(prepared)
         };
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse(initial).unwrap(),
-            &Media,
-            runtime_adapter,
-            device,
-            clock(),
-        )
-        .unwrap();
+        let mut runtime = devices
+            .start(initial.clone(), &Media, runtime_adapter, device, clock())
+            .unwrap();
         log.lock().unwrap().clear();
-        let mut candidate = format!(
-            "[1000]\nradio_channel=first\n[2000]\nradio_channel={}\n[3000]\nradio_channel=third\n[radio 1000]\nreceive_output_gain_db=-6\n",
+        let candidate = configuration(
             if fail_later {
                 "fail"
             } else if commit_failure {
                 "replacement"
             } else {
                 "second"
-            }
+            },
+            -6,
+            commit_failure,
         );
-        if commit_failure {
-            candidate.push_str("[4000]\nradio_channel=fourth\n");
-        }
         candidate_bounds.set(true);
-        let result = runtime.reload(
-            ConfigDocument::parse(&candidate).unwrap(),
+        let result = devices.reload(
+            &mut runtime,
+            candidate,
             &Media,
             runtime_adapter,
             device,
@@ -1944,7 +2213,10 @@ fn supported_radio_updates_keep_the_device_and_rollback_if_a_later_open_fails() 
             assert!(changes.contains(&"finish:1000:false".to_owned()));
             assert_eq!(changes.contains(&"close:1000".to_owned()), failure == 4);
             assert_eq!(runtime.revision(), 1);
-            assert_eq!(runtime.document(), &ConfigDocument::parse(initial).unwrap());
+            assert!(Arc::ptr_eq(
+                runtime.modular_configuration().unwrap(),
+                &initial
+            ));
         } else if commit_failure {
             assert_eq!(result, Err(RuntimeError::Restore));
             for name in ["1000", "2000", "4000"] {
@@ -1959,7 +2231,10 @@ fn supported_radio_updates_keep_the_device_and_rollback_if_a_later_open_fails() 
             assert_eq!(result, Err(RuntimeError::Device));
             assert!(changes.iter().any(|value| value == "finish:1000:false"));
             assert_eq!(runtime.revision(), 1);
-            assert_eq!(runtime.document(), &ConfigDocument::parse(initial).unwrap());
+            assert!(Arc::ptr_eq(
+                runtime.modular_configuration().unwrap(),
+                &initial
+            ));
         } else {
             assert_eq!(result, Ok(()));
             assert_eq!(runtime.revision(), 2);
@@ -1972,16 +2247,31 @@ fn supported_radio_updates_keep_the_device_and_rollback_if_a_later_open_fails() 
 fn admission_loss_discards_partial_commands_on_every_active_node() {
     use crate::runtime::dtmf::DigitEvent;
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nradio_channel=first\n[2000]\nradio_channel=second\n")
-            .unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000"), (SECOND, "2000")],
+            &[
+                (
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "first"}}),
+                ),
+                (
+                    SECOND,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "second"}}),
+                ),
+            ],
+        ),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
-    for local in ["1000", "2000"] {
+    for local in [PORT, SECOND] {
         for digit in ['*', '7'] {
             assert!(
                 runtime
@@ -1991,7 +2281,7 @@ fn admission_loss_discards_partial_commands_on_every_active_node() {
         }
     }
     runtime.discard_digits();
-    for local in ["1000", "2000"] {
+    for local in [PORT, SECOND] {
         assert!(
             runtime
                 .digit(
@@ -2003,24 +2293,15 @@ fn admission_loss_discards_partial_commands_on_every_active_node() {
                 )
                 .is_none()
         );
-        for digit in ['*', '7'] {
-            assert!(
-                runtime
-                    .digit(local, DigitEvent::Digit { digit, now_ms: 3 })
-                    .is_none()
-            );
-        }
-        assert!(matches!(
+        assert!(
             runtime
-                .digit(
-                    local,
-                    DigitEvent::Digit {
-                        digit: '0',
-                        now_ms: 4
-                    }
-                )
-                .unwrap(),
-            super::dtmf::DigitOutcome::Operation(operation) if operation.command.action == LinkAction::Status
+                .digit(local, DigitEvent::Unkey { now_ms: 2 })
+                .is_none(),
+            "discarded input must not become a command"
+        );
+        assert!(matches!(
+            enter_mapping(&mut runtime, local, None, "*70#", 3),
+            Ok(links::LinkEffect::Telemetry(LinkAction::Status, None))
         ));
     }
     assert!(runtime.stop(5));
@@ -2033,11 +2314,11 @@ fn message_only_event_has_no_link_effect_and_unexposed_handoff_reclaims_automati
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
     };
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\nradio_channel=old\n[event 1000 morning]\nat=daily 09:07\nmessage=hello\n",
-        )
-        .unwrap(),
+    let mut runtime = station_fixture::start(
+        scheduled_configuration(
+            json!([{"action":"message","message":"Hello","destination":"local"}]),
+            0,
+        ),
         &Media,
         adapter,
         device,
@@ -2045,55 +2326,74 @@ fn message_only_event_has_no_link_effect_and_unexposed_handoff_reclaims_automati
     )
     .unwrap();
     assert!(runtime.next_link().is_none());
-    let event = runtime.next_event(clock()).unwrap().unwrap();
-    runtime.queue_event(&event).unwrap();
-    assert!(matches!(
-        runtime.event_command(&event, clock()),
-        Ok(links::LinkEffect::None)
-    ));
-    assert!(runtime.complete_event(&event));
-    runtime
-        .reload(
-            ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
-            &Media,
-            adapter,
-            device,
-            clock(),
-        )
-        .unwrap();
-    assert_eq!(runtime.node("1000").unwrap().status(0).retiring, None);
-    assert_eq!(runtime.settings("1000").unwrap().channel, "new");
+    let at = event_clock(120);
+    let Some((links::LinkEffect::None, receipt)) = runtime.advance_commands(PORT, at).unwrap()
+    else {
+        panic!("standalone message")
+    };
+    receipt.settle(true);
+    assert!(runtime.advance_commands(PORT, at).unwrap().is_none());
+    station_fixture::reload(
+        &mut runtime,
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Interface,
+                "",
+                json!({"audio": {"device_identifier": "new"}}),
+            )],
+        ),
+        &Media,
+        adapter,
+        device,
+        event_clock(121),
+    )
+    .unwrap();
+    assert_eq!(runtime.node(PORT).unwrap().status(0).retiring, None);
+    assert_eq!(
+        station_fixture::selected_device(runtime.modular_configuration().unwrap(), PORT),
+        "new"
+    );
     assert!(runtime.stop(0));
 }
 
 #[test]
 fn retired_exposed_dispatcher_requires_detachment_even_when_current_was_never_exposed() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone()))),
         clock(),
     )
     .unwrap();
-    assert!(runtime.adapter_control_mut("1000", 1).is_some());
-    let settings = runtime.settings("1000").unwrap().clone();
+    assert!(runtime.adapter_control_mut(PORT, 1).is_some());
+    let settings = runtime.settings(PORT).unwrap().clone();
     assert_eq!(
-        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1),
+        runtime.replace_adapter(PORT, adapter(PORT, &settings).unwrap(), 1),
         Ok(2)
     );
     assert!(!runtime.stop(2));
-    assert!(runtime.detached("1000", 1));
-    assert!(runtime.detached("1000", 2));
+    assert!(runtime.detached(PORT, 1));
+    assert!(runtime.detached(PORT, 2));
     assert!(runtime.stop(3));
 }
 
 #[test]
 fn repeated_detach_tracking_is_idempotent_and_unrelated_acknowledgments_preserve_it() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n[permanent 1000 main]\nremote_node=3000\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::PermanentGroup,
+                "main",
+                json!({"remote_node": ["3000"]}),
+            )],
+        ),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone()))),
@@ -2104,14 +2404,14 @@ fn repeated_detach_tracking_is_idempotent_and_unrelated_acknowledgments_preserve
         runtime.authorize_incoming("missing", "2000", true),
         Err(RuntimeError::MissingNode)
     ));
-    assert!(runtime.authorize_incoming("1000", "2000", false).is_err());
-    runtime.authorize_incoming("1000", "2000", true).unwrap();
+    assert!(runtime.authorize_incoming(PORT, "2000", false).is_err());
+    runtime.authorize_incoming(PORT, "2000", true).unwrap();
     for _ in 0..2 {
-        runtime.incoming("1000", "2000", true).unwrap();
-        assert!(runtime.authorize_incoming("1000", "2000", true).is_err());
+        runtime.incoming(PORT, "2000", true).unwrap();
+        assert!(runtime.authorize_incoming(PORT, "2000", true).is_err());
         runtime
             .command(
-                "1000",
+                PORT,
                 dtmf::DigitOperation::new(
                     crate::command::Command {
                         action: LinkAction::Disconnect,
@@ -2127,7 +2427,7 @@ fn repeated_detach_tracking_is_idempotent_and_unrelated_acknowledgments_preserve
     assert!(runtime.next_link().is_none());
     runtime.peer_detached("other", "2000", 0);
     assert!(runtime.next_link().is_none());
-    runtime.peer_detached("1000", "2000", 0);
+    runtime.peer_detached(PORT, "2000", 0);
     assert!(runtime.next_link().is_some());
     assert!(runtime.stop(0));
 }
@@ -2135,31 +2435,47 @@ fn repeated_detach_tracking_is_idempotent_and_unrelated_acknowledgments_preserve
 #[test]
 fn peer_set_publication_preserves_live_controller_and_does_not_force_past_a_hazard() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nradio_channel=radio\nduplex=full\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[
+                (
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "radio"}}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::Radio,
+                    "",
+                    json!({"duplex_mode": "full"}),
+                ),
+            ],
+        ),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone()))),
         clock(),
     )
     .unwrap();
-    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut receive, mut transmit) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut old = receive.acquire_pair(&mut transmit).unwrap();
     old.transmit()
         .controller
         .process_audio(true, false, &[], &mut [1.0; 960]);
     let activity = old.transmit().controller.activity();
     let prior = activity.last_sample();
-    let settings = runtime.settings("1000").unwrap().clone();
+    let settings = runtime.settings(PORT).unwrap().clone();
     assert_eq!(
-        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1001),
+        runtime.replace_adapter(PORT, adapter("1000", &settings).unwrap(), 1001),
         Err(RuntimeError::Busy)
     );
     assert_eq!(old.id(), 1);
     assert_eq!(activity.last_sample(), prior);
     drop(old);
     assert_eq!(
-        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1002),
+        runtime.replace_adapter(PORT, adapter("1000", &settings).unwrap(), 1002),
         Ok(2)
     );
     assert_eq!(runtime.revision(), 1);
@@ -2171,10 +2487,19 @@ fn peer_set_publication_preserves_live_controller_and_does_not_force_past_a_haza
         .process_audio(true, false, &[], &mut [1.0; 960]);
     assert!(activity.last_sample() > prior);
     drop(next);
-    assert_eq!(runtime.node("1000").unwrap().status(1003).retiring, Some(1));
+    assert_eq!(runtime.node(PORT).unwrap().status(1003).retiring, Some(1));
     assert_eq!(
-        runtime.reload(
-            ConfigDocument::parse("[1000]\nradio_channel=radio\n").unwrap(),
+        station_fixture::reload(
+            &mut runtime,
+            station_fixture::configuration(
+                &[(PORT, "1000")],
+                &[(
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "radio"}})
+                )]
+            ),
             &Media,
             adapter,
             |_, _| Ok(Box::new(Device(log.clone()))),
@@ -2183,21 +2508,29 @@ fn peer_set_publication_preserves_live_controller_and_does_not_force_past_a_haza
         Err(RuntimeError::Busy)
     );
     runtime.reclaim();
-    assert_eq!(runtime.node("1000").unwrap().status(1003).retiring, Some(1));
-    assert!(runtime.detached("1000", 1));
+    assert_eq!(runtime.node(PORT).unwrap().status(1003).retiring, Some(1));
+    assert!(runtime.detached(PORT, 1));
     runtime.reclaim();
-    assert_eq!(runtime.node("1000").unwrap().status(1003).retiring, None);
-    runtime
-        .reload(
-            ConfigDocument::parse("[1000]\nradio_channel=radio\n").unwrap(),
-            &Media,
-            adapter,
-            |_, _| Ok(Box::new(Device(log.clone()))),
-            clock(),
-        )
-        .unwrap();
+    assert_eq!(runtime.node(PORT).unwrap().status(1003).retiring, None);
+    station_fixture::reload(
+        &mut runtime,
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Interface,
+                "",
+                json!({"audio": {"device_identifier": "radio"}}),
+            )],
+        ),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone()))),
+        clock(),
+    )
+    .unwrap();
     assert_eq!(receive.acquire_pair(&mut transmit).unwrap().id(), 3);
-    runtime.detached("1000", 2);
+    runtime.detached(PORT, 2);
     assert!(runtime.stop(1004));
 }
 
@@ -2250,11 +2583,16 @@ fn adapter_replacement_keeps_stream_producer_with_live_controller() {
     let drops = Arc::new(AtomicUsize::new(0));
     let media = StreamingMedia(Arc::clone(&drops));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\n[courtesy 1000 link]\ninput=link\nspeech_text=Connected\nmorse_text=L\n",
-        )
-        .unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Courtesy,
+                "link",
+                json!({"input": "link", "speech": {"text": "Connected"}, "morse": {"text": "L"}}),
+            )],
+        ),
         &media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
@@ -2263,13 +2601,13 @@ fn adapter_replacement_keeps_stream_producer_with_live_controller() {
     .unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
-    let settings = runtime.settings("1000").unwrap().clone();
+    let settings = runtime.settings(PORT).unwrap().clone();
     assert_eq!(
-        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1001),
+        runtime.replace_adapter(PORT, adapter("1000", &settings).unwrap(), 1001),
         Ok(2)
     );
 
-    assert!(runtime.detached("1000", 1));
+    assert!(runtime.detached(PORT, 1));
     runtime.reclaim();
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     assert!(runtime.stop(1002));
@@ -2282,20 +2620,54 @@ fn multi_node_failed_candidate_and_device_activation_restore_complete_old_runtim
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
     };
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nradio_channel=old1\n[2000]\nradio_channel=old2\n").unwrap(),
-        &Media,
-        adapter,
-        device,
-        clock(),
-    )
-    .unwrap();
-    assert_eq!(runtime.node_names(), ["1000", "2000"]);
+    let mut devices = station_fixture::DevicePlans::default();
+    let mut runtime = devices
+        .start(
+            station_fixture::configuration(
+                &[(PORT, "1000"), (SECOND, "2000")],
+                &[
+                    (
+                        PORT,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "old1"}}),
+                    ),
+                    (
+                        SECOND,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "old2"}}),
+                    ),
+                ],
+            ),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
+    assert_eq!(runtime.node_names(), [PORT, SECOND]);
     let original = runtime.revision();
     assert_eq!(
-        runtime.reload(
-            ConfigDocument::parse("[1000]\nradio_channel=new1\n[2000]\nradio_channel=fail\n")
-                .unwrap(),
+        devices.reload(
+            &mut runtime,
+            station_fixture::configuration(
+                &[(PORT, "1000"), (SECOND, "2000")],
+                &[
+                    (
+                        PORT,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "new1"}})
+                    ),
+                    (
+                        SECOND,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "fail"}})
+                    )
+                ]
+            ),
             &Media,
             adapter,
             device,
@@ -2304,7 +2676,10 @@ fn multi_node_failed_candidate_and_device_activation_restore_complete_old_runtim
         Err(RuntimeError::Device)
     );
     assert_eq!(runtime.revision(), original);
-    assert_eq!(runtime.settings("1000").unwrap().channel, "old1");
+    assert_eq!(
+        station_fixture::selected_device(runtime.modular_configuration().unwrap(), PORT),
+        "old1"
+    );
     assert!(
         log.lock()
             .unwrap()
@@ -2313,313 +2688,211 @@ fn multi_node_failed_candidate_and_device_activation_restore_complete_old_runtim
     assert!(runtime.stop(clock().now_ms));
 }
 
+fn event_clock(wall_seconds: i64) -> RuntimeClock {
+    RuntimeClock {
+        wall_seconds,
+        now_ms: 1000 + (wall_seconds - 100).max(0) as u64 * 1000,
+        ..clock()
+    }
+}
+fn scheduled_configuration(
+    actions: serde_json::Value,
+    polite: u64,
+) -> Arc<crate::config::resources::generation::RuntimeConfiguration> {
+    station_fixture::configuration(
+        &[(PORT, "1000")],
+        &[
+            (
+                PORT,
+                ResourceKind::Message,
+                "report",
+                json!({"locales":{"en-US":{"text":"Report { $time }","tts":"Report { $time }","morse":"TIME"}},"dtmf_id":"4"}),
+            ),
+            (
+                PORT,
+                ResourceKind::Macro,
+                "dispatch",
+                json!({"actions":actions}),
+            ),
+            (
+                PORT,
+                ResourceKind::Event,
+                "announcement",
+                json!({"start":{"at":"every day at 0:02 in UTC","macro":"dispatch","politeness_minutes":polite}}),
+            ),
+        ],
+    )
+}
+fn scheduled_runtime(
+    actions: serde_json::Value,
+    polite: u64,
+    media: &dyn NativeMediaPreparer,
+) -> Runtime {
+    let mut runtime = station_fixture::start(
+        scheduled_configuration(actions, polite),
+        media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Default::default())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    assert!(runtime.advance_commands(PORT, clock()).unwrap().is_none());
+    runtime
+}
 #[test]
 fn scheduled_event_clock_bounds_do_not_consume_another_event() {
-    for (second, subsecond) in [(60, 0), (0, 1000)] {
-        let mut runtime = link_notice_runtime(
-            "[1000]\n[2000]\n[event 1000 other]\nat=daily 09:08\nmessage=OTHER\n[event 2000 later]\nat=daily 09:08\nmessage=LATER\n[event 2000 ready]\nat=daily 09:07\nmessage=READY\n",
-            Arc::new(AtomicBool::new(false)),
-        );
-        let invalid = RuntimeClock {
-            civil: clock().civil.map(|(civil, _)| (civil, second)),
-            wall_subsecond_ms: subsecond,
-            ..clock()
-        };
-        assert!(matches!(
-            runtime.next_event(invalid),
-            Err(RuntimeError::Clock)
-        ));
-        let dispatch = runtime.next_event(clock()).unwrap().unwrap();
-        assert_eq!(dispatch.local(), "2000");
-        assert_eq!(dispatch.morse(), Some("READY"));
-        runtime.queue_event(&dispatch).unwrap();
-        assert!(runtime.complete_event(&dispatch));
-        assert!(runtime.next_event(clock()).unwrap().is_none());
-        assert!(runtime.stop(0));
-    }
-}
-
-#[test]
-fn scheduled_event_composition_uses_the_shared_recipe_and_manual_selector() {
-    let messages = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\n[event 1000 clock]\nat=daily 09:07\ncontent={message}\nmessage_id=site-time\narg_time=time\ndtmf_id=4\n",
-        )
-        .unwrap(),
-        &CapturingMedia(messages.clone()),
-        adapter,
-        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
-        clock(),
-    )
-    .expect("a scheduled composition is a valid message source");
-    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
-    runtime.queue_event(&dispatch).unwrap();
-    assert!(
-        messages.lock().unwrap().is_empty(),
-        "values resolve at playback, not admission"
-    );
-    assert!(runtime.complete_event(&dispatch));
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-    let mut generation = rx.acquire_pair(&mut tx).unwrap();
-    generation
-        .transmit()
-        .controller
-        .process_audio(false, false, &[], &mut [0.0; 12_001]);
-    runtime.prepare_messages(clock());
-    assert_eq!(*messages.lock().unwrap(), ["The time is 9:07 AM."]);
-    drop(generation);
-    assert!(runtime.queue_message("1000", "4", None).is_ok());
-    assert!(runtime.stop(0));
-}
-
-#[test]
-fn scheduled_event_expired_while_receiving_does_not_start_after_unkey() {
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\nduplex=full\n[event 1000 notice]\nat=daily 09:07\nmessage=TEST\npolite_maximum_wait_ms=10\n",
-        )
-        .unwrap(),
-        &Media,
-        adapter,
-        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
-        clock(),
-    )
-    .unwrap();
-    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
-    runtime.queue_event(&dispatch).unwrap();
-    assert!(runtime.complete_event(&dispatch));
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-    let mut generation = rx.acquire_pair(&mut tx).unwrap();
-    generation
-        .transmit()
-        .controller
-        .process_audio(true, false, &[], &mut [0.0; 960]);
-    let mut output = [0.0; 24_000];
-    generation
-        .transmit()
-        .controller
-        .process_audio(false, false, &[], &mut output);
-    assert!(
-        output.iter().all(|sample| *sample == 0.0),
-        "a skipped occurrence must never become audible later"
-    );
-    drop(generation);
-    assert!(runtime.stop(0));
-}
-
-#[test]
-fn scheduled_event_subsecond_lateness_does_not_renew_the_deadline() {
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n[event 1000 notice]\nat=daily 09:07\nmessage=TEST\npolite_maximum_wait_ms=100\n").unwrap(),
-        &Media, adapter,
-        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
-        clock(),
-    ).unwrap();
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-    let mut generation = rx.acquire_pair(&mut tx).unwrap();
-    generation
-        .transmit()
-        .controller
-        .process_audio(false, false, &[], &mut [0.0; 12_000]);
-    let late = RuntimeClock {
-        now_ms: 1250,
-        wall_subsecond_ms: 250,
-        ..clock()
-    };
-    let dispatch = runtime.next_event(late).unwrap().unwrap();
-    runtime.queue_event(&dispatch).unwrap();
-    assert!(runtime.complete_event(&dispatch));
-    let mut output = [0.0; 960];
-    generation
-        .transmit()
-        .controller
-        .process_audio(false, false, &[], &mut output);
-    assert_eq!(
-        output, [0.0; 960],
-        "the 100ms budget expired before the delayed control tick"
-    );
-    drop(generation);
-    assert!(runtime.stop(0));
-}
-
-#[test]
-fn scheduled_event_replaces_an_older_unstarted_occurrence() {
-    let messages = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nduplex=full\n[event 1000 clock]\nat=every 1 minute\ncontent={message}\nmessage_id=site-time\narg_time=time\npolite_maximum_wait_ms=300000\n").unwrap(),
-        &CapturingMedia(messages.clone()), adapter,
-        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
-        clock(),
-    ).unwrap();
-    let first = runtime.next_event(clock()).unwrap().unwrap();
-    runtime.queue_event(&first).unwrap();
-    assert!(runtime.complete_event(&first));
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-    let mut generation = rx.acquire_pair(&mut tx).unwrap();
-    for _ in 0..60 {
-        generation
-            .transmit()
-            .controller
-            .process_audio(true, false, &[], &mut [0.0; 48_000]);
-    }
-    let mut next = RuntimeClock {
-        now_ms: 61_000,
-        wall_seconds: 160,
-        ..clock()
-    };
-    next.civil = Some((
-        CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 8).unwrap(),
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = scheduled_runtime(
+        json!([{"action":"message","message":"Ready","destination":"local"}]),
         0,
-    ));
-    let latest = runtime.next_event(next).unwrap().unwrap();
-    runtime.queue_event(&latest).unwrap();
-    assert!(runtime.complete_event(&latest));
-    for _ in 0..80 {
-        generation
-            .transmit()
-            .controller
-            .process_audio(false, false, &[], &mut [0.0; 960]);
-        runtime.prepare_messages(next);
-    }
-    assert_eq!(
-        *messages.lock().unwrap(),
-        ["The time is 9:08 AM."],
-        "stale unstarted occurrences must be discarded, not replayed"
+        &CapturingMedia(log.clone()),
     );
-    drop(generation);
-    assert!(runtime.stop(0));
-}
-
-#[test]
-fn scheduled_event_cancelled_before_admission_skips_only_the_obsolete_media() {
-    let messages = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\n[event 1000 clock]\nat=every 1 minute\nmessage=Report ${time}\n",
-        )
-        .unwrap(),
-        &CapturingMedia(messages.clone()),
-        adapter,
-        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
-        clock(),
-    )
-    .unwrap();
-    let first = runtime.next_event(clock()).unwrap().unwrap();
-    assert_eq!(first.morse(), Some("Report 9:07 AM"));
-    let next = RuntimeClock {
-        now_ms: 61_000,
-        wall_seconds: 160,
-        civil: Some((
-            CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 8).unwrap(),
-            0,
-        )),
-        ..clock()
+    let invalid = RuntimeClock {
+        wall_subsecond_ms: 1000,
+        ..event_clock(120)
     };
-    let obsolete = runtime.next_event(next).unwrap().unwrap();
-    assert_eq!(obsolete.morse(), Some("Report 9:07 AM"));
-    runtime.queue_event(&obsolete).unwrap();
-    assert!(messages.lock().unwrap().is_empty());
-    assert!(runtime.complete_event(&obsolete));
-    assert_eq!(runtime.queue_event(&first), Err(RuntimeError::Rejected));
-    let latest = runtime.next_event(next).unwrap().unwrap();
-    assert_eq!(latest.morse(), Some("Report 9:08 AM"));
-    runtime.queue_event(&latest).unwrap();
-    assert_eq!(*messages.lock().unwrap(), ["Report 9:08 AM"]);
-    assert!(runtime.complete_event(&latest));
-    assert!(runtime.next_event(next).unwrap().is_none());
-    assert!(runtime.stop(0));
-}
-
-#[test]
-fn scheduled_event_full_queue_retry_keeps_the_original_start_deadline() {
-    let mut runtime = link_notice_runtime(
-        "[1000]\n[event 1000 report]\nat=daily 09:07\nmessage=Report\npolite_maximum_wait_ms=10\n",
-        Arc::new(AtomicBool::new(false)),
-    );
-    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
-    for _ in 0..4 {
+    assert!(runtime.advance_commands(PORT, invalid).unwrap().is_none());
+    assert!(log.lock().unwrap().is_empty());
+    let (_, receipt) = runtime
+        .advance_commands(PORT, event_clock(120))
+        .unwrap()
+        .unwrap();
+    receipt.settle(true);
+    assert!(
         runtime
-            .queue_status("1000", LinkAction::Time, None, clock(), None)
-            .unwrap();
-    }
-    assert_eq!(runtime.queue_event(&dispatch), Err(RuntimeError::Rejected));
-    assert!(!runtime.complete_event(&dispatch));
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-    let mut generation = tx.acquire().unwrap();
-    let controller = &mut generation.state().controller;
-    let mut queued = [0.0; 12_100];
-    controller.process_audio(false, false, &[], &mut queued);
-    assert_eq!(queued.iter().filter(|sample| **sample == 0.25).count(), 16);
-    runtime.queue_event(&dispatch).unwrap();
-    assert!(runtime.complete_event(&dispatch));
-    let mut expired = [0.0; 960];
-    controller.process_audio(false, false, &[], &mut expired);
-    assert_eq!(expired, [0.0; 960], "retry must not renew the start budget");
-    assert!(runtime.next_event(clock()).unwrap().is_none());
-    drop(generation);
-    assert!(runtime.stop(0));
+            .advance_commands(PORT, event_clock(121))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(*log.lock().unwrap(), ["Ready"]);
+    assert!(runtime.stop(event_clock(121).now_ms));
 }
 
 #[test]
-fn scheduled_event_preparation_failure_keeps_the_reservation_retryable() {
-    let reject = Arc::new(AtomicBool::new(false));
-    let mut runtime = link_notice_runtime(
-        "[1000]\n[event 1000 report]\nat=daily 09:07\nmessage=Report\n",
-        Arc::clone(&reject),
+fn scheduled_event_and_manual_selection_use_one_registered_message() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = scheduled_runtime(
+        json!([{"action":"message","message":"{ report }","destination":"local"}]),
+        0,
+        &CapturingMedia(log.clone()),
     );
-    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
-    reject.store(true, Ordering::Release);
-    assert_eq!(
-        runtime.queue_event(&dispatch),
-        Err(RuntimeError::Preparation)
-    );
-    assert!(!runtime.complete_event(&dispatch));
-    reject.store(false, Ordering::Release);
-    runtime.queue_event(&dispatch).unwrap();
-    runtime.queue_event(&dispatch).unwrap();
-    assert!(runtime.complete_event(&dispatch));
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-    let mut generation = tx.acquire().unwrap();
-    let mut output = [0.0; 12_016];
-    generation
+    let (effect, receipt) = runtime
+        .advance_commands(PORT, event_clock(120))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(effect, links::LinkEffect::None));
+    receipt.settle(true);
+    assert_eq!(log.lock().unwrap().len(), 1);
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+    let mut owner = tx.acquire().unwrap();
+    owner
         .state()
         .controller
-        .process_audio(false, false, &[], &mut output);
-    let heard: Vec<_> = output.into_iter().filter(|sample| *sample != 0.0).collect();
-    assert_eq!(heard, [0.25; 4], "only the successful retry may play");
-    assert!(runtime.next_event(clock()).unwrap().is_none());
-    drop(generation);
-    assert!(runtime.stop(0));
+        .process_audio(false, false, &[], &mut [0.0; 48_000]);
+    runtime.queue_message(PORT, "4", None).unwrap();
+    owner
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0; 48_000]);
+    runtime.prepare_messages(event_clock(121));
+    let log = log.lock().unwrap();
+    assert_eq!(log.as_slice(), ["Report 9:07 AM", "Report 9:07 AM"]);
+    drop(log);
+    drop(owner);
+    assert!(runtime.stop(event_clock(121).now_ms));
 }
 
 #[test]
-fn aggregate_scheduled_template_and_macro_use_trigger_clock_and_current_node() {
+fn scheduled_event_waits_for_receive_and_preserves_the_original_force_deadline() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let config = ConfigDocument::parse("[1000]\ncallsign=AB1CD\n[template hello]\ntext=${node}. ${time}\n[macro connect]\naction=connect\ntarget_node=2000\n[event 1000 morning]\nat=daily 09:07\ntemplate=hello\nmacro=connect\n").unwrap();
-    let mut runtime = Runtime::start(
-        config,
-        &Media,
-        adapter,
-        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
-        clock(),
-    )
-    .unwrap();
-    assert_eq!(
-        runtime.site_macro("1000", "connect").unwrap(),
-        crate::command::Command {
-            action: LinkAction::Transceive,
-            node: "2000".into()
-        }
+    let mut runtime = scheduled_runtime(
+        json!([{"action":"message","message":"Ready","destination":"local"}]),
+        1,
+        &CapturingMedia(log.clone()),
     );
-    assert!(runtime.site_macro("1000", "missing").is_err());
-    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
-    assert_eq!(dispatch.morse(), Some("1000. 9:07 AM"));
-    assert!(dispatch.speech().unwrap().starts_with("node,1,0,0,0."));
-    assert!(runtime.queue_event(&dispatch).is_ok());
-    assert!(runtime.complete_event(&dispatch));
-    assert!(runtime.next_event(clock()).unwrap().is_none());
-    assert!(runtime.stop(clock().now_ms));
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+    let mut owner = tx.acquire().unwrap();
+    owner
+        .state()
+        .controller
+        .process_audio(true, false, &[], &mut [0.0; 960]);
+    assert!(
+        runtime
+            .advance_commands(PORT, event_clock(120))
+            .unwrap()
+            .is_none()
+    );
+    let late = RuntimeClock {
+        wall_subsecond_ms: 999,
+        now_ms: event_clock(179).now_ms + 999,
+        ..event_clock(179)
+    };
+    assert!(runtime.advance_commands(PORT, late).unwrap().is_none());
+    assert!(log.lock().unwrap().is_empty());
+    let (effect, receipt) = runtime
+        .advance_commands(PORT, event_clock(180))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(effect, links::LinkEffect::None));
+    receipt.settle(true);
+    assert!(
+        runtime
+            .advance_commands(PORT, event_clock(181))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(*log.lock().unwrap(), ["Ready"]);
+    drop(owner);
+    assert!(runtime.stop(event_clock(181).now_ms));
+}
+
+#[test]
+fn scheduler_failure_consumes_only_its_occurrence_and_preserves_the_prior_status_queue() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = scheduled_runtime(
+        json!([{"action":"message","message":"SCHEDULED","destination":"local"}]),
+        0,
+        &CapturingMedia(log.clone()),
+    );
+    for _ in 0..4 {
+        runtime
+            .queue_status(PORT, LinkAction::Time, None, clock(), None)
+            .unwrap();
+    }
+    let before = log.lock().unwrap().clone();
+    assert!(
+        runtime
+            .advance_commands(PORT, event_clock(120))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        runtime
+            .node(PORT)
+            .unwrap()
+            .take_command_completion()
+            .unwrap()
+            .outcome,
+        crate::command_language::MacroOutcome::Rejected
+    );
+    assert_eq!(*log.lock().unwrap(), before);
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+    let mut owner = tx.acquire().unwrap();
+    let mut out = [0.0; 48_000];
+    owner
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut out);
+    assert!(out.into_iter().any(|x| x == 0.25));
+    assert!(
+        runtime
+            .advance_commands(PORT, event_clock(121))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(*log.lock().unwrap(), before);
+    drop(owner);
+    assert!(runtime.stop(event_clock(121).now_ms));
 }
 
 #[test]
@@ -2628,55 +2901,66 @@ fn successful_reload_retains_fixed_handles_hub_and_work_until_detached() {
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
     };
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n[2000]\nnode_enabled=no\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000"), (SECOND, "2000")],
+            &[(
+                SECOND,
+                ResourceKind::Metadata,
+                "",
+                json!({"enabled": false}),
+            )],
+        ),
         &Media,
         adapter,
         device,
         clock(),
     )
     .unwrap();
-    let node = runtime.node("1000").unwrap();
+    let node = runtime.node(PORT).unwrap();
     node.links().accept("3000", true).unwrap();
     let work = node.work().unwrap();
     let (mut rx, mut tx) = node.register_audio().unwrap();
     assert_eq!(rx.acquire().unwrap().id(), 1);
-    runtime
-        .reload(
-            ConfigDocument::parse("[1000]\ntransmit_hang_ms=10\n[4000]\n").unwrap(),
-            &Media,
-            adapter,
-            device,
-            clock(),
-        )
-        .unwrap();
+    station_fixture::reload(
+        &mut runtime,
+        station_fixture::configuration(
+            &[(PORT, "1000"), (FOURTH, "4000")],
+            &[(
+                PORT,
+                ResourceKind::TxSignaling,
+                "",
+                json!({"ptt": {"timing": {"hang_ms": 10}}}),
+            )],
+        ),
+        &Media,
+        adapter,
+        device,
+        clock(),
+    )
+    .unwrap();
     assert!(!work.is_current());
-    assert_eq!(runtime.node_names(), ["1000", "4000"]);
+    assert_eq!(runtime.node_names(), [PORT, FOURTH]);
     assert!(
         runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .links()
             .manager()
             .reaches("3000", true)
     );
-    assert_eq!(runtime.settings("1000").unwrap().hang_ms, 10);
+    assert_eq!(runtime.settings(PORT).unwrap().hang_ms, 10);
     assert_eq!(rx.acquire().unwrap().id(), 2);
     assert_eq!(tx.acquire().unwrap().id(), 2);
-    assert!(runtime.detached("1000", 1));
+    assert!(runtime.detached(PORT, 1));
     runtime.reclaim();
-    assert!(runtime.node("1000").unwrap().status(0).retiring.is_some());
+    assert!(runtime.node(PORT).unwrap().status(0).retiring.is_some());
     drop(work);
     runtime.reclaim();
-    assert!(runtime.node("1000").unwrap().status(0).retiring.is_none());
+    assert!(runtime.node(PORT).unwrap().status(0).retiring.is_none());
     assert!(!runtime.stop(2000));
-    assert!(
-        runtime
-            .take_effects()
-            .iter()
-            .any(|(name, _)| name == "1000")
-    );
-    assert!(runtime.detached("1000", 2));
+    assert!(runtime.take_effects().iter().any(|(name, _)| name == PORT));
+    assert!(runtime.detached(PORT, 2));
     runtime.reclaim();
     assert!(runtime.stop(2000));
     assert!(rx.acquire().is_none());
@@ -2685,13 +2969,22 @@ fn successful_reload_retains_fixed_handles_hub_and_work_until_detached() {
 
 #[test]
 fn partial_start_closes_previously_opened_devices_and_bad_media_keeps_live_revision() {
+    let mut devices = station_fixture::DevicePlans::default();
     let log = Arc::new(Mutex::new(Vec::new()));
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
     };
     assert!(matches!(
-        Runtime::start(
-            ConfigDocument::parse("[1000]\n[2000]\nradio_channel=fail\n").unwrap(),
+        devices.start(
+            station_fixture::configuration(
+                &[(PORT, "1000"), (SECOND, "2000")],
+                &[(
+                    SECOND,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "fail"}})
+                )]
+            ),
             &Media,
             adapter,
             device,
@@ -2703,18 +2996,41 @@ fn partial_start_closes_previously_opened_devices_and_bad_media_keeps_live_revis
         *log.lock().unwrap(),
         ["1000", "fail", "quiesce", "close", "quiesce", "close"]
     );
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
-        &Media,
-        adapter,
-        device,
-        clock(),
-    )
-    .unwrap();
+    let mut runtime = devices
+        .start(
+            station_fixture::single_port(true),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
     let before = log.lock().unwrap().len();
-    let bad = ConfigDocument::parse("[1000]\ntransmit_hang_ms=18446744073709551615\n").unwrap();
+    struct Unavailable;
+    impl NativeFilePreparer for Unavailable {
+        fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeSpeechPreparer for Unavailable {
+        fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeMediaPreparer for Unavailable {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
     assert_eq!(
-        runtime.reload(bad, &Media, adapter, device, clock()),
+        devices.reload(
+            &mut runtime,
+            station_fixture::single_port(true),
+            &Unavailable,
+            adapter,
+            device,
+            clock()
+        ),
         Err(RuntimeError::Preparation)
     );
     assert_eq!(runtime.revision(), 1);
@@ -2726,23 +3042,24 @@ fn partial_start_closes_previously_opened_devices_and_bad_media_keeps_live_revis
 fn reload_rejects_a_newer_installed_schedule_without_replacing_live_devices() {
     use crate::{access::AccessPolicy, runtime::link_schedule::LinkScheduler};
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
-    runtime.node("1000").unwrap().links().reconfigure(
+    runtime.node(PORT).unwrap().links().reconfigure(
         AccessPolicy::new("", "").unwrap(),
         crate::command::DtmfCommandMap::default(),
         Some(LinkScheduler::new(2, Vec::new(), Vec::new(), None).unwrap()),
     );
     let before = log.lock().unwrap().clone();
     assert_eq!(
-        runtime.reload(
-            ConfigDocument::parse("[1000]\n").unwrap(),
+        station_fixture::reload(
+            &mut runtime,
+            station_fixture::single_port(true),
             &Media,
             adapter,
             |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
@@ -2756,71 +3073,57 @@ fn reload_rejects_a_newer_installed_schedule_without_replacing_live_devices() {
 }
 
 #[test]
-fn no_window_permanent_links_work_without_wall_clock_and_window_reload_requires_it() {
+fn no_window_permanent_links_work_without_wall_clock() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
     };
-    let text = "[1000]\n[permanent 1000 main]\nremote_node=2000\n";
+    let config = station_fixture::configuration(
+        &[(PORT, "radio")],
+        &[(
+            PORT,
+            ResourceKind::PermanentGroup,
+            "main",
+            json!({"remote_node":["2000"]}),
+        )],
+    );
     let mut now = clock();
     now.civil = None;
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(text).unwrap(),
-        &Media,
-        adapter,
-        device,
-        now,
-    )
-    .unwrap();
+    let mut runtime = station_fixture::start(config, &Media, adapter, device, now).unwrap();
     assert!(runtime.next_link().is_some());
-    let replacement = format!(
-        "{text}[schedule 1000 daytime]\nremote_node=3000\nreplace_permanent=main\nstart_time=09:00\nend_time=10:00\n"
-    );
-    assert_eq!(
-        runtime.reload(
-            ConfigDocument::parse(&replacement).unwrap(),
-            &Media,
-            adapter,
-            device,
-            now
-        ),
-        Err(RuntimeError::Clock)
-    );
     assert_eq!(runtime.revision(), 1);
     assert!(runtime.stop(0));
 }
 
 #[test]
-fn scheduled_message_queue_retry_is_once_and_stale_dispatch_does_not_prepare_speech() {
+fn scheduled_message_is_not_reexecuted_when_its_generation_retires() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let device = |_: &str, _: &ResolvedNodeSettings| {
-        Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
-    };
-    let text = "[1000]\n[event 1000 test]\nat=daily 09:07\nmessage=TEST\n";
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(text).unwrap(),
-        &Media,
+    let actions = json!([{"action":"message","message":"Test","destination":"local"}]);
+    let mut runtime = scheduled_runtime(actions.clone(), 0, &CapturingMedia(log.clone()));
+    let tick = event_clock(120);
+    let (_, receipt) = runtime.advance_commands(PORT, tick).unwrap().unwrap();
+    receipt.settle(true);
+    for _ in 0..10 {
+        assert!(runtime.advance_commands(PORT, tick).unwrap().is_none());
+    }
+    assert_eq!(*log.lock().unwrap(), ["Test"]);
+    station_fixture::reload(
+        &mut runtime,
+        scheduled_configuration(actions, 0),
+        &CapturingMedia(log.clone()),
         adapter,
-        device,
-        clock(),
+        |_, _| Ok(Box::new(Device(Default::default())) as Box<dyn DeviceHandoff>),
+        event_clock(121),
     )
     .unwrap();
-    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
-    for _ in 0..10 {
-        assert_eq!(runtime.queue_event(&dispatch), Ok(()));
-    }
-    runtime
-        .reload(
-            ConfigDocument::parse(text).unwrap(),
-            &Media,
-            adapter,
-            device,
-            clock(),
-        )
-        .unwrap();
-    assert_eq!(runtime.queue_event(&dispatch), Err(RuntimeError::Rejected));
-    assert!(runtime.next_event(clock()).unwrap().is_none());
-    assert!(runtime.stop(0));
+    assert!(
+        runtime
+            .advance_commands(PORT, event_clock(121))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(*log.lock().unwrap(), ["Test"]);
+    assert!(runtime.stop(event_clock(122).now_ms));
 }
 
 #[test]
@@ -2851,16 +3154,23 @@ fn telemetry_is_registered_with_station_producer_not_synchronously_prepared() {
             Ok(Box::new(TestStation(None)))
         }
     }
-    let config =
-        "[1000]\n[identifier 1000 test]\nsound_file=test.wav\nspeech_text=hello\nmorse_text=TEST\n";
+    let config = station_fixture::configuration(
+        &[(PORT, "radio")],
+        &[(
+            PORT,
+            ResourceKind::Identifier,
+            "test",
+            json!({"file":"test.wav","speech":{"text":"hello"},"morse":{"text":"TEST"}}),
+        )],
+    );
     let media = Prepared {
         rate: 22050,
         file_ok: true,
         calls: Mutex::new(Vec::new()),
     };
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(config).unwrap(),
+    let mut runtime = station_fixture::start(
+        config,
         &media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
@@ -2871,26 +3181,78 @@ fn telemetry_is_registered_with_station_producer_not_synchronously_prepared() {
     assert!(runtime.stop(0));
 }
 
+fn attach_windows(
+    runtime: &mut Runtime,
+    primary: &str,
+    windows: &[(&str, &str, &str, &str, u64, u64, u64)],
+) {
+    use crate::{
+        access::AccessPolicy,
+        command::DtmfCommandMap,
+        runtime::link_schedule::{LinkScheduler, ReplacementSpec, RouteSpec},
+        schedule::ScheduledWindow,
+    };
+    let route = |name: &str, label: &str, permanent| RouteSpec {
+        local: PORT.into(),
+        remote: if permanent { "2000" } else { "3000" }.into(),
+        permanent,
+        group_label: Some(label.into()),
+        group_name: Some(name.into()),
+        group_priority: Some(0),
+    };
+    let mut routes = vec![route(primary, "primary", true)];
+    let mut replacements = Vec::new();
+    for &(label, name, begin, end, quiet, start_warning, end_warning) in windows {
+        let idx = routes.len();
+        routes.push(route(name, label, false));
+        replacements.push(ReplacementSpec {
+            routes: vec![idx],
+            replaced: vec![0],
+            window: ScheduledWindow::parse(None, None, begin, end).unwrap(),
+            end_inactivity_ms: quiet,
+            warning_before_start_ms: (start_warning > 0)
+                .then_some(start_warning)
+                .into_iter()
+                .collect(),
+            warning_before_end_ms: (end_warning > 0)
+                .then_some(end_warning)
+                .into_iter()
+                .collect(),
+            warning_message_id: Some("scheduled-link-change".into()),
+        });
+    }
+    runtime.node(PORT).unwrap().links().reconfigure(
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::default(),
+        Some(LinkScheduler::new(2, routes, replacements, None).unwrap()),
+    );
+}
+
 #[test]
 fn reconnect_reconciles_window_before_resuming_old_permanent_retry() {
     use super::{dtmf::DigitOperation, links::LinkEffect};
     use crate::command::{Command, LinkAction};
-    let text = "[1000]\n[permanent 1000 main]\nremote_node=2000\n[schedule 1000 window]\nremote_node=3000\nreplace_permanent=main\nstart_time=10:00\nend_time=11:00\n";
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(text).unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
+    attach_windows(
+        &mut runtime,
+        "primary",
+        &[("window", "window", "10:00", "11:00", 0, 0, 0)],
+    );
+    runtime.tick_links(clock());
     let (_, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
         panic!("permanent dial")
     };
     assert!(
         !runtime
-            .finish_connect("1000", attempt, false, clock())
+            .finish_connect(PORT, attempt, false, clock())
             .unwrap()
     );
     let operation = |action| {
@@ -2907,7 +3269,7 @@ fn reconnect_reconciles_window_before_resuming_old_permanent_retry() {
         invalid_clock.civil = civil;
         assert!(matches!(
             runtime.command(
-                "1000",
+                PORT,
                 operation(LinkAction::ReconnectAll),
                 invalid_clock,
                 false
@@ -2916,7 +3278,7 @@ fn reconnect_reconciles_window_before_resuming_old_permanent_retry() {
         ));
     }
     runtime
-        .command("1000", operation(LinkAction::DisconnectAll), clock(), false)
+        .command(PORT, operation(LinkAction::DisconnectAll), clock(), false)
         .unwrap();
     let mut during = clock();
     during.civil = Some((
@@ -2924,13 +3286,13 @@ fn reconnect_reconciles_window_before_resuming_old_permanent_retry() {
         0,
     ));
     runtime
-        .command("1000", operation(LinkAction::ReconnectAll), during, false)
+        .command(PORT, operation(LinkAction::ReconnectAll), during, false)
         .unwrap();
     assert!(runtime.next_link().is_none());
-    runtime.peer_detached("1000", "2000", during.now_ms);
+    runtime.peer_detached(PORT, "2000", during.now_ms);
     assert!(
         !runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .links()
             .manager()
@@ -2947,7 +3309,6 @@ fn reconnect_reconciles_window_before_resuming_old_permanent_retry() {
 #[test]
 fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
     use super::links::LinkEffect;
-    let text = "[1000]\n[permanent 1000 main]\nremote_node=2000\n[schedule 1000 window]\nremote_node=3000\nreplace_permanent=main\nstart_time=12:00\nend_time=13:00\nend_inactivity_ms=60000\n";
     let at = |now_ms, hour, minute| RuntimeClock {
         now_ms,
         wall_seconds: 0,
@@ -2958,14 +3319,19 @@ fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
         )),
     };
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(text).unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
         at(0, 12, 59),
     )
     .unwrap();
+    attach_windows(
+        &mut runtime,
+        "primary",
+        &[("window", "window", "12:00", "13:00", 60000, 0, 0)],
+    );
     runtime.tick_links(at(0, 12, 59));
     let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
         panic!("replacement dial")
@@ -2976,7 +3342,7 @@ fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
         Ok(true)
     );
 
-    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut receive, mut transmit) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut guard = receive.acquire_pair(&mut transmit).unwrap();
     guard
         .transmit()
@@ -2991,9 +3357,9 @@ fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
     runtime.tick_links(at(60_000, 13, 1));
     assert!(matches!(
         runtime.next_link(),
-        Some((local, LinkEffect::Detach(peers))) if local == "1000" && peers == ["3000"]
+        Some((local, LinkEffect::Detach(peers))) if local == PORT && peers == ["3000"]
     ));
-    runtime.peer_detached("1000", "3000", 60_000);
+    runtime.peer_detached(PORT, "3000", 60_000);
     drop((receive, transmit));
     assert!(runtime.stop(60_000));
 }
@@ -3001,53 +3367,49 @@ fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
 #[test]
 fn aggregate_schedule_warning_queues_one_localized_status_message() {
     let long_name = "N1".repeat(31) + "A";
-    let long_setting = format!("group_name={long_name}\n");
     let long_speech = format!("Connecting to {}A in 1 minute", "N,1,".repeat(31));
     for (group, lead, hour, minute, second, expected) in [
         (
-            "",
-            "warning_before_start_ms=60000",
+            "weekday",
+            (60000, 0),
             11,
             59,
             0,
             "Connecting to weekday in 1 minute",
         ),
         (
-            "group_name=Net 42\n",
-            "warning_before_start_ms=90000",
+            "Net 42",
+            (90000, 0),
             11,
             58,
             30,
             "Connecting to Net 42 in 1 minute, and 30 seconds",
         ),
         (
-            "group_name=3000\n",
-            "warning_before_start_ms=60000",
+            "3000",
+            (60000, 0),
             11,
             59,
             0,
             "Connecting to 3000 in 1 minute",
         ),
         (
-            "group_name=Evening Net\n",
-            "warning_before_end_ms=60000",
+            "Evening Net",
+            (0, 60000),
             12,
             59,
             0,
             "Disconnecting from Evening Net in 1 minute",
         ),
         (
-            long_setting.as_str(),
-            "warning_before_start_ms=60000",
+            long_name.as_str(),
+            (60000, 0),
             11,
             59,
             0,
             long_speech.as_str(),
         ),
     ] {
-        let config = format!(
-            "[general]\nlanguage=fr-CA\n[1000]\n[permanent 1000 main]\nremote_node=2000\n[schedule 1000 weekday]\nremote_node=3000\n{group}replace_permanent=main\ndays=Monday-Friday\nstart_time=12:00\nend_time=13:00\nend_inactivity_ms=0\n{lead}\nwarning_message_id=scheduled-link-change\n"
-        );
         let clock = RuntimeClock {
             now_ms: 1_000,
             wall_seconds: 0,
@@ -3059,22 +3421,21 @@ fn aggregate_schedule_warning_queues_one_localized_status_message() {
         };
         let messages = Arc::new(Mutex::new(Vec::new()));
         let devices = Arc::new(Mutex::new(Vec::new()));
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse(&config).unwrap(),
+        let mut runtime = station_fixture::start(
+            station_fixture::single_port(true),
             &CapturingMedia(messages.clone()),
             adapter,
             |_, _| Ok(Box::new(Device(devices.clone())) as Box<dyn DeviceHandoff>),
             clock,
         )
         .unwrap();
-        assert!(
-            runtime
-                .warnings()
-                .iter()
-                .any(|warning| warning.key == "language")
+        attach_windows(
+            &mut runtime,
+            "Primary",
+            &[("weekday", group, "12:00", "13:00", 0, lead.0, lead.1)],
         );
         runtime.tick_links(clock);
-        assert_eq!(*messages.lock().unwrap(), [expected], "{group}{lead}");
+        assert_eq!(*messages.lock().unwrap(), [expected], "{group} {lead:?}");
         assert!(runtime.stop(clock.now_ms));
     }
 }
@@ -3086,8 +3447,8 @@ fn render_preserves_c_scheduled_identity_and_ordinary_speech_rules() {
         "COUNT 42 A,B,1,C,D node,1,0,0,0"
     );
     assert_eq!(
-        super::render::scheduled_speech("prefix 1000. AB1CD. X1000.", "1000", "AB1CD", ""),
-        "prefix node,1,0,0,0. A,B,1,C,D. X,1,0,0,0,."
+        telemetry_speech("prefix 1000 AB1CD X1000", &["1000"]),
+        "prefix node,1,0,0,0 A,B,1,C,D X,1,0,0,0"
     );
     assert_eq!(super::render::morse("[]{}"), None);
     assert_eq!(
@@ -3098,40 +3459,27 @@ fn render_preserves_c_scheduled_identity_and_ordinary_speech_rules() {
 
 #[test]
 fn removing_a_node_keeps_stalled_owned_callbacks_observable_until_detached() {
+    use station_fixture::{PORT, single_port};
     let log = Arc::new(Mutex::new(Vec::new()));
-    let device = |_: &str, _: &ResolvedNodeSettings| {
-        Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
-    };
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
-        &Media,
-        adapter,
-        device,
-        clock(),
-    )
-    .unwrap();
-    let (mut rx, _tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-    let guard = rx.acquire().unwrap();
-    runtime
-        .reload(
-            ConfigDocument::parse("[1000]\nnode_enabled=no\n").unwrap(),
+    let mut runtime = Runtime::idle();
+    let adopt = |runtime: &mut Runtime<()>, enabled| {
+        let configuration = single_port(enabled);
+        let prepared = runtime.prepare_configuration(
+            Arc::clone(&configuration),
             &Media,
-            adapter,
-            device,
+            |_, settings| Ok((adapter(PORT, settings)?, false)),
+            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
             clock(),
-        )
-        .unwrap();
+        )?;
+        runtime.adopt_configuration(prepared, clock())?;
+        runtime.confirm_station_replacements(&configuration)
+    };
+    adopt(&mut runtime, true).unwrap();
+    let (mut rx, _tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+    let guard = rx.acquire().unwrap();
+    adopt(&mut runtime, false).unwrap();
     assert!(runtime.node_names().is_empty());
-    assert_eq!(
-        runtime.reload(
-            ConfigDocument::parse("[1000]\n").unwrap(),
-            &Media,
-            adapter,
-            device,
-            clock()
-        ),
-        Err(RuntimeError::Busy)
-    );
+    assert_eq!(adopt(&mut runtime, true), Err(RuntimeError::Busy));
     assert!(!runtime.stop(0));
     drop(guard);
     runtime.reclaim();
@@ -3151,25 +3499,26 @@ fn repeated_stop_cannot_forget_unacknowledged_peer_cleanup() {
             true
         }
     }
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &Media,
         adapter,
         |_, _| Ok(Box::new(SlowDevice(0)) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
-    runtime.incoming("1000", "2000", true).unwrap();
+    runtime.incoming(PORT, "2000", true).unwrap();
     assert!(!runtime.stop(0));
     assert!(!runtime.stop(0));
     assert_eq!(runtime.status(0)[0].1.state, LifecycleState::Stopping);
-    runtime.peer_detached("1000", "2000", 0);
-    assert!(runtime.detached("1000", 1));
+    runtime.peer_detached(PORT, "2000", 0);
+    assert!(runtime.detached(PORT, 1));
     assert!(runtime.stop(0));
 }
 
 #[test]
 fn failed_restore_keeps_current_document_but_gates_the_unavailable_node() {
+    let mut devices = station_fixture::DevicePlans::default();
     struct FailingRestore(bool);
     impl DeviceHandoff for FailingRestore {
         fn quiesce(&mut self) -> bool {
@@ -3185,18 +3534,36 @@ fn failed_restore_keeps_current_document_but_gates_the_unavailable_node() {
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(FailingRestore(false)) as Box<dyn DeviceHandoff>)
     };
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nradio_channel=old\n").unwrap(),
-        &Media,
-        adapter,
-        device,
-        clock(),
-    )
-    .unwrap();
-    let (mut rx, tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut runtime = devices
+        .start(
+            station_fixture::configuration(
+                &[(PORT, "1000")],
+                &[(
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "old"}}),
+                )],
+            ),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
+    let (mut rx, tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     assert_eq!(
-        runtime.reload(
-            ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
+        devices.reload(
+            &mut runtime,
+            station_fixture::configuration(
+                &[(PORT, "1000")],
+                &[(
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "new"}})
+                )]
+            ),
             &Media,
             adapter,
             device,
@@ -3205,15 +3572,27 @@ fn failed_restore_keeps_current_document_but_gates_the_unavailable_node() {
         Err(RuntimeError::Restore)
     );
     assert_eq!(runtime.revision(), 1);
-    assert_eq!(runtime.settings("1000").unwrap().channel, "old");
+    assert_eq!(
+        station_fixture::selected_device(runtime.modular_configuration().unwrap(), PORT),
+        "old"
+    );
     assert!(rx.acquire().is_none());
     assert!(runtime.next_link().is_none());
     drop((rx, tx));
-    assert!(runtime.detached("1000", 1));
+    assert!(runtime.detached(PORT, 1));
     runtime.reclaim();
-    runtime
+    devices
         .reload(
-            ConfigDocument::parse("[1000]\nradio_channel=old\n").unwrap(),
+            &mut runtime,
+            station_fixture::configuration(
+                &[(PORT, "1000")],
+                &[(
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "old"}}),
+                )],
+            ),
             &Media,
             adapter,
             device,
@@ -3221,7 +3600,7 @@ fn failed_restore_keeps_current_document_but_gates_the_unavailable_node() {
         )
         .unwrap();
     assert_eq!(runtime.revision(), 2);
-    assert!(runtime.node("1000").unwrap().work().is_some());
+    assert!(runtime.node(PORT).unwrap().work().is_some());
     assert!(runtime.stop(0));
 }
 
@@ -3248,37 +3627,53 @@ fn adapter_dispatcher_is_owned_off_audio_and_requires_explicit_drain_acknowledgm
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
     };
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nradio_channel=old\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Interface,
+                "",
+                json!({"audio": {"device_identifier": "old"}}),
+            )],
+        ),
         &Media,
         prepare,
         device,
         clock(),
     )
     .unwrap();
-    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-    assert!(runtime.adapter_control_mut("1000", 1).is_some());
-    runtime
-        .reload(
-            ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
-            &Media,
-            prepare,
-            device,
-            clock(),
-        )
-        .unwrap();
+    let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+    assert!(runtime.adapter_control_mut(PORT, 1).is_some());
+    station_fixture::reload(
+        &mut runtime,
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Interface,
+                "",
+                json!({"audio": {"device_identifier": "new"}}),
+            )],
+        ),
+        &Media,
+        prepare,
+        device,
+        clock(),
+    )
+    .unwrap();
     drop(rx.acquire());
     drop(tx.acquire());
     runtime.reclaim();
     assert_eq!(drops.load(Ordering::Relaxed), 0);
-    assert!(runtime.adapter_control_mut("1000", 1).is_some());
-    assert!(runtime.detached("1000", 1));
+    assert!(runtime.adapter_control_mut(PORT, 1).is_some());
+    assert!(runtime.detached(PORT, 1));
     runtime.reclaim();
     assert_eq!(drops.load(Ordering::Relaxed), 1);
-    assert!(runtime.adapter_control_mut("1000", 2).is_some());
+    assert!(runtime.adapter_control_mut(PORT, 2).is_some());
     assert!(!runtime.stop(0));
-    assert!(runtime.adapter_control_mut("1000", 2).is_some());
-    assert!(runtime.detached("1000", 2));
+    assert!(runtime.adapter_control_mut(PORT, 2).is_some());
+    assert!(runtime.detached(PORT, 2));
     assert!(runtime.stop(0));
     assert_eq!(drops.load(Ordering::Relaxed), 2);
 }
@@ -3292,8 +3687,11 @@ fn runtime_can_be_transferred_to_its_serialized_executor_owner() {
 #[test]
 fn control_views_and_real_radio_digit_drain_share_one_current_node() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let document = ConfigDocument::parse("[1000]\nunknown=yes\n").unwrap();
-    let mut runtime = Runtime::start(
+    let document = station_fixture::configuration(
+        &[(PORT, "1000")],
+        &[(PORT, ResourceKind::Radio, "", json!({"unknown":true}))],
+    );
+    let mut runtime = station_fixture::start(
         document.clone(),
         &Media,
         adapter,
@@ -3301,25 +3699,24 @@ fn control_views_and_real_radio_digit_drain_share_one_current_node() {
         clock(),
     )
     .unwrap();
-    assert_eq!(runtime.document(), &document);
-    assert_eq!(runtime.warnings().len(), 1);
-    assert_eq!(runtime.node("1000").unwrap().settings().channel, "1000");
-    assert_eq!(runtime.node("1000").unwrap().work().unwrap().id(), 1);
-    assert_eq!(runtime.topology("1000").as_deref(), Some(""));
+    assert!(Arc::ptr_eq(
+        runtime.modular_configuration().unwrap(),
+        &document
+    ));
+    assert_eq!(document.radio.warnings().len(), 1);
+    assert_eq!(runtime.node(PORT).unwrap().settings().channel, PORT);
+    assert_eq!(runtime.node(PORT).unwrap().work().unwrap().id(), 1);
+    assert_eq!(runtime.topology(PORT).as_deref(), Some(""));
     assert_eq!(runtime.topology("missing"), None);
     assert!(
         runtime
             .digit("missing", super::dtmf::DigitEvent::Lost)
             .is_none()
     );
-    assert!(
-        runtime
-            .digit("1000", super::dtmf::DigitEvent::Lost)
-            .is_none()
-    );
+    assert!(runtime.digit(PORT, super::dtmf::DigitEvent::Lost).is_none());
     assert!(!runtime.detached("missing", 1));
-    assert!(runtime.adapter_control_mut("1000", 99).is_none());
-    let (mut rx, _tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    assert!(runtime.adapter_control_mut(PORT, 99).is_none());
+    let (mut rx, _tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     for (row, column) in [
         (941.0, 1209.0),
         (852.0, 1209.0),
@@ -3341,29 +3738,28 @@ fn control_views_and_real_radio_digit_drain_share_one_current_node() {
             rx.acquire().unwrap().state().process(true, &mut pcm, 1000);
         }
     }
-    let events = runtime.node("1000").unwrap().drain_digits();
+    let events = runtime.node(PORT).unwrap().drain_digits();
     let commands: Vec<_> = events
         .into_iter()
-        .filter_map(|event| runtime.digit("1000", event))
+        .filter_map(|event| runtime.digit(PORT, event))
         .collect();
     assert_eq!(commands.len(), 1);
-    assert!(
-        matches!(&commands[0], super::dtmf::DigitOutcome::Operation(operation) if operation.command.action == LinkAction::Status)
-    );
-    runtime.node("1000").unwrap().discard_digits();
-    assert!(runtime.node("1000").unwrap().drain_digits().is_empty());
+    let Some(super::dtmf::DigitOutcome::Mapped(input)) = commands.into_iter().next() else {
+        panic!("registered RF digit sequence")
+    };
+    assert!(matches!(
+        runtime.dispatch_mapping(PORT, input, clock()),
+        Ok(links::LinkEffect::Telemetry(LinkAction::Status, None))
+    ));
+    runtime.node(PORT).unwrap().discard_digits();
+    assert!(runtime.node(PORT).unwrap().drain_digits().is_empty());
     assert!(runtime.stop(1001));
     assert_eq!(
         runtime.replace_adapter(
             "missing",
             adapter(
                 "1000",
-                &ResolvedNodeSettings::resolve(
-                    &document,
-                    &crate::config::NodeId::new("1000").unwrap()
-                )
-                .unwrap()
-                .value
+                &document.station_settings(PORT.parse().unwrap()).unwrap()
             )
             .unwrap(),
             1002
@@ -3371,7 +3767,8 @@ fn control_views_and_real_radio_digit_drain_share_one_current_node() {
         Err(RuntimeError::Busy)
     );
     assert_eq!(
-        runtime.reload(
+        station_fixture::reload(
+            &mut runtime,
             document,
             &Media,
             adapter,
@@ -3389,15 +3786,16 @@ fn removing_configured_route_emits_one_detach_before_any_replacement_dial() {
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
     };
-    let text = "[1000]\n[permanent 1000 main]\nremote_node=2000\n";
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(text).unwrap(),
-        &Media,
-        adapter,
-        device,
-        clock(),
-    )
-    .unwrap();
+    let config = station_fixture::configuration(
+        &[(PORT, "radio")],
+        &[(
+            PORT,
+            ResourceKind::PermanentGroup,
+            "main",
+            json!({"remote_node":["2000"]}),
+        )],
+    );
+    let mut runtime = station_fixture::start(config, &Media, adapter, device, clock()).unwrap();
     let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
         panic!("permanent dial")
     };
@@ -3405,24 +3803,31 @@ fn removing_configured_route_emits_one_detach_before_any_replacement_dial() {
         runtime.finish_connect(&local, attempt, true, clock()),
         Ok(true)
     );
-    runtime
-        .reload(
-            ConfigDocument::parse("[1000]\n[permanent 1000 replacement]\nremote_node=3000\n")
-                .unwrap(),
-            &Media,
-            adapter,
-            device,
-            clock(),
-        )
-        .unwrap();
+    station_fixture::reload(
+        &mut runtime,
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::PermanentGroup,
+                "replacement",
+                json!({"remote_node": ["3000"]}),
+            )],
+        ),
+        &Media,
+        adapter,
+        device,
+        clock(),
+    )
+    .unwrap();
     assert!(runtime.next_link().is_none());
     let effects = runtime.take_effects();
     assert!(
-        matches!(effects.as_slice(), [(local, LinkEffect::Detach(names))] if local == "1000" && names == &["2000"])
+        matches!(effects.as_slice(), [(local, LinkEffect::Detach(names))] if local == PORT && names == &["2000"])
     );
     assert!(runtime.take_effects().is_empty());
     assert!(runtime.next_link().is_none());
-    runtime.peer_detached("1000", "2000", 1001);
+    runtime.peer_detached(PORT, "2000", 1001);
     let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
         panic!("replacement dial")
     };
@@ -3431,7 +3836,7 @@ fn removing_configured_route_emits_one_detach_before_any_replacement_dial() {
         runtime.finish_connect(&local, attempt, false, clock()),
         Ok(false)
     );
-    runtime.detached("1000", 1);
+    runtime.detached(PORT, 1);
     runtime.reclaim();
     runtime.stop(1002);
     for (local, effect) in runtime.take_effects() {
@@ -3441,44 +3846,44 @@ fn removing_configured_route_emits_one_detach_before_any_replacement_dial() {
             }
         }
     }
-    runtime.detached("1000", 2);
+    runtime.detached(PORT, 2);
     assert!(runtime.stop(1003));
 }
 
 #[test]
 fn adapter_replacement_rejects_changed_callback_bounds_and_pending_retirement() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone()))),
         clock(),
     )
     .unwrap();
-    let settings = runtime.settings("1000").unwrap().clone();
+    let settings = runtime.settings(PORT).unwrap().clone();
     assert_eq!(
-        runtime.replace_adapter("missing", adapter("1000", &settings).unwrap(), 1000),
+        runtime.replace_adapter("missing", adapter(PORT, &settings).unwrap(), 1000),
         Err(RuntimeError::MissingNode)
     );
     for receive_changed in [false, true] {
-        let mut prepared = adapter("1000", &settings).unwrap();
+        let mut prepared = adapter(PORT, &settings).unwrap();
         if receive_changed {
             prepared.receive_maximum = 961;
         } else {
             prepared.transmit_maximum = 961;
         }
         assert_eq!(
-            runtime.replace_adapter("1000", prepared, 1000),
+            runtime.replace_adapter(PORT, prepared, 1000),
             Err(RuntimeError::Busy)
         );
     }
     assert_eq!(
-        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1000),
+        runtime.replace_adapter(PORT, adapter(PORT, &settings).unwrap(), 1000),
         Ok(2)
     );
     assert_eq!(
-        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1001),
+        runtime.replace_adapter(PORT, adapter(PORT, &settings).unwrap(), 1001),
         Err(RuntimeError::Busy)
     );
     assert!(runtime.stop(1002));
@@ -3495,8 +3900,8 @@ fn abnormal_runtime_drop_retains_protected_adapter_instead_of_freeing_live_audio
     }
     let dropped = Arc::new(AtomicUsize::new(0));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &Media,
         |_, _| {
             Ok(PreparedAdapter {
@@ -3511,11 +3916,11 @@ fn abnormal_runtime_drop_retains_protected_adapter_instead_of_freeing_live_audio
         clock(),
     )
     .unwrap();
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut guard = tx.acquire().unwrap();
     drop(runtime);
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
-    assert_eq!(guard.state().settings.channel, "1000");
+    assert_eq!(guard.state().settings.channel, PORT);
     drop(guard);
     assert!(tx.acquire().is_none());
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
@@ -3523,64 +3928,54 @@ fn abnormal_runtime_drop_retains_protected_adapter_instead_of_freeing_live_audio
 
 #[test]
 fn event_macros_wait_for_message_admission_and_execute_each_existing_action() {
-    for (action, target, message) in [
-        ("connect", "3000", "message=TEST\n"),
-        ("connect", "3000", "content={media}\nspeech_text=Report\n"),
-        ("disconnect", "2000", ""),
-        ("disconnect_all", "", ""),
-        ("reconnect_all", "", ""),
+    for (action, target) in [
+        ("connect", Some("3000")),
+        ("disconnect", Some("2000")),
+        ("disconnect_nonpermanent_all", None),
+        ("resume_permanent_links", None),
     ] {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let text = format!(
-            "[1000]\n[macro 1000 operation]\naction={action}\ntarget_node={target}\n[event 1000 event]\nat=daily 09:07\nmacro=operation\n{message}"
-        );
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse(&text).unwrap(),
-            &Media,
-            adapter,
-            |_, _| Ok(Box::new(Device(log.clone()))),
-            clock(),
-        )
-        .unwrap();
-        runtime.incoming("1000", "2000", true).unwrap();
-        let event = runtime.next_event(clock()).unwrap().unwrap();
-        assert_eq!(event.operation().unwrap().node, target);
-        if !message.is_empty() {
-            assert!(!runtime.complete_event(&event));
-            assert!(matches!(
-                runtime.event_command(&event, clock()),
-                Err(RuntimeError::Rejected)
-            ));
+        let mut command = json!({"action":action});
+        if let Some(peer) = target {
+            command["parameter"] = json!(peer);
         }
-        runtime.queue_event(&event).unwrap();
-        match runtime.event_command(&event, clock()).unwrap() {
+        let mut runtime = scheduled_runtime(
+            json!([{"action":"message","message":"Report","destination":"local"},command]),
+            0,
+            &Media,
+        );
+        runtime.incoming(PORT, "2000", true).unwrap();
+        let at = event_clock(120);
+        let (effect, notice) = runtime.advance_commands(PORT, at).unwrap().unwrap();
+        assert!(matches!(effect, links::LinkEffect::None));
+        assert!(runtime.advance_commands(PORT, at).unwrap().is_none());
+        notice.settle(true);
+        let (effect, receipt) = runtime.advance_commands(PORT, at).unwrap().unwrap();
+        match effect {
             links::LinkEffect::Connect(attempt) => {
                 assert_eq!(attempt.remote(), "3000");
-                assert!(
-                    runtime
-                        .finish_connect("1000", attempt, true, clock())
-                        .unwrap()
-                );
+                assert!(runtime.finish_connect(PORT, attempt, true, at).unwrap());
             }
             links::LinkEffect::Detach(peers) => assert_eq!(peers, ["2000"]),
-            links::LinkEffect::None => assert_eq!(action, "reconnect_all"),
+            links::LinkEffect::None => assert_eq!(action, "resume_permanent_links"),
             _ => panic!("unexpected macro effect"),
         }
-        assert!(runtime.complete_event(&event));
-        assert!(!runtime.complete_event(&event));
-        assert!(runtime.next_event(clock()).unwrap().is_none());
-        assert!(matches!(
-            runtime.event_command(&event, clock()),
-            Err(RuntimeError::Rejected)
-        ));
-        runtime.stop(0);
+        receipt.settle(true);
+        assert!(runtime.advance_commands(PORT, at).unwrap().is_none());
+        assert_eq!(
+            runtime
+                .node(PORT)
+                .unwrap()
+                .take_command_completion()
+                .unwrap()
+                .outcome,
+            crate::command_language::MacroOutcome::Completed
+        );
+        runtime.stop(at.now_ms);
         for peer in ["2000", "3000"] {
-            runtime.peer_detached("1000", peer, 0);
+            runtime.peer_detached(PORT, peer, at.now_ms);
         }
-        runtime.detached("1000", 1);
-        assert!(runtime.stop(0));
-        assert!(runtime.next_event(clock()).unwrap().is_none());
-        assert_eq!(runtime.queue_event(&event), Err(RuntimeError::Rejected));
+        runtime.detached(PORT, 1);
+        assert!(runtime.stop(at.now_ms));
     }
 }
 
@@ -3616,8 +4011,8 @@ fn status_actions_register_speech_with_station_and_queue_ring_playback() {
     ] {
         let media = Speech(Arc::new(Mutex::new(Vec::new())));
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse("[1000]\n").unwrap(),
+        let mut runtime = station_fixture::start(
+            station_fixture::single_port(true),
             &media,
             adapter,
             |_, _| Ok(Box::new(Device(log.clone()))),
@@ -3625,19 +4020,19 @@ fn status_actions_register_speech_with_station_and_queue_ring_playback() {
         )
         .unwrap();
         runtime
-            .queue_status("1000", action, last, clock(), None)
+            .queue_status(PORT, action, last, clock(), None)
             .unwrap();
         assert_eq!(*media.0.lock().unwrap(), [expected]);
         for _ in 0..3 {
             runtime
-                .queue_status("1000", action, last, clock(), None)
+                .queue_status(PORT, action, last, clock(), None)
                 .unwrap();
         }
         assert_eq!(
-            runtime.queue_status("1000", action, last, clock(), None),
+            runtime.queue_status(PORT, action, last, clock(), None),
             Err(RuntimeError::Rejected)
         );
-        let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
         let mut generation = rx.acquire_pair(&mut tx).unwrap();
         let mut audio = [0.0; 960];
         for _ in 0..13 {
@@ -3652,7 +4047,7 @@ fn status_actions_register_speech_with_station_and_queue_ring_playback() {
         let mut invalid_clock = clock();
         invalid_clock.civil = None;
         assert_eq!(
-            runtime.queue_status("1000", LinkAction::Time, None, invalid_clock, None),
+            runtime.queue_status(PORT, LinkAction::Time, None, invalid_clock, None),
             Err(RuntimeError::Clock)
         );
         assert_eq!(
@@ -3685,8 +4080,8 @@ fn loop_rejection_queues_localized_rf_speech_to_the_local_transmitter() {
 
     let media = Speech(Arc::new(Mutex::new(Vec::new())));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
@@ -3694,13 +4089,13 @@ fn loop_rejection_queues_localized_rf_speech_to_the_local_transmitter() {
     )
     .unwrap();
 
-    runtime.queue_loop_rejected("1000", "2000", None).unwrap();
+    runtime.queue_loop_rejected(PORT, "2000", None).unwrap();
     assert_eq!(
         *media.0.lock().unwrap(),
         ["Connection to node,2,0,0,0 rejected because it would create a link loop"]
     );
     runtime
-        .queue_remote_command_unsupported("1000", "3123456", None)
+        .queue_remote_command_unsupported(PORT, "3123456", None)
         .unwrap();
     assert_eq!(
         media.0.lock().unwrap().last().unwrap(),
@@ -3773,9 +4168,32 @@ impl NativeMediaPreparer for LinkNoticeMedia {
     }
 }
 
-fn link_notice_runtime(document: &str, reject_connect: Arc<AtomicBool>) -> Runtime {
-    Runtime::start(
-        ConfigDocument::parse(document).unwrap(),
+fn link_event_configuration(
+    ports: &[(&str, &str, u32)],
+    extra: &[(&str, ResourceKind, &str, serde_json::Value)],
+) -> Arc<crate::config::resources::generation::RuntimeConfiguration> {
+    let stations = ports
+        .iter()
+        .map(|&(id, key, _)| (id, key))
+        .collect::<Vec<_>>();
+    let mut resources = extra.to_vec();
+    for &(id, _, number) in ports {
+        resources.push((
+            id,
+            ResourceKind::Allstarlink,
+            "",
+            json!({"node_number":number}),
+        ));
+    }
+    station_fixture::configuration(&stations, &resources)
+}
+
+fn link_notice_runtime(
+    configuration: Arc<crate::config::resources::generation::RuntimeConfiguration>,
+    reject_connect: Arc<AtomicBool>,
+) -> Runtime {
+    station_fixture::start(
+        configuration,
         &LinkNoticeMedia(reject_connect),
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
@@ -3787,12 +4205,20 @@ fn link_notice_runtime(document: &str, reject_connect: Arc<AtomicBool>) -> Runti
 #[test]
 fn disabled_echo_announcements_do_not_queue_audio_or_suppress_ordinary_links() {
     let mut runtime = link_notice_runtime(
-        "[1000]\n[echolink]\nannouncement=off\n",
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Echolink,
+                "",
+                json!({"announcement":"off"}),
+            )],
+        ),
         Arc::new(AtomicBool::new(false)),
     );
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     runtime
-        .queue_echo_link_event("1000", "3002000", "K0TEST", true)
+        .queue_echo_link_event(PORT, "3002000", "K0TEST", true)
         .unwrap();
     let mut output = [0.0; 12016];
     tx.acquire()
@@ -3801,7 +4227,7 @@ fn disabled_echo_announcements_do_not_queue_audio_or_suppress_ordinary_links() {
         .controller
         .process_audio(false, false, &[], &mut output);
     assert!(output.iter().all(|sample| *sample == 0.0));
-    runtime.queue_link_event("1000", "2000", true).unwrap();
+    runtime.queue_link_event(PORT, "2000", true).unwrap();
     tx.acquire()
         .unwrap()
         .state()
@@ -3814,13 +4240,20 @@ fn disabled_echo_announcements_do_not_queue_audio_or_suppress_ordinary_links() {
 #[test]
 fn link_reconnect_skips_queued_disconnect_for_every_listener_and_reverse_pair() {
     let mut runtime = link_notice_runtime(
-        "[1000]\nradio_channel=first\n[2000]\nradio_channel=second\n[3000]\nradio_channel=third\n",
+        link_event_configuration(
+            &[
+                (PORT, "north", 1000),
+                (SECOND, "east", 2000),
+                (THIRD, "west", 3000),
+            ],
+            &[],
+        ),
         Arc::new(AtomicBool::new(false)),
     );
-    runtime.queue_link_event("1000", "2000", false).unwrap();
-    runtime.queue_link_event("2000", "1000", true).unwrap();
+    runtime.queue_link_event(PORT, "2000", false).unwrap();
+    runtime.queue_link_event(SECOND, "1000", true).unwrap();
 
-    for local in ["1000", "2000", "3000"] {
+    for local in [PORT, SECOND, THIRD] {
         let (_, mut tx) = runtime.node(local).unwrap().register_audio().unwrap();
         let mut audio = vec![0.0; 12_016];
         tx.acquire()
@@ -3839,9 +4272,12 @@ fn link_reconnect_skips_queued_disconnect_for_every_listener_and_reverse_pair() 
 
 #[test]
 fn link_reconnect_truncates_a_disconnect_that_already_started() {
-    let mut runtime = link_notice_runtime("[1000]\n", Arc::new(AtomicBool::new(false)));
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-    runtime.queue_link_event("1000", "2000", false).unwrap();
+    let mut runtime = link_notice_runtime(
+        station_fixture::single_port(true),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+    runtime.queue_link_event(PORT, "2000", false).unwrap();
     let mut prefix = vec![0.0; 12_002];
     tx.acquire()
         .unwrap()
@@ -3850,7 +4286,7 @@ fn link_reconnect_truncates_a_disconnect_that_already_started() {
         .process_audio(false, false, &[], &mut prefix);
     assert_eq!(prefix.iter().filter(|sample| **sample == 0.5).count(), 2);
 
-    runtime.queue_link_event("1000", "2000", true).unwrap();
+    runtime.queue_link_event(PORT, "2000", true).unwrap();
     let mut audio = [0.0; 8];
     tx.acquire()
         .unwrap()
@@ -3864,11 +4300,14 @@ fn link_reconnect_truncates_a_disconnect_that_already_started() {
 #[test]
 fn link_reconnect_cancels_only_the_same_actual_link_pair() {
     for (first, second) in [("3000", "2000"), ("1000", "3000")] {
-        let mut runtime = link_notice_runtime("[4000]\n", Arc::new(AtomicBool::new(false)));
+        let mut runtime = link_notice_runtime(
+            station_fixture::configuration(&[(FOURTH, "4000")], &[]),
+            Arc::new(AtomicBool::new(false)),
+        );
         runtime.queue_link_event("1000", "2000", false).unwrap();
         runtime.queue_link_event(first, second, false).unwrap();
         runtime.queue_link_event("2000", "1000", true).unwrap();
-        let (_, mut tx) = runtime.node("4000").unwrap().register_audio().unwrap();
+        let (_, mut tx) = runtime.node(FOURTH).unwrap().register_audio().unwrap();
         let mut audio = vec![0.0; 12_016];
         tx.acquire()
             .unwrap()
@@ -3884,14 +4323,17 @@ fn link_reconnect_cancels_only_the_same_actual_link_pair() {
 #[test]
 fn link_reconnect_cancels_disconnects_before_connect_preparation_fails() {
     let reject_connect = Arc::new(AtomicBool::new(false));
-    let mut runtime = link_notice_runtime("[1000]\n", Arc::clone(&reject_connect));
-    runtime.queue_link_event("1000", "2000", false).unwrap();
+    let mut runtime = link_notice_runtime(
+        station_fixture::single_port(true),
+        Arc::clone(&reject_connect),
+    );
+    runtime.queue_link_event(PORT, "2000", false).unwrap();
     reject_connect.store(true, Ordering::Release);
     assert_eq!(
-        runtime.queue_link_event("1000", "2000", true),
+        runtime.queue_link_event(PORT, "2000", true),
         Err(RuntimeError::Preparation)
     );
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut audio = vec![0.0; 12_016];
     tx.acquire()
         .unwrap()
@@ -3904,18 +4346,21 @@ fn link_reconnect_cancels_disconnects_before_connect_preparation_fails() {
 
 #[test]
 fn link_reconnect_keeps_bounded_admission_and_reclaims_cancelled_credit() {
-    let mut runtime = link_notice_runtime("[1000]\n", Arc::new(AtomicBool::new(false)));
+    let mut runtime = link_notice_runtime(
+        station_fixture::single_port(true),
+        Arc::new(AtomicBool::new(false)),
+    );
     for connected in [false, true, false, true] {
-        runtime.queue_link_event("1000", "2000", connected).unwrap();
+        runtime.queue_link_event(PORT, "2000", connected).unwrap();
     }
     for connected in [false, true] {
         assert_eq!(
-            runtime.queue_link_event("1000", "2000", connected),
+            runtime.queue_link_event(PORT, "2000", connected),
             Err(RuntimeError::Rejected),
             "cancellation does not bypass the four-item ownership limit"
         );
     }
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut audio = vec![0.0; 12_032];
     tx.acquire()
         .unwrap()
@@ -3925,7 +4370,7 @@ fn link_reconnect_keeps_bounded_admission_and_reclaims_cancelled_credit() {
     let heard: Vec<_> = audio.into_iter().filter(|sample| *sample != 0.0).collect();
     assert_eq!(heard, [0.25; 8], "both disconnect attempts were superseded");
     // Public event admission reclaims completed/cancelled media on control first.
-    runtime.queue_link_event("1000", "2000", true).unwrap();
+    runtime.queue_link_event(PORT, "2000", true).unwrap();
     assert!(runtime.stop(0));
 }
 
@@ -3951,13 +4396,15 @@ fn link_lifecycle_events_register_speech_for_every_node() {
 
     let media = Speech(Arc::new(Mutex::new(Vec::new())));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\nradio_channel=first\n\
-             [2000]\nradio_channel=second\n\
-             [3000]\nradio_channel=third\n",
-        )
-        .unwrap(),
+    let mut runtime = station_fixture::start(
+        link_event_configuration(
+            &[
+                (PORT, "north", 1000),
+                (SECOND, "east", 2000),
+                (THIRD, "west", 3000),
+            ],
+            &[],
+        ),
         &media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
@@ -3965,8 +4412,8 @@ fn link_lifecycle_events_register_speech_for_every_node() {
     )
     .unwrap();
 
-    runtime.queue_link_event("1000", "2000", true).unwrap();
-    runtime.queue_link_event("1000", "2000", false).unwrap();
+    runtime.queue_link_event(PORT, "2000", true).unwrap();
+    runtime.queue_link_event(PORT, "2000", false).unwrap();
     assert_eq!(
         *media.0.lock().unwrap(),
         [
@@ -4002,11 +4449,24 @@ fn group_members_skip_direct_events_but_unrelated_nodes_hear_pair_events() {
     }
     let media = Speech(Arc::new(Mutex::new(Vec::new())));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\nradio_channel=first\n[permanent 1000 network]\nremote_node=2000,3000\n[4000]\n",
-        )
-        .unwrap(),
+    let mut runtime = station_fixture::start(
+        link_event_configuration(
+            &[(PORT, "north", 1000), (FOURTH, "monitor", 4000)],
+            &[
+                (
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio": {"device_identifier": "first"}}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::PermanentGroup,
+                    "network",
+                    json!({"remote_node": ["2000", "3000"]}),
+                ),
+            ],
+        ),
         &media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
@@ -4014,8 +4474,8 @@ fn group_members_skip_direct_events_but_unrelated_nodes_hear_pair_events() {
     )
     .unwrap();
 
-    runtime.queue_link_event("1000", "2000", true).unwrap();
-    runtime.queue_link_event("1000", "2000", false).unwrap();
+    runtime.queue_link_event(PORT, "2000", true).unwrap();
+    runtime.queue_link_event(PORT, "2000", false).unwrap();
     runtime.queue_link_event("2000", "1000", true).unwrap();
     runtime.queue_link_event("2000", "1000", false).unwrap();
     assert_eq!(
@@ -4028,6 +4488,182 @@ fn group_members_skip_direct_events_but_unrelated_nodes_hear_pair_events() {
         ]
     );
     assert!(runtime.stop(0));
+}
+
+#[test]
+fn operator_pause_announces_a_connected_priority_group_member() {
+    let spoken = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::PermanentGroup,
+                "network",
+                json!({"group_name":"Blind Hams","remote_node":["506315"]}),
+            )],
+        ),
+        &CapturingMedia(spoken.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Default::default())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let (_, links::LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+        panic!("expected permanent dial");
+    };
+    assert_eq!(attempt.remote(), "506315");
+    assert!(
+        runtime
+            .finish_connect(PORT, attempt, true, clock())
+            .unwrap()
+    );
+    runtime.queue_link_event(PORT, "506315", true).unwrap();
+    assert!(spoken.lock().unwrap().is_empty(), "automatic member event");
+    // The default registered pause command is fixed and takes no node argument.
+    assert!(matches!(
+        enter_mapping(&mut runtime, PORT, None, "*806506315#", clock().now_ms),
+        Err(RuntimeError::Rejected)
+    ));
+    let links::LinkEffect::Detach(removed) =
+        enter_mapping(&mut runtime, PORT, None, "*806#", clock().now_ms).unwrap()
+    else {
+        panic!("expected manual disconnect");
+    };
+    assert_eq!(removed, ["506315"]);
+    for remote in removed {
+        runtime.peer_detached(PORT, &remote, clock().now_ms);
+        runtime.queue_link_event(PORT, &remote, false).unwrap();
+    }
+    runtime.queue_priority_group_events().unwrap();
+    let actual = spoken.lock().unwrap().clone();
+    assert!(runtime.stop(clock().now_ms));
+    assert_eq!(actual, ["node,5,0,6,3,1,5 disconnected"]);
+}
+
+fn single_priority_group() -> Arc<crate::config::resources::generation::RuntimeConfiguration> {
+    station_fixture::configuration(
+        &[(PORT, "1000")],
+        &[(
+            PORT,
+            ResourceKind::PermanentGroup,
+            "network",
+            json!({"group_name":"Blind Hams Network","remote_node":["506315"]}),
+        )],
+    )
+}
+
+#[test]
+fn resuming_a_priority_group_waits_for_the_dial_outcome_before_announcing() {
+    let spoken = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = station_fixture::start(
+        single_priority_group(),
+        &CapturingMedia(spoken.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Default::default())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let (_, links::LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+        panic!("expected initial group dial");
+    };
+    assert_eq!(
+        runtime.finish_connect(PORT, attempt, true, clock()),
+        Ok(true)
+    );
+    let group = runtime
+        .node(PORT)
+        .unwrap()
+        .links()
+        .group_member("506315")
+        .unwrap();
+    assert_eq!(group.selection().callback_slot(true), 1);
+    runtime.queue_priority_group_events().unwrap();
+    let links::LinkEffect::Detach(removed) =
+        enter_mapping(&mut runtime, PORT, None, "*806#", clock().now_ms).unwrap()
+    else {
+        panic!("expected manual disconnect");
+    };
+    assert_eq!(removed, ["506315"]);
+    runtime.peer_detached(PORT, "506315", clock().now_ms);
+    runtime.queue_priority_group_events().unwrap();
+    assert!(matches!(
+        enter_mapping(&mut runtime, PORT, None, "*816#", clock().now_ms),
+        Ok(links::LinkEffect::None)
+    ));
+    runtime.queue_priority_group_events().unwrap();
+    let node = runtime.node(PORT).unwrap();
+    let work = node.work().unwrap();
+    let retry = node.links().take_retry(clock().now_ms, work).unwrap();
+    assert_eq!(retry.remote(), "506315");
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(
+        runtime
+            .node(PORT)
+            .unwrap()
+            .links()
+            .finish_retry(retry, true, clock().now_ms),
+        Ok(true)
+    );
+    assert_eq!(group.selection().callback_slot(true), 1);
+    runtime.queue_priority_group_events().unwrap();
+    let actual = spoken.lock().unwrap().clone();
+    runtime.node(PORT).unwrap().links().ended("506315");
+    runtime.peer_detached(PORT, "506315", clock().now_ms);
+    assert!(runtime.stop(clock().now_ms));
+    assert_eq!(
+        actual,
+        ["Blind Hams Network. node,5,0,6,3,1,5 connected"; 2]
+    );
+}
+
+#[test]
+fn recovered_group_cancels_queued_outage_speech_before_rf_playback() {
+    let mut audible = Vec::new();
+    for recover in [false, true] {
+        let mut runtime =
+            link_notice_runtime(single_priority_group(), Arc::new(AtomicBool::new(false)));
+        let (_, links::LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+            panic!("expected initial group dial");
+        };
+        assert_eq!(
+            runtime.finish_connect(PORT, attempt, false, clock()),
+            Ok(false)
+        );
+        runtime.queue_priority_group_events().unwrap();
+        runtime.queue_priority_group_events().unwrap();
+        if recover {
+            let node = runtime.node(PORT).unwrap();
+            let work = node.work().unwrap();
+            let retry = node.links().take_retry(clock().now_ms, work).unwrap();
+            assert_eq!(retry.remote(), "506315");
+            assert_eq!(
+                node.links().finish_retry(retry, true, clock().now_ms),
+                Ok(true)
+            );
+            // The recovered transport is already live, before its first callback selects a slot.
+            runtime.queue_priority_group_events().unwrap();
+        }
+        let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+        let mut output = vec![0.0; 12_016];
+        tx.acquire()
+            .unwrap()
+            .state()
+            .controller
+            .process_audio(false, false, &[], &mut output);
+        audible.push(
+            output
+                .into_iter()
+                .filter(|sample| *sample != 0.0)
+                .collect::<Vec<_>>(),
+        );
+        if recover {
+            runtime.node(PORT).unwrap().links().ended("506315");
+            runtime.peer_detached(PORT, "506315", clock().now_ms);
+        }
+        assert!(runtime.stop(clock().now_ms));
+    }
+    assert_eq!(audible, [vec![0.25; 4], vec![]]);
 }
 
 #[test]
@@ -4052,11 +4688,16 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     }
     let media = Speech(Arc::new(Mutex::new(Vec::new())));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\n[permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Blind Hams Network\n",
-        )
-        .unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::PermanentGroup,
+                "network",
+                json!({"remote_node": ["2000", "3000"], "group_name": "Blind Hams Network"}),
+            )],
+        ),
         &media,
         adapter,
         |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
@@ -4065,7 +4706,7 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     .unwrap();
     runtime.queue_priority_group_events().unwrap();
     let group = runtime
-        .node("1000")
+        .node(PORT)
         .unwrap()
         .links()
         .group_member("2000")
@@ -4095,7 +4736,7 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     assert_eq!(media.0.lock().unwrap().len(), 1);
 
     for remote in ["2000", "3000"] {
-        let node = runtime.node("1000").unwrap();
+        let node = runtime.node(PORT).unwrap();
         node.links().ended(remote);
         assert_ne!(
             node.links().priority_groups()[0].selected.as_deref(),
@@ -4106,7 +4747,7 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     // The last peer's removed audio path cannot clear the old callback-active slot.
     assert_eq!(group.selection().active().unwrap().get(), 2);
     for now_ms in [1000, 2000, 4000] {
-        let node = runtime.node("1000").unwrap();
+        let node = runtime.node(PORT).unwrap();
         let work = node.work().unwrap();
         let retry = node.links().take_retry(now_ms, work).unwrap();
         assert_eq!(node.links().finish_retry(retry, false, now_ms), Ok(false));
@@ -4119,7 +4760,7 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
             "Blind Hams Network is unavailable",
         ]
     );
-    let node = runtime.node("1000").unwrap();
+    let node = runtime.node(PORT).unwrap();
     let work = node.work().unwrap();
     let retry = node.links().take_retry(100_000, work).unwrap();
     let recovered = retry.remote().to_owned();
@@ -4128,7 +4769,7 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     runtime.queue_priority_group_events().unwrap();
     assert_eq!(media.0.lock().unwrap().len(), 2);
 
-    let node = runtime.node("1000").unwrap();
+    let node = runtime.node(PORT).unwrap();
     node.links().ended(&recovered);
     node.links().reclaimed(&recovered, 100_001);
     runtime.queue_priority_group_events().unwrap();
@@ -4161,21 +4802,22 @@ fn scheduled_group_telemetry_uses_only_the_active_same_peer_schedule_once() {
             CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, 0).unwrap(),
             0,
         ));
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse(
-                "[1000]\n[permanent 1000 primary]\nremote_node=2000\ngroup_name=Primary\n\
-                 [schedule 1000 morning]\nremote_node=3000\ngroup_name=Morning Net\n\
-                 replace_permanent=primary\nstart_time=09:30\nend_time=11:00\nend_inactivity_ms=60000\n\
-                 [schedule 1000 evening]\nremote_node=3000\ngroup_name=Evening Net\n\
-                 replace_permanent=primary\nstart_time=20:00\nend_time=21:30\n",
-            )
-            .unwrap(),
+        let mut runtime = station_fixture::start(
+            station_fixture::single_port(true),
             &CapturingMedia(Arc::clone(&messages)),
             adapter,
             |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
             now,
         )
         .unwrap();
+        attach_windows(
+            &mut runtime,
+            "Primary",
+            &[
+                ("morning", "Morning Net", "09:30", "11:00", 60000, 0, 0),
+                ("evening", "Evening Net", "20:00", "21:30", 0, 0, 0),
+            ],
+        );
         runtime.tick_links(now);
         let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
             panic!("active group dial")
@@ -4187,7 +4829,7 @@ fn scheduled_group_telemetry_uses_only_the_active_same_peer_schedule_once() {
         );
         if answered {
             let group = runtime
-                .node("1000")
+                .node(PORT)
                 .unwrap()
                 .links()
                 .group_member(remote)
@@ -4201,7 +4843,7 @@ fn scheduled_group_telemetry_uses_only_the_active_same_peer_schedule_once() {
             [expected],
             "hour={hour}, answered={answered}"
         );
-        let node = runtime.node("1000").unwrap();
+        let node = runtime.node(PORT).unwrap();
         node.links().ended(remote);
         node.links().reclaimed(remote, now.now_ms);
         assert!(runtime.stop(now.now_ms));
@@ -4245,11 +4887,16 @@ fn priority_group_media_failure_is_reported_after_recording_the_transition() {
     }
 
     use super::links::LinkEffect;
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\n[permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Network\n",
-        )
-        .unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::PermanentGroup,
+                "network",
+                json!({"remote_node": ["2000", "3000"], "group_name": "Network"}),
+            )],
+        ),
         &RejectingMedia,
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
@@ -4257,7 +4904,7 @@ fn priority_group_media_failure_is_reported_after_recording_the_transition() {
     )
     .unwrap();
     let group = runtime
-        .node("1000")
+        .node(PORT)
         .unwrap()
         .links()
         .group_member("2000")
@@ -4273,7 +4920,7 @@ fn priority_group_media_failure_is_reported_after_recording_the_transition() {
     }
     assert_eq!(group.selection().callback_slot(true), 1);
     assert_eq!(
-        runtime.node("1000").unwrap().links().priority_groups()[0].selected,
+        runtime.node(PORT).unwrap().links().priority_groups()[0].selected,
         Some("2000".to_owned())
     );
 
@@ -4289,11 +4936,16 @@ fn priority_group_event_reports_a_full_status_queue() {
     use super::links::LinkEffect;
 
     let media = CapturingMedia(Arc::new(Mutex::new(Vec::new())));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(
-            "[1000]\n[permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Network\n",
-        )
-        .unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::PermanentGroup,
+                "network",
+                json!({"remote_node": ["2000", "3000"], "group_name": "Network"}),
+            )],
+        ),
         &media,
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
@@ -4310,7 +4962,7 @@ fn priority_group_event_reports_a_full_status_queue() {
         );
     }
     runtime
-        .node("1000")
+        .node(PORT)
         .unwrap()
         .links()
         .group_member("2000")
@@ -4325,7 +4977,7 @@ fn priority_group_event_reports_a_full_status_queue() {
         Err(RuntimeError::Rejected)
     );
     assert_eq!(
-        runtime.node("1000").unwrap().links().priority_groups()[0].selected,
+        runtime.node(PORT).unwrap().links().priority_groups()[0].selected,
         Some("2000".to_owned())
     );
 
@@ -4334,8 +4986,8 @@ fn priority_group_event_reports_a_full_status_queue() {
         Err(RuntimeError::Rejected)
     );
     for remote in ["2000", "3000"] {
-        runtime.node("1000").unwrap().links().ended(remote);
-        runtime.peer_detached("1000", remote, 0);
+        runtime.node(PORT).unwrap().links().ended(remote);
+        runtime.peer_detached(PORT, remote, 0);
     }
     assert!(runtime.stop(0));
 }
@@ -4343,8 +4995,16 @@ fn priority_group_event_reports_a_full_status_queue() {
 #[test]
 fn completed_parrot_capture_is_measured_localized_and_queued_for_playback() {
     let messages = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Radio,
+                "",
+                json!({"parrot": {"enabled": true}}),
+            )],
+        ),
         &CapturingMedia(messages.clone()),
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
@@ -4352,7 +5012,7 @@ fn completed_parrot_capture_is_measured_localized_and_queued_for_playback() {
     )
     .unwrap();
 
-    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut receive, mut transmit) = runtime.node(PORT).unwrap().register_audio().unwrap();
     {
         let mut callback = receive.acquire_pair(&mut transmit).unwrap();
         callback
@@ -4373,15 +5033,23 @@ fn completed_parrot_capture_is_measured_localized_and_queued_for_playback() {
 #[test]
 fn parrot_capture_waits_for_receive_to_end_and_reuses_the_deferred_buffer() {
     let messages = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Radio,
+                "",
+                json!({"parrot": {"enabled": true}}),
+            )],
+        ),
         &CapturingMedia(messages.clone()),
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
-    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut receive, mut transmit) = runtime.node(PORT).unwrap().register_audio().unwrap();
     {
         let mut callback = receive.acquire_pair(&mut transmit).unwrap();
         callback
@@ -4411,15 +5079,23 @@ fn parrot_capture_waits_for_receive_to_end_and_reuses_the_deferred_buffer() {
 #[test]
 fn parrot_capture_drops_a_second_prepared_burst_while_playback_is_pending() {
     let messages = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[(
+                PORT,
+                ResourceKind::Radio,
+                "",
+                json!({"parrot": {"enabled": true}}),
+            )],
+        ),
         &CapturingMedia(messages.clone()),
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
-    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (mut receive, mut transmit) = runtime.node(PORT).unwrap().register_audio().unwrap();
     {
         let mut callback = receive.acquire_pair(&mut transmit).unwrap();
         for _ in 0..2 {
@@ -4437,7 +5113,6 @@ fn parrot_capture_drops_a_second_prepared_burst_while_playback_is_pending() {
 
 #[test]
 fn parrot_command_rejects_a_second_toggle_until_callback_acknowledges_enable() {
-    use super::dtmf::DigitEvent;
     use super::links::LinkEffect;
     use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
 
@@ -4447,43 +5122,29 @@ fn parrot_command_rejects_a_second_toggle_until_callback_acknowledges_enable() {
             .unwrap()
             .to_string()
     };
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
-    runtime.node("1000").unwrap().links().configure_admin(
+    runtime.node(PORT).unwrap().links().configure_admin(
         &hash(b"1234", "c29tZXNhbHQ"),
         &hash(b"5678", "bG9ja3NhbHQ"),
         60_000,
     );
-    let feed = |runtime: &mut Runtime, sequence: &str, now_ms: u64| {
-        let mut operation = None;
-        for digit in sequence.chars() {
-            operation = runtime
-                .digit("1000", DigitEvent::Digit { digit, now_ms })
-                .or(operation);
-        }
-        operation
-    };
-    assert!(feed(&mut runtime, "*8001234#", 1000).is_none());
-    let super::dtmf::DigitOutcome::Operation(enabled) = feed(&mut runtime, "*804", 1001).unwrap()
-    else {
-        panic!("operation")
-    };
     assert!(matches!(
-        runtime.command("1000", enabled, clock(), false),
+        enter_mapping(&mut runtime, PORT, None, "*8001234#", 1000),
+        Ok(LinkEffect::None)
+    ));
+    assert!(matches!(
+        enter_mapping(&mut runtime, PORT, None, "*804#", 1001),
         Ok(LinkEffect::ParrotEnabled(true))
     ));
-    let super::dtmf::DigitOutcome::Operation(disabled) = feed(&mut runtime, "*805", 1002).unwrap()
-    else {
-        panic!("operation")
-    };
     assert!(matches!(
-        runtime.command("1000", disabled, clock(), false),
+        enter_mapping(&mut runtime, PORT, None, "*805#", 1002),
         Err(RuntimeError::Rejected)
     ));
     assert!(runtime.stop(clock().now_ms));
@@ -4498,54 +5159,44 @@ fn accepted_peer_parrot_command_confirms_only_its_source() {
         .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
         .unwrap()
         .to_string();
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n").unwrap(),
+    let mut runtime = station_fixture::start(
+        station_fixture::single_port(true),
         &Media,
         adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
         clock(),
     )
     .unwrap();
-    runtime.incoming("1000", "2000", true).unwrap();
+    runtime.incoming(PORT, "2000", true).unwrap();
     let reply = crate::link::PeerSignals::new().reply_target();
-    let operation = {
-        let links = runtime.node("1000").unwrap().links();
-        links.configure_admin(&digest, &digest, 60_000);
-        for digit in "*8001234#".chars() {
-            assert!(
-                links
-                    .peer_digit("2000", digit, 1001, reply.clone())
-                    .is_none()
-            );
-        }
-        let mut operation = None;
-        for digit in "*804".chars() {
-            operation = links
-                .peer_digit("2000", digit, 1002, reply.clone())
-                .or(operation);
-        }
-        match operation.unwrap() {
-            super::dtmf::DigitOutcome::Operation(operation) => operation,
-            _ => panic!("operation"),
-        }
-    };
-    let mut now = clock();
-    now.now_ms = 1003;
+    let links = runtime.node(PORT).unwrap().links();
+    links.configure_admin(&digest, &digest, 60_000);
+    links
+        .attach_ingress(
+            crate::link::PeerIdentity::from_operator("2000").unwrap(),
+            reply.clone(),
+        )
+        .unwrap();
     assert!(matches!(
-        runtime.command("1000", operation, now, false),
+        enter_mapping(&mut runtime, PORT, Some(&reply), "*8001234#", 1001),
+        Ok(LinkEffect::None)
+    ));
+    assert!(matches!(
+        enter_mapping(&mut runtime, PORT, Some(&reply), "*804#", 1002),
         Ok(LinkEffect::ParrotEnabled(true))
     ));
-    runtime.node("1000").unwrap().links().ended("2000");
-    runtime.peer_detached("1000", "2000", now.now_ms);
+    let now = RuntimeClock {
+        now_ms: 1003,
+        ..clock()
+    };
+    runtime.node(PORT).unwrap().links().ended("2000");
+    runtime.peer_detached(PORT, "2000", now.now_ms);
     assert!(runtime.stop(now.now_ms));
 }
 
 #[test]
 fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_source() {
-    use super::{
-        dtmf::{DigitEvent, DigitOutcome},
-        links::LinkEffect,
-    };
+    use super::links::LinkEffect;
     use crate::{config::EchoLinkTelemetry as Mode, link::PeerSignals};
     use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
     let digest = Argon2::default()
@@ -4553,12 +5204,10 @@ fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_so
         .unwrap()
         .to_string();
     for (dynamic, peer_source) in [(false, false), (false, true), (true, false), (true, true)] {
-        let source = format!(
-            "[1000]\nlink_command_echo_telemetry=83\n[echolink]\ntelemetry=demand\ntelemetry_dynamic={}\n",
-            if dynamic { "yes" } else { "no" }
-        );
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse(&source).unwrap(),
+        let mut runtime=station_fixture::start(station_fixture::configuration(&[(PORT,"radio")],&[
+            (PORT,ResourceKind::Echolink,"",json!({"telemetry":"demand","telemetry_dynamic":dynamic})),
+            (PORT,ResourceKind::Command,"",json!({"mappings":{"echo_telemetry":{"command":"*83","protected":true,"action":"set_echo_telemetry"}}}))
+        ]),
             &Media,
             adapter,
             |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
@@ -4573,48 +5222,47 @@ fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_so
         ));
         runtime.echo_response_requested("missing", &reply, 0);
         assert!(!runtime.echo_telemetry_allows("missing", &reply, 0));
-        assert!(!runtime.echo_telemetry_allows("1000", &reply, 200000));
-        runtime.echo_response_requested("1000", &reply, 200001);
+        assert!(!runtime.echo_telemetry_allows(PORT, &reply, 200000));
+        runtime.echo_response_requested(PORT, &reply, 200001);
         // Fixed demand still answers commands; dynamic controls mode changes,
         // not the response window of the configured policy.
-        assert!(runtime.echo_telemetry_allows("1000", &reply, 200001));
-        assert!(!runtime.echo_telemetry_allows("1000", &reply, 320001));
-        assert!(!runtime.echo_telemetry_allows("1000", &other, 200001));
+        assert!(runtime.echo_telemetry_allows(PORT, &reply, 200001));
+        assert!(!runtime.echo_telemetry_allows(PORT, &reply, 320001));
+        assert!(!runtime.echo_telemetry_allows(PORT, &other, 200001));
         assert_eq!(
-            runtime
-                .set_echo_telemetry("1000", Mode::Off, 200002)
-                .is_ok(),
+            runtime.set_echo_telemetry(PORT, Mode::Off, 200002).is_ok(),
             dynamic
         );
-        runtime.incoming("1000", "2000", true).unwrap();
+        runtime.incoming(PORT, "2000", true).unwrap();
         runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .links()
             .configure_admin(&digest, &digest, 60000);
-        let feed = |runtime: &mut Runtime, sequence: &str, now_ms| {
-            let links = runtime.node("1000").unwrap().links();
-            let mut operation = None;
-            for digit in sequence.chars() {
-                let next = if peer_source {
-                    links.peer_digit("2000", digit, now_ms, reply.clone())
-                } else {
-                    links.digit(DigitEvent::Digit { digit, now_ms })
-                };
-                operation = next.or(operation);
-            }
-            operation
+        let source = peer_source.then_some(&reply);
+        if peer_source {
+            runtime
+                .node(PORT)
+                .unwrap()
+                .links()
+                .attach_ingress(
+                    crate::link::PeerIdentity::from_operator("2000").unwrap(),
+                    reply.clone(),
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            enter_mapping(&mut runtime, PORT, source, "*8001234#", 200002),
+            Ok(LinkEffect::None)
+        ));
+        let now = RuntimeClock {
+            now_ms: 200004,
+            ..clock()
         };
-        assert!(feed(&mut runtime, "*8001234#", 200002).is_none());
-        let Some(DigitOutcome::Operation(operation)) = feed(&mut runtime, "*831#", 200003) else {
-            panic!("authorized mapped telemetry command missing")
-        };
-        let mut now = clock();
-        now.now_ms = 200004;
-        let result = runtime.command("1000", operation, now, false);
+        let result = enter_mapping(&mut runtime, PORT, source, "*831#", 200003);
         if dynamic {
             assert!(matches!(result, Ok(LinkEffect::None)));
-            assert!(runtime.echo_telemetry_allows("1000", &reply, now.now_ms));
+            assert!(runtime.echo_telemetry_allows(PORT, &reply, now.now_ms));
         } else {
             assert!(matches!(result, Err(RuntimeError::Rejected)));
         }
@@ -4628,14 +5276,14 @@ fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_so
             );
             status.reply = source.clone();
             let Ok(LinkEffect::Telemetry(LinkAction::Status, actual)) =
-                runtime.command("1000", status, now, false)
+                runtime.command(PORT, status, now, false)
             else {
                 panic!("status response missing")
             };
             assert_eq!(actual, source);
         }
-        runtime.node("1000").unwrap().links().ended("2000");
-        runtime.peer_detached("1000", "2000", now.now_ms);
+        runtime.node(PORT).unwrap().links().ended("2000");
+        runtime.peer_detached(PORT, "2000", now.now_ms);
         assert!(runtime.stop(now.now_ms));
     }
 }
@@ -4666,21 +5314,52 @@ fn device_reload_rejects_outstanding_work_and_drains_in_flight_callbacks() {
                 closes: closes.clone(),
             }) as Box<dyn DeviceHandoff>)
         };
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse("[1000]\nradio_channel=old\n[2000]\nradio_channel=same\n")
-                .unwrap(),
+        let mut runtime = station_fixture::start(
+            station_fixture::configuration(
+                &[(PORT, "1000"), (SECOND, "2000")],
+                &[
+                    (
+                        PORT,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "old"}}),
+                    ),
+                    (
+                        SECOND,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "same"}}),
+                    ),
+                ],
+            ),
             &Media,
             adapter,
             device,
             clock(),
         )
         .unwrap();
-        let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
-        let work = (reason == 0).then(|| runtime.node("1000").unwrap().work().unwrap());
+        let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+        let work = (reason == 0).then(|| runtime.node(PORT).unwrap().work().unwrap());
         let protected = (reason == 2).then(|| rx.acquire().unwrap());
-        let result = runtime.reload(
-            ConfigDocument::parse("[1000]\nradio_channel=new\n[2000]\nradio_channel=same\n")
-                .unwrap(),
+        let result = station_fixture::reload(
+            &mut runtime,
+            station_fixture::configuration(
+                &[(PORT, "1000"), (SECOND, "2000")],
+                &[
+                    (
+                        PORT,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "new"}}),
+                    ),
+                    (
+                        SECOND,
+                        ResourceKind::Interface,
+                        "",
+                        json!({"audio": {"device_identifier": "same"}}),
+                    ),
+                ],
+            ),
             &Media,
             adapter,
             device,
@@ -4693,19 +5372,22 @@ fn device_reload_rejects_outstanding_work_and_drains_in_flight_callbacks() {
             assert!(runtime.reload_pending());
             assert_eq!(runtime.poll_reload(clock()), Ok(false));
         }
-        assert_eq!(runtime.settings("1000").unwrap().channel, "old");
+        assert_eq!(
+            station_fixture::selected_device(runtime.modular_configuration().unwrap(), PORT),
+            "old"
+        );
         assert_eq!(runtime.revision(), 1);
         assert_eq!(closes.load(Ordering::Relaxed), 0);
-        assert!(runtime.node("2000").unwrap().work().unwrap().is_current());
+        assert!(runtime.node(SECOND).unwrap().work().unwrap().is_current());
         if reason == 1 {
-            assert!(runtime.node("1000").unwrap().work().is_none());
+            assert!(runtime.node(PORT).unwrap().work().is_none());
         }
         if reason == 2 {
             // The running RX block retains its generation. New TX blocks cannot enter.
             assert_eq!(protected.as_ref().unwrap().id(), 1);
             assert!(tx.acquire().is_none());
             assert!(
-                runtime.node("1000").unwrap().work().is_none(),
+                runtime.node(PORT).unwrap().work().is_none(),
                 "physical handoff admitted incumbent work while RX was draining"
             );
         }
@@ -4717,8 +5399,11 @@ fn device_reload_rejects_outstanding_work_and_drains_in_flight_callbacks() {
         } else {
             assert_eq!(runtime.poll_reload(clock()), Ok(true));
             assert_eq!(closes.load(Ordering::Relaxed), 1);
-            assert_eq!(runtime.node("1000").unwrap().work().unwrap().id(), 2);
-            assert_eq!(runtime.settings("1000").unwrap().channel, "new");
+            assert_eq!(runtime.node(PORT).unwrap().work().unwrap().id(), 2);
+            assert_eq!(
+                station_fixture::selected_device(runtime.modular_configuration().unwrap(), PORT),
+                "new"
+            );
             assert_eq!(rx.acquire().unwrap().id(), 2);
             assert_eq!(tx.acquire().unwrap().id(), 2);
         }
@@ -4730,135 +5415,65 @@ fn command_runtime(
     settings: serde_json::Value,
     definitions: &[(&str, &str, serde_json::Value)],
 ) -> Runtime<()> {
-    command_runtime_named("1000", settings, definitions)
+    command_runtime_media(PORT, settings, definitions, &Media)
 }
-fn command_runtime_named(
-    local: &str,
-    settings: serde_json::Value,
-    definitions: &[(&str, &str, serde_json::Value)],
-) -> Runtime<()> {
-    command_runtime_media(local, settings, definitions, &Media)
-}
+
 fn command_runtime_media(
     local: &str,
     settings: serde_json::Value,
     definitions: &[(&str, &str, serde_json::Value)],
     media: &dyn NativeMediaPreparer,
 ) -> Runtime<()> {
-    command_runtime_media_settings(local, "", None, settings, definitions, media)
+    command_runtime_media_settings(local, false, None, settings, definitions, media)
 }
+
 fn command_runtime_media_settings(
     local: &str,
-    node_settings: &str,
+    immediate_full_duplex: bool,
     radio: Option<crate::remote_base_command::RemoteCommandConfiguration>,
     settings: serde_json::Value,
     definitions: &[(&str, &str, serde_json::Value)],
     media: &dyn NativeMediaPreparer,
 ) -> Runtime<()> {
-    use crate::config::resources::{
-        PortKey,
-        candidate::{
-            CapturedResource, ModularCandidate, ResourceBinding, ResourceId, ResourceKind,
-            ResourceRegistry, ResourceScope,
-        },
-    };
-
-    let site: ResourceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".parse().unwrap();
-    let port: ResourceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
-    let owner = ResourceScope::Port(port);
-    let commands = ResourceBinding {
-        scope: owner,
-        kind: ResourceKind::Command,
-        id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".parse().unwrap(),
-    };
-    let account = ResourceBinding {
-        scope: owner,
-        kind: ResourceKind::Allstarlink,
-        id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd".parse().unwrap(),
-    };
-
-    let mut fields = vec![
+    let mut resources = vec![
+        (local, ResourceKind::Command, "", settings),
         (
-            ResourceBinding {
-                id: site,
-                scope: ResourceScope::Site(site),
-                kind: ResourceKind::Metadata,
-            },
-            serde_json::json!({"name":"Station","inherit_from":null}),
+            local,
+            ResourceKind::Allstarlink,
+            "",
+            json!({"node_number":1000}),
         ),
-        (
-            ResourceBinding {
-                id: port,
-                scope: owner,
-                kind: ResourceKind::Metadata,
-            },
-            serde_json::json!({"name":"North","inherit_from":"site"}),
-        ),
-        (commands, settings),
-        (account, serde_json::json!({"node_number":1000})),
     ];
-    let mut kinds = vec!["metadata", "metadata", "command", "allstarlink"];
-    let mut members = Vec::new();
-    for (i, (kind, key, body)) in definitions.iter().enumerate() {
-        let binding = ResourceBinding {
-            id: format!("00000000-0000-4000-8000-{i:012}").parse().unwrap(),
-            scope: owner,
-            kind: match *kind {
-                "macro" => ResourceKind::Macro,
-                "event" => ResourceKind::Event,
-                "message" => ResourceKind::Message,
-                _ => panic!("fixture kind"),
-            },
-        };
-        fields.push((binding, body.clone()));
-        kinds.push(kind);
-        members.push((binding, PortKey::new(*key)));
+    for (kind, key, settings) in definitions {
+        let kind = ResourceKind::catalog()
+            .find(|k| k.as_str() == *kind)
+            .expect("registered fixture kind");
+        resources.push((local, kind, *key, settings.clone()));
     }
-    let registry = ResourceRegistry::with_members(
-        site,
-        &[(
-            port,
-            PortKey::new("North ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©"),
-        )],
-        &[commands, account],
-        &members,
-    )
-    .unwrap();
-    let bodies: Vec<_> = fields
-        .iter()
-        .zip(kinds)
-        .map(|((binding, settings), kind)| {
-            let mut body = if binding.kind == ResourceKind::Event {
-                settings.clone()
-            } else {
-                serde_json::json!({"configuration":settings})
-            };
-            body["id"] = serde_json::json!(binding.id.to_string());
-            body["kind"] = serde_json::json!(kind);
-            if let Some((_, key)) = members.iter().find(|(m, _)| m == binding) {
-                body["key"] = serde_json::json!(key.as_str());
-            }
-            serde_json::to_vec(&body).unwrap()
-        })
-        .collect();
-    let captures: Vec<_> = fields
-        .iter()
-        .zip(&bodies)
-        .map(|((binding, _), json)| CapturedResource {
-            binding: *binding,
-            json,
-        })
-        .collect();
-    let candidate = ModularCandidate::assemble(&registry, &captures).unwrap();
-    let validated = candidate
-        .command_language(owner)
-        .expect("prepared command language");
-    candidate
-        .event_profiles(&validated, Some("UTC"))
-        .expect("prepared event profiles");
-
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(&format!("[{local}]\n{node_settings}")).unwrap(),
+    if immediate_full_duplex {
+        resources.extend([
+            (
+                local,
+                ResourceKind::Radio,
+                "",
+                json!({"duplex_mode":"full"}),
+            ),
+            (
+                local,
+                ResourceKind::RxSignaling,
+                "",
+                json!({"timing":{"kerchunk_max_ms":0}}),
+            ),
+            (
+                local,
+                ResourceKind::TxSignaling,
+                "",
+                json!({"ptt":{"timing":{"hang_ms":0}}}),
+            ),
+        ]);
+    }
+    station_fixture::start(
+        station_fixture::configuration(&[(local, "North")], &resources),
         media,
         |name, settings| {
             let mut prepared = adapter(name, settings)?;
@@ -4868,27 +5483,7 @@ fn command_runtime_media_settings(
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
         clock(),
     )
-    .unwrap();
-    let node = crate::config::NodeId::new(local).unwrap();
-    let speech = crate::config::ResolvedSpeechSettings::resolve(runtime.document(), &node)
-        .unwrap()
-        .value;
-    let morse = crate::config::ResolvedMorseSettings::resolve(runtime.document(), &node)
-        .unwrap()
-        .value;
-    let language = "en-US".parse().unwrap();
-    let renderers = super::CommandRenderers {
-        catalog: crate::messages::MessageCatalog::load("en-US").unwrap(),
-        language: &language,
-        speech: &speech,
-        morse: &morse,
-    };
-    runtime
-        .node(local)
-        .unwrap()
-        .install_command_profile(&candidate, port, Some("UTC"), clock(), renderers)
-        .unwrap();
-    runtime
+    .unwrap()
 }
 
 #[test]
@@ -4913,14 +5508,14 @@ fn registered_dtmf_completion_reaches_the_actual_link_owner() {
         for digit in "A*00123".chars() {
             assert!(
                 runtime
-                    .digit("1000", DigitEvent::Digit { digit, now_ms: 0 })
+                    .digit(PORT, DigitEvent::Digit { digit, now_ms: 0 })
                     .is_none()
             );
         }
         assert!(
             runtime
                 .digit(
-                    "1000",
+                    PORT,
                     DigitEvent::Digit {
                         digit: '\0',
                         now_ms: 16
@@ -4928,25 +5523,21 @@ fn registered_dtmf_completion_reaches_the_actual_link_owner() {
                 )
                 .is_none()
         );
-        let Some(DigitOutcome::Mapped(input)) = runtime.digit("1000", boundary) else {
+        let Some(DigitOutcome::Mapped(input)) = runtime.digit(PORT, boundary) else {
             panic!("one completed mapping")
         };
-        let effect = runtime.dispatch_mapping("1000", input, clock()).unwrap();
+        let effect = runtime.dispatch_mapping(PORT, input, clock()).unwrap();
         let crate::runtime::links::LinkEffect::Connect(attempt) = effect else {
             panic!("domain dial")
         };
         assert_eq!(attempt.remote(), "00123");
-        runtime
-            .node("1000")
-            .unwrap()
-            .links()
-            .cancel_connect(attempt);
-        assert!(runtime.digit("1000", boundary).is_none());
+        runtime.node(PORT).unwrap().links().cancel_connect(attempt);
+        assert!(runtime.digit(PORT, boundary).is_none());
     }
     for digit in "789D".chars() {
         assert!(
             runtime
-                .digit("1000", DigitEvent::Digit { digit, now_ms: 19 })
+                .digit(PORT, DigitEvent::Digit { digit, now_ms: 19 })
                 .is_none()
         );
     }
@@ -4986,55 +5577,140 @@ fn registered_startup_waits_for_nested_injected_input_and_domain_admission() {
     for delta in [0, 7, 8, 24] {
         assert!(
             runtime
-                .advance_commands("1000", tick(delta))
+                .advance_commands(PORT, tick(delta))
                 .unwrap()
                 .is_none()
         );
     }
     let Some((LinkEffect::Connect(dial), receipt)) =
-        runtime.advance_commands("1000", tick(25)).unwrap()
+        runtime.advance_commands(PORT, tick(25)).unwrap()
     else {
         panic!("nested dial")
     };
     assert_eq!(dial.remote(), "00123");
-    assert!(
-        runtime
-            .advance_commands("1000", tick(26))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        runtime
-            .finish_connect("1000", dial, true, tick(27))
-            .unwrap()
-    );
+    assert!(runtime.advance_commands(PORT, tick(26)).unwrap().is_none());
+    assert!(runtime.finish_connect(PORT, dial, true, tick(27)).unwrap());
     receipt.settle(true);
     let Some((LinkEffect::Detach(names), receipt)) =
-        runtime.advance_commands("1000", tick(28)).unwrap()
+        runtime.advance_commands(PORT, tick(28)).unwrap()
     else {
         panic!("outer disconnect")
     };
     assert_eq!(names, ["00123"]);
     receipt.settle(true);
-    assert!(
-        runtime
-            .advance_commands("1000", tick(29))
-            .unwrap()
-            .is_none()
-    );
-    let node = runtime.node("1000").unwrap();
+    assert!(runtime.advance_commands(PORT, tick(29)).unwrap().is_none());
+    let node = runtime.node(PORT).unwrap();
     assert_eq!(
         node.take_command_completion().unwrap().outcome,
         MacroOutcome::Completed
     );
-    assert!(
-        runtime
-            .advance_commands("1000", tick(30))
-            .unwrap()
-            .is_none()
-    );
-    runtime.peer_detached("1000", "00123", 1031);
+    assert!(runtime.advance_commands(PORT, tick(30)).unwrap().is_none());
+    runtime.peer_detached(PORT, "00123", 1031);
     assert!(runtime.stop(1031));
+}
+
+#[test]
+fn authenticated_reverse_phone_connects_and_pauses_permanent_links_while_muted() {
+    use crate::{
+        link::{
+            Mode, PeerIdentity, PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource, ProtocolId,
+        },
+        runtime::{dtmf::DigitOutcome, links::LinkEffect},
+    };
+
+    const TIMEOUT_MS: u64 = 5000;
+    let mut runtime = command_runtime(
+        json!({"inactivity_timeout_ms":TIMEOUT_MS}),
+        &[(
+            "permanent-group",
+            "network",
+            json!({"group_name":"Fixture Network","remote_node":["506315"]}),
+        )],
+    );
+    let mut now = clock();
+    let (_, LinkEffect::Connect(group)) = runtime.next_link().unwrap() else {
+        panic!("expected permanent-group dial");
+    };
+    assert_eq!(group.remote(), "506315");
+    assert_eq!(runtime.finish_connect(PORT, group, true, now), Ok(true));
+
+    let source = PhoneSource::new(
+        PhoneAccountId::new("account").unwrap(),
+        1,
+        PhoneCallId::new([3; 16]).unwrap(),
+        1,
+        1,
+    )
+    .unwrap();
+    let call = PeerSignals::for_reverse_phone(source.clone());
+    assert!(call.authenticate_phone());
+    let reply = call.reply_target();
+    let identity = PeerIdentity::parse(ProtocolId::Phone, &source.call_id().to_string()).unwrap();
+    runtime
+        .node(PORT)
+        .unwrap()
+        .links()
+        .attach_ingress(identity.clone(), reply.clone())
+        .unwrap();
+
+    let enter = |runtime: &mut Runtime, now: &mut RuntimeClock, digits: &str| {
+        let links = runtime.node(PORT).unwrap().links();
+        let mut completed = None;
+        for digit in digits.chars() {
+            // A symbol just before the configured deadline rearms collection.
+            now.now_ms += TIMEOUT_MS - 1;
+            assert!(
+                links
+                    .expire_connection_digits(&reply, now.now_ms)
+                    .is_empty()
+            );
+            completed = links.phone_digit(&source, digit, now.now_ms, reply.clone());
+            assert_eq!(completed.is_some(), digit == '#');
+        }
+        let Some(DigitOutcome::Mapped(input)) = completed else {
+            panic!("expected the completed caller command");
+        };
+        runtime.dispatch_mapping(PORT, input, *now).unwrap()
+    };
+    let LinkEffect::Connect(newsline) = enter(&mut runtime, &mut now, "*3506316#") else {
+        panic!("expected transceive dial");
+    };
+    assert_eq!(newsline.remote(), "506316");
+    assert_eq!(newsline.mode(), Mode::TRANSCEIVE);
+    assert_eq!(newsline.phone_reply(), Some(&reply));
+    assert!(!newsline.permanent());
+    assert_eq!(runtime.finish_connect(PORT, newsline, true, now), Ok(true));
+
+    let LinkEffect::PrivateDetach {
+        remotes: removed,
+        reply: target,
+    } = enter(&mut runtime, &mut now, "*806#")
+    else {
+        panic!("expected the permanent group to pause with a caller-only response");
+    };
+    assert_eq!(target, reply);
+    assert_eq!(removed, ["506315"]);
+    runtime.peer_detached(PORT, &removed[0], now.now_ms);
+    let links = runtime.node(PORT).unwrap().links();
+    let peers = links.manager().snapshot();
+    assert!(
+        peers
+            .iter()
+            .any(|peer| peer.name == "506316" && !peer.ended && !peer.retrying)
+    );
+    assert!(
+        peers
+            .iter()
+            .any(|peer| peer.name == "506315" && peer.paused)
+    );
+    assert!(
+        links
+            .ingress_receive_status()
+            .any(|(peer, state)| peer == &identity && state.muted)
+    );
+    links.ended("506316");
+    runtime.peer_detached(PORT, "506316", now.now_ms);
+    assert!(runtime.stop(now.now_ms));
 }
 
 #[test]
@@ -5062,12 +5738,12 @@ fn registered_mute_tracks_exact_sources_and_keeps_phone_commands_live() {
         1,
     )
     .unwrap();
-    let call = PeerSignals::for_phone(phone.clone());
+    let call = PeerSignals::for_reverse_phone(phone.clone());
     assert!(call.authenticate_phone());
     for (alias, sig) in [("2000", &asl), ("3000123", &echo)] {
-        runtime.incoming("1000", alias, true).unwrap();
+        runtime.incoming(PORT, alias, true).unwrap();
         runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .links()
             .attach_ingress(
@@ -5077,7 +5753,7 @@ fn registered_mute_tracks_exact_sources_and_keeps_phone_commands_live() {
             .unwrap();
     }
     runtime
-        .node("1000")
+        .node(PORT)
         .unwrap()
         .links()
         .attach_ingress(
@@ -5085,6 +5761,50 @@ fn registered_mute_tracks_exact_sources_and_keeps_phone_commands_live() {
             call.reply_target(),
         )
         .unwrap();
+    let caller_toggle = |runtime: &mut Runtime<()>| {
+        let cmds = runtime.node(PORT).unwrap().links();
+        let mut out = None;
+        for digit in "*99#".chars() {
+            out = cmds.phone_digit(&phone, digit, clock().now_ms, call.reply_target());
+        }
+        let Some(DigitOutcome::Mapped(input)) = out else {
+            panic!("actual authenticated caller")
+        };
+        let retry = input.clone();
+        let effect = runtime.dispatch_mapping(PORT, input, clock()).unwrap();
+        assert!(runtime.dispatch_mapping(PORT, retry, clock()).is_err());
+        let crate::runtime::links::LinkEffect::PrivatePhoneResult(target, result) = effect else {
+            panic!("expected private mute confirmation");
+        };
+        use crate::messages::OperationResult;
+        assert_eq!(target, call.reply_target());
+        assert_eq!(
+            result,
+            if call.rx_muted() {
+                OperationResult::CallerMuted
+            } else {
+                OperationResult::CallerUnmuted
+            }
+        );
+    };
+    assert!(call.rx_muted());
+    let redirected = PeerSignals::redirected(&call.reply_target());
+    toggle(
+        &mut runtime,
+        json!({"action":"rx_mute_toggle","target":"phone_patch","parameter":phone.call_id().to_string()}),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        toggle(
+            &mut runtime,
+            json!({"action":"rx_mute_toggle","target":"peers"}),
+        )
+        .unwrap();
+    }
+    assert!(call.rx_muted() && redirected.rx_muted());
+    assert!(!asl.rx_muted() && !echo.rx_muted());
+    caller_toggle(&mut runtime);
+    assert!(!call.rx_muted() && !redirected.rx_muted());
     toggle(
         &mut runtime,
         json!({"action":"rx_mute_toggle","target":"peers","link_type":"echolink"}),
@@ -5099,7 +5819,7 @@ fn registered_mute_tracks_exact_sources_and_keeps_phone_commands_live() {
         .unwrap();
         assert_eq!(
             (asl.rx_muted(), echo.rx_muted(), call.rx_muted()),
-            (expected, expected, false)
+            (expected, expected, expected)
         );
     }
     toggle(
@@ -5109,17 +5829,7 @@ fn registered_mute_tracks_exact_sources_and_keeps_phone_commands_live() {
     .unwrap();
     assert!(asl.rx_muted() && !echo.rx_muted());
     for expected in [true, false] {
-        let cmds = runtime.node("1000").unwrap().links();
-        let mut out = None;
-        for digit in "*99#".chars() {
-            out = cmds.phone_digit(&phone, digit, clock().now_ms, call.reply_target());
-        }
-        let Some(DigitOutcome::Mapped(input)) = out else {
-            panic!("actual authenticated caller")
-        };
-        let retry = input.clone();
-        runtime.dispatch_mapping("1000", input, clock()).unwrap();
-        assert!(runtime.dispatch_mapping("1000", retry, clock()).is_err());
+        caller_toggle(&mut runtime);
         assert_eq!(call.rx_muted(), expected);
         assert!(asl.rx_muted());
     }
@@ -5136,7 +5846,7 @@ fn registered_mute_tracks_exact_sources_and_keeps_phone_commands_live() {
         json!({"action":"rx_mute_toggle","target":"port"}),
     )
     .unwrap();
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut txg = tx.acquire().unwrap();
     assert!(!txg.state().controller.admits_local_receive(true));
     assert!(!txg.state().controller.admits_local_receive(false));
@@ -5150,9 +5860,173 @@ fn registered_mute_tracks_exact_sources_and_keeps_phone_commands_live() {
     drop(txg);
     for (name, sig) in [("2000", asl), ("3000123", echo)] {
         sig.end();
-        runtime.node("1000").unwrap().links().ended(name);
-        runtime.peer_detached("1000", name, clock().now_ms);
+        runtime.node(PORT).unwrap().links().ended(name);
+        runtime.peer_detached(PORT, name, clock().now_ms);
     }
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn aggregate_receive_mute_gates_attached_phone_and_network_audio_and_keying() {
+    use crate::{
+        audio::LinkAudioQueue,
+        command_language::prepare_runtime_action,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{
+            AudioPeer, LinkAudio, Mode, PeerIdentity, PeerInput, PeerSignals, PhoneAccountId,
+            PhoneCallId, PhoneSource, ProtocolId, SourcePosition,
+        },
+    };
+    use serde_json::json;
+
+    struct Input(Arc<PeerSignals>, f32);
+    impl PeerInput for Input {
+        fn source_rate(&self) -> u32 {
+            48_000
+        }
+        fn signals(&self) -> &PeerSignals {
+            &self.0
+        }
+        fn available(&self) -> u64 {
+            4
+        }
+        fn finite_playout(&self) -> Option<bool> {
+            Some(true)
+        }
+        fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+            output.fill(self.1);
+            Some(output.len())
+        }
+    }
+
+    let mut runtime = command_runtime(json!({}), &[]);
+    let port = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".parse().unwrap();
+    runtime.incoming(PORT, "2000", true).unwrap();
+    let peer = Arc::new(PeerSignals::new());
+    let make_call = |id: u8| {
+        PhoneSource::new(
+            PhoneAccountId::new("account").unwrap(),
+            1,
+            PhoneCallId::new([id; 16]).unwrap(),
+            u64::from(id),
+            u64::from(id),
+        )
+        .unwrap()
+    };
+    let incoming_id = make_call(1);
+    let incoming = Arc::new(PeerSignals::for_phone(incoming_id.clone()));
+    assert!(incoming.authenticate_phone());
+    let outgoing_id = make_call(2);
+    let outgoing = Arc::new(PeerSignals::for_outgoing_phone(outgoing_id.clone()));
+    let detached = PeerSignals::for_phone(make_call(3));
+    assert!(detached.authenticate_phone());
+    let private_id = make_call(4);
+    let private = PeerSignals::for_phone(private_id.clone());
+
+    let phone_identity = |source: &PhoneSource| {
+        PeerIdentity::parse(ProtocolId::Phone, &source.call_id().to_string()).unwrap()
+    };
+    let mut attach = |identity, signal: &PeerSignals| {
+        runtime
+            .node(PORT)
+            .unwrap()
+            .links()
+            .attach_ingress(identity, signal.reply_target())
+    };
+    attach(PeerIdentity::from_operator("2000").unwrap(), &peer).unwrap();
+    attach(phone_identity(&incoming_id), &incoming).unwrap();
+    attach(phone_identity(&outgoing_id), &outgoing).unwrap();
+    assert_eq!(
+        attach(phone_identity(&private_id), &private),
+        Err(crate::link::AdmissionError::Denied)
+    );
+
+    // The media-only recipient still cannot collect a call-scoped command.
+    assert!(!outgoing.reply_target().phone_authenticated());
+    for digit in "*99#".chars() {
+        assert!(
+            runtime
+                .node(PORT)
+                .unwrap()
+                .links()
+                .phone_digit(&outgoing_id, digit, clock().now_ms, outgoing.reply_target())
+                .is_none()
+        );
+    }
+
+    let mut peers = Vec::new();
+    let mut outputs = Vec::new();
+    for (signal, phone, level) in [
+        (&peer, None, 0.0625),
+        (&incoming, Some(&incoming_id), 0.125),
+        (&outgoing, Some(&outgoing_id), 0.25),
+    ] {
+        let (writer, output) = LinkAudioQueue::new(960, 4).unwrap().into_endpoints();
+        let input = Input(Arc::clone(signal), level);
+        peers.push(
+            match phone {
+                Some(source) => AudioPeer::for_phone(
+                    source,
+                    &signal.reply_target(),
+                    Mode::phone(true),
+                    input,
+                    writer,
+                    4,
+                ),
+                None => AudioPeer::new("2000", Mode::TRANSCEIVE, input, writer, 4, 0),
+            }
+            .unwrap(),
+        );
+        outputs.push(output);
+    }
+    let (mut mixer, mut dispatch) = LinkAudio::new(peers, 4).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings {
+            hang_ms: 0,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let toggle =
+        prepare_runtime_action(&json!({"action":"rx_mute_toggle","target":"peers"})).unwrap();
+    for (index, muted) in [false, true, false].into_iter().enumerate() {
+        if index != 0 {
+            runtime
+                .management_action(port, "management", &toggle, clock())
+                .unwrap();
+        }
+        for signal in [&peer, &incoming, &outgoing] {
+            assert_eq!(signal.rx_muted(), muted);
+            signal.publish_pcm();
+            signal.set_radio_keyed(true);
+            assert!(signal.radio_keyed());
+            assert_eq!(signal.output_radio_keyed(signal.receive_epoch()), !muted);
+        }
+        assert!(!detached.rx_muted() && !private.rx_muted());
+
+        let mut rf = [0.0; 4];
+        assert_eq!(
+            mixer
+                .process(&mut controller, false, &mut rf, SourcePosition::default())
+                .unwrap(),
+            !muted
+        );
+        assert_eq!(rf, [if muted { 0.0 } else { 0.4375 }; 4]);
+        dispatch.dispatch(1);
+        for (output, mixed) in outputs.iter_mut().zip([0.375, 0.3125, 0.1875]) {
+            let mut programme = [0.0; 4];
+            assert_eq!(output.read_span(&mut programme).is_some(), !muted);
+            assert_eq!(programme, [if muted { 0.0 } else { mixed }; 4]);
+        }
+    }
+    for signal in [&peer, &incoming, &outgoing] {
+        signal.end();
+    }
+    runtime.node(PORT).unwrap().links().ended("2000");
+    runtime.peer_detached(PORT, "2000", clock().now_ms);
     assert!(runtime.stop(clock().now_ms));
 }
 
@@ -5190,7 +6064,7 @@ fn registered_protected_macro_expiry_cancels_before_its_nested_dial() {
         .unwrap()
         .to_string();
     runtime
-        .node("1000")
+        .node(PORT)
         .unwrap()
         .links()
         .configure_admin(&digest, &digest, 20);
@@ -5198,7 +6072,7 @@ fn registered_protected_macro_expiry_cancels_before_its_nested_dial() {
         let mut output = None;
         for digit in digits.chars() {
             output = rt.digit(
-                "1000",
+                PORT,
                 DigitEvent::Digit {
                     digit,
                     now_ms: tick(ms).now_ms,
@@ -5212,18 +6086,13 @@ fn registered_protected_macro_expiry_cancels_before_its_nested_dial() {
         let Some(DigitOutcome::Mapped(input)) = enter(&mut runtime, digits, t) else {
             panic!("mapped")
         };
-        runtime.dispatch_mapping("1000", input, tick(t)).unwrap();
+        runtime.dispatch_mapping(PORT, input, tick(t)).unwrap();
     }
-    assert!(runtime.advance_commands("1000", tick(1)).unwrap().is_none());
-    assert!(
-        runtime
-            .advance_commands("1000", tick(26))
-            .unwrap()
-            .is_none()
-    );
+    assert!(runtime.advance_commands(PORT, tick(1)).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, tick(26)).unwrap().is_none());
     assert_eq!(
         runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .take_command_completion()
             .unwrap()
@@ -5256,11 +6125,11 @@ fn registered_direct_injection_uses_a_private_collector_and_monotonic_deadline()
         .management_action(port, "operator", &action, clock())
         .unwrap();
     assert!(matches!(effect, LinkEffect::CommandQueued(_)));
-    assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, clock()).unwrap().is_none());
     assert!(
         runtime
             .advance_commands(
-                "1000",
+                PORT,
                 RuntimeClock {
                     wall_seconds: -1,
                     civil: None,
@@ -5272,7 +6141,7 @@ fn registered_direct_injection_uses_a_private_collector_and_monotonic_deadline()
     );
     let Some((LinkEffect::Connect(dial), receipt)) = runtime
         .advance_commands(
-            "1000",
+            PORT,
             RuntimeClock {
                 wall_seconds: -1,
                 civil: None,
@@ -5284,17 +6153,12 @@ fn registered_direct_injection_uses_a_private_collector_and_monotonic_deadline()
         panic!("injected dial")
     };
     assert_eq!(dial.remote(), "0002");
-    runtime.node("1000").unwrap().links().cancel_connect(dial);
+    runtime.node(PORT).unwrap().links().cancel_connect(dial);
     receipt.settle(true);
-    assert!(
-        runtime
-            .advance_commands("1000", tick(11))
-            .unwrap()
-            .is_none()
-    );
+    assert!(runtime.advance_commands(PORT, tick(11)).unwrap().is_none());
     assert_eq!(
         runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .take_command_completion()
             .unwrap()
@@ -5310,7 +6174,7 @@ fn registered_account_rejects_numeric_self_aliases_under_a_private_owner() {
     use crate::link::AdmissionError;
     use serde_json::json;
     let local = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    let mut runtime = command_runtime_named(local, json!({}), &[]);
+    let mut runtime = command_runtime_media(local, json!({}), &[], &Media);
     for target in ["1000", "01000", "0001000"] {
         let request =
             prepare_runtime_action(&json!({"action":"connect","parameter":target})).unwrap();
@@ -5332,7 +6196,7 @@ fn registered_command_message_uses_the_port_recipe_and_queue_before_the_next_dia
     use serde_json::json;
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = command_runtime_media(
-        "1000",
+        PORT,
         json!({}),
         &[
             (
@@ -5360,12 +6224,12 @@ fn registered_command_message_uses_the_port_recipe_and_queue_before_the_next_dia
     );
     assert!(log.lock().unwrap().is_empty());
     submit(&mut runtime, json!({"action":"call_macro","macro":"order"}));
-    let Some((LinkEffect::None, admitted)) = runtime.advance_commands("1000", clock()).unwrap()
+    let Some((LinkEffect::None, admitted)) = runtime.advance_commands(PORT, clock()).unwrap()
     else {
         panic!("queued report")
     };
     assert_eq!(*log.lock().unwrap(), ["Ready"]);
-    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let (_, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
     let mut owner = tx.acquire().unwrap();
     let mut output = [0.0; 16_000];
     owner
@@ -5373,21 +6237,17 @@ fn registered_command_message_uses_the_port_recipe_and_queue_before_the_next_dia
         .controller
         .process_audio(false, false, &[], &mut output);
     assert!(output.iter().any(|sample| *sample != 0.0));
-    assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, clock()).unwrap().is_none());
     admitted.settle(true);
     let Some((LinkEffect::Connect(attempt), admitted)) =
-        runtime.advance_commands("1000", clock()).unwrap()
+        runtime.advance_commands(PORT, clock()).unwrap()
     else {
         panic!("next domain action")
     };
     assert_eq!(attempt.remote(), "0099");
-    runtime
-        .node("1000")
-        .unwrap()
-        .links()
-        .cancel_connect(attempt);
+    runtime.node(PORT).unwrap().links().cancel_connect(attempt);
     admitted.settle(true);
-    assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, clock()).unwrap().is_none());
     drop(owner);
     assert!(runtime.stop(clock().now_ms));
 }
@@ -5413,7 +6273,7 @@ fn registered_retiring_generation_cancels_a_wait_without_dialing_its_replacement
     else {
         panic!("macro admission")
     };
-    assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, clock()).unwrap().is_none());
     assert!(runtime.stop(clock().now_ms + 1));
     assert_eq!(reply.outcome(), Some(MacroOutcome::Cancelled));
 }
@@ -5434,7 +6294,7 @@ fn registered_permanent_connect_is_idempotent_only_for_the_owned_active_mode() {
     };
     assert!(
         runtime
-            .finish_connect("1000", attempt, true, clock())
+            .finish_connect(PORT, attempt, true, clock())
             .unwrap()
     );
     assert!(matches!(
@@ -5457,7 +6317,7 @@ fn registered_permanent_connect_is_idempotent_only_for_the_owned_active_mode() {
     assert!(
         matches!(runtime.management_action(port,"operator",&pause,clock()).unwrap().1,LinkEffect::Detach(peers) if peers==["00220"])
     );
-    runtime.peer_detached("1000", "00220", clock().now_ms);
+    runtime.peer_detached(PORT, "00220", clock().now_ms);
     let resume = prepare_runtime_action(&json!({"action":"resume_permanent_links"})).unwrap();
     runtime
         .management_action(port, "operator", &resume, clock())
@@ -5498,39 +6358,25 @@ fn registered_window_ending_behind_a_real_pending_action_never_runs_either_bound
         )
         .unwrap();
     let Some((LinkEffect::Connect(attempt), receipt)) =
-        runtime.advance_commands("1000", tick(101)).unwrap()
+        runtime.advance_commands(PORT, tick(101)).unwrap()
     else {
         panic!("blocking real dial")
     };
-    assert!(
-        runtime
-            .advance_commands("1000", tick(122))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        runtime
-            .advance_commands("1000", tick(181))
-            .unwrap()
-            .is_none()
-    );
-    runtime
-        .node("1000")
-        .unwrap()
-        .links()
-        .cancel_connect(attempt);
+    assert!(runtime.advance_commands(PORT, tick(122)).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, tick(181)).unwrap().is_none());
+    runtime.node(PORT).unwrap().links().cancel_connect(attempt);
     receipt.settle(true);
     for second in [182, 183, 184] {
         assert!(
             runtime
-                .advance_commands("1000", tick(second))
+                .advance_commands(PORT, tick(second))
                 .unwrap()
                 .is_none()
         )
     }
     assert!(
         runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .links()
             .manager()
@@ -5571,7 +6417,7 @@ fn registered_scheduler_warning_captures_boundary_arguments_across_a_pause() {
     use serde_json::json;
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = command_runtime_media(
-        "1000",
+        PORT,
         json!({}),
         &[
             (
@@ -5597,9 +6443,8 @@ fn registered_scheduler_warning_captures_boundary_arguments_across_a_pause() {
         now_ms: 1000 + ((s - 100) as u64) * 1000,
         ..clock()
     };
-    assert!(runtime.advance_commands("1000", at(120)).unwrap().is_none());
-    let Some((LinkEffect::None, receipt)) = runtime.advance_commands("1000", at(130)).unwrap()
-    else {
+    assert!(runtime.advance_commands(PORT, at(120)).unwrap().is_none());
+    let Some((LinkEffect::None, receipt)) = runtime.advance_commands(PORT, at(130)).unwrap() else {
         panic!("captured warning")
     };
     receipt.settle(true);
@@ -5611,7 +6456,7 @@ fn registered_scheduler_warning_captures_boundary_arguments_across_a_pause() {
         "{spoken}"
     );
     drop(spoken);
-    assert!(runtime.advance_commands("1000", at(131)).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, at(131)).unwrap().is_none());
     assert!(runtime.stop(at(132).now_ms));
 }
 
@@ -5621,7 +6466,7 @@ fn registered_mixed_route_warning_preserves_kind_and_deadline_without_inventing_
     use serde_json::json;
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = command_runtime_media(
-        "1000",
+        PORT,
         json!({}),
         &[
             (
@@ -5651,14 +6496,14 @@ fn registered_mixed_route_warning_preserves_kind_and_deadline_without_inventing_
         wall_seconds: 120,
         ..clock()
     };
-    let Some((LinkEffect::None, receipt)) = runtime.advance_commands("1000", at).unwrap() else {
+    let Some((LinkEffect::None, receipt)) = runtime.advance_commands(PORT, at).unwrap() else {
         panic!("captured event bindings")
     };
     receipt.settle(true);
-    assert!(runtime.advance_commands("1000", at).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, at).unwrap().is_none());
     assert_eq!(
         runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .take_command_completion()
             .unwrap()
@@ -5704,13 +6549,13 @@ fn registered_queued_management_responses_keep_their_individual_terminal_outcome
     ] {
         assert!(response.outcome().is_none());
         let Some((LinkEffect::Connect(a), receipt)) =
-            runtime.advance_commands("1000", clock()).unwrap()
+            runtime.advance_commands(PORT, clock()).unwrap()
         else {
             panic!("ordered dial")
         };
-        runtime.node("1000").unwrap().links().cancel_connect(a);
+        runtime.node(PORT).unwrap().links().cancel_connect(a);
         receipt.settle(accept);
-        assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+        assert!(runtime.advance_commands(PORT, clock()).unwrap().is_none());
         assert_eq!(response.outcome(), Some(outcome));
     }
     assert_eq!(first.outcome(), Some(MacroOutcome::Rejected));
@@ -5733,8 +6578,8 @@ fn registered_injected_management_radio_reads_available_owner_without_grant_or_r
             access: RemoteDtmfAccess::Disabled,
         });
         let mut runtime = command_runtime_media_settings(
-            "1000",
-            "",
+            PORT,
+            false,
             prepared,
             json!({"mappings":{"check":{"command":"A","action":"radio","operation":"status","detail":"short","protected":protected}}}),
             &[(
@@ -5762,7 +6607,7 @@ fn registered_injected_management_radio_reads_available_owner_without_grant_or_r
                 now_ms: clock().now_ms + delta,
                 ..clock()
             };
-            if let Some((effect, receipt)) = runtime.advance_commands("1000", at).unwrap() {
+            if let Some((effect, receipt)) = runtime.advance_commands(PORT, at).unwrap() {
                 let LinkEffect::RemoteBase(operation) = effect else {
                     panic!("radio status")
                 };
@@ -5779,6 +6624,70 @@ fn registered_injected_management_radio_reads_available_owner_without_grant_or_r
         assert_eq!(response.outcome() == Some(MacroOutcome::Completed), reached);
         assert!(runtime.stop(clock().now_ms + 3003));
     }
+}
+
+#[test]
+fn registered_peer_macro_formats_the_actual_ingress_across_a_pause() {
+    use crate::{
+        link::{PeerIdentity, PeerSignals},
+        runtime::{dtmf::DigitOutcome, links::LinkEffect},
+    };
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = command_runtime_media_settings(
+        PORT,
+        true,
+        None,
+        json!({"mappings":{"call":{"command":"B","protected":false,"action":"call_macro","macro":"report"}}}),
+        &[(
+            "macro",
+            "report",
+            json!({"actions":[
+                {"action":"pause","timing":{"duration_ms":12}},
+                {"action":"message","message":"Peer { $peer-node-number } { $peer-protocol } { $peer-callsign } { $event-kind }","destination":"local"}
+            ]}),
+        )],
+        &CapturingMedia(captured.clone()),
+    );
+    let original = PeerSignals::new();
+    original.bind_peer_callsign("K0TEST");
+    let reply = PeerSignals::redirected(&original.reply_target()).reply_target();
+    runtime.incoming(PORT, "2000", true).unwrap();
+    let links = runtime.node(PORT).unwrap().links();
+    links
+        .attach_ingress(PeerIdentity::from_operator("2000").unwrap(), reply.clone())
+        .unwrap();
+    assert!(matches!(
+        links
+            .peer_text("2000", b"D 1000 8888 1 B", reply.clone(), false, 0, 10)
+            .unwrap(),
+        LinkEffect::None
+    ));
+    let LinkEffect::Digit(DigitOutcome::Mapped(input)) = links
+        .peer_text("2000", b"D 1000 8888 2 #", reply.clone(), false, 0, 10)
+        .unwrap()
+    else {
+        panic!("relayed macro mapping");
+    };
+    let at = |now_ms| RuntimeClock { now_ms, ..clock() };
+    assert!(matches!(
+        runtime.dispatch_mapping(PORT, input, at(10)).unwrap(),
+        LinkEffect::CommandQueued(_)
+    ));
+    assert!(runtime.advance_commands(PORT, at(10)).unwrap().is_none());
+    assert!(captured.lock().unwrap().is_empty());
+    if let Some((effect, receipt)) = runtime.advance_commands(PORT, at(22)).unwrap() {
+        assert!(matches!(effect, LinkEffect::None));
+        receipt.settle(true);
+    }
+    assert_eq!(
+        *captured.lock().unwrap(),
+        ["Peer 2,0,0,0 allstarlink K,0,T,E,S,T command"]
+    );
+    let links = runtime.node(PORT).unwrap().links();
+    links.retire_source(&reply);
+    links.ended("2000");
+    runtime.peer_detached(PORT, "2000", 23);
+    assert!(runtime.stop(23));
 }
 
 #[test]
@@ -5800,8 +6709,8 @@ fn registered_peer_macro_keeps_exact_private_radio_collector_through_pause() {
             )],
         );
         let source = PeerSignals::new().reply_target();
-        runtime.incoming("1000", "2000", true).unwrap();
-        let links = runtime.node("1000").unwrap().links();
+        runtime.incoming(PORT, "2000", true).unwrap();
+        let links = runtime.node(PORT).unwrap().links();
         links.configure_remote("6", RemoteDtmfAccess::Open).unwrap();
         links
             .attach_ingress(PeerIdentity::from_operator("2000").unwrap(), source.clone())
@@ -5816,17 +6725,17 @@ fn registered_peer_macro_keeps_exact_private_radio_collector_through_pause() {
             ..clock()
         };
         let LinkEffect::CommandQueued(response) =
-            runtime.dispatch_mapping("1000", input, at(10)).unwrap()
+            runtime.dispatch_mapping(PORT, input, at(10)).unwrap()
         else {
             panic!("macro receipt")
         };
-        assert!(runtime.advance_commands("1000", at(10)).unwrap().is_none());
-        let links = runtime.node("1000").unwrap().links();
+        assert!(runtime.advance_commands(PORT, at(10)).unwrap().is_none());
+        let links = runtime.node(PORT).unwrap().links();
         assert!(links.expire_peer_digits(11).is_empty());
         if retire {
             links.retire_source(&source);
         }
-        let effect = runtime.advance_commands("1000", at(22)).unwrap();
+        let effect = runtime.advance_commands(PORT, at(22)).unwrap();
         if retire {
             assert!(effect.is_none());
             assert_eq!(response.outcome(), Some(MacroOutcome::Cancelled));
@@ -5837,17 +6746,17 @@ fn registered_peer_macro_keeps_exact_private_radio_collector_through_pause() {
             assert_eq!(op.reply.as_ref(), Some(&source));
             assert!(
                 runtime
-                    .node("1000")
+                    .node(PORT)
                     .unwrap()
                     .links()
                     .remote_authorized(&op, 22)
             );
             receipt.settle(true);
-            assert!(runtime.advance_commands("1000", at(23)).unwrap().is_none());
+            assert!(runtime.advance_commands(PORT, at(23)).unwrap().is_none());
             assert_eq!(response.outcome(), Some(MacroOutcome::Completed));
         }
-        runtime.node("1000").unwrap().links().ended("2000");
-        runtime.peer_detached("1000", "2000", 24);
+        runtime.node(PORT).unwrap().links().ended("2000");
+        runtime.peer_detached(PORT, "2000", 24);
         assert!(runtime.stop(24));
     }
 }
@@ -5877,11 +6786,11 @@ fn registered_non_ingress_selection_preserves_the_receivers_own_target() {
             ),
         ],
     );
-    runtime.incoming("1000", "2000", true).unwrap();
+    runtime.incoming(PORT, "2000", true).unwrap();
     let mut outcome = None;
     for digit in "A2000#".chars() {
         outcome = runtime.digit(
-            "1000",
+            PORT,
             DigitEvent::Digit {
                 digit,
                 now_ms: clock().now_ms,
@@ -5892,11 +6801,11 @@ fn registered_non_ingress_selection_preserves_the_receivers_own_target() {
         panic!("local selection")
     };
     let LinkEffect::VerifyCommandTarget(op) =
-        runtime.dispatch_mapping("1000", input, clock()).unwrap()
+        runtime.dispatch_mapping(PORT, input, clock()).unwrap()
     else {
         panic!("directory check")
     };
-    runtime.command("1000", op, clock(), true).unwrap();
+    runtime.command(PORT, op, clock(), true).unwrap();
     let select =
         prepare_runtime_action(&json!({"action":"select_command_target","parameter":"4000"}))
             .unwrap();
@@ -5909,10 +6818,10 @@ fn registered_non_ingress_selection_preserves_the_receivers_own_target() {
         ),
         Err(RuntimeError::Unavailable)
     ));
-    assert!(runtime.advance_commands("1000", clock()).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, clock()).unwrap().is_none());
     assert_eq!(
         runtime
-            .node("1000")
+            .node(PORT)
             .unwrap()
             .take_command_completion()
             .unwrap()
@@ -5920,7 +6829,7 @@ fn registered_non_ingress_selection_preserves_the_receivers_own_target() {
         MacroOutcome::Rejected
     );
     let Some(DigitOutcome::Operation(op)) = runtime.digit(
-        "1000",
+        PORT,
         DigitEvent::Digit {
             digit: '5',
             now_ms: clock().now_ms,
@@ -5929,8 +6838,8 @@ fn registered_non_ingress_selection_preserves_the_receivers_own_target() {
         panic!("RF forwarded digit")
     };
     assert_eq!(op.command.node, "2000");
-    runtime.node("1000").unwrap().links().ended("2000");
-    runtime.peer_detached("1000", "2000", clock().now_ms);
+    runtime.node(PORT).unwrap().links().ended("2000");
+    runtime.peer_detached(PORT, "2000", clock().now_ms);
     assert!(runtime.stop(clock().now_ms));
 }
 
@@ -5961,8 +6870,8 @@ fn registered_numeric_alias_waits_for_requester_then_fans_out_only_to_configured
     for route in ["local", "peers", "local_and_links"] {
         let log = Arc::new(Mutex::new(Vec::new()));
         let mut rt = command_runtime_media_settings(
-            "1000",
-            "duplex=full\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n",
+            PORT,
+            true,
             None,
             json!({"mappings":{"alias":{"command":"A","protected":false,"action":"message"}}}),
             &[(
@@ -5974,8 +6883,8 @@ fn registered_numeric_alias_waits_for_requester_then_fans_out_only_to_configured
         );
         let mut add = |name: &str| {
             let sig = Arc::new(PeerSignals::new());
-            rt.incoming("1000", name, true).unwrap();
-            rt.node("1000")
+            rt.incoming(PORT, name, true).unwrap();
+            rt.node(PORT)
                 .unwrap()
                 .links()
                 .attach_ingress(
@@ -5994,7 +6903,7 @@ fn registered_numeric_alias_waits_for_requester_then_fans_out_only_to_configured
         let (second, _, mut other_out) = add("3000");
         // A live token from an unrelated transport cannot impersonate this link's D envelope.
         assert!(
-            rt.node("1000")
+            rt.node(PORT)
                 .unwrap()
                 .links()
                 .peer_text(
@@ -6008,22 +6917,21 @@ fn registered_numeric_alias_waits_for_requester_then_fans_out_only_to_configured
                 .is_err()
         );
         let (mut mixer, mut distributor) = LinkAudio::new(vec![first, second], 256).unwrap();
-        let (_, mut tx) = rt.node("1000").unwrap().register_audio().unwrap();
+        let (_, mut tx) = rt.node(PORT).unwrap().register_audio().unwrap();
         let mut owner = tx.acquire().unwrap();
         let mut outcome = None;
         for digit in "A7#".chars() {
-            outcome = rt.node("1000").unwrap().links().peer_digit(
-                "2000",
-                digit,
-                10,
-                caller.reply_target(),
-            );
+            outcome =
+                rt.node(PORT)
+                    .unwrap()
+                    .links()
+                    .peer_digit("2000", digit, 10, caller.reply_target());
         }
         let Some(DigitOutcome::Mapped(input)) = outcome else {
             panic!("numeric alias")
         };
         assert!(matches!(
-            rt.dispatch_mapping("1000", input, clock()),
+            rt.dispatch_mapping(PORT, input, clock()),
             Ok(LinkEffect::None)
         ));
         let mut render = || {
@@ -6067,16 +6975,139 @@ fn registered_numeric_alias_waits_for_requester_then_fans_out_only_to_configured
             "{route}"
         );
         drop(owner);
-        rt.node("1000").unwrap().links().ended("2000");
-        rt.node("1000").unwrap().links().ended("3000");
-        rt.peer_detached("1000", "2000", 50);
-        rt.peer_detached("1000", "3000", 50);
+        rt.node(PORT).unwrap().links().ended("2000");
+        rt.node(PORT).unwrap().links().ended("3000");
+        rt.peer_detached(PORT, "2000", 50);
+        rt.peer_detached(PORT, "3000", 50);
         assert!(rt.stop(50));
     }
 }
 
 #[test]
+fn registered_reload_releases_same_instant_order_after_retiring_queued_work() {
+    use crate::{
+        command_language::prepare_runtime_action,
+        runtime::{DeviceUpdate, links::LinkEffect},
+    };
+
+    struct Staged(Arc<AtomicBool>);
+    impl DeviceHandoff for Staged {
+        fn quiesce(&mut self) -> bool {
+            true
+        }
+        fn close(&mut self) {}
+        fn open(&mut self, _: &GenerationSettings) -> bool {
+            true
+        }
+        fn poll_update(&mut self, _: &GenerationSettings) -> Result<DeviceUpdate, RuntimeError> {
+            Ok(DeviceUpdate::Staged)
+        }
+        fn poll_finish_update(&mut self, _: bool) -> Result<bool, RuntimeError> {
+            Ok(self.0.load(Ordering::Acquire))
+        }
+    }
+    let dial = |target| json!({"actions":[{"action":"connect","parameter":target}]});
+    let configuration = |gain| {
+        station_fixture::configuration(
+            &[(PORT, "North")],
+            &[
+                (
+                    PORT,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio":{"input_gain_db":gain}}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::Allstarlink,
+                    "",
+                    json!({"node_number":1000}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::Macro,
+                    "block",
+                    json!({"actions":[{"action":"pause","timing":{"duration_ms":21000}}]}),
+                ),
+                (PORT, ResourceKind::Macro, "first", dial("00201")),
+                (PORT, ResourceKind::Macro, "second", dial("00202")),
+                (
+                    PORT,
+                    ResourceKind::Event,
+                    "first",
+                    json!({"start":{"at":"every day at 0:02 in UTC","macro":"first"},"sequence_number":1}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::Event,
+                    "second",
+                    json!({"start":{"at":"every day at 0:02 in UTC","macro":"second"},"sequence_number":2}),
+                ),
+            ],
+        )
+    };
+    let tick = |second: i64| RuntimeClock {
+        wall_seconds: second,
+        now_ms: clock().now_ms + (second - 100) as u64 * 1000,
+        ..clock()
+    };
+    for finish_during_handoff in [false, true] {
+        let ready = Arc::new(AtomicBool::new(false));
+        let device = |_: &str, _: &ResolvedNodeSettings| {
+            Ok(Box::new(Staged(ready.clone())) as Box<dyn DeviceHandoff>)
+        };
+        let mut runtime =
+            station_fixture::start(configuration(0), &Media, adapter, device, tick(100)).unwrap();
+        let block =
+            prepare_runtime_action(&json!({"action":"call_macro","macro":"block"})).unwrap();
+        runtime
+            .management_action(PORT.parse().unwrap(), "operator", &block, tick(100))
+            .unwrap();
+        assert!(runtime.advance_commands(PORT, tick(100)).unwrap().is_none());
+        assert!(runtime.advance_commands(PORT, tick(120)).unwrap().is_none());
+        station_fixture::reload(
+            &mut runtime,
+            configuration(-6),
+            &Media,
+            adapter,
+            device,
+            tick(120),
+        )
+        .unwrap();
+        assert!(runtime.reload_pending());
+        if finish_during_handoff {
+            assert!(runtime.advance_commands(PORT, tick(121)).unwrap().is_none());
+            let Some((LinkEffect::Connect(first), receipt)) =
+                runtime.advance_commands(PORT, tick(121)).unwrap()
+            else {
+                panic!("the incumbent must still own the first scheduled macro");
+            };
+            assert_eq!(first.remote(), "00201");
+            runtime.node(PORT).unwrap().links().cancel_connect(first);
+            receipt.settle(true);
+            assert!(runtime.advance_commands(PORT, tick(121)).unwrap().is_none());
+        }
+
+        ready.store(true, Ordering::Release);
+        assert_eq!(runtime.poll_reload(tick(122)), Ok(true));
+        let Some((LinkEffect::Connect(second), receipt)) =
+            runtime.advance_commands(PORT, tick(122)).unwrap()
+        else {
+            panic!(
+                "the successor was stranded after reload, incumbent completed={finish_during_handoff}"
+            );
+        };
+        assert_eq!(second.remote(), "00202");
+        runtime.node(PORT).unwrap().links().cancel_connect(second);
+        receipt.settle(true);
+        assert!(runtime.advance_commands(PORT, tick(122)).unwrap().is_none());
+        assert!(runtime.stop(tick(122).now_ms));
+    }
+}
+
+#[test]
 fn pending_device_staging_commit_and_uncertain_reverse_retain_the_transaction() {
+    let mut devices = station_fixture::DevicePlans::default();
     use crate::runtime::DeviceUpdate;
     #[derive(Default)]
     struct Progress {
@@ -6126,20 +7157,33 @@ fn pending_device_staging_commit_and_uncertain_reverse_retain_the_transaction() 
         let device = |_: &str, _: &ResolvedNodeSettings| {
             Ok(Box::new(Pending(state.clone())) as Box<dyn DeviceHandoff>)
         };
-        let initial = "[1000]\nradio_channel=first\n";
-        let edited = "[1000]\nradio_channel=first\n[radio 1000]\nreceive_output_gain_db=-6\n";
-        let mut runtime = Runtime::start(
-            ConfigDocument::parse(initial).unwrap(),
-            &Media,
-            adapter,
-            device,
-            clock(),
-        )
-        .unwrap();
+        let configuration = |gain: i32, fail: bool| {
+            let mut ports = vec![(PORT, "1000")];
+            let mut resources = vec![(
+                PORT,
+                ResourceKind::Interface,
+                "",
+                json!({"audio":{"device_identifier":"first","input_gain_db":gain}}),
+            )];
+            if fail {
+                ports.push((SECOND, "2000"));
+                resources.push((
+                    SECOND,
+                    ResourceKind::Interface,
+                    "",
+                    json!({"audio":{"device_identifier":"fail"}}),
+                ));
+            }
+            station_fixture::configuration(&ports, &resources)
+        };
+        let mut runtime = devices
+            .start(configuration(0, false), &Media, adapter, device, clock())
+            .unwrap();
         let previous = runtime.revision();
-        runtime
+        devices
             .reload(
-                ConfigDocument::parse(edited).unwrap(),
+                &mut runtime,
+                configuration(-6, false),
                 &Media,
                 adapter,
                 device,
@@ -6155,7 +7199,7 @@ fn pending_device_staging_commit_and_uncertain_reverse_retain_the_transaction() 
         state.lock().unwrap().finish = true;
         assert_eq!(runtime.poll_reload(clock()), Ok(true));
         assert!(runtime.revision() > previous);
-        assert!(runtime.detached("1000", previous));
+        assert!(runtime.detached(PORT, previous));
         let incumbent = runtime.revision();
         {
             let mut steps = state.lock().unwrap();
@@ -6163,11 +7207,10 @@ fn pending_device_staging_commit_and_uncertain_reverse_retain_the_transaction() 
             steps.drained = false;
             steps.attempts.clear();
         }
-        let mut failed = String::from(initial);
-        failed.push_str("[2000]\nradio_channel=fail\n");
-        runtime
+        devices
             .reload(
-                ConfigDocument::parse(&failed).unwrap(),
+                &mut runtime,
+                configuration(0, true),
                 &Media,
                 adapter,
                 device,
@@ -6188,12 +7231,13 @@ fn pending_device_staging_commit_and_uncertain_reverse_retain_the_transaction() 
         }
         state.lock().unwrap().drained = true;
         assert_eq!(runtime.poll_reload(clock()), Err(RuntimeError::Restore));
-        assert!(runtime.detached("1000", incumbent));
+        assert!(runtime.detached(PORT, incumbent));
         runtime.reclaim();
         state.lock().unwrap().attempts.clear();
-        runtime
+        devices
             .reload(
-                ConfigDocument::parse(edited).unwrap(),
+                &mut runtime,
+                configuration(-6, false),
                 &Media,
                 adapter,
                 device,
@@ -6202,7 +7246,7 @@ fn pending_device_staging_commit_and_uncertain_reverse_retain_the_transaction() 
             .unwrap();
         assert!(!runtime.reload_pending());
         assert!(state.lock().unwrap().attempts.contains(&"open"));
-        assert!(runtime.node("1000").unwrap().work().is_some());
+        assert!(runtime.node(PORT).unwrap().work().is_some());
         assert!(runtime.stop(0));
     }
 }
@@ -6240,22 +7284,22 @@ fn equipment_macro_retains_callers_deadline_after_a_wait() {
     else {
         panic!("parent admission")
     };
-    assert!(runtime.advance_commands("1000", now(0)).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, now(0)).unwrap().is_none());
     let Some((links::LinkEffect::SiteCommand(_, permit), receipt)) =
-        runtime.advance_commands("1000", now(5)).unwrap()
+        runtime.advance_commands(PORT, now(5)).unwrap()
     else {
         panic!("site action from actual parent")
     };
     let links::LinkEffect::CommandQueued(child) = runtime
-        .equipment_macro("1000", "child", Some(&permit), now(5))
+        .equipment_macro(PORT, "child", Some(&permit), now(5))
         .unwrap()
     else {
         panic!("child admission")
     };
     receipt.settle(true);
-    assert!(runtime.advance_commands("1000", now(5)).unwrap().is_none());
-    assert!(runtime.advance_commands("1000", now(5)).unwrap().is_none());
-    let effect = runtime.advance_commands("1000", now(11)).unwrap();
+    assert!(runtime.advance_commands(PORT, now(5)).unwrap().is_none());
+    assert!(runtime.advance_commands(PORT, now(5)).unwrap().is_none());
+    let effect = runtime.advance_commands(PORT, now(11)).unwrap();
     assert!(
         effect.is_none(),
         "expired equipment child emitted a domain effect"
@@ -6263,3 +7307,196 @@ fn equipment_macro_retains_callers_deadline_after_a_wait() {
     assert_eq!(child.outcome(), Some(MacroOutcome::Limit));
     assert!(runtime.stop(now(12).now_ms));
 }
+
+#[test]
+fn busy_dial_speech_reaches_only_the_originating_radio_while_peer_routes_are_live() {
+    use crate::{
+        audio::LinkAudioQueue,
+        link::{
+            AudioPeer, LinkAudio, Mode, PeerInput, PeerSignals, PhoneAccountId, PhoneCallId,
+            PhoneSource, SourcePosition,
+        },
+    };
+
+    struct Quiet(PeerSignals);
+    impl PeerInput for Quiet {
+        fn source_rate(&self) -> u32 {
+            48_000
+        }
+        fn signals(&self) -> &PeerSignals {
+            &self.0
+        }
+        fn available(&self) -> u64 {
+            0
+        }
+        fn render(&mut self, out: &mut [f32]) -> Option<usize> {
+            out.fill(0.0);
+            None
+        }
+    }
+
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let devices = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = station_fixture::start(
+        station_fixture::configuration(
+            &[(PORT, "1000")],
+            &[
+                (
+                    PORT,
+                    ResourceKind::Radio,
+                    "",
+                    json!({"duplex_mode": "full"}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::TxSignaling,
+                    "",
+                    json!({"ptt": {"timing": {"hang_ms": 0}}}),
+                ),
+                (
+                    PORT,
+                    ResourceKind::RxSignaling,
+                    "",
+                    json!({"timing": {"kerchunk_max_ms": 0}}),
+                ),
+            ],
+        ),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(devices.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let call = PhoneSource::new(
+        PhoneAccountId::new("private").unwrap(),
+        1,
+        PhoneCallId::new([3; 16]).unwrap(),
+        1,
+        3,
+    )
+    .unwrap();
+    let private = PeerSignals::for_phone(call.clone());
+    assert!(private.authenticate_phone());
+    let (wire_peer, mut from_peer) = LinkAudioQueue::new(960, 8).unwrap().into_endpoints();
+    let (wire_call, mut from_call) = LinkAudioQueue::new(960, 8).unwrap().into_endpoints();
+    let peer = AudioPeer::new(
+        "2000",
+        Mode::TRANSCEIVE,
+        Quiet(PeerSignals::new()),
+        wire_peer,
+        960,
+        0,
+    )
+    .unwrap();
+    let handset = AudioPeer::for_phone(
+        &call,
+        &private.reply_target(),
+        Mode::phone(true),
+        Quiet(private),
+        wire_call,
+        960,
+    )
+    .unwrap();
+    let (mut mixer, mut dispatch) = LinkAudio::new(vec![peer, handset], 960).unwrap();
+    let (mut rx, mut tx) = runtime.node(PORT).unwrap().register_audio().unwrap();
+    let mut station = rx.acquire_pair(&mut tx).unwrap();
+    let controller = &mut station.transmit().controller;
+    let mut origin = [0.125; 960];
+    mixer
+        .process(controller, true, &mut origin, SourcePosition::default())
+        .unwrap();
+    dispatch.dispatch(1);
+    for output in [&mut from_peer, &mut from_call] {
+        let mut pcm = [0.0; 960];
+        assert!(output.read_span(&mut pcm).is_some());
+        assert!(
+            pcm.contains(&0.125),
+            "local carrier reaches each connected recipient"
+        );
+    }
+
+    let before = messages.lock().unwrap().len();
+    runtime
+        .queue_phone_dial_failure(PORT, 486, || true)
+        .unwrap();
+    let mut audible = false;
+    let mut leaked = false;
+    for _ in 0..40 {
+        origin.fill(0.0);
+        let keyed = mixer
+            .process(controller, false, &mut origin, SourcePosition::default())
+            .unwrap();
+        audible |= keyed && origin.iter().any(|&x| x > 0.1);
+        dispatch.dispatch(1);
+        for output in [&mut from_peer, &mut from_call] {
+            let mut pcm = [0.0; 960];
+            if output.read_span(&mut pcm).is_some() {
+                leaked |= pcm.iter().any(|&x| x != 0.0);
+            }
+        }
+    }
+    drop(station);
+    assert!(runtime.stop(0));
+    assert_eq!(&messages.lock().unwrap()[before..], &["The line is busy."]);
+    assert!(
+        audible,
+        "the originating station actually rendered the 486 speech stream"
+    );
+    assert!(
+        !leaked,
+        "neither the network destination nor the separate caller may hear the reply"
+    );
+}
+
+#[test]
+fn permanent_group_config_is_expanded_into_ordered_routes() {
+    let configuration = station_fixture::configuration(
+        &[(PORT, "524950")],
+        &[(
+            PORT,
+            ResourceKind::PermanentGroup,
+            "blind-hams",
+            json!({
+                "remote_node":["506315","506312","506310","506311","506313","506314"],
+                "group_name":"The Blind Hams Network"
+            }),
+        )],
+    );
+    let mut runtime = station_fixture::start(
+        configuration,
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let routes = runtime
+        .node(PORT)
+        .unwrap()
+        .links()
+        .schedule()
+        .unwrap()
+        .route_specs();
+    assert_eq!(
+        routes
+            .iter()
+            .map(|route| route.remote.as_str())
+            .collect::<Vec<_>>(),
+        ["506315", "506312", "506310", "506311", "506313", "506314"]
+    );
+    assert!(routes.iter().all(|route| {
+        route.group_label.as_deref() == Some("blind-hams")
+            && route.group_name.as_deref() == Some("The Blind Hams Network")
+    }));
+    assert_eq!(
+        routes
+            .iter()
+            .map(|route| route.group_priority)
+            .collect::<Vec<_>>(),
+        (0..6).map(Some).collect::<Vec<_>>()
+    );
+    assert!(runtime.stop(0));
+}
+
+#[path = "coffee_transition_tests.rs"]
+mod coffee_transition;

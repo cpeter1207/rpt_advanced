@@ -82,6 +82,7 @@ impl<R: Runtime> Backend<R> {
             return Err(Fault::PreconditionFailed);
         }
         let target = fresh()?;
+        let zone = crate::schedule_zone::capture();
         let (manifest, objects, admission, compiled, prepared) = if name == "restore_configuration"
         {
             let (loaded, retained) = match body["restore"].as_str() {
@@ -105,7 +106,7 @@ impl<R: Runtime> Backend<R> {
             };
             let candidate = loaded.assemble_candidate().map_err(|_| Fault::Invalid)?;
             let compiled =
-                PreparedConfiguration::prepare(&candidate, self.zone.as_deref(), &self.inputs)?;
+                PreparedConfiguration::prepare(&candidate, zone.as_deref(), &self.inputs)?;
             let prepared = self.runtime.prepare(&compiled, &target.to_string())?;
             let m = retained_manifest(loaded.manifest(), target)?;
             (
@@ -125,7 +126,7 @@ impl<R: Runtime> Backend<R> {
             let initial = graph.manifest(target)?;
             let candidate = graph.assemble(&initial)?;
             let validated =
-                PreparedConfiguration::prepare(&candidate, self.zone.as_deref(), &self.inputs)?;
+                PreparedConfiguration::prepare(&candidate, zone.as_deref(), &self.inputs)?;
             for warning in &validated.public.warnings {
                 self.runtime.diagnostic(*warning);
             }
@@ -139,7 +140,7 @@ impl<R: Runtime> Backend<R> {
             let manifest = graph.manifest(target)?;
             let candidate = graph.assemble(&manifest)?;
             let compiled =
-                PreparedConfiguration::prepare(&candidate, self.zone.as_deref(), &self.inputs)?;
+                PreparedConfiguration::prepare(&candidate, zone.as_deref(), &self.inputs)?;
             let prepared = self
                 .runtime
                 .prepare(&compiled, manifest.revision().as_str())?;

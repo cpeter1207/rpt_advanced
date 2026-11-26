@@ -25,6 +25,20 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(crate) struct AccountCredentials(BTreeMap<(ResourceId, CredentialSlot), RetainedCredential>);
 
 impl AccountCredentials {
+    #[cfg(test)]
+    pub(crate) fn fixture(rows: &[(ResourceId, CredentialSlot, ResourceId, &[u8])]) -> Self {
+        Self(
+            rows.iter()
+                .map(|&(owner, slot, version, bytes)| {
+                    (
+                        (owner, slot),
+                        RetainedCredential::fixture(owner, version, bytes),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     fn bind(
         configuration: &RuntimeConfiguration,
         final_graph: &Credentials,
@@ -219,6 +233,17 @@ impl Runtime for NativeRuntime {
         self.engine.command_owner(target, revision, action)
     }
 
+    fn maintenance(&self, grant: Arc<super::maintenance::Grant>, intent: Invocation) -> Effect {
+        self.engine.dispatch_maintenance(grant, intent)
+    }
+    fn clear_maintenance(&self, grant: Arc<super::maintenance::Grant>) -> Result<(), Fault> {
+        self.engine
+            .run(move |host| {
+                host.clear_maintenance(&grant)
+                    .map_err(|_| RuntimeError::Unavailable)
+            })
+            .map_err(fault)
+    }
     fn dispatch(&self, revision: &str, invocation: Invocation) -> Effect {
         self.engine.dispatch_registered(revision, invocation)
     }

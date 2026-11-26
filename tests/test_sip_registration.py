@@ -196,11 +196,11 @@ def until(api, peer, ctx, predicate, mode="success", seconds=12, identity=IDENTI
 
 def run(path):
     library = C.CDLL(path)
-    symbol = library.rptadv_sip_adapter_descriptor_v1
+    symbol = library.rptadv_sip_adapter_descriptor_v2
     symbol.restype = C.POINTER(Descriptor)
     api = symbol().contents
     assert api.struct_size >= C.sizeof(Descriptor)
-    assert api.abi_version == 1 and api.capability == b"rptadv.sip"
+    assert api.abi_version == 2 and api.capability == b"rptadv.sip"
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
         peer.bind(("127.0.0.1", 0))
         peer.setblocking(False)

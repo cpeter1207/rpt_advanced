@@ -181,6 +181,26 @@ request body. Its coordinator claim is nonblocking and rechecks current
 identity authorization and expiry. Hosts consume coalesced listener faults.
 This component is staged independently of HAL routing and runtime adoption.
 
+Ship the operator client as the separately installable `rpt-advanced-cli`
+Debian package. It has no Product or radio-library dependency. Members of
+`rpt-advanced-admin` may use the separately provisioned CLI credential. The
+standalone service depends on the matching CLI package and uses it for a
+synchronous, authenticated `ExecReload`. Its client CA, certificate and
+key arrive as `rpt-advanced.cli.*` systemd credentials, independently of
+the backend server identity and configuration encryption key. A unit
+environment setting selects the management origin; changing the listener
+requires the corresponding reload-client setting. Missing client
+credentials fail the reload without opening an anonymous path.
+
+Temporary maintenance uses a bounded boot-scoped lease resource bound to
+the authenticated TLS connection, actor, port, active revision and runtime
+generation. The connection owner supplies its lifetime proof; request
+headers cannot create one. Typed operations retain their durable request
+identity and carry that exact lease. The physical owner rechecks admission
+and clears manual PTT, tone and signaling overrides after cancellation,
+expiry, connection loss or owner replacement. A lease never retains a
+generation-work guard while awaiting operator input.
+
 Remove controller INI at the coordinated cutover, including reconstructed
 processing text, private-secret and static-node INI readers. Preserve external
 directory-feed decoding and USBRadioPlus's public INI format. Reuse typed native

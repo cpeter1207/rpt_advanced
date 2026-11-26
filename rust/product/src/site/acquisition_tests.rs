@@ -1,8 +1,11 @@
 //! Real polling and ownership, with only physical adapter calls replaced by fixtures.
 use super::*;
-use crate::site::acquisition::Acquisition;
+use crate::site::{
+    acquisition::Acquisition,
+    equipment_fixture::{endpoint, input, output, sensor},
+};
 use rpt_advanced_core::{
-    config::{ConfigDocument, NodeId, ResolvedSiteSettings},
+    config::{ResolvedSiteSettings, SiteBackend},
     runtime::{GenerationSettings, NodeHost, RuntimeGeneration},
     site::ReadingQuality,
 };
@@ -35,36 +38,45 @@ fn site_engine_retires_external_device_workers_outside_control_even_when_drain_f
         .unwrap_or_else(|e| e.into_inner());
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let api = unsafe { &*crate::lifecycle::rptadv_product_descriptor_v1() };
-    assert_eq!(unsafe { api.stop.unwrap()() }, 0);
+    assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
     for drain_failure in [false, true] {
         *PROBE.lock().unwrap() = Probe::default();
         crate::lifecycle::SKIP_TICKER_THREAD.store(true, Ordering::Release);
-        let configuration = "[1000]\nradio_channel=usb\nduplex=full\n";
+        let local = crate::fixture::station::LOCAL;
+        let configuration = crate::fixture::station::prepare(
+            &[(local, "1000", serde_json::json!({}))],
+            &[(
+                local,
+                rpt_advanced_core::config::resources::candidate::ResourceKind::Interface,
+                "",
+                serde_json::json!({"audio":{"device_identifier":"usb"}}),
+            )],
+        );
         let mut control = unsafe { crate::fixture::control_descriptor().read() };
         control.submit = Some(observed_submit);
         let mut host = unsafe { crate::fixture::host_descriptor().read() };
         host.context = ptr::without_provenance_mut(1);
-        assert_eq!(
-            unsafe {
-                api.start.unwrap()(
-                    Box::leak(Box::new(host)),
-                    Box::leak(Box::new(control)),
-                    rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
-                    rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
-                    configuration.as_ptr().cast(),
-                    configuration.len(),
-                )
-            },
-            0
-        );
+        // SAFETY: both descriptor allocations outlive the global Engine and its callbacks.
+        let started = unsafe {
+            crate::lifecycle::tests::fixture_engine(
+                configuration,
+                Box::leak(Box::new(host)),
+                Box::leak(Box::new(control)),
+            )
+        }
+        .unwrap();
         let (engine, call) = crate::lifecycle::selected().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&started, &engine));
+        drop(started);
         let acquisition = Acquisition::prepare(
-            &definitions("[1000]\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\nstartup_state=on\nsafe_state=off\n"),
-            backends(), Instant::now(),
-        ).unwrap();
+            &BTreeMap::from([(local.to_owned(), relay_settings(true, false))]),
+            backends(),
+            Instant::now(),
+        )
+        .unwrap();
         engine
             .run(move |host| {
-                host.install_sites(acquisition, crate::site::radio::RadioSite::default());
+                host.fixture_install_sites(acquisition, crate::site::radio::RadioSite::default());
                 Ok(())
             })
             .unwrap();
@@ -91,21 +103,28 @@ fn site_engine_retires_external_device_workers_outside_control_even_when_drain_f
     }
 }
 
-fn definitions(text: &str) -> BTreeMap<String, ResolvedSiteSettings> {
-    let document = ConfigDocument::parse(text).unwrap();
-    document
-        .nodes()
-        .into_iter()
-        .map(|name| {
-            (
-                name.to_owned(),
-                ResolvedSiteSettings::resolve(&document, &NodeId::new(name).unwrap())
-                    .unwrap()
-                    .value,
-            )
-        })
-        .collect()
+fn gpio(line: &str) -> rpt_advanced_core::config::SiteEndpoint {
+    endpoint(SiteBackend::Gpiod, "fixture", line)
 }
+
+fn voltage(name: &str) -> rpt_advanced_core::config::SensorSettings {
+    sensor(name, endpoint(SiteBackend::Hwmon, "fixture", "in0_input"))
+}
+
+fn definitions(site: ResolvedSiteSettings) -> BTreeMap<String, ResolvedSiteSettings> {
+    BTreeMap::from([("1000".into(), site)])
+}
+
+fn relay_settings(startup_on: bool, safe_on: bool) -> ResolvedSiteSettings {
+    let mut relay = output("relay", gpio("7"));
+    relay.startup_on = startup_on;
+    relay.safe_on = safe_on;
+    ResolvedSiteSettings {
+        outputs: vec![relay],
+        ..Default::default()
+    }
+}
+
 fn host(node: &str) -> NodeHost<(), ()> {
     NodeHost::new(
         RuntimeGeneration::prepare(
@@ -148,9 +167,7 @@ fn close(acquisition: &mut Acquisition, host: &mut NodeHost<(), ()>) {
 fn site_acquisition_keeps_startup_request_and_separates_submission_from_faults() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     *PROBE.lock().unwrap() = Probe::default();
-    let settings = definitions(
-        "[1000]\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\nstartup_state=on\n",
-    );
+    let settings = definitions(relay_settings(true, false));
     let mut host = host("1000");
     let mut service = Acquisition::prepare(&settings, backends(), Instant::now()).unwrap();
     let pending = service
@@ -202,13 +219,20 @@ fn site_acquisition_keeps_startup_request_and_separates_submission_from_faults()
 fn site_acquisition_output_can_share_a_name_with_an_input_or_sensor() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     for source in [
-        "[input 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=8\n",
-        "[sensor 1000 relay]\nenabled=yes\nbackend=hwmon\ndevice=fixture\nchannel=in0_input\n",
+        ResolvedSiteSettings {
+            inputs: vec![input("relay", gpio("8"))],
+            ..Default::default()
+        },
+        ResolvedSiteSettings {
+            sensors: vec![voltage("relay")],
+            ..Default::default()
+        },
     ] {
         *PROBE.lock().unwrap() = Probe::default();
-        let settings = definitions(&format!(
-            "[1000]\n{source}[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\n"
-        ));
+        let settings = definitions(ResolvedSiteSettings {
+            outputs: vec![output("relay", gpio("7"))],
+            ..source
+        });
         let mut host = host("1000");
         let mut service = Acquisition::prepare(&settings, backends(), Instant::now()).unwrap();
         assert_eq!(service.output("1000", "relay", 1.0), Ok(()));
@@ -245,9 +269,22 @@ fn site_acquisition_slow_node_cannot_stall_or_refresh_another_nodes_measurement(
             workers::BLOCK_GPIO.store(false, Ordering::Release);
         }
     }
-    let settings = definitions(
-        "[1000]\n[1001]\n[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\n[sensor 1001 supply]\nenabled=yes\nbackend=hwmon\ndevice=fixture\nchannel=in0_input\n",
-    );
+    let settings = BTreeMap::from([
+        (
+            "1000".into(),
+            ResolvedSiteSettings {
+                inputs: vec![input("door", gpio("7"))],
+                ..Default::default()
+            },
+        ),
+        (
+            "1001".into(),
+            ResolvedSiteSettings {
+                sensors: vec![voltage("supply")],
+                ..Default::default()
+            },
+        ),
+    ]);
     let mut first = host("1000");
     let mut second = host("1001");
     let mut service = Acquisition::prepare(&settings, backends(), Instant::now()).unwrap();
@@ -302,9 +339,7 @@ fn site_acquisition_expired_output_ack_is_not_reported_as_current_availability()
     *PROBE.lock().unwrap() = Probe::default();
     let epoch = Instant::now();
     let mut host = host("1000");
-    let settings = definitions(
-        "[1000]\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\n",
-    );
+    let settings = definitions(relay_settings(false, false));
     let mut service = Acquisition::prepare(&settings, backends(), epoch).unwrap();
     until(|| {
         service.poll(0, |_| host.control().work());
@@ -333,9 +368,10 @@ fn site_acquisition_sensor_staleness_and_failure_preserve_last_real_reading() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     *PROBE.lock().unwrap() = Probe::default();
     let mut host = host("1000");
-    let settings = definitions(
-        "[1000]\n[sensor 1000 supply]\nenabled=yes\nbackend=hwmon\ndevice=fixture\nchannel=in0_input\n",
-    );
+    let settings = definitions(ResolvedSiteSettings {
+        sensors: vec![voltage("supply")],
+        ..Default::default()
+    });
     let mut service = Acquisition::prepare(&settings, backends(), Instant::now()).unwrap();
     let mut valid = None;
     until(|| {
@@ -364,9 +400,12 @@ fn site_acquisition_public_definitions_ignore_missing_endpoints_and_fault_wrong_
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     *PROBE.lock().unwrap() = Probe::default();
     let mut host = host("1000");
-    let mut settings = definitions(
-        "[1000]\n[sensor 1000 supply]\nenabled=yes\nbackend=hwmon\ndevice=fixture\nchannel=in0_input\n[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=8\n",
-    );
+    let mut settings = definitions(ResolvedSiteSettings {
+        sensors: vec![voltage("supply")],
+        inputs: vec![input("door", gpio("7"))],
+        outputs: vec![output("relay", gpio("8"))],
+        ..Default::default()
+    });
     let node = settings.get_mut("1000").unwrap();
     // These records are public: malformed callers must not fabricate readings.
     let mut sensor = node.sensors[0].clone();
@@ -409,9 +448,10 @@ fn site_acquisition_discards_read_completed_after_its_radio_generation_changed()
     }
     let release = Release;
     let mut host = host("1000");
-    let settings = definitions(
-        "[1000]\n[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\n",
-    );
+    let settings = definitions(ResolvedSiteSettings {
+        inputs: vec![input("door", gpio("7"))],
+        ..Default::default()
+    });
     let mut service = Acquisition::prepare(&settings, backends(), Instant::now()).unwrap();
     service.poll(0, |_| host.control().work());
     until(|| workers::GPIO_ENTERED.load(Ordering::Acquire));

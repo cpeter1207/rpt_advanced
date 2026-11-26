@@ -11,8 +11,8 @@
 #include <string.h>
 
 static const struct ast_module_info *metadata;
-static struct rptadv_asterisk_descriptor_v1 descriptor;
-static const struct rptadv_asterisk_descriptor_v1 *selected;
+static struct rptadv_asterisk_descriptor_v2 descriptor;
+static const struct rptadv_asterisk_descriptor_v2 *selected;
 static const struct rptadv_product_descriptor_v1 product;
 static const struct rptadv_product_management_v1 management;
 static const struct rptadv_control_descriptor_v1 control;
@@ -23,7 +23,7 @@ static int load_result, unload_result, reload_calls, load_calls;
 void ast_module_register(const struct ast_module_info *info) { metadata = info; }
 void ast_module_unregister(const struct ast_module_info *info) { assert(info == metadata); }
 
-const struct rptadv_asterisk_descriptor_v1 *rptadv_asterisk_descriptor_v1(void) { return selected; }
+const struct rptadv_asterisk_descriptor_v2 *rptadv_asterisk_descriptor_v2(void) { return selected; }
 const struct rptadv_product_descriptor_v1 *rptadv_product_descriptor_v1(void) { return &product; }
 const struct rptadv_product_management_v1 *rptadv_product_management_descriptor_v1(void) {
     return &management;
@@ -33,9 +33,12 @@ const struct rptadv_file_descriptor *rptadv_file_adapter_descriptor(void) { retu
 const struct rptadv_speech_descriptor *rptadv_speech_adapter_descriptor(void) { return &speech; }
 
 static int load(void *module, const struct rptadv_product_descriptor_v1 *owner,
+                const struct rptadv_product_management_v1 *bootstrap,
                 const struct rptadv_control_descriptor_v1 *executor,
                 const struct rptadv_file_descriptor *files,
                 const struct rptadv_speech_descriptor *voices) {
+    ++load_calls;
+    assert(bootstrap == &management);
     assert(module == metadata->self);
     assert(owner == &product);
     assert(executor == &control);
@@ -43,21 +46,11 @@ static int load(void *module, const struct rptadv_product_descriptor_v1 *owner,
     assert(voices == &speech);
     return load_result;
 }
-int rptadv_asterisk_load_management_v1(void *module,
-                                       const struct rptadv_product_descriptor_v1 *owner,
-                                       const struct rptadv_product_management_v1 *bootstrap,
-                                       const struct rptadv_control_descriptor_v1 *executor,
-                                       const struct rptadv_file_descriptor *files,
-                                       const struct rptadv_speech_descriptor *voices) {
-    assert(bootstrap == &management);
-    ++load_calls;
-    return load(module, owner, executor, files, voices);
-}
 static int reload(void) { return ++reload_calls; }
 static int unload(void) { return unload_result; }
 
 static void valid(void) {
-    descriptor = (struct rptadv_asterisk_descriptor_v1){
+    descriptor = (struct rptadv_asterisk_descriptor_v2){
         .struct_size = sizeof(descriptor),
         .abi_version = RPTADV_ASTERISK_ABI_VERSION,
         .capability = RPTADV_ASTERISK_CAPABILITY,

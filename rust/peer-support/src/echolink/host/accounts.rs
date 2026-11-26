@@ -576,7 +576,9 @@ impl Accounts {
         let (done, receipt) = std::sync::mpsc::sync_channel(1);
         let mut message = done;
         loop {
-            match self.control.submit(message, |signal| { let _ = signal.send(()); }) {
+            match self.control.submit(message, |signal| {
+                let _ = signal.send(());
+            }) {
                 Ok(()) => return receipt.recv().map_err(|_| Error::Control),
                 Err(rejected) if rejected.reason == RejectionReason::Full => {
                     message = rejected.payload;
@@ -591,13 +593,27 @@ impl Accounts {
     /// # Safety
     /// All configuration spans remain readable for this call. Neither input is retained.
     #[cfg(target_os = "linux")]
-    pub unsafe fn prepare_direct(&self, config: &abi::AccountConfig, directory: abi::ByteSpan,
-        station: [u8; 16], timing: super::super::JitterTiming) -> Result<DirectEntry, Error> {
-        if config.enabled != 1 || config.transport.kind != 0 { return Err(Error::Contract); }
-        let secrets = abi::AccountSecrets { struct_size: size_of::<abi::AccountSecrets>() as u32,
-            abi_version: 1, directory_password: directory, proxy_password: abi::ByteSpan::default() };
+    pub unsafe fn prepare_direct(
+        &self,
+        config: &abi::AccountConfig,
+        directory: abi::ByteSpan,
+        station: [u8; 16],
+        timing: super::super::JitterTiming,
+    ) -> Result<DirectEntry, Error> {
+        if config.enabled != 1 || config.transport.kind != 0 {
+            return Err(Error::Contract);
+        }
+        let secrets = abi::AccountSecrets {
+            struct_size: size_of::<abi::AccountSecrets>() as u32,
+            abi_version: 1,
+            directory_password: directory,
+            proxy_password: abi::ByteSpan::default(),
+        };
         let account = unsafe { self.provider.prepare(config, &secrets) }?;
-        account.station.set(uuid::Uuid::from_bytes(station).to_string()).map_err(|_| Error::Contract)?;
+        account
+            .station
+            .set(uuid::Uuid::from_bytes(station).to_string())
+            .map_err(|_| Error::Contract)?;
         account.stage_jitter(timing)?;
         Ok(DirectEntry(Entry::new(account, self)))
     }
@@ -702,15 +718,27 @@ impl Accounts {
 #[derive(Clone)]
 pub struct DirectEntry(Arc<Entry>);
 impl DirectEntry {
-    pub fn station(&self) -> &str { self.0.account.station.get().expect("bound direct account") }
-    pub fn account(&self) -> &Arc<Account> { &self.0.account }
+    pub fn station(&self) -> &str {
+        self.0.account.station.get().expect("bound direct account")
+    }
+    pub fn account(&self) -> &Arc<Account> {
+        &self.0.account
+    }
     pub fn admit(&self, enabled: bool) {
-        self.0.notifications.enabled.store(enabled, Ordering::Release);
+        self.0
+            .notifications
+            .enabled
+            .store(enabled, Ordering::Release);
     }
     /// # Safety
     /// Caller retains this entry and provider code through successful off-executor stop.
-    pub unsafe fn activate(&self) -> Result<(), Error> { unsafe { self.0.activate() } }
-    pub fn stop(&self) -> Result<(), Error> { self.admit(false); self.0.account.stop() }
+    pub unsafe fn activate(&self) -> Result<(), Error> {
+        unsafe { self.0.activate() }
+    }
+    pub fn stop(&self) -> Result<(), Error> {
+        self.admit(false);
+        self.0.account.stop()
+    }
 }
 
 impl Drop for Accounts {

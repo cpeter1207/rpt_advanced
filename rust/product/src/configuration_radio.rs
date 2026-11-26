@@ -1,4 +1,4 @@
-//! Side-effect-free radio inspection through the existing dynamically linked C SDK.
+//! Unique typed preparation results borrowed from the matched radio SDK.
 
 use crate::abi;
 use std::{
@@ -8,12 +8,6 @@ use std::{
     ptr::{self, NonNull},
 };
 
-type Resolve = unsafe extern "C" fn(
-    *const abi::UrpNativeProcessingArgs,
-    abi::UrpNativeProcessingDiagnostic,
-    *mut c_void,
-    *mut *mut c_void,
-) -> i32;
 type Visit =
     unsafe extern "C" fn(*const c_void, abi::UrpNativeConfigurationSink, *mut c_void) -> i32;
 type Destroy = unsafe extern "C" fn(*mut c_void);
@@ -21,7 +15,6 @@ type RemoteOptions = unsafe extern "C" fn(*mut c_void, *mut abi::UrpRemoteComman
 
 #[derive(Clone, Copy)]
 struct Api {
-    resolve: Resolve,
     visit: Visit,
     destroy: Destroy,
     remote_options: RemoteOptions,
@@ -57,9 +50,6 @@ impl Api {
                 "shared radio configuration provider has an incompatible descriptor".into(),
             );
         }
-        // SAFETY: advertised size covers these three fields; do not borrow the longer current table.
-        let resolve =
-            unsafe { ptr::addr_of!((*descriptor).native_configuration_resolve).read_unaligned() };
         // SAFETY: the same checked descriptor tail contains the visit operation.
         let visit =
             unsafe { ptr::addr_of!((*descriptor).native_configuration_visit).read_unaligned() };
@@ -71,7 +61,6 @@ impl Api {
             ptr::addr_of!((*descriptor).native_configuration_remote_options).read_unaligned()
         };
         Ok(Self {
-            resolve: resolve.ok_or("shared radio configuration resolution is unavailable")?,
             visit: visit.ok_or("shared radio configuration visit is unavailable")?,
             destroy: destroy.ok_or("shared radio configuration destruction is unavailable")?,
             remote_options: remote_options
@@ -140,38 +129,6 @@ impl ResolvedRadio {
             access,
         }))
     }
-    pub(crate) fn resolve(
-        configuration: &str,
-        node: &str,
-        diagnostic: abi::UrpNativeProcessingDiagnostic,
-        context: *mut c_void,
-    ) -> Result<Self, String> {
-        // SAFETY: the linked SDK returns an immutable process-lifetime descriptor.
-        let api = unsafe { Api::from_descriptor(abi::usbradioplus_product_descriptor_v1()) }?;
-        let args = abi::UrpNativeProcessingArgs {
-            struct_size: size_of::<abi::UrpNativeProcessingArgs>() as u32,
-            abi_version: 1,
-            configuration: configuration.as_ptr(),
-            configuration_length: u32::try_from(configuration.len())
-                .map_err(|_| "radio configuration is too long")?,
-            node: node.as_ptr(),
-            node_length: u32::try_from(node.len())
-                .map_err(|_| "radio node identity is too long")?,
-        };
-        let mut owner = ptr::null_mut();
-        // SAFETY: source spans and diagnostic context remain live for this synchronous operation.
-        let status = unsafe { (api.resolve)(&args, diagnostic, context, &mut owner) };
-        if status != 0 {
-            return Err(format!(
-                "shared radio configuration failed for node {node} ({status})"
-            ));
-        }
-        Ok(Self {
-            owner: NonNull::new(owner).ok_or("shared radio configuration returned no owner")?,
-            api,
-        })
-    }
-
     pub(crate) fn visit<F: FnMut(*const abi::UrpNativeStationConfig) -> Result<(), String>>(
         &self,
         callback: F,
@@ -236,29 +193,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_remote_command_options_are_copied_without_opening_hardware() {
-        for (source, expected) in [
-            ("[524950]\n", None),
-            (
-                "[524950]\n[remote_base 524950]\nenabled=yes\nbackend=hamlib\nhamlib_model=RIG_MODEL_DUMMY\ndtmf_prefix=65\ndtmf_access=open\nstartup_memory=local\nallowed_modes=FM\nallowed_rx_ranges_hz=144000000-148000000\nallowed_tx_ranges_hz=144000000-148000000\n[remote_memory 524950 local]\nselector=1\nrx_frequency_hz=146520000\ntx_frequency_hz=146520000\nmode=FM\n",
-                Some((
-                    "65",
-                    rpt_advanced_core::remote_base_command::RemoteDtmfAccess::Open,
-                )),
-            ),
-        ] {
-            let owner = ResolvedRadio::resolve(source, "524950", None, ptr::null_mut()).unwrap();
-            assert_eq!(
-                owner
-                    .remote_commands()
-                    .unwrap()
-                    .map(|value| (value.prefix, value.access)),
-                expected.map(|(prefix, access)| (prefix.to_string(), access))
-            );
-        }
-    }
-
-    #[test]
     fn short_and_wrong_abi_descriptors_are_rejected_before_reading_tails() {
         let size_only = 4_u32;
         // SAFETY: a rejected size-only prefix must not require a readable ABI word.
@@ -271,14 +205,6 @@ mod tests {
         assert!(unsafe { Api::from_descriptor(ptr::null()) }.is_err());
     }
 
-    unsafe extern "C" fn resolve_unavailable(
-        _: *const abi::UrpNativeProcessingArgs,
-        _: abi::UrpNativeProcessingDiagnostic,
-        _: *mut c_void,
-        _: *mut *mut c_void,
-    ) -> i32 {
-        -1
-    }
     unsafe extern "C" fn visit_unavailable(
         _: *const c_void,
         _: abi::UrpNativeConfigurationSink,
@@ -332,7 +258,6 @@ mod tests {
             let resolved = ResolvedRadio {
                 owner: NonNull::from(&mut owner).cast(),
                 api: Api {
-                    resolve: resolve_unavailable,
                     visit: visit_unavailable,
                     destroy: destroy_noop,
                     remote_options: options,
@@ -374,8 +299,6 @@ mod tests {
         descriptor.capability_name = c"usbradioplus.product1".as_ptr();
         // SAFETY: this test retains the complete readable descriptor, including its checked prefix.
         let load = |descriptor: &abi::UrpAstDescriptor| unsafe { Api::from_descriptor(descriptor) };
-        assert!(load(&descriptor).err().unwrap().contains("resolution"));
-        descriptor.native_configuration_resolve = Some(resolve_unavailable);
         assert!(load(&descriptor).err().unwrap().contains("visit"));
         descriptor.native_configuration_visit = Some(visit_unavailable);
         assert!(load(&descriptor).err().unwrap().contains("destruction"));
@@ -387,6 +310,7 @@ mod tests {
                 .contains("command configuration")
         );
         descriptor.native_configuration_remote_options = Some(remote_options_unavailable);
+        assert!(descriptor.native_configuration_resolve.is_none());
         assert!(load(&descriptor).is_ok());
         for capability in [c"wrong.product".as_ptr(), ptr::null()] {
             descriptor.capability_name = capability;
@@ -402,7 +326,6 @@ mod tests {
         let mut resolved = ResolvedRadio {
             owner: NonNull::dangling(),
             api: Api {
-                resolve: resolve_unavailable,
                 visit: visit_unavailable,
                 destroy: destroy_noop,
                 remote_options: remote_options_unavailable,
@@ -460,7 +383,6 @@ mod tests {
             let resolved = ResolvedRadio {
                 owner: NonNull::new(Box::into_raw(Box::new(destroyed.clone())).cast()).unwrap(),
                 api: Api {
-                    resolve: resolve_unavailable,
                     visit: visit_request,
                     destroy,
                     remote_options: remote_options_unavailable,

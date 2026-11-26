@@ -2288,7 +2288,7 @@
       "deny_nodes": [
         "2999"
       ],
-      "static_directory_file": "/etc/rpt_advanced/static-nodes.conf",
+      "static_nodes": {},
       "directory_file": "/var/lib/rpt_advanced/directory.txt",
       "lookup_method": "both",
       "iax": {

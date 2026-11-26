@@ -168,9 +168,10 @@ impl ParrotCapture {
             if buffer.is_empty() {
                 buffer.clear();
                 self.free.push(buffer);
-            } else if let Err(rtrb::PushError::Full(clip)) =
-                self.completed.push(CapturedParrot { samples: buffer, isolation_epoch })
-            {
+            } else if let Err(rtrb::PushError::Full(clip)) = self.completed.push(CapturedParrot {
+                samples: buffer,
+                isolation_epoch,
+            }) {
                 let mut buffer = clip.samples;
                 buffer.clear();
                 self.free.push(buffer);

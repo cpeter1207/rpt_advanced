@@ -1,6 +1,12 @@
 //! Authored delay changes run on the negotiated ordinary peer's exclusive owner.
 use crossbeam_queue::ArrayQueue;
-use std::{ffi::c_void, sync::{Arc, atomic::{AtomicBool, AtomicU8, Ordering}}};
+use std::{
+    ffi::c_void,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU8, Ordering},
+    },
+};
 
 pub(crate) type Set = unsafe extern "C" fn(*mut c_void, u32, u32, u32) -> i32;
 
@@ -38,13 +44,17 @@ fn receipt_status(live: impl FnOnce() -> bool, result: impl FnOnce() -> u8) -> O
     // Acquiring retirement must precede reading its published completion result.
     let live = live();
     match result() {
-        1 => Some(true), 2 => Some(false),
+        1 => Some(true),
+        2 => Some(false),
         _ if !live => Some(false),
         _ => None,
     }
 }
 
-struct Command { delays: Delays, result: Arc<AtomicU8> }
+struct Command {
+    delays: Delays,
+    result: Arc<AtomicU8>,
+}
 
 /// Management-side handoff for one negotiated peer, with no direct access to native state.
 pub struct PlayoutControl {
@@ -56,30 +66,55 @@ impl PlayoutControl {
     /// Queue a change (or the saved tuple for reverse). Wake the existing attached
     /// executor token, then retain and poll this receipt before aggregate confirmation.
     pub fn request(&mut self, delays: Delays) -> Option<Receipt> {
-        if !self.live.load(Ordering::Acquire) { return None; }
+        if !self.live.load(Ordering::Acquire) {
+            return None;
+        }
         let result = Arc::new(AtomicU8::new(0));
-        self.commands.push(Command { delays, result: Arc::clone(&result) }).ok()?;
-        Some(Receipt { result, live: Arc::clone(&self.live) })
+        self.commands
+            .push(Command {
+                delays,
+                result: Arc::clone(&result),
+            })
+            .ok()?;
+        Some(Receipt {
+            result,
+            live: Arc::clone(&self.live),
+        })
     }
 }
 
-pub(crate) struct Owner { control: PlayoutControl, set: Set }
+pub(crate) struct Owner {
+    control: PlayoutControl,
+    set: Set,
+}
 impl Owner {
     pub(crate) fn new(set: Set) -> (Self, PlayoutControl) {
         let commands = Arc::new(ArrayQueue::new(1));
         let live = Arc::new(AtomicBool::new(true));
-        (Self { set, control: PlayoutControl { commands: Arc::clone(&commands), live: Arc::clone(&live) } },
-         PlayoutControl { commands, live })
+        (
+            Self {
+                set,
+                control: PlayoutControl {
+                    commands: Arc::clone(&commands),
+                    live: Arc::clone(&live),
+                },
+            },
+            PlayoutControl { commands, live },
+        )
     }
     pub(crate) unsafe fn step(&self, peer: *mut c_void) {
         if let Some(command) = self.control.commands.pop() {
             let ok = unsafe { command.delays.apply(self.set, peer) };
-            command.result.store(if ok { 1 } else { 2 }, Ordering::Release);
+            command
+                .result
+                .store(if ok { 1 } else { 2 }, Ordering::Release);
         }
     }
 }
 impl Drop for Owner {
-    fn drop(&mut self) { self.control.live.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        self.control.live.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -91,13 +126,15 @@ mod tests {
         // The sole writer published acceptance before retirement. Model the minimum
         // visibility promised after acquiring retirement, without scheduling threads.
         let retirement_observed = std::cell::Cell::new(false);
-        let observe = || receipt_status(
-            || {
-                retirement_observed.set(true);
-                false
-            },
-            || u8::from(retirement_observed.get()),
-        );
+        let observe = || {
+            receipt_status(
+                || {
+                    retirement_observed.set(true);
+                    false
+                },
+                || u8::from(retirement_observed.get()),
+            )
+        };
         let first = observe();
         let second = observe();
         assert_eq!((first, second), (Some(true), Some(true)));
@@ -105,12 +142,18 @@ mod tests {
 
     #[test]
     fn completed_and_abandoned_receipts_remain_terminal() {
-        unsafe extern "C" fn accept(_: *mut c_void, _: u32, _: u32, _: u32) -> i32 { 0 }
-        unsafe extern "C" fn refuse(_: *mut c_void, _: u32, _: u32, _: u32) -> i32 { -1 }
+        unsafe extern "C" fn accept(_: *mut c_void, _: u32, _: u32, _: u32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn refuse(_: *mut c_void, _: u32, _: u32, _: u32) -> i32 {
+            -1
+        }
 
-        for (setter, step, expected) in [(accept as Set, true, true),
-                                         (refuse as Set, true, false),
-                                         (accept as Set, false, false)] {
+        for (setter, step, expected) in [
+            (accept as Set, true, true),
+            (refuse as Set, true, false),
+            (accept as Set, false, false),
+        ] {
             let (owner, mut control) = Owner::new(setter);
             let receipt = control.request(Delays::new(20, 40, 100).unwrap()).unwrap();
             let copy = receipt.clone();

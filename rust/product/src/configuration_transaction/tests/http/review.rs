@@ -1,5 +1,7 @@
 //! Actual store and mTLS regressions for mutable dependencies and typed response contracts.
 use super::*;
+mod live_status;
+mod maintenance;
 mod native;
 mod station;
 use crate::management::{ManagedStore, ProfileInputs};
@@ -21,6 +23,9 @@ fn authenticated_review_regressions() {
         "echo",
         "audio",
         "schemas",
+        "event-timezones",
+        "live-status",
+        "maintenance-lease",
         "poll",
         "native-runtime",
         "native-site-zero",
@@ -463,6 +468,57 @@ fn checked_schema(client: &Client<'_>, template: &str, path: &str) -> (Value, Va
     eprintln!("Validated complete authenticated response at {path} against {href}");
     (doc.body, schema.body)
 }
+fn event_timezones(client: &Client<'_>) {
+    let port = port(client);
+    edit(
+        client,
+        "POST",
+        &format!("{port}command/macros/"),
+        json!({"key":"notice","configuration":{"actions":[{"action":"pause"}]}}),
+    );
+    let create = |fields: Value| {
+        edit(client, "POST", &format!("{port}schedule/events/"), fields).headers["location"].clone()
+    };
+    let calendar = create(json!({
+        "key":"calendar",
+        "start":{"at":"every day at 19:00 in America/Chicago","macro":"notice",
+            "warnings":[{"at":"every day at 18:55 in Europe/London","macro":"notice"}]},
+        "end":{"at":"every day at 20:00 in America/New_York","macro":"notice"}
+    }));
+    let (doc, schema) = checked_schema(
+        client,
+        "/effective/ports/{port}/schedule/events/{member}/",
+        &effective(&calendar),
+    );
+    assert_eq!(
+        doc["meta"]["timezones"],
+        json!({
+            "/start/at":"America/Chicago",
+            "/start/warnings/0/at":"Europe/London",
+            "/end/at":"America/New_York"
+        })
+    );
+    assert_eq!(doc["meta"]["sources"]["/start/warnings"]["href"], calendar);
+    assert_eq!(
+        schema["properties"]["meta"]["properties"]["timezones"]["readOnly"],
+        true
+    );
+    let authored = client.get(&calendar).body;
+    assert!(authored["meta"].get("timezones").is_none());
+    assert_eq!(
+        authored["start"]["at"],
+        "every day at 19:00 in America/Chicago"
+    );
+
+    let startup = create(json!({
+        "key":"startup",
+        "start":{"at":"controller_start","macro":"notice"}
+    }));
+    let doc = client.get(&effective(&startup));
+    assert_eq!(doc.code, 200);
+    assert!(doc.body["meta"].get("timezones").is_none());
+}
+
 fn audience_schemas(client: &Client<'_>, port: &str) {
     let create = |at: &str, family: &str, key: &str, configuration: Value| {
         edit(
@@ -749,17 +805,43 @@ pub(super) fn run(
         "echo" => scenario.serve(inputs(), echo),
         "audio" => scenario.serve(inputs(), |c, _| audio(c)),
         "schemas" => scenario.serve(inputs(), |c, _| schemas(c)),
+        "event-timezones" => scenario.serve(inputs(), |c, _| event_timezones(c)),
+        "live-status" => scenario.serve(inputs(), live_status::read),
+        "maintenance-lease" => scenario.serve(inputs(), |client, _| maintenance::read(client)),
+        "native-maintenance-session" => native::run(&mut scenario, case),
         "poll" => scenario.serve(inputs(), |c, rt| poll(c, fixture, rt)),
-        "asterisk-managed" | "asterisk-private-pending" => native::asterisk(&scenario, case == "asterisk-private-pending"),
-        "standalone-managed" | "standalone-private-pending" => native::standalone(&scenario, case == "standalone-private-pending"),
+        "asterisk-managed" | "asterisk-private-pending" => {
+            native::asterisk(&scenario, case == "asterisk-private-pending")
+        }
+        "standalone-managed" | "standalone-private-pending" => {
+            native::standalone(&scenario, case == "standalone-private-pending")
+        }
         "standalone-managed-direct-echo" => native::managed_echo::activation(&scenario),
-        "standalone-managed-asl-activation" | "standalone-managed-asl-originate" => native::managed_asl::activation(&scenario),
-        "native-private-authorized" | "native-private-retained-vad" | "native-private-managed-iax" | "native-private-inband" => native::positive_phone(&scenario),
-        "standalone-managed-phone-dial" => native::managed_phone_dial::run(&scenario, false),
-        "standalone-managed-phone-hangup" => native::managed_phone_dial::run(&scenario, true),
+        "standalone-managed-asl-activation" | "standalone-managed-asl-originate" => {
+            native::managed_asl::activation(&scenario)
+        }
+        "native-private-authorized"
+        | "native-private-auto-attach"
+        | "native-private-retained-vad"
+        | "native-private-managed-iax"
+        | "native-private-inband"
+        | "native-private-mailbox-access" => native::positive_phone(&scenario),
+        "standalone-managed-phone-dial"
+        | "standalone-managed-phone-pending"
+        | "standalone-managed-phone-hangup"
+        | "standalone-managed-phone-idle-rtp"
+        | "standalone-managed-phone-progress"
+        | "standalone-managed-phone-progress-terminal"
+        | "standalone-managed-phone-rtp-handover" => {
+            native::managed_phone_dial::run(&scenario, case)
+        }
         "standalone-managed-phone-incoming" => native::managed_phone_incoming::run(&scenario),
         "managed-backup-first" => first_cold_start_after_backup(fixture),
         "public-pending-backup" => public_pending_after_backup(&mut scenario),
+        "standalone-managed-phone-prompt-clock"
+        | "standalone-managed-phone-login-timers"
+        | "standalone-managed-phone-login-barge"
+        | "standalone-managed-phone-mix-minus" => native::managed_phone_incoming::run(&scenario),
         "managed-bootstrap" | "managed-maintenance" | "managed-offline-first" | "inspection-r1" => {
             native::bootstrap(&scenario)
         }

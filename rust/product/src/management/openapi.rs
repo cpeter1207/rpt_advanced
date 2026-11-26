@@ -136,7 +136,7 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
         for &name in route.methods {
             let mut op = OperationBuilder::new().summary(Some(format!("{name} {}", route.profile)));
             let success = match (name, route.target) {
-                ("GET", _) | (_, Target::Operation) => "200",
+                ("GET", _) | (_, Target::Operation | Target::MaintenanceLease) => "200",
                 ("POST", _) => "201",
                 _ => "202",
             };
@@ -145,7 +145,9 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
                 "202" => "Accepted desired configuration",
                 _ => "Current representation or operation receipt",
             });
-            let read = if name == "GET" || route.target == Target::Operation {
+            let read = if name == "GET"
+                || matches!(route.target, Target::Operation | Target::MaintenanceLease)
+            {
                 Content::new(Some(Ref::new(format!(
                     "{mount}/schemas/{}/",
                     schema::response_name(route)
@@ -160,7 +162,11 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
             if name == "POST" {
                 result = result.header("Location", Header::new(Object::with_type(Type::String)));
             }
-            op = op.response(success, result.build());
+            let result = result.build();
+            if route.target == Target::MaintenanceLease && name == "PUT" {
+                op = op.response("201", result.clone());
+            }
+            op = op.response(success, result);
             for error in errors {
                 let status = error.wire().0.as_u16().to_string();
                 if name == "GET"
@@ -178,7 +184,12 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
                 }
                 op = op.response(&status, Ref::from_response_name(&status));
             }
-            if name == "GET" && matches!(route.target, Target::Collection(_)) {
+            if name == "GET"
+                && matches!(
+                    route.target,
+                    Target::Collection(_) | Target::Peers | Target::Calls
+                )
+            {
                 for q in ["offset", "limit"] {
                     op = op.parameter(parameter(
                         q,
@@ -190,7 +201,8 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
                 }
             }
             if name != "GET" {
-                let create = name == "PUT" && route.target == Target::Operation;
+                let create = name == "PUT"
+                    && matches!(route.target, Target::Operation | Target::MaintenanceLease);
                 op = op.parameter(parameter(
                     "If-Match",
                     ParameterIn::Header,

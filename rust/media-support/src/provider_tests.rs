@@ -17,14 +17,14 @@ fn raw_config() -> RawConfig {
 }
 
 #[cfg(file_adapter)]
-fn test_stream() -> PcmStream {
+fn test_stream(child_reaper: Option<ChildReaper>) -> PcmStream {
     let config = Config {
         #[cfg(file_adapter)]
         ffmpeg: "ffmpeg".into(),
         #[cfg(speech_adapter)]
         piper: "piper".into(),
         process_timeout: Duration::from_secs(1),
-        child_reaper: None,
+        child_reaper,
     };
     let mut wave = Vec::from(
         *b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x03\0\x01\0\x80\xbb\0\0\0\xee\x02\0\x04\0\x20\0data\x04\0\0\0",
@@ -33,9 +33,7 @@ fn test_stream() -> PcmStream {
     let mut command = std::process::Command::new("cat");
     PcmStream::f32_wave(
         crate::process::ChildStream::spawn(&config, &mut command, Some(&wave), &|| false).unwrap(),
-        &|| false,
     )
-    .unwrap()
 }
 
 #[cfg(file_adapter)]
@@ -54,21 +52,26 @@ fn truncated_finite_wave_data_is_rejected_after_complete_samples() {
     let mut command = std::process::Command::new("cat");
     let child =
         crate::process::ChildStream::spawn(&config, &mut command, Some(&wave), &|| false).unwrap();
-    let mut stream = PcmStream::f32_wave(child, &|| false).unwrap();
-    let mut samples = [0.0; 4];
-    assert_eq!(stream.read(&mut samples, &|| false).unwrap(), 1);
-    assert_eq!(
-        stream.read(&mut samples, &|| false),
-        Err(MediaError::InvalidOutput)
-    );
+    let mut stream = PcmStream::f32_wave(child);
+    let mut samples = [MaybeUninit::uninit(); 4];
+    let mut next = || loop {
+        let event = stream.step(&mut samples, &|| false)?;
+        if event.kind != STEP_PENDING {
+            break Ok(event);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(next().unwrap().kind, STEP_FORMAT_READY);
+    assert_eq!(next().unwrap().samples, 1);
+    assert_eq!(next(), Err(MediaError::InvalidOutput));
 }
 
 #[cfg(speech_adapter)]
-fn test_stream() -> PcmStream {
+fn test_stream(child_reaper: Option<ChildReaper>) -> PcmStream {
     let config = Config {
         piper: "piper".into(),
         process_timeout: Duration::from_secs(1),
-        child_reaper: None,
+        child_reaper,
     };
     let mut command = std::process::Command::new("sh");
     command.args(["-c", "printf '\\000\\000'"]);
@@ -129,7 +132,7 @@ fn abi_rejects_invalid_creation_and_stream_arguments() {
             context: std::ptr::null(),
             is_cancelled: not_cancelled,
         };
-        let mut audio = empty_stream();
+        let mut audio = std::ptr::null_mut();
         assert_eq!(
             unsafe {
                 open_file(
@@ -203,7 +206,7 @@ fn abi_rejects_invalid_speech_streams() {
         context: std::ptr::null(),
         is_cancelled: not_cancelled,
     };
-    let mut audio = empty_stream();
+    let mut audio = std::ptr::null_mut();
     let valid = RawSpeechRequest {
         text: c"text".as_ptr(),
         model: c"model".as_ptr(),
@@ -330,7 +333,7 @@ fn abi_opens_and_streams_source_rate_media() {
     };
     let mut context = std::ptr::null_mut();
     assert_eq!(unsafe { create(&config, &mut context) }, 0);
-    let mut stream = empty_stream();
+    let mut stream = std::ptr::null_mut();
     #[cfg(file_adapter)]
     assert_eq!(
         unsafe { open_file(context, source_path.as_ptr(), &cancellation, &mut stream) },
@@ -349,35 +352,54 @@ fn abi_opens_and_streams_source_rate_media() {
             0
         );
     }
-    assert_eq!(stream.sample_rate_hz, 22050);
+    assert!(!stream.is_null());
+    let mut rate = None;
     let mut samples = Vec::new();
     let mut chunk = [0.0; 8];
     loop {
-        let mut count = usize::MAX;
+        let mut result = RawStep::default();
         assert_eq!(
             unsafe {
-                read_stream(
-                    stream.handle,
+                step_stream(
+                    stream,
                     &cancellation,
                     chunk.as_mut_ptr(),
                     chunk.len(),
-                    &mut count,
+                    &mut result,
                 )
             },
             0
         );
-        assert!(count <= chunk.len());
-        if count == 0 {
-            break;
+        match result.kind {
+            STEP_PENDING => {
+                assert_eq!(result, RawStep::default());
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            STEP_FORMAT_READY => {
+                assert_eq!(result.samples, 0);
+                assert_eq!(rate.replace(result.sample_rate_hz), None);
+            }
+            STEP_SAMPLES => {
+                assert_eq!(rate, Some(22050));
+                assert_eq!(result.sample_rate_hz, 0);
+                assert!((1..=chunk.len()).contains(&result.samples));
+                samples.extend_from_slice(&chunk[..result.samples]);
+            }
+            STEP_EOF => {
+                assert_eq!(result.samples, 0);
+                assert_eq!(result.sample_rate_hz, 0);
+                break;
+            }
+            other => panic!("unexpected step {other}"),
         }
-        samples.extend_from_slice(&chunk[..count]);
     }
+    assert_eq!(rate, Some(22050));
     #[cfg(file_adapter)]
     assert_eq!(samples.len(), 2);
     #[cfg(speech_adapter)]
     assert_eq!(samples.len(), 2205);
     unsafe {
-        close_stream(stream.handle);
+        close_stream(stream);
         destroy(context);
     }
     std::fs::remove_file(source).unwrap();
@@ -393,12 +415,17 @@ fn abi_opens_and_streams_source_rate_media() {
 }
 
 #[test]
-fn cancellation_after_stream_open_discards_the_owned_handle() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+fn cancellation_after_stream_open_leaves_retirement_with_the_caller() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    extern "C" fn cancel_on_second_call(context: *const c_void) -> u32 {
-        let calls = unsafe { &*context.cast::<AtomicUsize>() };
-        u32::from(calls.fetch_add(1, Ordering::Relaxed) != 0)
+    static RELEASES: AtomicUsize = AtomicUsize::new(0);
+    extern "C" fn release() {
+        RELEASES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    extern "C" fn observe_cancel(context: *const c_void) -> u32 {
+        let flag = unsafe { &*context.cast::<AtomicBool>() };
+        u32::from(flag.load(Ordering::Acquire))
     }
 
     let preparation = Preparation::new(Config {
@@ -409,15 +436,12 @@ fn cancellation_after_stream_open_discards_the_owned_handle() {
         process_timeout: Duration::from_millis(100),
         child_reaper: None,
     });
-    let calls = AtomicUsize::new(0);
+    let flag = AtomicBool::new(false);
     let cancellation = RawCancellation {
-        context: std::ptr::from_ref(&calls).cast(),
-        is_cancelled: cancel_on_second_call,
+        context: std::ptr::from_ref(&flag).cast(),
+        is_cancelled: observe_cancel,
     };
-    let mut output = RawStream {
-        handle: std::ptr::dangling_mut::<c_void>(),
-        sample_rate_hz: 1,
-    };
+    let mut output = std::ptr::dangling_mut::<c_void>();
     let (owner, cancellation) = unsafe {
         open_arguments(
             std::ptr::from_ref(&preparation).cast(),
@@ -427,34 +451,47 @@ fn cancellation_after_stream_open_discards_the_owned_handle() {
     }
     .unwrap();
     assert!(std::ptr::eq(owner, &preparation));
-    assert_eq!(cancel_on_second_call(cancellation.context), 0);
-    let result = unsafe { publish(cancellation, &mut output, test_stream()) };
-    assert_eq!(result, Err(MediaError::Cancelled));
-    assert!(output.handle.is_null());
+    assert!(output.is_null());
 
-    let cancellation = RawCancellation {
-        context: std::ptr::null(),
-        is_cancelled: not_cancelled,
+    // Use the real child-backed stream. Cancel only after setup has succeeded.
+    let stream = test_stream(Some(ChildReaper {
+        acquire: no_op,
+        release,
+    }));
+    flag.store(true, Ordering::Release);
+    unsafe { publish(&mut output, stream) };
+    assert!(!output.is_null());
+
+    let mut sample = 0.25;
+    let mut result = RawStep {
+        kind: STEP_SAMPLES,
+        sample_rate_hz: 0,
+        samples: 1,
     };
-    unsafe { publish(&cancellation, &mut output, test_stream()) }.unwrap();
-    assert!(!output.handle.is_null());
-    unsafe { close_stream(output.handle) };
+    let status = unsafe { step_stream(output, cancellation, &mut sample, 1, &mut result) };
+    let released_before_close = RELEASES.load(Ordering::Relaxed);
+    unsafe { close_stream(output) };
+    assert_eq!(released_before_close, 0);
+    assert_eq!(RELEASES.load(Ordering::Relaxed), 1);
+    assert_eq!(status, -6);
+    assert_eq!(result, RawStep::default());
+    assert_eq!(sample, 0.25);
 }
 
 #[test]
-fn read_stream_rejects_invalid_output_and_cancellation_arguments() {
+fn step_stream_rejects_invalid_output_and_cancellation_arguments() {
     let cancellation = RawCancellation {
         context: std::ptr::null(),
         is_cancelled: not_cancelled,
     };
-    let mut stream = test_stream();
+    let mut stream = test_stream(None);
     let handle = std::ptr::from_mut(&mut stream).cast();
     let mut output = [0.0_f32; 2];
-    let mut count = usize::MAX;
+    let mut result = RawStep::default();
 
     assert_eq!(
         unsafe {
-            read_stream(
+            step_stream(
                 handle,
                 &cancellation,
                 output.as_mut_ptr(),
@@ -465,15 +502,23 @@ fn read_stream_rejects_invalid_output_and_cancellation_arguments() {
         -1
     );
     assert_eq!(
-        unsafe { read_stream(handle, &cancellation, std::ptr::null_mut(), 2, &mut count) },
+        unsafe { step_stream(handle, &cancellation, std::ptr::null_mut(), 2, &mut result) },
         -1
     );
     assert_eq!(
-        unsafe { read_stream(handle, &cancellation, output.as_mut_ptr(), 0, &mut count) },
+        unsafe { step_stream(handle, &cancellation, output.as_mut_ptr(), 0, &mut result) },
         -1
     );
     assert_eq!(
-        unsafe { read_stream(handle, std::ptr::null(), output.as_mut_ptr(), 2, &mut count) },
+        unsafe {
+            step_stream(
+                handle,
+                std::ptr::null(),
+                output.as_mut_ptr(),
+                2,
+                &mut result,
+            )
+        },
         -1
     );
 
@@ -485,12 +530,12 @@ fn read_stream_rejects_invalid_output_and_cancellation_arguments() {
         is_cancelled: cancelled,
     };
     assert_eq!(
-        unsafe { read_stream(handle, &cancellation, output.as_mut_ptr(), 2, &mut count) },
+        unsafe { step_stream(handle, &cancellation, output.as_mut_ptr(), 2, &mut result) },
         -6
     );
     assert_eq!(
         unsafe {
-            read_stream(
+            step_stream(
                 std::ptr::null_mut(),
                 &RawCancellation {
                     context: std::ptr::null(),
@@ -498,7 +543,7 @@ fn read_stream_rejects_invalid_output_and_cancellation_arguments() {
                 },
                 output.as_mut_ptr(),
                 2,
-                &mut count,
+                &mut result,
             )
         },
         -1

@@ -29,8 +29,17 @@ impl Caller {
         let mut output = BufReader::new(pbx.stdout.take().unwrap());
         let mut line = String::new();
         assert_ne!(output.read_line(&mut line).unwrap(), 0);
-        let port = line.trim().parse().expect("private IAX registrar bound a UDP port");
-        Self { pbx, input: Some(input), output, port, channel: None }
+        let port = line
+            .trim()
+            .parse()
+            .expect("private IAX registrar bound a UDP port");
+        Self {
+            pbx,
+            input: Some(input),
+            output,
+            port,
+            channel: None,
+        }
     }
 
     fn step(&mut self, name: &str) {
@@ -73,14 +82,23 @@ pub(super) fn positive_iax(
     output: &fixture::ReviewOutput,
 ) {
     let mut caller = Caller::start();
-    edit(client, "POST", &format!("{path}protocols/phone-patch/"), json!({"configuration": {
-        "provider": {"protocol": "iax2", "server": "127.0.0.1", "port": caller.port, "username": "club-account"},
-        "credentials": {"password": "fixture-only"}, "vad": {"enabled": false}
-    }}));
-    put(client, path, json!({"name":"Call","inherit_from":"site","enabled":true}));
-    let observe=|step:&str|{
+    edit(
+        client,
+        "POST",
+        &format!("{path}protocols/phone-patch/"),
+        json!({"configuration": {
+            "provider": {"protocol": "iax2", "server": "127.0.0.1", "port": caller.port, "username": "club-account"},
+            "credentials": {"password": "fixture-only"}, "vad": {"enabled": false}
+        }}),
+    );
+    put(
+        client,
+        path,
+        json!({"name":"Call","inherit_from":"site","enabled":true}),
+    );
+    let observe = |step: &str| {
         owners.trace();
-        let counters=[
+        let counters = [
             owners.read_count.load(Ordering::Acquire),
             fixture::PHONE_EVENT_DIGITS.load(Ordering::Acquire),
             fixture::PHONE_COMMAND_DIGITS.load(Ordering::Acquire),
@@ -90,31 +108,60 @@ pub(super) fn positive_iax(
             fixture::PHONE_WIRE_ORIGINAL.load(Ordering::Acquire),
             fixture::PHONE_FRESH.load(Ordering::Acquire),
             fixture::PHONE_ACCEPTED.load(Ordering::Acquire),
-            output.keyed.load(Ordering::Acquire),output.audible.load(Ordering::Acquire),
+            output.keyed.load(Ordering::Acquire),
+            output.audible.load(Ordering::Acquire),
         ];
-        eprintln!("IAX {step} reads/events/commands/rejected/authenticated/routes/wire/fresh/credited/keyed/audible {counters:?}");
+        eprintln!(
+            "IAX {step} reads/events/commands/rejected/authenticated/routes/wire/fresh/credited/keyed/audible {counters:?}"
+        );
         counters
     };
     caller.step("dial");
-    let opened=observe("answered");
-    let before=(opened[9],opened[10]);
+    let opened = observe("answered");
+    let before = (opened[9], opened[10]);
     caller.step("wrong");
     caller.step("beforeauth");
-    let rejected=observe("wrong credential and first playback");
-    assert_eq!((rejected[9],rejected[10]),before);
-    assert!(rejected[0]>0 && rejected[1]>=9 && rejected[2]>=9 && rejected[3]>0 && rejected[4]==0,
-        "wrong credentials must traverse the real native events and scoped verifier");
+    let rejected = observe("wrong credential and first playback");
+    assert_eq!((rejected[9], rejected[10]), before);
+    assert!(
+        rejected[0] > 0
+            && rejected[1] >= 9
+            && rejected[2] >= 9
+            && rejected[3] > 0
+            && rejected[4] == 0,
+        "wrong credentials must traverse the real native events and scoped verifier"
+    );
     caller.step("login");
     caller.step("beforeattach");
-    let authenticated=observe("login and second playback");
-    assert!(authenticated[4]>rejected[4],"the real mailbox did not authenticate");
-    assert_eq!((authenticated[9],authenticated[10]),before);
-    caller.step("attach");
+    let authenticated = observe("login and muted playback");
+    assert!(
+        authenticated[4] > rejected[4],
+        "the real mailbox did not authenticate"
+    );
+    assert_eq!((authenticated[9], authenticated[10]), before);
+    let calls = format!(
+        "{}calls/?limit=1",
+        path.replacen("/configuration/", "/status/", 1)
+    );
+    assert!(
+        live_status::wait_for(client, &calls, |document| {
+            let call = &document["_embedded"]["item"][0];
+            call["direction"] == "incoming"
+                && call["attached"] == true
+                && call["muted"] == true
+                && call["active"] == false
+                && fixture::PHONE_ROUTE_INSTALLS.load(Ordering::Acquire) > rejected[5]
+        }),
+        "verified IAX login must install a muted radio route without an attach command"
+    );
+    caller.step("unmute");
     caller.step("joined");
-    let attached=observe("attached playback");
-    assert!(attached[5]>authenticated[5],"the authenticated mapped attach did not install a radio route");
-    assert!(attached[6]>authenticated[6] && attached[8]>0,"actual IAX timed audio never reached the live radio ring");
-    assert!(attached[9]>before.0 && attached[10]>before.1);
+    let attached = observe("unmuted playback");
+    assert!(
+        attached[6] > authenticated[6] && attached[8] > 0,
+        "actual IAX timed audio never reached the live radio ring"
+    );
+    assert!(attached[9] > before.0 && attached[10] > before.1);
     let identity = owners.read_identity();
     assert_eq!(identity.source.port(), caller.port);
     assert!(identity.source.ip().is_loopback());
@@ -122,10 +169,19 @@ pub(super) fn positive_iax(
     caller.step("mute");
     observe("mute completed");
     wait_until(|| output.value.load(Ordering::Acquire) == 0);
-    let quiet = (output.keyed.load(Ordering::Acquire), output.audible.load(Ordering::Acquire));
+    let quiet = (
+        output.keyed.load(Ordering::Acquire),
+        output.audible.load(Ordering::Acquire),
+    );
     caller.step("muted");
     observe("muted completed");
-    assert_eq!((output.keyed.load(Ordering::Acquire), output.audible.load(Ordering::Acquire)), quiet);
+    assert_eq!(
+        (
+            output.keyed.load(Ordering::Acquire),
+            output.audible.load(Ordering::Acquire)
+        ),
+        quiet
+    );
     caller.step("unmute");
     observe("unmute completed");
     caller.step("restored");
@@ -149,10 +205,24 @@ pub(super) fn positive_iax(
         (0..3).all(|i| after[i] > before_delete[i])
     });
     let after = owners.retirement();
-    assert_eq!(std::array::from_fn::<_,3,_>(|i| after[i] - before_delete[i]), [1, 1, 1]);
-    eprintln!("private PHONE mailbox withdrawal: original PBX channel gone, native stop/joined detach/peer destroy exactly once");
+    assert_eq!(
+        std::array::from_fn::<_, 3, _>(|i| after[i] - before_delete[i]),
+        [1, 1, 1]
+    );
+    eprintln!(
+        "private PHONE mailbox withdrawal: original PBX channel gone, native stop/joined detach/peer destroy exactly once"
+    );
     wait_until(|| output.value.load(Ordering::Acquire) == 0);
-    put(client, path, json!({"name":"Call","inherit_from":"site","enabled":false}));
-    eprintln!("actual Asterisk channel {:?}, authenticated IAX owner {:?}, station callback keys {} audible {}",
-        caller.channel, identity, output.keyed.load(Ordering::Acquire), output.audible.load(Ordering::Acquire));
+    put(
+        client,
+        path,
+        json!({"name":"Call","inherit_from":"site","enabled":false}),
+    );
+    eprintln!(
+        "actual Asterisk channel {:?}, authenticated IAX owner {:?}, station callback keys {} audible {}",
+        caller.channel,
+        identity,
+        output.keyed.load(Ordering::Acquire),
+        output.audible.load(Ordering::Acquire)
+    );
 }

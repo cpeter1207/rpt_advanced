@@ -74,6 +74,10 @@ Use test-driven development.
 
 [x] - Verify that the configured station hangup command ends its established outgoing SIP dialog. Run 87591 observed the controller send BYE on the same dialog after both PCM directions were verified, then confirmed media retirement and a clean shutdown.
 
+[x] - Complete the f3 per-caller SIP prompt/timer/barge-in, mix-minus, mailbox-policy, continuous telephone VAD and call-progress changes; verify the native regressions and all 13 optimized standalone rehearsal scenarios (73724 plus incoming-only 99414).
+
+[x] - Deploy the approved, backed-up trial 2 build with the existing protected store and audio assets; verify live ownership, registrations and mapped release files. Record the operator report on 2026-11-25 that the requested radio/link/phone hardware checks are working correctly. Normal boot promotion and final release remain pending.
+
 [] - Define separate public, writable, effective and status resource types; retire the aggregate operation envelope as the new persistence/API format.
 
 [] - Split controller configuration into site metadata/defaults, port metadata, radio/audio/signaling/interface sections, protocol instances, events, macros, messages, mailboxes and equipment resources.
@@ -288,7 +292,7 @@ Use test-driven development.
 
 [] - Test every command family, aliases, protection, decoder bounds, custom terminators, unkey/inactivity races, overflow/loss, nested calls, cancellation and no repeated effects.
 
-[] - Implement rx_mute_toggle for the owning port, one exact live peer, all connected network peers, a link-type-filtered peer set and the actual phone caller.
+[] - Implement rx_mute_toggle for the owning port, one exact live peer, all connected peers, including attached callers, a link-type-filtered peer set and the actual phone caller.
 
 [] - Implement mixed/all-muted/empty group rules, unique or exact caller selection, live-generation validation and captured desired states for retry-safe toggles.
 

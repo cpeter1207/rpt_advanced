@@ -1,6 +1,5 @@
 //! Site ownership barriers wait outside serialized control and audio callbacks.
 use super::*;
-use crate::site::{acquisition::Acquisition, radio::RadioSite};
 use std::time::Duration;
 
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
@@ -33,7 +32,7 @@ impl Engine {
     }
 
     /// Cleanup must remain admissible after normal command admission closes.
-    fn site_control<T: Send + 'static>(
+    pub(super) fn site_control<T: Send + 'static>(
         self: &Arc<Self>,
         operation: impl FnOnce(&mut Host) -> T + Send + 'static,
     ) -> Result<T, RuntimeError> {
@@ -78,74 +77,6 @@ impl Engine {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-    }
-
-    /// Prepare/fence physical owners before briefly gating controller publication.
-    pub(super) fn reload_configuration(
-        self: &Arc<Self>,
-        document: ConfigDocument,
-    ) -> Result<(), RuntimeError> {
-        if self.reloading.load(Ordering::Acquire) {
-            return Err(RuntimeError::Busy);
-        }
-        let settings = crate::site::configured(&document)?;
-        self.site_backends.validate_scopes(settings.values())?;
-        let definition = document.clone();
-        let basis = self.run(move |host| host.site_basis(&definition))?;
-        let acquisition = Acquisition::prepare_reload(
-            &settings,
-            Arc::clone(&self.site_backends),
-            self.origin,
-            basis.known,
-        )
-        .map_err(|_| RuntimeError::Preparation)?;
-        let radio = RadioSite::prepare(&settings).map_err(|_| RuntimeError::Preparation)?;
-        // A rejected executor task drops only an Arc; its owner is retained here
-        // so dormant workers are never joined on the control executor.
-        let prepared = Arc::new(Mutex::new((Some(acquisition), Some(radio))));
-        let target = Arc::clone(&prepared);
-        self.run(move |host| {
-            let mut pair = target.lock().unwrap_or_else(|e| e.into_inner());
-            let (acquisition, radio) = &mut *pair;
-            host.begin_site_reload(basis.revision, acquisition, radio, &basis.replaced)
-        })?;
-        let result = self.wait_sites(false).and_then(|()| {
-            self.reloading.store(true, Ordering::Release);
-            self.revision.fetch_add(1, Ordering::AcqRel);
-            self.lost_digits.store(true, Ordering::Release);
-            let clock = self.clock();
-            catch_unwind(AssertUnwindSafe(|| {
-                self.run_inner(true, move |host| {
-                    host.reload(document, clock)?;
-                    Ok(host.runtime.reload_pending())
-                })
-            }))
-            .unwrap_or(Err(RuntimeError::Preparation))
-        });
-        if result == Ok(true) {
-            return Ok(());
-        }
-        self.finish_reload(result.map(|_| ()))
-    }
-
-    pub(super) fn poll_reload_configuration(self: &Arc<Self>) -> Result<bool, RuntimeError> {
-        if !self.reloading.load(Ordering::Acquire) {
-            return Ok(true);
-        }
-        let clock = self.clock();
-        let result = self.run_inner(true, move |host| host.poll_reload(clock));
-        if result == Ok(false) {
-            return Ok(false);
-        }
-        self.finish_reload(result.map(|_| ())).map(|()| true)
-    }
-
-    pub(super) fn finish_reload(
-        self: &Arc<Self>,
-        result: Result<(), RuntimeError>,
-    ) -> Result<(), RuntimeError> {
-        self.finish_reload_sites(result.is_ok())?;
-        result
     }
 
     pub(super) fn finish_reload_sites(self: &Arc<Self>, applied: bool) -> Result<(), RuntimeError> {

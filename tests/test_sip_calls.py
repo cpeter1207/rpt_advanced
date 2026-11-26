@@ -24,6 +24,8 @@ class Call(C.Structure):
         ("source_port", C.c_uint16),
         ("source", C.c_ubyte * 16),
         ("direction", C.c_uint32),
+        ("alerting_seen", C.c_uint32),
+        ("invite_failure_status", C.c_uint32),
     ]
 
 
@@ -77,9 +79,9 @@ class Fixture:
         assert api.register(self.ctx, 7) == 0
         self.until(lambda: registration.snapshot(api, self.ctx).state == 2)
 
-    def step(self):
+    def step(self, *, collect_calls=True):
         assert self.api.service(self.ctx, 7) == 0
-        while True:
+        while collect_calls:
             call = Call(struct_size=C.sizeof(Call))
             code = self.api.next_call(self.ctx, 7, C.byref(call))
             if code == 1:
@@ -260,51 +262,77 @@ def delayed_ack(api):
 
 
 def capacity(api):
-    """Eight slots remain owned until explicit release, independent of events."""
+    """Existing established dialogs retain their own tokens when a ninth arrives."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as peer:
         peer.bind(("127.0.0.1", 0))
         peer.setblocking(False)
         f = Fixture(api, peer)
-        for number in range(1, 9):
+        dialogs = []
+        ninth_status = 200
+        answer = registration.Span(ANSWER, len(ANSWER))
+        for number in range(1, 10):
+            known = set(f.calls)
             f.send("INVITE", number=number, body=OFFER)
-            f.until(lambda f=f, number=number: len(f.calls) == number)
-        assert len({call.call for call in f.calls.values()}) == 8
-        f.send("INVITE", number=9, body=OFFER)
-        f.until(
-            lambda: (
-                f.response(9, "INVITE", 486) is not None
-                or f.response(9, "INVITE", 503) is not None
-            )
-        )
-        assert len(f.calls) == 8
-        for number, token in enumerate(f.calls, 1):
-            f.send("CANCEL", number=number)
-            f.until(lambda f=f, token=token: f.calls[token].state == 5)
             f.until(
-                lambda f=f, number=number: f.response(number, "INVITE", 487) is not None
+                lambda known=known, number=number: (
+                    set(f.calls) != known
+                    or f.response(number, "INVITE", 486)
+                    or f.response(number, "INVITE", 503)
+                )
             )
-            f.send("ACK", number=number, to=f.response(number, "INVITE", 487)[1]["to"])
-        # Terminal state is authoritative even though observations were consumed.
-        f.send("INVITE", number=10, body=OFFER)
-        f.until(lambda f=f: f.response(10, "INVITE", 486) is not None)
-        for token in f.calls:
+            added = set(f.calls) - known
+            if not added:
+                assert number == 9, "first eight dialogs must establish"
+                refusal = f.response(number, "INVITE", 486) or f.response(
+                    number, "INVITE", 503
+                )
+                ninth_status = int(refusal[0].split()[1])
+                f.send("ACK", number=number, to=refusal[1]["to"])
+                break
+            (token,) = added
+            assert api.respond_call(f.ctx, 7, token, 200, answer) == 0
+            f.until(lambda number=number: f.response(number, "INVITE", 200))
+            to = f.response(number, "INVITE", 200)[1]["to"]
+            f.send("ACK", number=number, to=to)
+            f.until(lambda token=token: f.calls[token].state == 3)
+            dialogs.append((number, token, to))
+
+        count = len(dialogs)
+        assert all(f.calls[token].state == 3 for _, token, _ in dialogs)
+        for number, token, to in dialogs:
+            f.send("BYE", number=number, to=to)
+            f.until(
+                lambda number=number, token=token: (
+                    f.response(number, "BYE", 200) and f.calls[token].state == 5
+                )
+            )
+        for _, token, _ in dialogs:
             assert api.release_call(f.ctx, 7, token) == 0
-        old = max(f.calls)
+            assert api.release_call(f.ctx, 7, token) == -2
+
+        # Explicit release permits a new owner, with a token that cannot alias the old calls.
+        last = max(f.calls)
         f.send("INVITE", number=11, body=OFFER)
-        f.until(lambda f=f: max(f.calls) > old)
+        f.until(lambda: max(f.calls) > last)
         token = max(f.calls)
         f.send("CANCEL", number=11)
-        f.until(lambda f=f, token=token: f.calls[token].state == 5)
-        f.until(lambda f=f: f.response(11, "INVITE", 487) is not None)
+        f.until(lambda: f.calls[token].state == 5 and f.response(11, "INVITE", 487))
         f.send("ACK", number=11, to=f.response(11, "INVITE", 487)[1]["to"])
         assert api.release_call(f.ctx, 7, token) == 0
         f.close()
-    print("PASS fixed capacity, retained terminal slots and nonreused call tokens")
+    print(
+        f"SIP_CAPACITY_CLOSED established={count} ninth_status={ninth_status} all_byes_200=true "
+        "terminal_released=true tokens_not_reused=true shutdown=true",
+        flush=True,
+    )
+    assert count == 9, (
+        "a ninth call must establish while the first eight remain connected"
+    )
 
 
 def run(path):
     library = C.CDLL(path)
-    symbol = library.rptadv_sip_adapter_descriptor_v1
+    symbol = library.rptadv_sip_adapter_descriptor_v2
     symbol.restype = C.POINTER(Descriptor)
     api = symbol().contents
     assert api.struct_size >= C.sizeof(Descriptor), "incoming call capability missing"

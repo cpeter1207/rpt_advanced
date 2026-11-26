@@ -5,8 +5,10 @@
 #include <rptadv_gpio_adapter/rptadv_gpio_adapter.h>
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define GPIO_ABI RPTADV_GPIO_ADAPTER_ABI_VERSION
 
@@ -26,6 +28,7 @@ static const struct rptadv_gpio_device_info identity = {
 /** @brief Memory-backed HID, allocated and closed by the real station owner. */
 struct rptadv_gpio_device {
     _Atomic uint32_t ptt;
+    FILE *progress_ptt;
     _Atomic uint32_t outputs;
     _Atomic uint64_t service_count;
     struct rptadv_gpio_eeprom_image eeprom;
@@ -71,6 +74,16 @@ static enum rptadv_gpio_result device_open(const struct rptadv_gpio_device_confi
     if (!device) {
         return RPTADV_GPIO_NO_MEMORY;
     }
+    const char *trace = getenv("RPTADV_TEST_SIP_PROGRESS_PTT");
+    if (trace) {
+        device->progress_ptt = fopen(trace, "w");
+        if (!device->progress_ptt) {
+            free(device);
+            return RPTADV_GPIO_UNSUPPORTED;
+        }
+        fputc('0', device->progress_ptt);
+        fflush(device->progress_ptt);
+    }
     atomic_init(&device->ptt, 0);
     atomic_init(&device->outputs, config->gpio_output_initial_mask);
     atomic_init(&device->service_count, 0);
@@ -88,7 +101,11 @@ static enum rptadv_gpio_result device_open(const struct rptadv_gpio_device_confi
 static enum rptadv_gpio_result device_publish(struct rptadv_gpio_device *device,
                                              const struct rptadv_gpio_output_action *action)
 {
-    atomic_store(&device->ptt, action->ptt_asserted);
+    uint32_t prior = atomic_exchange(&device->ptt, action->ptt_asserted);
+    if (device->progress_ptt && prior != action->ptt_asserted) {
+        fputc(action->ptt_asserted ? '1' : '0', device->progress_ptt);
+        fflush(device->progress_ptt);
+    }
     atomic_store(&device->outputs, action->gpio_output_mask);
     return RPTADV_GPIO_OK;
 }
@@ -103,12 +120,16 @@ static enum rptadv_gpio_result device_inputs(const struct rptadv_gpio_device *de
                                             struct rptadv_gpio_input_snapshot *output)
 {
     (void)device;
+    /* Keep the qualified default fixture behavior outside the idle RTP case. */
+    const char *edge = getenv("RPTADV_TEST_SIP_CARRIER_EDGE");
+    const uint32_t carrier = getenv("RPTADV_TEST_SIP_IDLE_RTP") == NULL
+                             || (edge != NULL && access(edge, F_OK) == 0);
     *output = (struct rptadv_gpio_input_snapshot){
         .struct_size = sizeof(*output),
         .abi_version = GPIO_ABI,
         .online = 1,
-        .cor_active = 1,
-        .ctcss_active = 1,
+        .cor_active = carrier,
+        .ctcss_active = carrier,
     };
     return RPTADV_GPIO_OK;
 }
@@ -130,6 +151,9 @@ static enum rptadv_gpio_result device_stats(const struct rptadv_gpio_device *dev
 
 static void device_close(struct rptadv_gpio_device *device)
 {
+    if (device->progress_ptt) {
+        fclose(device->progress_ptt);
+    }
     free(device);
 }
 

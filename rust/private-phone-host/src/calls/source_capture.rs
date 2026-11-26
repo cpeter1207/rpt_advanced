@@ -11,13 +11,23 @@ pub(super) struct Audio {
     pub(super) resets: u32,
     pub(super) qualified: usize,
 }
-unsafe extern "C" fn audio(context: *mut c_void, _: u64, pcm: *const f32, count: usize,
-    concealed: u32, birth: *const abi::rptadv_source_birth_v1) -> usize {
+unsafe extern "C" fn audio(
+    context: *mut c_void,
+    _: u64,
+    pcm: *const f32,
+    count: usize,
+    concealed: u32,
+    birth: *const abi::rptadv_source_birth_v1,
+) -> usize {
     let capture = unsafe { &mut *context.cast::<Audio>() };
     if concealed == 0 {
         capture.original += count;
-        if !pcm.is_null() && !birth.is_null()
-            && unsafe { std::slice::from_raw_parts(pcm, count) }.iter().any(|v| v.abs() > 0.01) {
+        if !pcm.is_null()
+            && !birth.is_null()
+            && unsafe { std::slice::from_raw_parts(pcm, count) }
+                .iter()
+                .any(|v| v.abs() > 0.01)
+        {
             capture.qualified += count;
         }
     } else {
@@ -38,7 +48,7 @@ unsafe extern "C" fn digit(context: *mut c_void, _: u32) -> i32 {
     0
 }
 
-pub(super) fn read(call: &PrivateCall, capture: &mut Audio) -> Result<(),crate::Error> {
+pub(super) fn read(call: &PrivateCall, capture: &mut Audio) -> Result<(), crate::Error> {
     let mut sink: abi::rptadv_peer_source_sink_v1 = unsafe { std::mem::zeroed() };
     sink.struct_size = size_of::<abi::rptadv_peer_source_sink_v1>() as u32;
     sink.abi_version = 1;
@@ -47,10 +57,13 @@ pub(super) fn read(call: &PrivateCall, capture: &mut Audio) -> Result<(),crate::
     // The oldest kernel receipt can predate this dialog and its SELECT.
     // Use the same absolute monotonic clock as the production frontend.
     let mut now = std::mem::MaybeUninit::<libc::timespec>::uninit();
-    assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC,now.as_mut_ptr()) },0);
+    assert_eq!(
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, now.as_mut_ptr()) },
+        0
+    );
     let now = unsafe { now.assume_init() };
-    sink.reference_now_ns = u64::try_from(now.tv_sec).unwrap()*1_000_000_000
-        + u64::try_from(now.tv_nsec).unwrap();
+    sink.reference_now_ns =
+        u64::try_from(now.tv_sec).unwrap() * 1_000_000_000 + u64::try_from(now.tv_nsec).unwrap();
     sink.audio_timed = Some(audio);
     sink.gap = Some(gap);
     sink.digit = Some(digit);

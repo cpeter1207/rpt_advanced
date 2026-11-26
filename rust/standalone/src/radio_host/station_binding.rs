@@ -1,4 +1,4 @@
-//! Dormant station plans remain independent of the legacy configuration dispatcher.
+//! Dormant typed station plans and serialized physical ownership.
 use super::{MAXIMUM_RADIO_FRAMES, PortLease, RadioHandle, Selection, StationPlan};
 use crate::{abi, host_services::StandaloneHostContext};
 use std::{
@@ -111,7 +111,7 @@ unsafe extern "C" fn open(
         registry: binding.ports.clone(),
         port,
     });
-    let reservation = Selection::Typed {
+    let reservation = Selection {
         plan: binding.plan.clone(),
         maximum_frames: maximum as u32,
         lease,
@@ -137,14 +137,11 @@ unsafe extern "C" fn stage(context: *mut c_void, radio: *mut c_void, plan: *cons
     }) else {
         return -1;
     };
-    let Selection::Typed {
+    let Selection {
         plan: current,
         maximum_frames,
         lease,
-    } = &handle.reservation
-    else {
-        return -2;
-    };
+    } = &handle.reservation;
     if !Arc::ptr_eq(&host.radio.typed_ports, &binding.ports)
         || !Arc::ptr_eq(&binding.ports, &lease.registry)
         || current.port != binding.plan.port
@@ -156,11 +153,10 @@ unsafe extern "C" fn stage(context: *mut c_void, radio: *mut c_void, plan: *cons
         return -7;
     };
     if let Some(pending) = &handle.pending {
-        return match pending {
-            Selection::Typed { plan, .. } if Arc::ptr_eq(plan, &binding.plan) => {
-                active.poll_typed_stage()
-            }
-            _ => -5,
+        return if Arc::ptr_eq(&pending.plan, &binding.plan) {
+            active.poll_typed_stage()
+        } else {
+            -5
         };
     }
     let Some(generation) = host.radio.next_generation() else {
@@ -168,7 +164,7 @@ unsafe extern "C" fn stage(context: *mut c_void, radio: *mut c_void, plan: *cons
     };
     let status = active.stage_typed(&binding.plan, generation, *maximum_frames);
     if active.has_typed_update() {
-        handle.pending = Some(Selection::Typed {
+        handle.pending = Some(Selection {
             plan: binding.plan.clone(),
             maximum_frames: *maximum_frames,
             lease: lease.clone(),
@@ -187,7 +183,7 @@ unsafe extern "C" fn release(_context: *mut c_void, plan: *mut c_void) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{host_services::HostServicesOwner, secrets::SecretsFile};
+    use crate::host_services::HostServicesOwner;
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Scenario {
         Dormant,
@@ -238,13 +234,6 @@ mod tests {
         }
         PREPARE_STATUS.get()
     }
-    unsafe extern "C" fn legacy_prepare(
-        _: *mut c_void,
-        _: *const abi::UrpNativeCreateArgs,
-        _: *mut *mut c_void,
-    ) -> i32 {
-        -1
-    }
     unsafe extern "C" fn begin(_: *mut c_void, _: *mut c_void) -> i32 {
         BEGINS.set(BEGINS.get() + 1);
         BEGIN_STATUS.get()
@@ -260,10 +249,8 @@ mod tests {
     fn exercise(scenario: Scenario) {
         // SAFETY: both versioned getters belong to this retained, matched product library.
         let producer = unsafe { libloading::Library::new("libusbradioplus_product.so.1") }.unwrap();
-        let host =
-            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
-        let other =
-            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+        let host = HostServicesOwner::new(None).unwrap();
+        let other = HostServicesOwner::new(None).unwrap();
         let table = host.descriptor();
 
         // SAFETY: the getters and public fixture structures are retained for all synchronous calls.
@@ -390,7 +377,6 @@ mod tests {
             let mut ticket: abi::rptadv_remote_ticket_v1 = std::mem::zeroed();
             if scenario != Scenario::Dormant {
                 let mut api = crate::radio_activation::tests::remote_fixture_api();
-                api.native_prepare_update = Some(legacy_prepare);
                 api.native_begin_update = Some(begin);
                 api.native_accept_update = Some(accept);
                 api.native_finish_update = Some(finish);
@@ -448,7 +434,7 @@ mod tests {
     }
     unsafe fn check_update(
         scenario: Scenario,
-        table: &abi::rptadv_host_services_v10,
+        table: &abi::rptadv_host_services_v11,
         radio: *mut c_void,
         next: *mut c_void,
     ) {

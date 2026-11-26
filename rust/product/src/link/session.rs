@@ -194,11 +194,11 @@ impl PeerControl {
     pub(crate) fn inbound_policy(&self) -> InboundPolicy {
         self.observer.policy()
     }
-    /// Queue bounded work, returning ownership to the caller when full.
-    pub fn send(&mut self, command: Command) -> Result<(), Command> {
+    /// Queue bounded work, returning the boxed command to the caller when full.
+    pub fn send(&mut self, command: Command) -> Result<(), Box<Command>> {
         self.commands
             .push(command)
-            .map_err(|rtrb::PushError::Full(command)| command)?;
+            .map_err(|rtrb::PushError::Full(command)| Box::new(command))?;
         self.wake.notify();
         Ok(())
     }
@@ -533,32 +533,60 @@ impl PeerIoWorker {
         Ok(())
     }
 
-    fn register_session<T>(&mut self, (services, peer): (HostServices, *mut c_void), session: Box<T>,
-        step: unsafe extern "C" fn(*mut c_void) -> i32, stop: Arc<AtomicBool>, reply: PeerReply,
-        wake: PeerWake) -> Result<(), Box<T>> {
-        if self.stop.load(Ordering::Acquire) || self.async_peers.try_reserve(1).is_err() { return Err(session); }
+    fn register_session<T>(
+        &mut self,
+        (services, peer): (HostServices, *mut c_void),
+        session: Box<T>,
+        step: unsafe extern "C" fn(*mut c_void) -> i32,
+        stop: Arc<AtomicBool>,
+        reply: PeerReply,
+        wake: PeerWake,
+    ) -> Result<(), Box<T>> {
+        if self.stop.load(Ordering::Acquire) || self.async_peers.try_reserve(1).is_err() {
+            return Err(session);
+        }
         // The provider may invoke step before returning. Never borrow a moved
         // session until the paired host detach has quiesced its registration.
         let context = Box::into_raw(session);
-        let registration = match unsafe { services.peer_step_attach(peer, Some(step), context.cast()) } {
-            Ok(value) => value,
-            Err(_) => return Err(unsafe { Box::from_raw(context) }),
-        };
+        let registration =
+            match unsafe { services.peer_step_attach(peer, Some(step), context.cast()) } {
+                Ok(value) => value,
+                Err(_) => return Err(unsafe { Box::from_raw(context) }),
+            };
         services.attach_wake(&wake, registration);
-        self.async_peers.push(AsyncPeer { services, registration, stop, reply, wake,
-            session: NonNull::new(context.cast()).unwrap(), destroy: destroy_session::<T> });
+        self.async_peers.push(AsyncPeer {
+            services,
+            registration,
+            stop,
+            reply,
+            wake,
+            session: NonNull::new(context.cast()).unwrap(),
+            destroy: destroy_session::<T>,
+        });
         Ok(())
     }
 
-    pub(crate) fn attach_private(&mut self, io: PeerIo, reply: PeerReply, capacity: usize)
-        -> Result<super::private_phone::Control, Error> {
+    pub(crate) fn attach_private(
+        &mut self,
+        io: PeerIo,
+        reply: PeerReply,
+        capacity: usize,
+    ) -> Result<super::private_phone::Control, Error> {
         self.reap();
         let owner = io.async_owner().ok_or(Error::Admission)?;
-        let (session, control) = super::private_phone::Session::new(io, reply.clone(), self.epoch, capacity)?;
+        let (session, control) =
+            super::private_phone::Session::new(io, reply.clone(), self.epoch, capacity)?;
         let stop = Arc::clone(&session.stop);
         let wake = session.wake.clone();
-        self.register_session(owner, Box::new(session), super::private_phone::step, stop, reply, wake)
-            .map_err(|_| Error::Thread)?;
+        self.register_session(
+            owner,
+            Box::new(session),
+            super::private_phone::step,
+            stop,
+            reply,
+            wake,
+        )
+        .map_err(|_| Error::Thread)?;
         Ok(control)
     }
 
@@ -583,7 +611,9 @@ impl PeerIoWorker {
 
     #[cfg(target_os = "linux")]
     pub(crate) fn owns_session(&self, stop: &Arc<AtomicBool>) -> bool {
-        self.async_peers.iter().any(|peer| Arc::ptr_eq(&peer.stop, stop))
+        self.async_peers
+            .iter()
+            .any(|peer| Arc::ptr_eq(&peer.stop, stop))
     }
 
     /// Signal all owners, then wait off-callback before releasing peer handles.
@@ -653,6 +683,8 @@ impl PeerSession {
         });
         #[cfg(test)]
         let owner_thread = Arc::new(std::sync::Mutex::new(None));
+        let observer = inbound.observer();
+        observer.signals().bind_peer_callsign(io.callsign());
         let control = PeerControl {
             callsign: io.callsign().to_owned(),
             can_forward_text: io.can_forward_text(),
@@ -662,7 +694,7 @@ impl PeerSession {
             events: outgoing,
             stop: stop.clone(),
             wake: wake.clone(),
-            observer: inbound.observer(),
+            observer,
             peer_observation: Arc::clone(&peer_observation),
             #[cfg(test)]
             owner_thread: Arc::clone(&owner_thread),
@@ -713,8 +745,14 @@ impl PeerSession {
     pub(crate) fn bind_clock(&mut self, clock: Arc<SourceClock>) {
         self.outbound.bind_clock(clock);
     }
-    pub(crate) fn bind_media_isolation(&mut self, isolation: Arc<rpt_advanced_core::link::MediaIsolation>) {
-        self.inbound.signals().reply_target().bind_media_isolation(Arc::clone(&isolation));
+    pub(crate) fn bind_media_isolation(
+        &mut self,
+        isolation: Arc<rpt_advanced_core::link::MediaIsolation>,
+    ) {
+        self.inbound
+            .signals()
+            .reply_target()
+            .bind_media_isolation(Arc::clone(&isolation));
         self.outbound.bind_media_isolation(isolation);
     }
     fn signal_receipt(&self, step_ms: u64) -> SignalReceipt {

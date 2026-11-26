@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 
 fn segment(ring: InboundConsumer, budget: u64) -> SegmentConsumer {
@@ -396,7 +397,7 @@ fn playback_timeout_hold_preserves_one_shot_source_through_priority_playback() {
     let reader = session
         .register_program(MediaProgram::single(composition_tone(500)), true)
         .unwrap();
-    let job = session.requests.as_mut().unwrap().pop().unwrap();
+    let job = session.requests.pop().unwrap();
     let control = Arc::clone(&job.control);
     session.jobs.push(job);
     let mut identifier = session
@@ -460,6 +461,15 @@ fn held_status_terminal_cancel_and_drop_reclaim_one_shot_jobs() {
         session.jobs.push(job);
         session.start().unwrap();
         reader.start();
+        // Hold a completed source with its reader still owned. Before the
+        // converter tail is written, the first read may legally return a prefix.
+        let limit = std::time::Instant::now() + Duration::from_secs(2);
+        while control.completed.load(Ordering::Acquire) != 1 && std::time::Instant::now() < limit {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(control.completed.load(Ordering::Acquire), 1);
+        assert_eq!(control.failed.load(Ordering::Acquire), 0);
+        assert_eq!(control.consumer_outstanding.load(Ordering::Acquire), 1);
         assert!(matches!(
             render_until_terminal(reader.as_mut()),
             PcmRead::Samples(64) | PcmRead::FinalSamples(64)
@@ -737,12 +747,19 @@ fn morse_replacement_waits_for_late_primary_consumer() {
         handled: 1,
         one_shot: true,
     };
-    let (_requests, requests) = RingBuffer::new(1);
+    let requests = Inbox::default();
     let file = Arc::clone(&session.file);
     let speech = Arc::clone(&session.speech);
     let stopping = Arc::clone(&session.stopping);
     session.worker = Some(thread::spawn(move || {
-        worker_loop(vec![job, marker], requests, file, speech, stopping);
+        schedule(
+            vec![job, marker],
+            requests,
+            file,
+            speech,
+            stopping,
+            Arc::new(Lifecycle::new().unwrap()),
+        );
     }));
     // The second job confirms that the worker visited the replacement before audio drains ready.
     for _ in 0..1000 {
@@ -867,7 +884,7 @@ fn fixture_context(fixture: Fixture, open_file: bool, open_speech: bool) -> Arc<
         // SAFETY: Box::into_raw returns a non-null aligned fixture pointer.
         handle: unsafe { std::ptr::NonNull::new_unchecked(handle) },
         destroy: destroy_fixture_context,
-        read_stream: read_fixture_stream,
+        step_stream: read_fixture_stream,
         close_stream: close_test_stream,
         open_file: open_file.then_some(open_fixture_file),
         open_speech: open_speech.then_some(open_fixture_speech),
@@ -922,19 +939,18 @@ unsafe extern "C" fn destroy_fixture_context(handle: *mut c_void) {
     drop(unsafe { Box::from_raw(handle.cast::<Fixture>()) });
 }
 
-unsafe fn open_fixture(context: *const c_void, output: *mut ffi::rptadv_media_stream) -> i32 {
+unsafe fn open_fixture(context: *const c_void, output: *mut *mut c_void) -> i32 {
     // SAFETY: the owning Context keeps its fixture alive through the synchronous call.
     let fixture = unsafe { &*context.cast::<Fixture>() };
     if fixture.open_code != 0 {
         return fixture.open_code;
     }
     unsafe {
-        (*output).handle = if fixture.null_handle {
+        *output = if fixture.null_handle {
             ptr::null_mut()
         } else {
-            context.cast_mut()
+            Box::into_raw(Box::new((context, Some(fixture.rate)))).cast()
         };
-        (*output).sample_rate_hz = fixture.rate;
     }
     0
 }
@@ -943,7 +959,7 @@ unsafe extern "C" fn open_fixture_file(
     context: *const c_void,
     _: *const std::ffi::c_char,
     _: *const ffi::rptadv_media_cancellation,
-    output: *mut ffi::rptadv_media_stream,
+    output: *mut *mut c_void,
 ) -> i32 {
     // SAFETY: forwarded unchanged to the fixture's synchronous open helper.
     unsafe { open_fixture(context, output) }
@@ -953,12 +969,11 @@ unsafe extern "C" fn open_null_handle_file(
     _: *const c_void,
     _: *const std::ffi::c_char,
     _: *const ffi::rptadv_media_cancellation,
-    output: *mut ffi::rptadv_media_stream,
+    output: *mut *mut c_void,
 ) -> i32 {
     // SAFETY: the test provides a live, writable stream result.
     unsafe {
-        (*output).handle = ptr::null_mut();
-        (*output).sample_rate_hz = 48_000;
+        *output = ptr::null_mut();
     }
     0
 }
@@ -967,7 +982,7 @@ unsafe extern "C" fn open_fixture_speech(
     context: *const c_void,
     _: *const ffi::rptadv_media_speech_request,
     _: *const ffi::rptadv_media_cancellation,
-    output: *mut ffi::rptadv_media_stream,
+    output: *mut *mut c_void,
 ) -> i32 {
     // SAFETY: forwarded unchanged to the fixture's synchronous open helper.
     unsafe { open_fixture(context, output) }
@@ -978,10 +993,21 @@ unsafe extern "C" fn read_fixture_stream(
     cancellation: *const ffi::rptadv_media_cancellation,
     output: *mut f32,
     capacity: usize,
-    count: *mut usize,
+    event: *mut ffi::rptadv_media_step,
 ) -> i32 {
     // SAFETY: the stream handle borrows its owning fixture Context.
-    let fixture = unsafe { &*handle.cast::<Fixture>() };
+    let (context, rate) = unsafe { &mut *handle.cast::<(*const c_void, Option<u32>)>() };
+    if let Some(rate) = rate.take() {
+        unsafe {
+            *event = ffi::rptadv_media_step {
+                kind: 1,
+                sample_rate_hz: rate,
+                samples: 0,
+            };
+        }
+        return 0;
+    }
+    let fixture = unsafe { &*context.cast::<Fixture>() };
     let first = fixture.reads.fetch_add(1, Ordering::AcqRel) == 0;
     let code = if first {
         fixture.first_read_code
@@ -989,24 +1015,20 @@ unsafe extern "C" fn read_fixture_stream(
         fixture.later_read_code
     };
     if code != 0 {
-        unsafe { *count = 0 };
         return code;
     }
     if !first {
         if let Some(gate) = &fixture.streaming_gate {
             gate.entered.store(true, Ordering::Release);
-            while !gate.released.load(Ordering::Acquire) {
-                // SAFETY: the worker retains its cancellation record throughout this read.
-                let cancelled = unsafe { &*cancellation };
-                // SAFETY: the callback and its context are borrowed from that live record.
-                if unsafe {
-                    cancelled
-                        .is_cancelled
-                        .is_some_and(|check| check(cancelled.context) != 0)
-                } {
-                    break;
+            if !gate.released.load(Ordering::Acquire) {
+                unsafe {
+                    *event = ffi::rptadv_media_step {
+                        kind: 0,
+                        sample_rate_hz: 0,
+                        samples: 0,
+                    };
                 }
-                thread::sleep(Duration::from_millis(1));
+                return 0;
             }
             gate.exited.store(true, Ordering::Release);
         }
@@ -1025,10 +1047,15 @@ unsafe extern "C" fn read_fixture_stream(
         fixture.later_count
     };
     unsafe {
-        *count = if fixture.invalid_count {
+        let count = if fixture.invalid_count {
             capacity + 1
         } else {
             samples
+        };
+        *event = ffi::rptadv_media_step {
+            kind: if count == 0 { 3 } else { 2 },
+            sample_rate_hz: 0,
+            samples: count,
         };
         if !fixture.invalid_count {
             std::slice::from_raw_parts_mut(output, samples).fill(if fixture.nan_sample {
@@ -1047,46 +1074,62 @@ unsafe extern "C" fn open_test_file(
     _: *const c_void,
     _: *const std::ffi::c_char,
     _: *const ffi::rptadv_media_cancellation,
-    output: *mut ffi::rptadv_media_stream,
+    output: *mut *mut c_void,
 ) -> i32 {
     unsafe {
-        (*output).handle = std::ptr::dangling_mut::<c_void>();
-        (*output).sample_rate_hz = 48000;
+        *output = Box::into_raw(Box::new((ptr::null::<c_void>(), Some(48000u32)))).cast();
     }
     0
 }
 
 unsafe extern "C" fn read_test_file(
-    _: *mut c_void,
-    cancellation: *const ffi::rptadv_media_cancellation,
+    handle: *mut c_void,
+    _: *const ffi::rptadv_media_cancellation,
     output: *mut f32,
     capacity: usize,
-    count: *mut usize,
+    event: *mut ffi::rptadv_media_step,
 ) -> i32 {
+    let (_, rate) = unsafe { &mut *handle.cast::<(*const c_void, Option<u32>)>() };
+    if let Some(rate) = rate.take() {
+        unsafe {
+            *event = ffi::rptadv_media_step {
+                kind: 1,
+                sample_rate_hz: rate,
+                samples: 0,
+            };
+        }
+        return 0;
+    }
     if READS.fetch_add(1, Ordering::AcqRel) == 0 {
         unsafe {
             std::slice::from_raw_parts_mut(output, capacity).fill(0.25);
-            *count = capacity;
+            *event = ffi::rptadv_media_step {
+                kind: 2,
+                sample_rate_hz: 0,
+                samples: capacity,
+            };
         }
         return 0;
     }
     READING.store(true, Ordering::Release);
-    while !RELEASE_READ.load(Ordering::Acquire) {
-        let cancelled = unsafe { &*cancellation };
-        if unsafe {
-            cancelled
-                .is_cancelled
-                .is_some_and(|check| check(cancelled.context) != 0)
-        } {
-            break;
-        }
-        thread::sleep(Duration::from_millis(1));
+    let kind = if RELEASE_READ.load(Ordering::Acquire) {
+        3
+    } else {
+        0
+    };
+    unsafe {
+        *event = ffi::rptadv_media_step {
+            kind,
+            sample_rate_hz: 0,
+            samples: 0,
+        };
     }
-    unsafe { *count = 0 };
     0
 }
 
-unsafe extern "C" fn close_test_stream(_: *mut c_void) {}
+unsafe extern "C" fn close_test_stream(handle: *mut c_void) {
+    drop(unsafe { Box::from_raw(handle.cast::<(*const c_void, Option<u32>)>()) });
+}
 unsafe extern "C" fn destroy_test_context(_: *mut c_void) {}
 
 struct ReleaseRead;
@@ -1102,14 +1145,14 @@ fn context(
             *const c_void,
             *const std::ffi::c_char,
             *const ffi::rptadv_media_cancellation,
-            *mut ffi::rptadv_media_stream,
+            *mut *mut c_void,
         ) -> i32,
     >,
 ) -> Arc<Context> {
     Arc::new(Context {
         handle: std::ptr::NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         destroy: destroy_test_context,
-        read_stream: read_test_file,
+        step_stream: read_test_file,
         close_stream: close_test_stream,
         open_file,
         open_speech: None,
@@ -1262,9 +1305,17 @@ fn worker_loop_reclaims_consumer_after_stream_generation_is_cancelled() {
     let control = Arc::clone(&job.control);
     let stopping = Arc::new(AtomicBool::new(false));
     let worker_stopping = Arc::clone(&stopping);
-    let (_, requests) = RingBuffer::new(1);
-    let worker =
-        thread::spawn(move || worker_loop(vec![job], requests, file, speech, worker_stopping));
+    let requests = Inbox::default();
+    let worker = thread::spawn(move || {
+        schedule(
+            vec![job],
+            requests,
+            file,
+            speech,
+            worker_stopping,
+            Arc::new(Lifecycle::new().unwrap()),
+        )
+    });
 
     for _ in 0..1_000 {
         if READING.load(Ordering::Acquire) {
@@ -1466,6 +1517,15 @@ fn file_stream_open_validates_handles_and_inclusive_rate_bounds() {
         stopping: &stopping,
         generation: 1,
     };
+    let open_file = |ctx: &Arc<Context>, path: &Path, cancel: &Cancellation<'_>| {
+        let path = super::super::path_string(path)?;
+        let raw = raw_cancellation(cancel);
+        let mut stream = ctx.open(|out| unsafe {
+            (ctx.open_file.unwrap())(ctx.handle.as_ptr(), path.as_ptr(), &raw, out)
+        })?;
+        stream.await_format(&raw)?;
+        Ok::<_, MediaError>(stream)
+    };
     for file in [fixture(8000, 1, 0.25), fixture(192000, 1, 0.25)] {
         let context = fixture_context(file, true, false);
         assert!(open_file(&context, Path::new("test.wav"), &cancellation).is_ok());
@@ -1489,6 +1549,19 @@ fn file_stream_open_validates_handles_and_inclusive_rate_bounds() {
 
 #[test]
 fn stream_validation_requires_a_handle_and_an_inclusive_rate() {
+    let valid_stream = |handle: *mut c_void, rate: u32| {
+        let mut f = fixture(rate, 1, 0.25);
+        f.null_handle = handle.is_null();
+        let context = fixture_context(f, true, false);
+        let cancelled = rpt_advanced_core::media::Cancellation::default();
+        let raw = super::super::raw_cancellation(&cancelled);
+        let opened = context.open(|out| unsafe {
+            (context.open_file.unwrap())(context.handle.as_ptr(), c"x".as_ptr(), &raw, out)
+        });
+        opened
+            .and_then(|mut stream| stream.await_format(&raw))
+            .is_ok()
+    };
     let handle = std::hint::black_box(std::ptr::NonNull::<u8>::dangling().as_ptr().cast());
     for (handle, rate, valid) in [
         (std::ptr::null_mut(), 48_000, false),
@@ -1682,6 +1755,63 @@ fn collect_stream(reader: &mut dyn PcmStreamReader, output: &mut [f32]) -> usize
 }
 
 #[test]
+fn a_held_prompt_reader_allows_another_station_prompt_to_start() {
+    fn read_audible(reader: &mut dyn PcmStreamReader) -> bool {
+        let until = std::time::Instant::now() + Duration::from_secs(1);
+        let mut output = [0.0; 16];
+        while std::time::Instant::now() < until {
+            match reader.render(&mut output) {
+                PcmRead::Samples(n) | PcmRead::FinalSamples(n) => {
+                    if output[..n].iter().any(|sample| sample.abs() > 0.02) {
+                        return true;
+                    }
+                }
+                PcmRead::Pending => thread::sleep(Duration::from_millis(1)),
+                PcmRead::Finished => return false,
+                PcmRead::Failed => panic!("station prompt producer failed"),
+            }
+        }
+        false
+    }
+
+    let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    session.start().unwrap();
+    let mut first = session
+        .register_program(MediaProgram::single(composition_tone(500)), true)
+        .unwrap();
+    first.start();
+    assert!(
+        read_audible(first.as_mut()),
+        "first prompt never became audible"
+    );
+    let mut second = session
+        .register_program(MediaProgram::single(composition_tone(1_000)), true)
+        .unwrap();
+    second.start();
+
+    // Leave the first reader alive at its current position while polling the second.
+    let concurrent = read_audible(second.as_mut());
+    let first_tail = collect_samples(first.as_mut(), &mut [0.0; 64]);
+    let second_tail = collect_samples(second.as_mut(), &mut [0.0; 64]);
+    let first_resumed = first_tail.iter().any(|sample| sample.abs() > 0.02);
+    let second_valid = second_tail.iter().any(|sample| sample.abs() > 0.02);
+    drop((first, second));
+    drop(session);
+
+    assert!(
+        first_resumed && second_valid,
+        "both independent prompts must finish audibly"
+    );
+    eprintln!(
+        "PRIVATE_PROMPT_FAIR first_ready=true second_while_first_held={concurrent} first_resumed={first_resumed} second_valid={second_valid}"
+    );
+    assert!(
+        concurrent,
+        "a held caller prompt must not delay an independent ready prompt"
+    );
+}
+
+#[test]
 fn prepared_native_parrot_recording_uses_the_station_media_ring() {
     let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
     session.start().unwrap();
@@ -1735,9 +1865,17 @@ fn media_worker_reclaims_retired_consumer_after_one_shot_playback() {
     let speech = Arc::clone(&session.speech);
     let stopping = Arc::new(AtomicBool::new(false));
     let worker_stopping = Arc::clone(&stopping);
-    let (_, requests) = RingBuffer::new(1);
-    let worker =
-        thread::spawn(move || worker_loop(vec![job], requests, file, speech, worker_stopping));
+    let requests = Inbox::default();
+    let worker = thread::spawn(move || {
+        schedule(
+            vec![job],
+            requests,
+            file,
+            speech,
+            worker_stopping,
+            Arc::new(Lifecycle::new().unwrap()),
+        )
+    });
 
     assert!(!collect_samples(reader.as_mut(), &mut [0.0; 64]).is_empty());
     for _ in 0..1_000 {
@@ -2509,7 +2647,7 @@ fn one_shot_registration_validates_sources_queue_and_session_state() {
         session.register(MediaSource::default()).err(),
         Some(MediaError::InvalidRequest)
     );
-    for _ in 0..4 {
+    for _ in 0..5 {
         session
             .register_once(MediaSource {
                 morse: Some(rpt_advanced_core::media::MorseSource {
@@ -2522,20 +2660,6 @@ fn one_shot_registration_validates_sources_queue_and_session_state() {
             })
             .unwrap();
     }
-    assert_eq!(
-        session
-            .register_once(MediaSource {
-                morse: Some(rpt_advanced_core::media::MorseSource {
-                    text: "E".into(),
-                    speed_wpm: 20,
-                    frequency_hz: 800.0,
-                    level_db: -6,
-                }),
-                ..MediaSource::default()
-            })
-            .err(),
-        Some(MediaError::QueueFull)
-    );
 }
 
 #[test]
@@ -2677,5 +2801,79 @@ fn session_rejects_invalid_media_and_duplicate_start_or_persistent_registration(
             })
             .err(),
         Some(MediaError::InvalidRequest)
+    );
+}
+
+#[test]
+fn dropping_a_reader_before_late_publication_releases_its_one_shot_ring() {
+    for handled in [0, 1] {
+        let (_session, mut job, mut reader) = registered_file_job(fixture(48_000, 8, 0.25));
+        job.one_shot = true;
+        reader.start();
+        job.handled = handled;
+        drop(reader);
+        assert!(job.ready.is_abandoned());
+        assert!(!job.control.abandoned.load(Ordering::Acquire));
+
+        let (_producer, ring) = InboundRing::open(48_000, InboundPolicy::Media).unwrap();
+        let consumer = segment(ring, 8);
+        let progress = Arc::downgrade(&consumer.progress);
+        job.control
+            .consumer_outstanding
+            .fetch_add(1, Ordering::AcqRel);
+        assert!(job.ready.push((1, 0, consumer)).is_ok());
+
+        assert!(
+            one_shot_done(&job),
+            "the released reader cannot acknowledge late PCM"
+        );
+        drop(job);
+        assert!(progress.upgrade().is_none());
+    }
+}
+
+#[test]
+fn provider_eof_retires_its_handle_while_reader_tail_is_still_pending() {
+    let gate = Arc::new(StreamingGate::default());
+    gate.released.store(true, Ordering::Release);
+    let mut file = fixture(48_000, 8, 0.25);
+    file.streaming_gate = Some(gate.clone());
+    let (session, mut job, mut reader) = registered_file_job(file);
+    let baseline = Arc::strong_count(&session.file);
+    let control = job.control.clone();
+    reader.start();
+    let mut task = Box::pin(produce(
+        &mut job,
+        1,
+        &session.file,
+        &session.speech,
+        &session.stopping,
+        &session.lifecycle,
+        InboundRing::open,
+    ));
+    let mut cx = std::task::Context::from_waker(Waker::noop());
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !gate.exited.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        assert!(task.as_mut().poll(&mut cx).is_pending());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        gate.exited.load(Ordering::Acquire),
+        "fixture must return EOF"
+    );
+    assert_eq!(control.consumer_outstanding.load(Ordering::Acquire), 1);
+    assert_eq!(control.completed.load(Ordering::Acquire), 0);
+    // No further producer polls or reader samples. The retirement lane can still finish.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while Arc::strong_count(&session.file) > baseline && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    let retired = Arc::strong_count(&session.file) == baseline;
+    drop(task);
+    drop(reader);
+    session.lifecycle.drain_station(&session.stopping);
+    assert!(
+        retired,
+        "provider retirement must finish before FIR padding can drain"
     );
 }

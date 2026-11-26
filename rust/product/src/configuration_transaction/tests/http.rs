@@ -578,20 +578,61 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         .unwrap();
         fs::set_permissions(&keys, fs::Permissions::from_mode(0o500)).unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap());
-        child.args(["--exact", TEST, "--nocapture"])
+        child
+            .args(["--exact", TEST, "--nocapture"])
             .env("CREDENTIALS_DIRECTORY", &keys)
             .env(
                 "RPTADV_HAL_FIXTURE_KEY",
                 keys.join("rpt-advanced.aead.example"),
             )
             .env("RPTADV_HAL_TEST_CHILD", "1");
+        let case = std::env::var("RPTADV_HAL_REVIEW_CASE");
         if matches!(
-            std::env::var("RPTADV_HAL_REVIEW_CASE").as_deref(),
+            case.as_deref(),
             Ok("standalone-managed-phone-dial"
                 | "standalone-managed-phone-hangup"
-                | "standalone-managed-phone-incoming")
+                | "standalone-managed-phone-pending"
+                | "standalone-managed-phone-progress"
+                | "standalone-managed-phone-progress-terminal"
+                | "standalone-managed-phone-incoming"
+                | "standalone-managed-phone-idle-rtp"
+                | "standalone-managed-phone-rtp-handover"
+                | "standalone-managed-phone-login-timers"
+                | "standalone-managed-phone-mix-minus")
         ) {
-            child.env("RPTADV_TEST_PHONE_AUDIO", fixture.0.join("phone-programme.txt"));
+            child.env(
+                "RPTADV_TEST_PHONE_AUDIO",
+                fixture.0.join("phone-programme.txt"),
+            );
+        }
+        if matches!(
+            case.as_deref(),
+            Ok("standalone-managed-phone-idle-rtp"
+                | "standalone-managed-phone-rtp-handover"
+                | "standalone-managed-phone-progress"
+                | "standalone-managed-phone-progress-terminal")
+        ) {
+            child.env("RPTADV_TEST_SIP_IDLE_RTP", "1");
+        }
+        if case.as_deref() == Ok("standalone-managed-phone-rtp-handover") {
+            child.env(
+                "RPTADV_TEST_SIP_CARRIER_EDGE",
+                fixture.0.join("sip-rf-carrier"),
+            );
+        }
+        if matches!(
+            case.as_deref(),
+            Ok("standalone-managed-phone-progress" | "standalone-managed-phone-progress-terminal")
+        ) {
+            child
+                .env(
+                    "RPTADV_TEST_SIP_PROGRESS_PCM",
+                    fixture.0.join("progress.pcm"),
+                )
+                .env(
+                    "RPTADV_TEST_SIP_PROGRESS_PTT",
+                    fixture.0.join("progress.ptt"),
+                );
         }
         let out = child.status().unwrap();
         fs::set_permissions(keys, fs::Permissions::from_mode(0o700)).unwrap();

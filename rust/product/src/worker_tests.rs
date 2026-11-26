@@ -1,13 +1,14 @@
 use super::*;
-use crate::services::HostServices;
+use crate::{fixture::station, services::HostServices};
 use rpt_advanced_core::{
-    config::ConfigDocument,
+    config::resources::candidate::ResourceKind,
     media::{FileRequest, MediaError, PreparedAudio, SpeechRequest},
     runtime::{
         DeviceHandoff, GenerationSettings, NativeFilePreparer, NativeSpeechPreparer,
         PreparedAdapter, Runtime, RuntimeClock, RuntimeError,
     },
 };
+use serde_json::{Value, json};
 
 struct Media;
 impl NativeFilePreparer for Media {
@@ -62,62 +63,79 @@ fn audio_owners() -> (Runtime<Audio>, AudioOwners) {
     audio_owners_with_maximum(8)
 }
 fn audio_owners_with_maximum(maximum: usize) -> (Runtime<Audio>, AudioOwners) {
-    audio_owners_with_config(maximum, "[1000]\nradio_channel=usb\nduplex=full\n")
+    audio_owners_with_config(maximum, &[])
 }
-fn audio_owners_with_config(maximum: usize, configuration: &str) -> (Runtime<Audio>, AudioOwners) {
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(configuration).unwrap(),
-        &Media,
-        |_, _| {
-            let (state, _) =
-                Audio::new(Vec::new(), maximum).map_err(|_| RuntimeError::Preparation)?;
-            Ok(PreparedAdapter {
-                remote_commands: None,
-                state,
-                control: (),
-                receive_maximum: maximum,
-                transmit_maximum: maximum,
-            })
-        },
-        |_, _| Ok(Box::new(Device) as Box<dyn DeviceHandoff>),
-        RuntimeClock {
-            now_ms: 0,
-            wall_seconds: 0,
-            wall_subsecond_ms: 0,
-            civil: None,
-        },
-    )
-    .unwrap();
-    let owners = runtime.node("1000").unwrap().register_audio().unwrap();
+fn audio_owners_with_config(
+    maximum: usize,
+    rows: &[(ResourceKind, Value)],
+) -> (Runtime<Audio>, AudioOwners) {
+    let mut runtime = Runtime::idle();
+    configure_audio(&mut runtime, maximum, rows, 0);
+    let owners = runtime
+        .node(station::LOCAL)
+        .unwrap()
+        .register_audio()
+        .unwrap();
     (runtime, owners)
 }
-fn reload_audio(runtime: &mut Runtime<Audio>, extra: &str) -> u64 {
-    runtime
-        .reload(
-            ConfigDocument::parse(&format!("[1000]\nradio_channel=usb\nduplex=full\n{extra}"))
-                .unwrap(),
+
+fn configure_audio(
+    runtime: &mut Runtime<Audio>,
+    maximum: usize,
+    rows: &[(ResourceKind, Value)],
+    now_ms: u64,
+) -> u64 {
+    let mut rows: Vec<_> = rows
+        .iter()
+        .map(|(kind, fields)| (station::LOCAL, *kind, "", fields.clone()))
+        .collect();
+    if rows
+        .iter()
+        .all(|(_, kind, _, _)| *kind != ResourceKind::Radio)
+    {
+        rows.push((
+            station::LOCAL,
+            ResourceKind::Radio,
+            "",
+            json!({"duplex_mode":"full"}),
+        ));
+    }
+    let config = station::prepare(&[(station::LOCAL, "1000", json!({}))], &rows);
+    let clock = RuntimeClock {
+        now_ms,
+        wall_seconds: 0,
+        wall_subsecond_ms: 0,
+        civil: None,
+    };
+    let plan = runtime
+        .prepare_configuration(
+            config.runtime().clone(),
             &Media,
             |_, _| {
-                let (state, _) = Audio::new(Vec::new(), 8).unwrap();
-                Ok(PreparedAdapter {
-                    remote_commands: None,
-                    state,
-                    control: (),
-                    receive_maximum: 8,
-                    transmit_maximum: 8,
-                })
+                let (state, _) =
+                    Audio::new(Vec::new(), maximum).map_err(|_| RuntimeError::Preparation)?;
+                Ok((
+                    PreparedAdapter {
+                        remote_commands: None,
+                        state,
+                        control: (),
+                        receive_maximum: maximum,
+                        transmit_maximum: maximum,
+                    },
+                    false,
+                ))
             },
             |_, _| Ok(Box::new(Device) as Box<dyn DeviceHandoff>),
-            RuntimeClock {
-                now_ms: 1,
-                wall_seconds: 0,
-                wall_subsecond_ms: 0,
-                civil: None,
-            },
+            clock,
         )
         .unwrap();
-    runtime.status(1)[0].1.active.unwrap()
+    runtime.adopt_configuration(plan, clock).unwrap();
+    runtime
+        .confirm_station_replacements(config.runtime())
+        .unwrap();
+    runtime.status(now_ms)[0].1.active.unwrap()
 }
+
 fn worker() -> RadioWorker {
     worker_with_status(RadioStatus::default())
 }
@@ -128,7 +146,7 @@ fn worker_with_interval(status: RadioStatus, interval_ms: u64) -> RadioWorker {
     crate::fixture::RADIO_READY.store(0, Ordering::Release);
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
     RadioWorker::prepare(
-        services.radio("1000", "usb", 8).unwrap(),
+        station::radio(services, 8),
         Instant::now(),
         status,
         0,
@@ -152,8 +170,13 @@ fn remote_metadata_applies_non_fm_on_the_serial_transmit_owner() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (mut runtime, owners) =
-        audio_owners_with_config(8, "[1000]\nradio_channel=usb\nduplex=full\nhang_ms=0\n");
+    let (mut runtime, owners) = audio_owners_with_config(
+        8,
+        &[(
+            ResourceKind::TxSignaling,
+            json!({"ptt":{"timing":{"hang_ms":0}}}),
+        )],
+    );
     let mut worker = worker();
     let context = std::ptr::from_ref(&*worker.transmit).cast_mut().cast();
     let mut linked = 99;
@@ -194,7 +217,7 @@ fn local_ring_captures_squelch_delay_before_any_callback() {
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
     for (delay, reserve) in [(0, 0), (150, 7200)] {
         let worker = RadioWorker::prepare(
-            services.radio("1000", "usb", 4096).unwrap(),
+            station::radio(services, 4096),
             Instant::now(),
             RadioStatus::default(),
             delay,
@@ -271,7 +294,13 @@ fn independent_callbacks_queue_processed_pcm_and_return_transmit_keying() {
             .all(|sample| sample.is_finite() && sample.abs() <= 1.0)
     );
     let owners = worker.stop().unwrap();
-    assert!(runtime.node("1000").unwrap().register_audio().is_none());
+    assert!(
+        runtime
+            .node(station::LOCAL)
+            .unwrap()
+            .register_audio()
+            .is_none()
+    );
     drop(owners);
     assert!(runtime.stop(0));
 }
@@ -283,7 +312,13 @@ fn direct_transmit_callback_returns_activity_scoped_ctcss_separately_from_ptt() 
         .unwrap_or_else(|e| e.into_inner());
     let (mut runtime, owners) = audio_owners_with_config(
         8,
-        "[1000]\nradio_channel=usb\nduplex=full\nctcss_encode_on_input=yes\nctcss_hang_ms=20\ntransmit_hang_ms=100\n",
+        &[(
+            ResourceKind::TxSignaling,
+            json!({
+                "ptt":{"timing":{"hang_ms":100}},
+                "ctcss":{"enabled":true,"on_input":true,"frequency_hz":100,"timing":{"hang_ms":20}}
+            }),
+        )],
     );
     let mut worker = worker();
     assert!(worker.attach(owners).is_ok());
@@ -438,7 +473,7 @@ fn duplicate_attachment_preserves_both_owner_pairs_and_adapter_errors_fail_silen
     let returned = worker.attach(other_owners).expect_err("already attached");
     assert!(
         other_runtime
-            .node("1000")
+            .node(station::LOCAL)
             .unwrap()
             .register_audio()
             .is_none()
@@ -508,7 +543,7 @@ fn prepare_failure_returns_reservation_and_quiesce_destroys_before_owner_release
     let before = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
     RadioWorker::fail_next_for_test(TestFailure::Prepare);
     let Err(failure) = RadioWorker::prepare(
-        services.radio("1000", "usb", 8).unwrap(),
+        station::radio(services, 8),
         Instant::now(),
         RadioStatus::default(),
         0,
@@ -530,7 +565,13 @@ fn prepare_failure_returns_reservation_and_quiesce_destroys_before_owner_release
         crate::fixture::RADIO_DROPS.load(Ordering::Relaxed),
         before + 2
     );
-    assert!(runtime.node("1000").unwrap().register_audio().is_none());
+    assert!(
+        runtime
+            .node(station::LOCAL)
+            .unwrap()
+            .register_audio()
+            .is_none()
+    );
     drop(owners);
     assert!(runtime.stop(0));
 }
@@ -551,7 +592,7 @@ fn radio_retirement_poll_preserves_callbacks_and_owners_while_pending() {
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let (mut runtime, owners) = audio_owners();
     let mut worker = RadioWorker::prepare(
-        services.radio("1000", "usb", 8).unwrap(),
+        station::radio(services, 8),
         Instant::now(),
         RadioStatus::default(),
         0,
@@ -571,7 +612,7 @@ fn radio_retirement_poll_preserves_callbacks_and_owners_while_pending() {
     );
     drop(worker.stop());
     let worker = RadioWorker::prepare(
-        services.radio("1000", "usb", 8).unwrap(),
+        station::radio(services, 8),
         Instant::now(),
         RadioStatus::default(),
         0,
@@ -603,7 +644,7 @@ fn metadata_bind_failure_returns_the_unactivated_radio_reservation() {
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let before = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
     let failure = RadioWorker::prepare(
-        services.radio("1000", "usb", 8).unwrap(),
+        station::radio(services, 8),
         Instant::now(),
         RadioStatus::default(),
         0,
@@ -740,7 +781,17 @@ fn reload_applies_snapshot_interval_at_each_callback_boundary() {
         assert_eq!(rx(&worker, false, &mut [0.0; 8]), 0);
         assert_eq!(tx(&worker, &mut [0.0; 8]).0, 0);
     }
-    reload_audio(&mut runtime, "status_snapshot_interval_ms=1\n");
+    configure_audio(
+        &mut runtime,
+        8,
+        &[(
+            ResourceKind::Radio,
+            json!({
+                "duplex_mode":"full","timing":{"status_snapshot_interval_ms":1}
+            }),
+        )],
+        1,
+    );
     for _ in 0..6 {
         assert_eq!(rx(&worker, false, &mut [0.0; 8]), 0);
         assert_eq!(tx(&worker, &mut [0.0; 8]).0, 0);
@@ -765,7 +816,17 @@ fn reload_local_ring_waits_for_both_owners_and_discards_previous_audio() {
             assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
         }
         let original = worker.observer.clone();
-        let generation = reload_audio(&mut runtime, "squelch_delay_ms=20\n");
+        let generation = configure_audio(
+            &mut runtime,
+            8,
+            &[(
+                ResourceKind::RxSignaling,
+                json!({
+                    "timing":{"squelch_delay_ms":20}
+                }),
+            )],
+            1,
+        );
         let mut input = [0.5; 8];
         assert_eq!(rx(&worker, true, &mut input), 0);
         assert_eq!(input, [0.0; 8], "RX must wait for the matching local ring");
@@ -1075,7 +1136,7 @@ fn failed_host_activation_returns_reservation_without_consuming_owners() {
     let before = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
     crate::fixture::RADIO_ACTIVATE_RESULT.store(1, Ordering::Release);
     let Err(failure) = RadioWorker::prepare(
-        services.radio("1000", "usb", 8).unwrap(),
+        station::radio(services, 8),
         Instant::now(),
         RadioStatus::default(),
         0,
@@ -1092,7 +1153,7 @@ fn failed_host_activation_returns_reservation_without_consuming_owners() {
     assert_eq!(failed.poll_stop(), Ok(true));
     drop(failed);
     let mut worker = RadioWorker::prepare(
-        services.radio("1000", "usb", 8).unwrap(),
+        station::radio(services, 8),
         Instant::now(),
         RadioStatus::default(),
         0,
@@ -1222,7 +1283,7 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let (mut runtime, owners) = audio_owners();
     let mut worker = RadioWorker::prepare(
-        services.radio("1000", "usb", 8).unwrap(),
+        station::radio(services, 8),
         Instant::now(),
         RadioStatus::default(),
         0,
@@ -1232,7 +1293,13 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
     assert!(worker.attach(owners).is_ok());
     let owners = worker.stop().unwrap();
     assert!(probe.destroyed.get());
-    assert!(runtime.node("1000").unwrap().register_audio().is_none());
+    assert!(
+        runtime
+            .node(station::LOCAL)
+            .unwrap()
+            .register_audio()
+            .is_none()
+    );
     drop(owners);
     assert!(runtime.stop(0));
 }
@@ -1388,7 +1455,7 @@ fn registered_local_rf_delay_fences_queued_audio_and_key_before_tx_callback() {
     assert!(worker.attach(owners).is_ok());
     let port = crate::host::tests::commands::install_with_other(
         &mut runtime,
-        "1000",
+        station::LOCAL,
         "North é",
         Some(1000),
         serde_json::json!({}),

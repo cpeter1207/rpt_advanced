@@ -307,6 +307,29 @@ fn real_generation_source_and_protection_survive_parameter_conversion_and_nested
         mute.admit(&ctx, false, true, false).unwrap().action,
         Action::Mute(MuteTarget::PhonePatch(None))
     ));
+    let admit_phone = |digits| {
+        lang.match_completed(digits)
+            .unwrap()
+            .admit(&ctx, false, true, false)
+    };
+    assert!(matches!(
+        admit_phone("*3").unwrap().action,
+        Action::Host(HostAction::PhoneGrammar(action))
+            if matches!(&*action, crate::phone_dtmf::PhoneDtmfAction::Attach(None))
+    ));
+    let connect = admit_phone("*3506316").unwrap();
+    assert_eq!(connect.context.owner, ctx.owner);
+    assert!(matches!(
+        &connect.action,
+        Action::Link(command)
+            if command.action == LinkAction::Transceive
+                && command.node.as_str() == "506316"
+    ));
+    assert!(matches!(
+        admit_phone("A506316"),
+        Err(ActionError::SourceOnly)
+    ));
+    drop(connect);
     phone.end();
     assert!(mute.admit(&ctx, false, true, false).is_err());
     host.control().stop(15).unwrap();
@@ -713,71 +736,6 @@ fn fixed_numeric_setting_preserves_its_authored_type_for_provider_validation() {
         Ok(Action::Radio(RadioAction::ConstrainedSetting {selector:16, raw: tuple, value:Some(CapabilityValue::Number(n)), units:None}))
         if tuple == raw && n.as_u64() == Some(1)
     ));
-}
-
-#[test]
-fn phone_grammar_requires_the_current_authenticated_call() {
-    use crate::{
-        config::resources::candidate::ResourceScope,
-        link::{PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource},
-        runtime::{GenerationSettings, NodeHost, RuntimeGeneration},
-    };
-    use std::sync::Arc;
-    let mut host = NodeHost::new(
-        RuntimeGeneration::prepare(
-            4,
-            GenerationSettings {
-                node: "1234".into(),
-                device: "test".into(),
-                receive_maximum: 480,
-                transmit_maximum: 480,
-                squelch_delay_ms: 0,
-                status_snapshot_interval_ms: 50,
-            },
-            (),
-            (),
-        )
-        .unwrap(),
-    );
-
-    let mut ctx = InvocationContext {
-        owner: ResourceScope::Port("11111111-1111-4111-8111-111111111111".parse().unwrap()),
-        generation: Arc::new(host.control().work().unwrap()),
-        source: CommandSource::Scheduler,
-        requires_grant: false,
-    };
-    let a = prepare_runtime_action(&json!({"action":"phone_manual_key"})).unwrap();
-    assert!(matches!(a.admit(&ctx, false), Err(ActionError::SourceOnly)));
-    let phone = PeerSignals::for_phone(
-        PhoneSource::new(
-            PhoneAccountId::new("account").unwrap(),
-            1,
-            PhoneCallId::new([3; 16]).unwrap(),
-            2,
-            3,
-        )
-        .unwrap(),
-    );
-    ctx.source = CommandSource::Connection {
-        reply: phone.reply_target(),
-        origin: PhoneCallId::new([3; 16]).unwrap().to_string(),
-    };
-
-    assert!(matches!(a.admit(&ctx, false), Err(ActionError::SourceOnly)));
-    assert!(phone.authenticate_phone());
-    assert!(a.admit(&ctx,false).is_ok());
-    let commands=CommandLanguage::standard();
-    for (command,target) in [("*3",None),("*31234",Some("1234"))]{
-        let action=commands.match_completed(command).unwrap().admit(&ctx,false,true,false)
-            .expect("authenticated transceive must resolve the private attachment before public node decoding").action;
-        let Action::Host(HostAction::PhoneGrammar(action))=action else {panic!("private attachment must not dial a public link")};
-        assert!(matches!(&*action,crate::phone_dtmf::PhoneDtmfAction::Attach(t) if t.as_ref().map(|t|t.as_str())==target));
-    }
-    let select=commands.match_completed("*41234").unwrap().admit(&ctx,false,true,false).unwrap().action;
-    assert!(matches!(select,Action::Host(HostAction::PhoneGrammar(a))
-        if matches!(&*a,crate::phone_dtmf::PhoneDtmfAction::SelectTarget(target) if target.as_str()=="1234")));
-    phone.end();
-    assert!(matches!(a.admit(&ctx, false), Err(ActionError::SourceOnly)));
 }
 
 #[test]

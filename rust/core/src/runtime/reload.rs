@@ -24,11 +24,9 @@ enum RestoreProgress {
 
 /// Own every prepared object until all leases are ready or rollback is safe.
 pub(super) struct ReloadTransaction<A: Send, C: Send> {
-    pub(super) source: ConfigurationSource,
-    pub(super) warnings: Vec<ConfigWarning>,
+    pub(super) configuration: Arc<RuntimeConfiguration>,
+    pub(super) site: modular::PreparedSite,
     pub(super) candidates: Vec<Candidate<A, C>>,
-    pub(super) events: Vec<Event>,
-    pub(super) scheduler: EventScheduler,
     pub(super) revision: u64,
     pub(super) generation_id: u64,
     pub(super) changed: Vec<usize>,
@@ -64,20 +62,16 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
 
 impl<A: Send, C: Send> ReloadTransaction<A, C> {
     pub(super) fn new(
-        source: ConfigurationSource,
-        warnings: Vec<ConfigWarning>,
+        configuration: Arc<RuntimeConfiguration>,
+        site: modular::PreparedSite,
         candidates: Vec<Candidate<A, C>>,
-        events: Vec<Event>,
-        scheduler: EventScheduler,
         revisions: (u64, u64),
     ) -> Self {
         let states = vec![DeviceProgress::Prepare; candidates.len()];
         Self {
-            source,
-            warnings,
+            configuration,
+            site,
             candidates,
-            events,
-            scheduler,
             revision: revisions.0,
             generation_id: revisions.1,
             changed: Vec::new(),
@@ -110,17 +104,15 @@ impl<A: Send, C: Send> ReloadTransaction<A, C> {
         if self.failure.is_none() {
             for index in 0..self.candidates.len() {
                 if let Err(error) = self.forward(runtime, index, clock.now_ms) {
-                    if matches!(self.source, ConfigurationSource::Modular(..)) {
-                        // A restored device resumes its old callbacks. Fence every incumbent
-                        // whose physical plan differs from the accepted desired generation
-                        // before any reverse open, including stations omitted by the candidate.
-                        for node in &mut runtime.nodes {
-                            if !self.candidates.iter().any(|candidate| {
-                                candidate.name == node.name && candidate.keeps_station(node)
-                            }) {
-                                node.failed_station_replacement = true;
-                                node.publish_rf_inhibit();
-                            }
+                    // A restored device resumes its old callbacks. Fence every incumbent
+                    // whose physical plan differs from the accepted desired generation
+                    // before any reverse open, including stations omitted by the candidate.
+                    for node in &mut runtime.nodes {
+                        if !self.candidates.iter().any(|candidate| {
+                            candidate.name == node.name && candidate.keeps_station(node)
+                        }) {
+                            node.failed_station_replacement = true;
+                            node.publish_rf_inhibit();
                         }
                     }
                     self.fail(error);

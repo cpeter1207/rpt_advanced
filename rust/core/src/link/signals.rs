@@ -6,41 +6,58 @@ use std::sync::{
 
 /// Station-local PCM cut shared with prepared peer rings and retained egress.
 #[derive(Debug, Default)]
-pub struct MediaIsolation(AtomicU64);
+pub struct MediaIsolation {
+    // Only call owners mutate claims, on the control plane. Audio reads epoch once.
+    claims: std::sync::Mutex<usize>,
+    epoch: AtomicU64,
+}
 
 impl MediaIsolation {
-    const CLAIMS: u64 = 0xffff;
-
     /// Capture the station media epoch. An odd tag suppresses public programme.
     pub fn epoch(&self) -> u64 {
-        let state = self.0.load(Ordering::Acquire);
-        (state >> 15 & !1) | u64::from(state & Self::CLAIMS != 0)
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    // The claims mutex serializes writers; readers never take that mutex.
+    fn publish(&self, active: bool) {
+        let old = self.epoch.load(Ordering::Relaxed);
+        self.epoch.store(
+            (old.wrapping_add(2) & !1) | u64::from(active),
+            Ordering::Release,
+        );
     }
 
     /// Own one suppression claim independently of other pending or live calls.
+    /// Acquire and release claims on the control plane, never in an audio callback.
     pub fn hold(self: &Arc<Self>) -> Option<MediaIsolationClaim> {
-        self.0.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-            ((state & Self::CLAIMS) < Self::CLAIMS)
-                .then(|| state.wrapping_add(1 << 16) + 1)
-        }).ok()?;
+        let mut claims = self.claims.lock().unwrap();
+        *claims = claims.checked_add(1)?;
+        self.publish(true);
         Some(MediaIsolationClaim(Arc::clone(self)))
     }
 }
 
-/// Release only the suppression acquired by this one call.
+/// Release only the suppression acquired by this one call, on its control owner.
 pub struct MediaIsolationClaim(Arc<MediaIsolation>);
 
 impl Drop for MediaIsolationClaim {
     fn drop(&mut self) {
-        self.0.0.fetch_add((1 << 16) - 1, Ordering::AcqRel);
+        let mut claims = self.0.claims.lock().unwrap();
+        *claims -= 1;
+        self.0.publish(*claims != 0);
     }
 }
+
+// A reverse caller's first unmute belongs to that caller. This odd epoch
+// also invalidates any PCM or regenerated DTMF captured before consent.
+const WAITING_FOR_CALLER_UNMUTE: u64 = u64::MAX;
 
 #[derive(Debug)]
 struct ReplyState {
     phone: Option<super::PhoneSource>,
     phone_authenticated: AtomicBool,
     phone_media_only: bool,
+    peer_callsign: OnceLock<Arc<str>>,
     rx_muted: Arc<AtomicU64>,
     media_isolation: OnceLock<Arc<MediaIsolation>>,
     ended: AtomicBool,
@@ -74,6 +91,11 @@ impl RegenerationOrigin {
     }
 }
 impl PeerReply {
+    /// Copied public callsign from the authenticated provider session.
+    pub(crate) fn peer_callsign(&self) -> Option<&str> {
+        self.0.peer_callsign.get().map(AsRef::as_ref)
+    }
+
     /// Capture receipt-time identity before the outcome leaves its actual ingress.
     pub fn regeneration_origin(&self) -> Option<RegenerationOrigin> {
         let epoch = self.0.rx_muted.load(Ordering::Acquire);
@@ -95,8 +117,13 @@ impl PeerReply {
             .0
             .rx_muted
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
-                ((old & 1 != 0) != muted).then(|| old.wrapping_add(1))
+                (old != WAITING_FOR_CALLER_UNMUTE && (old & 1 != 0) != muted)
+                    .then(|| old.wrapping_add(1))
             });
+    }
+    /// Toggle the verified caller's own ingress, including its initial mute.
+    pub(crate) fn toggle_caller_rx_mute(&self) {
+        self.0.rx_muted.fetch_add(1, Ordering::AcqRel);
     }
     /// Exact private call source, absent for ordinary node peers.
     pub fn phone_source(&self) -> Option<&super::PhoneSource> {
@@ -108,7 +135,8 @@ impl PeerReply {
     }
     /// Media admission follows either verified mailbox attachment or the outbound leg.
     pub fn phone_media_allowed(&self) -> bool {
-        !self.ended() && (self.0.phone_media_only || self.0.phone_authenticated.load(Ordering::Acquire))
+        !self.ended()
+            && (self.0.phone_media_only || self.0.phone_authenticated.load(Ordering::Acquire))
     }
     /// The called party has a PCM route and no command-input lane.
     pub fn outgoing_phone(&self) -> bool {
@@ -162,10 +190,26 @@ impl PeerSignals {
     pub fn for_phone(source: super::PhoneSource) -> Self {
         Self::with_phone(Some(source))
     }
+    /// A reverse caller can hear shared audio after login, while its ingress
+    /// stays muted until the same caller explicitly toggles it.
+    pub fn for_reverse_phone(source: super::PhoneSource) -> Self {
+        Self::with_mute(
+            Some(source),
+            Arc::new(AtomicU64::new(WAITING_FOR_CALLER_UNMUTE)),
+            false,
+        )
+    }
     /// An outgoing recipient can exchange PCM without any mailbox grant.
     pub fn for_outgoing_phone(source: super::PhoneSource) -> Self {
         Self::with_mute(Some(source), Arc::new(AtomicU64::new(0)), true)
     }
+    /// Bind the authenticated provider callsign before publishing the connection.
+    pub fn bind_peer_callsign(&self, callsign: &str) {
+        if !callsign.is_empty() {
+            let _ = self.reply.0.peer_callsign.set(Arc::from(callsign));
+        }
+    }
+
     /// Prepare a fresh media endpoint for the same surviving connection. Reply/edge tokens
     /// remain generation-specific while its operator mute follows the transport.
     pub fn redirected(previous: &PeerReply) -> Self {
@@ -174,6 +218,9 @@ impl PeerSignals {
             previous.0.rx_muted.clone(),
             previous.0.phone_media_only,
         );
+        if let Some(callsign) = previous.0.peer_callsign.get() {
+            let _ = next.reply.0.peer_callsign.set(Arc::clone(callsign));
+        }
         if let Some(isolation) = previous.0.media_isolation.get() {
             next.reply.bind_media_isolation(Arc::clone(isolation));
         }
@@ -182,7 +229,11 @@ impl PeerSignals {
     fn with_phone(phone: Option<super::PhoneSource>) -> Self {
         Self::with_mute(phone, Arc::new(AtomicU64::new(0)), false)
     }
-    fn with_mute(phone: Option<super::PhoneSource>, rx_muted: Arc<AtomicU64>, phone_media_only: bool) -> Self {
+    fn with_mute(
+        phone: Option<super::PhoneSource>,
+        rx_muted: Arc<AtomicU64>,
+        phone_media_only: bool,
+    ) -> Self {
         Self {
             pcm: AtomicU64::new(0),
             dtmf_muted: AtomicBool::new(false),
@@ -190,6 +241,7 @@ impl PeerSignals {
                 phone,
                 phone_authenticated: AtomicBool::new(false),
                 phone_media_only,
+                peer_callsign: OnceLock::new(),
                 rx_muted,
                 media_isolation: OnceLock::new(),
                 ended: AtomicBool::new(false),
@@ -235,7 +287,12 @@ impl PeerSignals {
     /// Read the current source mute without cloning the connection token on audio.
     pub fn receive_epoch(&self) -> u64 {
         let muted = self.reply.0.rx_muted.load(Ordering::Acquire);
-        let isolated = self.reply.0.media_isolation.get().map_or(0, |gate| gate.epoch());
+        let isolated = self
+            .reply
+            .0
+            .media_isolation
+            .get()
+            .map_or(0, |gate| gate.epoch());
         (muted & !1).wrapping_add(isolated & !1) | ((muted | isolated) & 1)
     }
     /// Whether the source is operationally muted.
@@ -335,5 +392,62 @@ impl PeerSignals {
         }
         let len = storage.iter().position(|byte| *byte == 0)?;
         std::str::from_utf8(&storage[..len]).ok()
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use std::{sync::Barrier, thread};
+
+    #[test]
+    fn independent_isolation_claims_have_no_packed_count_limit() {
+        let isolation = Arc::new(MediaIsolation::default());
+        let initial = isolation.epoch();
+        let anchor = isolation.hold().unwrap();
+        let held = Arc::new(Barrier::new(9));
+        let release = Arc::new(Barrier::new(9));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let isolation = Arc::clone(&isolation);
+                let held = Arc::clone(&held);
+                let release = Arc::clone(&release);
+                thread::spawn(move || {
+                    let claims: Vec<_> = (0..10_000).map(|_| isolation.hold()).collect();
+                    let admitted = claims.iter().filter(|claim| claim.is_some()).count();
+                    held.wait();
+                    release.wait();
+                    drop(claims);
+                    admitted
+                })
+            })
+            .collect();
+        held.wait();
+        let active = isolation.epoch();
+        release.wait();
+        let admitted: usize = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .sum();
+        let retained = isolation.epoch();
+        drop(anchor);
+        let finished = isolation.epoch();
+        eprintln!(
+            "ISOLATION_CAPACITY_CLOSED requested=80001 admitted={} active={} retained={} released={} epoch_changed={}",
+            admitted + 1,
+            active & 1 != 0,
+            retained & 1 != 0,
+            finished & 1 == 0,
+            initial != active && active != retained && retained != finished
+        );
+        assert_ne!(active & 1, 0);
+        assert_ne!(retained & 1, 0);
+        assert_eq!(finished & 1, 0);
+        assert_ne!(initial, active);
+        assert_ne!(active, finished);
+        assert_eq!(
+            admitted, 80_000,
+            "isolation must not impose a packed total-call limit"
+        );
     }
 }

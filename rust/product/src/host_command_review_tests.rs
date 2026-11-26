@@ -152,15 +152,17 @@ pub(crate) fn install_with_other<A: Send, C: Send>(
         .event_profiles(&validated, Some("UTC"))
         .expect("prepared event profiles");
 
-    let node = rpt_advanced_core::config::NodeId::new(local).unwrap();
-    let speech =
-        rpt_advanced_core::config::ResolvedSpeechSettings::resolve(runtime.document(), &node)
-            .unwrap()
-            .value;
-    let morse =
-        rpt_advanced_core::config::ResolvedMorseSettings::resolve(runtime.document(), &node)
-            .unwrap()
-            .value;
+    let (speech, morse) = {
+        let owner = ResourceScope::Port(local.parse().map_err(|_| RuntimeError::MissingNode)?);
+        let scope = runtime
+            .modular_configuration()
+            .and_then(|config| config.scopes.get(&owner))
+            .ok_or(RuntimeError::MissingNode)?;
+        (
+            scope.telemetry.speech.clone(),
+            scope.telemetry.morse.clone(),
+        )
+    };
     let language = "en-US".parse().unwrap();
     let renderers = rpt_advanced_core::runtime::CommandRenderers {
         catalog: rpt_advanced_core::messages::MessageCatalog::load("en-US").unwrap(),
@@ -190,35 +192,37 @@ fn registered_startup_connect_survives_answer_and_local_partial_command() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut host = host();
-    install(
-        &mut host,
-        "1000",
-        "North é",
-        Some(1000),
-        json!({"mappings":{"mute":{"command":"AB","protected":false,"action":"rx_mute_toggle","target":"port"}}}),
+    let config = configuration(
+        "usb",
         &[
             (
-                "macro",
+                Kind::Command,
+                "",
+                json!({"mappings":{"mute":{"command":"AB","protected":false,"action":"rx_mute_toggle","target":"port"}}}),
+            ),
+            (
+                Kind::Macro,
                 "boot",
                 json!({"actions":[{"action":"connect","parameter":"2000"},{"action":"pause","timing":{"duration_ms":15}},{"action":"message","message":"Ready","destination":"local"}]}),
             ),
             (
-                "event",
+                Kind::Event,
                 "start",
                 json!({"start":{"at":"controller_start","macro":"boot"}}),
             ),
         ],
     );
+    let mut host =
+        Host::fixture_start(config, media(), services(), Instant::now(), clock()).unwrap();
     let Some((LinkEffect::Connect(dial), dial_receipt)) =
-        host.runtime.advance_commands("1000", at(10)).unwrap()
+        host.runtime.advance_commands(LOCAL, at(10)).unwrap()
     else {
         panic!("startup dial")
     };
     assert!(
         host.runtime
             .digit(
-                "1000",
+                LOCAL,
                 DigitEvent::Digit {
                     digit: 'A',
                     now_ms: 10
@@ -228,21 +232,21 @@ fn registered_startup_connect_survives_answer_and_local_partial_command() {
     );
     assert!(
         host.runtime
-            .finish_connect("1000", dial, true, at(11))
+            .finish_connect(LOCAL, dial, true, at(11))
             .unwrap()
     );
     let (io, _) = peer(48000);
-    host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, at(11))
+    host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, at(11))
         .unwrap();
     assert!(
         host.runtime
-            .advance_commands("1000", at(11))
+            .advance_commands(LOCAL, at(11))
             .unwrap()
             .is_none()
     );
     assert!(
         host.runtime
-            .node("1000")
+            .node(LOCAL)
             .unwrap()
             .take_command_completion()
             .is_none()
@@ -250,14 +254,14 @@ fn registered_startup_connect_survives_answer_and_local_partial_command() {
     dial_receipt.settle(true);
     assert!(
         host.runtime
-            .advance_commands("1000", at(12))
+            .advance_commands(LOCAL, at(12))
             .unwrap()
             .is_none()
     );
     assert!(
         host.runtime
             .digit(
-                "1000",
+                LOCAL,
                 DigitEvent::Digit {
                     digit: 'B',
                     now_ms: 12
@@ -266,7 +270,7 @@ fn registered_startup_connect_survives_answer_and_local_partial_command() {
             .is_none()
     );
     let Some(DigitOutcome::Mapped(input)) = host.runtime.digit(
-        "1000",
+        LOCAL,
         DigitEvent::Digit {
             digit: '#',
             now_ms: 12,
@@ -274,29 +278,27 @@ fn registered_startup_connect_survives_answer_and_local_partial_command() {
     ) else {
         panic!("partial RF command survived link attachment")
     };
-    host.runtime
-        .dispatch_mapping("1000", input, at(12))
-        .unwrap();
+    host.runtime.dispatch_mapping(LOCAL, input, at(12)).unwrap();
     assert!(
         host.runtime
-            .node("1000")
+            .node(LOCAL)
             .unwrap()
             .radio_receive_status()
             .muted
     );
     assert!(
         host.runtime
-            .advance_commands("1000", at(26))
+            .advance_commands(LOCAL, at(26))
             .unwrap()
             .is_none()
     );
-    let Some((LinkEffect::None, message)) = host.runtime.advance_commands("1000", at(27)).unwrap()
+    let Some((LinkEffect::None, message)) = host.runtime.advance_commands(LOCAL, at(27)).unwrap()
     else {
         panic!("message after pause")
     };
     assert!(
         host.runtime
-            .node("1000")
+            .node(LOCAL)
             .unwrap()
             .take_command_completion()
             .is_none()
@@ -304,20 +306,20 @@ fn registered_startup_connect_survives_answer_and_local_partial_command() {
     message.settle(true);
     assert!(
         host.runtime
-            .advance_commands("1000", at(28))
+            .advance_commands(LOCAL, at(28))
             .unwrap()
             .is_none()
     );
     assert_eq!(
         host.runtime
-            .node("1000")
+            .node(LOCAL)
             .unwrap()
             .take_command_completion()
             .unwrap()
             .outcome,
         MacroOutcome::Completed
     );
-    assert!(host.stop(32));
+    assert!(host.fixture_stop(32));
 }
 
 // Step the actual provider session at a deterministic receipt time. The host owns its normal
@@ -329,9 +331,9 @@ fn attached_session(
     let (io, state) = peer(48_000);
     let (_, out) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
     let (session, control) = PeerSession::prepare(io, out, "1000", "2000", false).unwrap();
-    host.runtime.incoming("1000", "2000", true).unwrap();
+    host.runtime.incoming(LOCAL, "2000", true).unwrap();
     host.runtime
-        .node("1000")
+        .node(LOCAL)
         .unwrap()
         .links()
         .attach_ingress(
@@ -340,7 +342,7 @@ fn attached_session(
         )
         .unwrap();
     host.peers.push(PeerOwner {
-        local: "1000".into(),
+        local: LOCAL.into(),
         remote: "2000".into(),
         mode: Mode::TRANSCEIVE,
         group: None,
@@ -356,10 +358,30 @@ fn registered_same_batch_unlock_protected_and_select_forward_use_own_ingress() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut host = host();
+    let mut host = Host::fixture_start(
+        configuration(
+            "usb",
+            &[(
+                Kind::Allstarlink,
+                "",
+                json!({
+                    "node_number":1000, "iax":{"registration_url":""},
+                    "static_nodes":{
+                        "2000":{"host":"127.0.0.1","port":4569,"source":"127.0.0.1"},
+                        "4000":{"host":"127.0.0.1","port":4569,"source":"127.0.0.1"}
+                    }
+                }),
+            )],
+        ),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
     install(
         &mut host,
-        "1000",
+        LOCAL,
         "North é",
         Some(1000),
         json!({"mappings":{
@@ -371,7 +393,7 @@ fn registered_same_batch_unlock_protected_and_select_forward_use_own_ingress() {
     let hash =
         "$argon2id$v=19$m=1024,t=2,p=1$Zml4dHVyZTE$B1VnpG+RsPUNLprBqRc964o5W2vBdnP8VyhbqpcwHyE";
     host.runtime
-        .node("1000")
+        .node(LOCAL)
         .unwrap()
         .links()
         .configure_admin(hash, hash, 60000);
@@ -383,7 +405,7 @@ fn registered_same_batch_unlock_protected_and_select_forward_use_own_ingress() {
     host.pump(at(11)).unwrap();
     assert!(
         host.runtime
-            .node("1000")
+            .node(LOCAL)
             .unwrap()
             .radio_receive_status()
             .muted
@@ -395,7 +417,7 @@ fn registered_same_batch_unlock_protected_and_select_forward_use_own_ingress() {
         "{ops:?}"
     );
     session.stop();
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -407,7 +429,7 @@ fn registered_delayed_transport_batch_expires_at_exact_digit_and_addressed_envel
         let mut host = host();
         install(
             &mut host,
-            "1000",
+            LOCAL,
             "North é",
             Some(1000),
             json!({"inactivity_timeout_ms":10,"mappings":{
@@ -433,7 +455,7 @@ fn registered_delayed_transport_batch_expires_at_exact_digit_and_addressed_envel
         host.pump(at(200)).unwrap();
         assert!(
             host.runtime
-                .node("1000")
+                .node(LOCAL)
                 .unwrap()
                 .radio_receive_status()
                 .muted,
@@ -446,11 +468,11 @@ fn registered_delayed_transport_batch_expires_at_exact_digit_and_addressed_envel
         );
         for (_, link) in queued {
             if let LinkEffect::Connect(d) = link {
-                host.runtime.node("1000").unwrap().links().cancel_connect(d);
+                host.runtime.node(LOCAL).unwrap().links().cancel_connect(d);
             }
         }
         session.stop();
-        assert!(host.stop(220));
+        assert!(host.fixture_stop(220));
     }
 }
 
@@ -460,11 +482,8 @@ fn registered_private_slot_binds_incoming_account_and_writes_only_it_in_asl_quer
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut host = Host::start(
-        ConfigDocument::parse(&format!(
-            "[{SLOT}]\nradio_channel=usb\nduplex=full\nlink_static_directory_file=fixture\n"
-        ))
-        .unwrap(),
+    let mut host = Host::fixture_start(
+        configuration("usb", &[]),
         media(),
         services(),
         Instant::now(),
@@ -473,7 +492,10 @@ fn registered_private_slot_binds_incoming_account_and_writes_only_it_in_asl_quer
     .unwrap();
     install(&mut host, SLOT, "North é", Some(1000), json!({}), &[]);
     let (io, state) = peer(48000);
-    host.incoming_peer(io, "127.0.0.1", clock()).unwrap();
+    // Source admission is covered by the registered ASL boundary fixture. This
+    // unit control starts at its verified handoff and checks wire/slot separation.
+    host.accept_verified_peer(SLOT, "2000", io, clock())
+        .unwrap();
     state
         .lock()
         .unwrap()
@@ -503,12 +525,12 @@ fn registered_private_slot_binds_incoming_account_and_writes_only_it_in_asl_quer
         host.incoming_peer(io, "127.0.0.1", at(21)),
         Err(RuntimeError::MissingNode)
     ));
-    assert!(host.stop(30));
+    assert!(host.fixture_stop(30));
     let mut numeric = super::host();
     assert!(matches!(
         install_with_other(
             &mut numeric.runtime,
-            "1000",
+            "missing-slot",
             "1000",
             Some(1001),
             json!({}),
@@ -517,7 +539,7 @@ fn registered_private_slot_binds_incoming_account_and_writes_only_it_in_asl_quer
         ),
         Err(RuntimeError::MissingNode)
     ));
-    assert!(numeric.stop(30));
+    assert!(numeric.fixture_stop(30));
 }
 
 #[test]
@@ -528,7 +550,7 @@ fn registered_peer_hint_and_unkey_leave_nonradio_candidate_for_its_real_terminat
     let mut host = host();
     install(
         &mut host,
-        "1000",
+        LOCAL,
         "North é",
         Some(1000),
         json!({"inactivity_timeout_ms":5000,"mappings":{
@@ -551,7 +573,7 @@ fn registered_peer_hint_and_unkey_leave_nonradio_candidate_for_its_real_terminat
     host.pump(at(3010)).unwrap();
     let muted = |host: &mut Host| {
         host.runtime
-            .node("1000")
+            .node(LOCAL)
             .unwrap()
             .radio_receive_status()
             .muted
@@ -582,7 +604,7 @@ fn registered_peer_hint_and_unkey_leave_nonradio_candidate_for_its_real_terminat
         "the configured inactivity deadline executes it"
     );
     session.stop();
-    assert!(host.stop(8030));
+    assert!(host.fixture_stop(8030));
 }
 
 #[test]
@@ -590,52 +612,57 @@ fn round2_retained_port_reload_preserves_start_and_recovery_but_revokes_command_
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut host = host();
-    let defs = [
+    let mut defs = vec![
         (
-            "macro",
+            Kind::Macro,
             "boot",
             json!({"actions":[{"action":"connect","parameter":"2011"}]}),
         ),
         (
-            "macro",
+            Kind::Macro,
             "recover",
             json!({"actions":[{"action":"connect","parameter":"2012"}]}),
         ),
         (
-            "macro",
+            Kind::Macro,
             "end",
             json!({"actions":[{"action":"connect","parameter":"2013"}]}),
         ),
         (
-            "macro",
+            Kind::Macro,
             "wait",
             json!({"actions":[{"action":"pause","timing":{"duration_ms":300}},{"action":"connect","parameter":"2099"}]}),
         ),
         (
-            "event",
+            Kind::Event,
             "start",
             json!({"start":{"at":"controller_start","macro":"boot"}}),
         ),
         (
-            "event",
+            Kind::Event,
             "window",
             json!({"restart_recovery":true,"start":{"at":"every day at 23:55 in UTC","macro":"recover"},"end":{"at":"every day at 0:10 in UTC","macro":"end"}}),
         ),
     ];
-    let install_profile =
-        |host: &mut Host| install(host, "1000", "North", Some(1000), json!({}), &defs);
-    let port = install_profile(&mut host);
-    let work = host.runtime.node("1000").unwrap().command_work().unwrap();
+    let mut host = Host::fixture_start(
+        configuration("usb", &defs),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let port = LOCAL.parse::<ResourceId>().unwrap();
+    let work = host.runtime.node(LOCAL).unwrap().command_work().unwrap();
     let drain = |host: &mut Host, clock| {
         let mut dials = Vec::new();
         for _ in 0..8 {
             if let Some((LinkEffect::Connect(dial), receipt)) =
-                host.runtime.advance_commands("1000", clock).unwrap()
+                host.runtime.advance_commands(LOCAL, clock).unwrap()
             {
                 dials.push(dial.remote().to_owned());
                 host.runtime
-                    .node("1000")
+                    .node(LOCAL)
                     .unwrap()
                     .links()
                     .cancel_connect(dial);
@@ -658,16 +685,20 @@ fn round2_retained_port_reload_preserves_start_and_recovery_but_revokes_command_
     };
     assert!(
         host.runtime
-            .advance_commands("1000", clock())
+            .advance_commands(LOCAL, clock())
             .unwrap()
             .is_none()
     );
     assert_eq!(pending.outcome(), None);
-    host.reload(document("usb", "transmit_hang_ms=12\n"), clock())
+    defs.push((
+        Kind::TxSignaling,
+        "",
+        json!({"ptt":{"timing":{"hang_ms":12}}}),
+    ));
+    host.fixture_reload(configuration("usb", &defs), clock())
         .unwrap();
     assert!(!work.is_current());
     assert_eq!(pending.outcome(), Some(MacroOutcome::Cancelled));
-    install_profile(&mut host);
     assert!(
         drain(&mut host, clock()).is_empty(),
         "no second startup or recovered window"
@@ -678,5 +709,203 @@ fn round2_retained_port_reload_preserves_start_and_recovery_but_revokes_command_
         ..clock()
     };
     assert_eq!(drain(&mut host, end), ["2013"]);
-    assert!(host.stop(601000));
+    assert!(host.fixture_stop(601000));
+}
+
+#[test]
+fn delayed_directory_selection_preserves_ingress_order_and_rejects_a_retired_connection() {
+    use crate::link::session::tests::State;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+    };
+
+    // Only this synthetic file lookup can block. The bound also detects an implementation
+    // that holds the control owner while waiting for the file.
+    static LOOKUP: Mutex<Option<(SyncSender<()>, Receiver<()>)>> = Mutex::new(None);
+    static ANSWERED: AtomicBool = AtomicBool::new(false);
+    unsafe extern "C" fn record(
+        _: *mut c_void,
+        _: *const std::ffi::c_char,
+        _: usize,
+        remote: *const std::ffi::c_char,
+        length: usize,
+        sink: abi::rptadv_text_sink_v1,
+        context: *mut c_void,
+    ) -> i32 {
+        if unsafe { std::slice::from_raw_parts(remote.cast::<u8>(), length) } != b"4000" {
+            return -1;
+        }
+        let gate = LOOKUP.lock().unwrap().take();
+        let Some((entered, release)) = gate else {
+            return -1;
+        };
+        if entered.send(()).is_err() || release.recv_timeout(Duration::from_secs(4)).is_err() {
+            return -1;
+        }
+        let Some(sink) = sink else {
+            return -1;
+        };
+        let route = b"radio@127.0.0.1:4569/4000,127.0.0.1";
+        unsafe {
+            sink(context, route.as_ptr().cast(), route.len());
+        }
+        ANSWERED.store(true, Ordering::Release);
+        0
+    }
+    fn wait(mut ready: impl FnMut() -> bool) -> bool {
+        let until = Instant::now() + Duration::from_secs(1);
+        while !ready() {
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        true
+    }
+    fn input(peer: &Mutex<State>, symbols: &[u8]) {
+        peer.lock()
+            .unwrap()
+            .input
+            .extend(symbols.iter().copied().map(Input::Digit));
+    }
+    fn digits(peer: &Mutex<State>, target: &str) -> Vec<u8> {
+        let prefix = format!("D {target} 1000 ");
+        peer.lock()
+            .unwrap()
+            .texts
+            .iter()
+            .filter_map(|line| {
+                line.strip_prefix(prefix.as_bytes())
+                    .and_then(|body| body.last().copied())
+            })
+            .collect()
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut passed = Vec::new();
+    for retire in [false, true] {
+        ANSWERED.store(false, Ordering::Release);
+        let (signal, entered) = mpsc::sync_channel(1);
+        let (release, gate) = mpsc::sync_channel(1);
+        *LOOKUP.lock().unwrap() = Some((signal, gate));
+        let mut table = service_table();
+        table.directory_record = Some(record);
+        let config = configuration(
+            "usb",
+            &[
+                (
+                    Kind::Allstarlink,
+                    "",
+                    json!({"lookup_method":"file","directory_file":"fixture",
+                "iax":{"registration_url":""},
+                "static_nodes":{"6000":{"host":"127.0.0.1","port":4569,"source":"127.0.0.1"}}}),
+                ),
+                (
+                    Kind::Command,
+                    "",
+                    json!({"mappings":{
+                        "choose":{"command":"C","protected":false,"action":"select_command_target"},
+                        "mute":{"command":"B","protected":false,"action":"rx_mute_toggle","target":"port"}
+                    }}),
+                ),
+            ],
+        );
+        let engine = unsafe {
+            crate::lifecycle::tests::fixture_engine(
+                config,
+                &table,
+                crate::fixture::control_descriptor(),
+            )
+        }
+        .unwrap();
+        let (origin, observer) = engine
+            .run(|host| {
+                Ok((
+                    attach(host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE),
+                    attach(host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE),
+                ))
+            })
+            .unwrap();
+        // Verify the relay and the same source's static operation before the gated selection.
+        input(&origin, b"C6000#1#");
+        let static_control = wait(|| digits(&observer, "6000") == b"1");
+        input(&origin, b"C4000#56");
+        let started = entered.recv_timeout(Duration::from_secs(1)).is_ok();
+        input(&observer, b"B#");
+        let independent = wait(|| {
+            engine
+                .run(|host| {
+                    Ok(host
+                        .runtime
+                        .node(LOCAL)
+                        .unwrap()
+                        .radio_receive_status()
+                        .muted)
+                })
+                .unwrap()
+        });
+        let mut replacement = None;
+        if retire {
+            let now = engine.elapsed_ms();
+            replacement = Some(
+                engine
+                    .run(move |host| {
+                        let previous = host
+                            .peers
+                            .iter()
+                            .find(|peer| peer.remote == "2000")
+                            .unwrap()
+                            .control
+                            .reply_target();
+                        host.detach(LOCAL, "2000", now);
+                        let next = attach(host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+                        let current = host
+                            .peers
+                            .iter()
+                            .find(|peer| peer.remote == "2000")
+                            .unwrap()
+                            .control
+                            .reply_target();
+                        assert!(previous.ended() && previous != current);
+                        Ok(next)
+                    })
+                    .unwrap(),
+            );
+        }
+        // Establish the successor's own target while the old lookup is still blocked.
+        let replacement_selected = replacement.as_ref().is_none_or(|peer| {
+            input(peer, b"C6000#8");
+            wait(|| digits(&observer, "6000") == b"18")
+        });
+        let _ = release.send(());
+        let resolved = started && wait(|| ANSWERED.load(Ordering::Acquire));
+        // The callback may return before the worker posts its result. Once every
+        // registered lookup job has finished, let the real owner consume that result.
+        let drained = wait(|| crate::lifecycle::tests::fixture_jobs_finished(&engine));
+        let now = engine.clock();
+        engine.run(move |host| host.pump(now)).unwrap();
+        let forwarded = if let Some(replacement) = replacement {
+            input(&replacement, b"9");
+            wait(|| digits(&observer, "6000") == b"189") && digits(&observer, "4000").is_empty()
+        } else {
+            wait(|| digits(&observer, "4000") == b"56")
+        };
+        let stopped = crate::lifecycle::tests::fixture_stop() == 0;
+        LOOKUP.lock().unwrap().take();
+        eprintln!(
+            "ASL_DIRECTORY_SELECTION retire={retire} static={static_control} started={started} independent={independent} replacement_selected={replacement_selected} answered={resolved} drained={drained} forwarded={forwarded} stopped={stopped}"
+        );
+        assert!(
+            static_control && independent && replacement_selected && drained && stopped,
+            "static selection, independent ingress, worker drain and shutdown are prerequisites"
+        );
+        passed.push(started && resolved && forwarded);
+    }
+    assert_eq!(
+        passed,
+        [true, true],
+        "a blocked ASL command target must retain ordered symbols only for its current ingress"
+    );
 }

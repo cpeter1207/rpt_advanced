@@ -10,7 +10,8 @@ pub(crate) type Step = unsafe extern "C" fn(*mut c_void) -> i32;
 
 type ConfigurePrivate = unsafe extern "C" fn(*mut c_void, *const c_void, u32, u32, u32) -> i32;
 type SetPrivate = unsafe extern "C" fn(*mut c_void, u32, u32, u32) -> i32;
-const RELEASED_PREFIX:usize=std::mem::offset_of!(Descriptor,peer_set_deadline)+size_of::<*const c_void>();
+const RELEASED_PREFIX: usize =
+    std::mem::offset_of!(Descriptor, peer_set_deadline) + size_of::<*const c_void>();
 type Descriptor = crate::abi::rptadv_iax2_async_descriptor_v1;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -40,9 +41,15 @@ unsafe fn checked_descriptor(pointer: *const c_void) -> Result<Descriptor, Error
     if prefix[0] < RELEASED_PREFIX as u32 || prefix[1] != 1 {
         return Err(Error::Descriptor);
     }
-    let mut storage=std::mem::MaybeUninit::<Descriptor>::zeroed();
-    unsafe{ptr::copy_nonoverlapping(pointer.cast::<u8>(),storage.as_mut_ptr().cast(),RELEASED_PREFIX)};
-    let api=unsafe{storage.assume_init()};
+    let mut storage = std::mem::MaybeUninit::<Descriptor>::zeroed();
+    unsafe {
+        ptr::copy_nonoverlapping(
+            pointer.cast::<u8>(),
+            storage.as_mut_ptr().cast(),
+            RELEASED_PREFIX,
+        )
+    };
+    let api = unsafe { storage.assume_init() };
     if api.capability != *b"rptadv.iaxasync\0"
         || ![
             api.runtime_create.is_some(),
@@ -71,21 +78,40 @@ impl Executor {
     /// until this owner and all its registrations are destroyed.
     pub(crate) unsafe fn new(pointer: *const c_void) -> Result<Self, Error> {
         let api = unsafe { checked_descriptor(pointer) }?;
-        let extent=unsafe{pointer.cast::<u32>().read_unaligned()} as usize;
+        let extent = unsafe { pointer.cast::<u32>().read_unaligned() } as usize;
         // This is an append-only optional callback beyond the released alpha14 table.
-        let configure_private = if extent >= RELEASED_PREFIX + size_of::<Option<ConfigurePrivate>>() {
-            unsafe{pointer.cast::<u8>().add(RELEASED_PREFIX).cast::<Option<ConfigurePrivate>>().read_unaligned()}
-        } else {None};
+        let configure_private = if extent >= RELEASED_PREFIX + size_of::<Option<ConfigurePrivate>>()
+        {
+            unsafe {
+                pointer
+                    .cast::<u8>()
+                    .add(RELEASED_PREFIX)
+                    .cast::<Option<ConfigurePrivate>>()
+                    .read_unaligned()
+            }
+        } else {
+            None
+        };
         let live_offset = RELEASED_PREFIX + size_of::<Option<ConfigurePrivate>>();
         let set_private = if extent >= live_offset + size_of::<Option<SetPrivate>>() {
-            unsafe { pointer.cast::<u8>().add(live_offset).cast::<Option<SetPrivate>>().read_unaligned() }
-        } else { None };
+            unsafe {
+                pointer
+                    .cast::<u8>()
+                    .add(live_offset)
+                    .cast::<Option<SetPrivate>>()
+                    .read_unaligned()
+            }
+        } else {
+            None
+        };
         let mut runtime = ptr::null_mut();
         if unsafe { api.runtime_create.unwrap()(&mut runtime) } != 0 {
             return Err(Error::Initialize);
         }
         Ok(Self {
-            api, configure_private, set_private,
+            api,
+            configure_private,
+            set_private,
             runtime: NonNull::new(runtime).ok_or(Error::Initialize)?,
         })
     }
@@ -148,22 +174,43 @@ impl Executor {
         unsafe { self.api.peer_detach.unwrap()(token) };
     }
 
-    pub(crate) fn supports_live_policy(&self) -> bool { self.set_private.is_some() }
+    pub(crate) fn supports_live_policy(&self) -> bool {
+        self.set_private.is_some()
+    }
     /// Change the existing context while holding the peer exclusively or on its callback turn.
-    pub(crate) unsafe fn set_delays(&self, peer: *mut c_void, [min, initial, max]: [u32; 3]) -> Result<(), Error> {
+    pub(crate) unsafe fn set_delays(
+        &self,
+        peer: *mut c_void,
+        [min, initial, max]: [u32; 3],
+    ) -> Result<(), Error> {
         let set = self.set_private.ok_or(Error::Descriptor)?;
-        if unsafe { set(peer, min, initial, max) } == 0 { Ok(()) } else { Err(Error::Initialize) }
+        if unsafe { set(peer, min, initial, max) } == 0 {
+            Ok(())
+        } else {
+            Err(Error::Initialize)
+        }
     }
 
-    pub(crate) fn supports_private(&self,delays:[u32;3])->bool{
-        delays==[20,40,100] || self.configure_private.is_some()
+    pub(crate) fn supports_private(&self, delays: [u32; 3]) -> bool {
+        delays == [20, 40, 100] || self.configure_private.is_some()
     }
     /// Configure the actual private call before the first audio operation or attachment.
-    pub(crate) unsafe fn configure_private(&self,peer:*mut c_void,jitter:*const c_void,delays:[u32;3])->Result<(),Error>{
-        if delays==[20,40,100]{return unsafe{self.configure_jitter(peer,jitter)};}
-        let [min,initial,max]=delays;
-        let configure=self.configure_private.ok_or(Error::Descriptor)?;
-        if unsafe{configure(peer,jitter,min,initial,max)}==0 {Ok(())} else {Err(Error::Initialize)}
+    pub(crate) unsafe fn configure_private(
+        &self,
+        peer: *mut c_void,
+        jitter: *const c_void,
+        delays: [u32; 3],
+    ) -> Result<(), Error> {
+        if delays == [20, 40, 100] {
+            return unsafe { self.configure_jitter(peer, jitter) };
+        }
+        let [min, initial, max] = delays;
+        let configure = self.configure_private.ok_or(Error::Descriptor)?;
+        if unsafe { configure(peer, jitter, min, initial, max) } == 0 {
+            Ok(())
+        } else {
+            Err(Error::Initialize)
+        }
     }
     /// Install one codec-neutral jitter context before starting peer callbacks.
     ///

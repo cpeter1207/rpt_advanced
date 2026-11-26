@@ -1,5 +1,5 @@
 use super::*;
-use crate::{link::Mode, schedule::Weekday};
+use crate::link::Mode;
 
 fn catalog() -> MessageCatalog {
     MessageCatalog::from_sources(
@@ -59,45 +59,6 @@ fn direct_status_excludes_topology_blocked_automatic_intent() {
 }
 
 #[test]
-fn scheduled_greetings_use_captured_civil_time_and_reject_unknown_clock_format() {
-    let catalog = catalog();
-    let template = MessageTemplate::parse("${greeting}").unwrap();
-    let links = LinkManager::new("1000").unwrap();
-    for (hour, greeting) in [
-        (0, "Good Morning"),
-        (12, "Good Afternoon"),
-        (17, "Good Evening"),
-    ] {
-        let civil = CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, 0).unwrap();
-        assert_eq!(
-            message(&template, civil, 24, "1000", "W1AW", &links, &catalog),
-            Ok(greeting.into())
-        );
-        assert_eq!(
-            message(&template, civil, 13, "1000", "W1AW", &links, &catalog),
-            Err(RuntimeError::Preparation)
-        );
-    }
-}
-
-#[test]
-fn scheduled_day_of_week_substitution_uses_the_node_catalog() {
-    let catalog = MessageCatalog::from_sources(
-        "fr-CA",
-        include_str!("../../../../messages/en-US.ftl"),
-        Some("day-of-week =\n    .text = Vendredi\n    .tts = Vendredi\n    .morse = VENDREDI\n"),
-    )
-    .unwrap();
-    let template = MessageTemplate::parse("${day_of_week}").unwrap();
-    let links = LinkManager::new("1000").unwrap();
-    let civil = CivilTime::new(2026, 9, 18, Weekday::Friday, 9, 0).unwrap();
-    assert_eq!(
-        message(&template, civil, 24, "1000", "W1AW", &links, &catalog),
-        Ok("Vendredi".into())
-    );
-}
-
-#[test]
 fn speech_pronunciation_preserves_preformatted_identities() {
     for (source, expected) in [
         ("node,2,0,0,0", "node,2,0,0,0"),
@@ -109,6 +70,6 @@ fn speech_pronunciation_preserves_preformatted_identities() {
             "A,B,1,C,D linked node,2,0,0,0.",
         ),
     ] {
-        assert_eq!(scheduled_speech(source, "1000", "AB1CD", ""), expected);
+        assert_eq!(telemetry_speech(source, &["1000"]), expected);
     }
 }

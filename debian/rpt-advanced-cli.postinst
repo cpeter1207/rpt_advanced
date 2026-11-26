@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = configure ]; then
+    if ! getent group rpt-advanced-admin >/dev/null; then
+        addgroup --system rpt-advanced-admin
+    fi
+    install -d -m 0750 -o root -g rpt-advanced-admin /etc/rpt_advanced/cli
+fi
+
+#DEBHELPER#

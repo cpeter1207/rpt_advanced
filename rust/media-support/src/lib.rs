@@ -75,7 +75,7 @@ impl Preparation {
         ]);
         command.stdin(std::process::Stdio::from(input));
         let child = process::ChildStream::spawn(&self.config, &mut command, None, cancelled)?;
-        process::PcmStream::f32_wave(child, cancelled)
+        Ok(process::PcmStream::f32_wave(child))
     }
     #[cfg(speech_adapter)]
     fn open_speech(

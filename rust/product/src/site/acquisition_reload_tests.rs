@@ -2,9 +2,6 @@
 use super::*;
 use std::collections::BTreeSet;
 
-const RELAY: &str =
-    "[1000]\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\n";
-
 fn begin(
     service: &mut Acquisition,
     definitions: &BTreeMap<String, ResolvedSiteSettings>,
@@ -21,7 +18,12 @@ fn site_acquisition_reload_preserves_live_output_and_retires_only_after_safe() {
     *PROBE.lock().unwrap() = Probe::default();
     let epoch = Instant::now();
     let mut host = host("1000");
-    let mut service = Acquisition::prepare(&definitions(RELAY), backends(), epoch).unwrap();
+    let mut service = Acquisition::prepare(
+        &definitions(relay_settings(false, false)),
+        backends(),
+        epoch,
+    )
+    .unwrap();
     assert!(!service.stage());
     assert!(service.commit().is_err());
     service.output("1000", "relay", 1.0).unwrap();
@@ -34,9 +36,11 @@ fn site_acquisition_reload_preserves_live_output_and_retires_only_after_safe() {
             .is_some()
     });
     assert_eq!(PROBE.lock().unwrap().written, [1.0]);
-    let replacement = definitions(&format!(
-        "{RELAY}[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=8\n[sensor 1000 volts]\nenabled=yes\nbackend=hwmon\ndevice=fixture\nchannel=in0_input\n"
-    ));
+    let replacement = definitions(ResolvedSiteSettings {
+        inputs: vec![input("door", gpio("8"))],
+        sensors: vec![voltage("volts")],
+        ..relay_settings(false, false)
+    });
     assert!(begin(&mut service, &replacement, epoch));
     assert!(!begin(&mut service, &replacement, epoch));
     assert!(!service.resume());
@@ -81,7 +85,12 @@ fn site_acquisition_reload_safe_failure_retains_owner_and_resumes_old_demand() {
     *PROBE.lock().unwrap() = Probe::default();
     let epoch = Instant::now();
     let mut host = host("1000");
-    let mut service = Acquisition::prepare(&definitions(RELAY), backends(), epoch).unwrap();
+    let mut service = Acquisition::prepare(
+        &definitions(relay_settings(false, false)),
+        backends(),
+        epoch,
+    )
+    .unwrap();
     service.output("1000", "relay", 1.0).unwrap();
     until(|| {
         service.poll(0, |_| host.control().work());
@@ -121,7 +130,7 @@ fn site_acquisition_stale_preparation_is_rejected_without_opening_another_owner(
     *PROBE.lock().unwrap() = Probe::default();
     let epoch = Instant::now();
     let mut host = host("1000");
-    let definitions = definitions(RELAY);
+    let definitions = definitions(relay_settings(false, false));
     let mut service = Acquisition::prepare(&definitions, backends(), epoch).unwrap();
     let stale =
         Acquisition::prepare_reload(&definitions, backends(), epoch, Default::default()).unwrap();
@@ -142,7 +151,7 @@ fn site_acquisition_unchanged_owner_retains_demand_across_radio_generation_hando
         *PROBE.lock().unwrap() = Probe::default();
         let epoch = Instant::now();
         let mut host = host("1000");
-        let settings = definitions(RELAY);
+        let settings = definitions(relay_settings(false, false));
         let mut service = Acquisition::prepare(&settings, backends(), epoch).unwrap();
         service.output("1000", "relay", 1.0).unwrap();
         until(|| {
@@ -179,7 +188,7 @@ fn site_acquisition_reassigned_node_or_pin_starts_with_its_own_request() {
         *PROBE.lock().unwrap() = Probe::default();
         let epoch = Instant::now();
         let mut host = host("1000");
-        let mut settings = definitions(RELAY);
+        let mut settings = definitions(relay_settings(false, false));
         let mut service = Acquisition::prepare(&settings, backends(), epoch).unwrap();
         service.output("1000", "relay", 1.0).unwrap();
         until(|| {
@@ -228,12 +237,19 @@ fn site_acquisition_reassigned_node_or_pin_starts_with_its_own_request() {
 fn site_acquisition_reload_metadata_preserves_demand_and_physical_ownership() {
     use rpt_advanced_core::site::{OutputRequest, OutputState};
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    for edit in ["startup_state=on\n", "safe_state=on\n"] {
+    for (startup_on, safe_on) in [(true, false), (false, true)] {
+        let changed = definitions(relay_settings(startup_on, safe_on));
         *PROBE.lock().unwrap() = Probe::default();
         let epoch = Instant::now();
         let mut host = host("1000");
-        let mut service = Acquisition::prepare(&definitions(RELAY), backends(), epoch).unwrap();
-        let mut pulse = OutputState::new(definitions(RELAY)["1000"].outputs[0].clone());
+        let mut service = Acquisition::prepare(
+            &definitions(relay_settings(false, false)),
+            backends(),
+            epoch,
+        )
+        .unwrap();
+        let mut pulse =
+            OutputState::new(definitions(relay_settings(false, false))["1000"].outputs[0].clone());
         pulse.advance(0, true);
         pulse.command(OutputRequest::Pulse, 0).unwrap();
         assert_eq!(pulse.snapshot().pulse_deadline_ms, Some(500));
@@ -247,11 +263,7 @@ fn site_acquisition_reload_metadata_preserves_demand_and_physical_ownership() {
                 .is_some()
         });
         let before = service.output_status("1000", "relay").unwrap();
-        assert!(begin(
-            &mut service,
-            &definitions(&format!("{RELAY}{edit}")),
-            epoch
-        ));
+        assert!(begin(&mut service, &changed, epoch));
         until(|| service.barrier().is_some());
         assert!(service.stage());
         until(|| service.barrier().is_some());
@@ -262,7 +274,7 @@ fn site_acquisition_reload_metadata_preserves_demand_and_physical_ownership() {
         assert_eq!(after.submitted, before.submitted);
         assert_eq!(after.quality, ReadingQuality::Valid);
         let observations = service.poll(1, |_| host.control().work());
-        pulse.reconfigure(definitions(&format!("{RELAY}{edit}"))["1000"].outputs[0].clone());
+        pulse.reconfigure(changed["1000"].outputs[0].clone());
         pulse.advance(1, observations["1000"].outputs["relay"].available);
         assert_eq!(pulse.snapshot().pulse_deadline_ms, Some(500));
         pulse.advance(500, observations["1000"].outputs["relay"].available);
@@ -277,7 +289,7 @@ fn site_acquisition_reload_metadata_preserves_demand_and_physical_ownership() {
         close(&mut service, &mut host);
         assert_eq!(
             PROBE.lock().unwrap().written.last(),
-            Some(&f64::from(edit.starts_with("safe")))
+            Some(&f64::from(safe_on))
         );
     }
 }
@@ -288,7 +300,12 @@ fn site_acquisition_aborted_metadata_change_retains_old_retirement_level() {
     *PROBE.lock().unwrap() = Probe::default();
     let epoch = Instant::now();
     let mut host = host("1000");
-    let mut service = Acquisition::prepare(&definitions(RELAY), backends(), epoch).unwrap();
+    let mut service = Acquisition::prepare(
+        &definitions(relay_settings(false, false)),
+        backends(),
+        epoch,
+    )
+    .unwrap();
     until(|| {
         service.poll(0, |_| host.control().work());
         service
@@ -299,7 +316,7 @@ fn site_acquisition_aborted_metadata_change_retains_old_retirement_level() {
     });
     assert!(begin(
         &mut service,
-        &definitions(&format!("{RELAY}safe_state=on\n")),
+        &definitions(relay_settings(false, true)),
         epoch
     ));
     until(|| service.barrier().is_some());

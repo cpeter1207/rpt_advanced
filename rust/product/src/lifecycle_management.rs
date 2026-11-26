@@ -16,11 +16,17 @@ use std::sync::OnceLock;
 pub(super) struct ManagementState {
     gate: OnceLock<Arc<AtomicBool>>,
     state: Mutex<(u64, Observed)>,
+    observing: AtomicBool,
     pub(super) reload: Mutex<Option<crate::management::HostReload>>,
 }
 impl ManagementState {
     pub(super) fn install_gate(&self, gate: Arc<AtomicBool>) {
         assert!(self.gate.set(gate).is_ok());
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_observed(&self, observed: Observed) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).1 = observed;
     }
 }
 impl Engine {
@@ -60,13 +66,119 @@ impl Engine {
         // Storage trust is independent of the last observation confirmed by the physical owner.
     }
     pub(crate) fn modular_observed(&self) -> Observed {
-        self.management_state
+        let state = self
+            .management_state
             .state
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .1
-            .clone()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut observed = state.1.clone();
+        if !self.accepting.load(Ordering::Acquire)
+            || self.reloading.load(Ordering::Acquire)
+            || self
+                .management_state
+                .gate
+                .get()
+                .is_none_or(|g| g.load(Ordering::Acquire))
+        {
+            observed.domain = Default::default();
+        }
+        observed
     }
+    fn start_domain_observer(self: &Arc<Self>) {
+        if self.management_state.observing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let owner = Arc::downgrade(self);
+        let job = std::thread::Builder::new()
+            .name("rpt-status".into())
+            .spawn(move || {
+                while let Some(engine) = owner.upgrade() {
+                    if !engine.accepting.load(Ordering::Acquire) {
+                        break;
+                    }
+                    engine.refresh_domain();
+                    drop(engine);
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            });
+        match job {
+            Ok(job) => self
+                .jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(job),
+            Err(_) => self
+                .management_state
+                .observing
+                .store(false, Ordering::Release),
+        }
+    }
+
+    fn refresh_domain(self: &Arc<Self>) {
+        let Ok(_call) = self.enter() else { return };
+        let generation = self.revision.load(Ordering::Acquire);
+        let (fault_epoch, revision, owners) = {
+            let state = self
+                .management_state
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(revision) = &state.1.active_revision else {
+                return;
+            };
+            if self
+                .management_state
+                .gate
+                .get()
+                .is_none_or(|g| g.load(Ordering::Acquire))
+            {
+                return;
+            }
+            (state.0, revision.clone(), state.1.owners.clone())
+        };
+        let Ok(selection) = self.run(|host| Ok(host.status_selection())) else {
+            return;
+        };
+        // Provider locks and directory observations may wait. Only this observer is occupied.
+        let registrations = selection
+            .iter()
+            .filter_map(|(&(port, account), query)| {
+                query
+                    .observe(self.services, port, account)
+                    .map(|result| ((port, account), result))
+            })
+            .collect();
+        let engine = Arc::clone(self);
+        let _ = self.run(move |host| {
+            if host.status_selection() != selection {
+                return Ok(None);
+            }
+            let mut domain = host.live_domain(&owners, engine.elapsed_ms())?;
+            domain.registrations = registrations;
+            let mut state = engine
+                .management_state
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if engine.current(generation)
+                && state.0 == fault_epoch
+                && state.1.active_revision.as_ref() == Some(&revision)
+                && state.1.owners == owners
+                && engine
+                    .management_state
+                    .gate
+                    .get()
+                    .is_some_and(|g| !g.load(Ordering::Acquire))
+            {
+                return Ok(Some(std::mem::replace(
+                    &mut state.1.domain,
+                    Arc::new(domain),
+                )));
+            }
+            Ok(None)
+        });
+    }
+
     pub(crate) fn management_diagnostic(&self, event: Diagnostic) {
         self.services
             .scheduler_notice(&format!("management {event:?}"));
@@ -92,6 +204,9 @@ impl Engine {
                         .1 = Observed::default();
                     AdoptionOutcome::RecoveryRequired
                 });
+                if matches!(outcome, AdoptionOutcome::Confirmed) {
+                    engine.start_domain_observer();
+                }
                 let _ = confirmation.send(outcome);
             }) {
             Ok(job) => {
@@ -102,32 +217,58 @@ impl Engine {
         }
     }
 
-    fn poll_private_accounts(self: &Arc<Self>, attempt: std::num::NonZeroU64, reverse: bool) -> Result<(),RuntimeError> {
+    fn poll_private_accounts(
+        self: &Arc<Self>,
+        attempt: std::num::NonZeroU64,
+        reverse: bool,
+    ) -> Result<(), RuntimeError> {
         loop {
-            if !self.accepting.load(Ordering::Acquire) { return Err(RuntimeError::Rejected); }
-            if self.run_inner(true,move |host| if reverse { host.restore_private_accounts(attempt) }
-                else { host.apply_private_accounts(attempt) })? { return Ok(()); }
+            if !self.accepting.load(Ordering::Acquire) {
+                return Err(RuntimeError::Rejected);
+            }
+            if self.run_inner(true, move |host| {
+                if reverse {
+                    host.restore_private_accounts(attempt)
+                } else {
+                    host.apply_private_accounts(attempt)
+                }
+            })? {
+                return Ok(());
+            }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
-    fn poll_asl(self: &Arc<Self>, attempt: std::num::NonZeroU64, phase: u32) -> Result<(), RuntimeError> {
+    fn poll_asl(
+        self: &Arc<Self>,
+        attempt: std::num::NonZeroU64,
+        phase: u32,
+    ) -> Result<(), RuntimeError> {
         loop {
-            if !self.accepting.load(Ordering::Acquire) { return Err(RuntimeError::Rejected); }
-            if self.run_inner(true, move |host| host.step_network_accounts(attempt, phase))? { return Ok(()); }
+            if !self.accepting.load(Ordering::Acquire) {
+                return Err(RuntimeError::Rejected);
+            }
+            if self.run_inner(true, move |host| host.step_network_accounts(attempt, phase))? {
+                return Ok(());
+            }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
-    fn restore_accounts(self: &Arc<Self>, attempt: std::num::NonZeroU64) -> Result<(), RuntimeError> {
+    fn restore_accounts(
+        self: &Arc<Self>,
+        attempt: std::num::NonZeroU64,
+    ) -> Result<(), RuntimeError> {
         self.poll_asl(attempt, 3)?;
         self.poll_private_accounts(attempt, true)?;
-        self.run_inner(true, move |host| host.finish_private_accounts(attempt, |_, _| true))?;
+        self.run_inner(true, move |host| {
+            host.finish_private_accounts(attempt, |_, _| true)
+        })?;
         self.poll_asl(attempt, 4)?;
         self.run_inner(true, move |host| host.finish_asl_selection(attempt))
     }
 
-    fn apply_modular(
+    pub(super) fn apply_modular(
         self: &Arc<Self>,
         prepared: Prepared,
     ) -> Result<AdoptionOutcome, RuntimeError> {
@@ -148,104 +289,132 @@ impl Engine {
         let basis = radio.clone();
         self.run(move |host| host.verify_private_basis(&basis))?;
         let mut entered_core = false;
-        let result = self.poll_private_accounts(attempt, false)
+        let result = self
+            .poll_private_accounts(attempt, false)
             .and_then(|()| self.poll_asl(attempt, 1))
             .and_then(|()| self.begin_modular_sites(site))
-            .and_then(|()| self.wait_sites(false)).and_then(|()| {
-            self.reloading
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .map_err(|_| RuntimeError::Busy)?;
-            self.revision.fetch_add(1, Ordering::AcqRel);
-            self.lost_digits.store(true, Ordering::Release);
-            let clock = self.clock();
-            let name = revision.clone();
-            let installed = Arc::clone(&inputs);
-            entered_core = true;
-            let mut ready = self.run_inner(true, move |host| {
-                host.begin_core_adoption(radio, name, credentials, installed, clock)
-            })?;
-            while !ready {
-                if !self.accepting.load(Ordering::Acquire) {
-                    return Err(RuntimeError::Rejected);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+            .and_then(|()| self.wait_sites(false))
+            .and_then(|()| {
+                self.reloading
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .map_err(|_| RuntimeError::Busy)?;
+                self.revision.fetch_add(1, Ordering::AcqRel);
+                self.lost_digits.store(true, Ordering::Release);
                 let clock = self.clock();
-                ready = self.run_inner(true, move |host| host.poll_reload(clock))?;
-            }
-            Ok(())
-        });
+                let name = revision.clone();
+                let installed = Arc::clone(&inputs);
+                entered_core = true;
+                let mut ready = self.run_inner(true, move |host| {
+                    host.begin_core_adoption(radio, name, credentials, installed, clock)
+                })?;
+                while !ready {
+                    if !self.accepting.load(Ordering::Acquire) {
+                        return Err(RuntimeError::Rejected);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    let clock = self.clock();
+                    ready = self.run_inner(true, move |host| host.poll_reload(clock))?;
+                }
+                Ok(())
+            });
         // Abort uncommitted site changes or collect the committed old workers outside control.
         // A failed cleanup leaves the live selection unknown even if the radio rolled back.
         self.finish_reload_sites(result.is_ok())?;
         if result.is_err() {
             let attempted = revision.clone();
             let basis = retained.clone();
-            let restored = self.run(move |host| Ok(if entered_core { host.modular_rollback_confirmed(&attempted) }
-                else { host.verify_private_basis(&basis).is_ok() }))?;
-            if restored {
-                self.restore_accounts(attempt)?;
-                return Ok(AdoptionOutcome::RolledBack);
+            let restored = self.run(move |host| {
+                Ok(if entered_core {
+                    host.modular_rollback_confirmed(&attempted)
+                } else {
+                    host.verify_private_basis(&basis).is_ok()
+                })
+            })?;
+            if !restored {
+                // Keep TX inhibited while the account providers reverse the failed attempt.
+                self.inhibit_modular();
             }
-            // An inconclusive physical transition invalidates our live observation.
-            return Err(RuntimeError::Restore);
+            self.restore_accounts(attempt)?;
+            return if restored {
+                Ok(AdoptionOutcome::RolledBack)
+            } else {
+                Err(RuntimeError::Restore)
+            };
         }
         loop {
-        if !self.accepting.load(Ordering::Acquire) { return Err(RuntimeError::Rejected); }
-        let engine = Arc::clone(self);
-        let configuration = configuration.clone();
-        let inputs = inputs.clone();
-        let revision = revision.clone();
-        let result = self.run_inner(true, move |host| {
-            if !host
-                .runtime
-                .modular_configuration()
-                .is_some_and(|active| Arc::ptr_eq(active, &configuration))
-            {
+            if !self.accepting.load(Ordering::Acquire) {
                 return Err(RuntimeError::Rejected);
             }
-            let observed = host.observed_configuration(&revision, &inputs)?;
-            let mut state = engine
-                .management_state
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if state.0 != fault_epoch
-                || state.0 == u64::MAX
-                || !engine.accepting.load(Ordering::Acquire)
-            {
-                return Err(RuntimeError::Restore);
+            let engine = Arc::clone(self);
+            let configuration = configuration.clone();
+            let inputs = inputs.clone();
+            let revision = revision.clone();
+            let result = self.run_inner(true, move |host| {
+                if !host
+                    .runtime
+                    .modular_configuration()
+                    .is_some_and(|active| Arc::ptr_eq(active, &configuration))
+                {
+                    return Err(RuntimeError::Rejected);
+                }
+                let observed = host.observed_configuration(&revision, &inputs)?;
+                let mut state = engine
+                    .management_state
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if state.0 != fault_epoch
+                    || state.0 == u64::MAX
+                    || !engine.accepting.load(Ordering::Acquire)
+                {
+                    return Err(RuntimeError::Restore);
+                }
+                let gate = engine
+                    .management_state
+                    .gate
+                    .get()
+                    .ok_or(RuntimeError::Rejected)?;
+                // All physical and site handoffs succeeded. Release only this generation's
+                // affected stations on the same serialized turn as native confirmation.
+                host.runtime.check_station_confirmation(&configuration)?;
+                let finish_phone = host.prepare_account_release(attempt)?;
+                if !host.step_network_accounts(attempt, 2)? {
+                    return Ok(false);
+                }
+                host.begin_account_release(attempt)?;
+                if finish_phone {
+                    host.finish_private_accounts(attempt, |local, mailbox| {
+                        let Ok(port) = local.parse::<ResourceId>() else {
+                            return false;
+                        };
+                        configuration
+                            .scopes
+                            .get(&ResourceScope::Port(port))
+                            .is_some_and(|scope| {
+                                scope.mailboxes.effective.values().any(|current| {
+                                    Some(current.binding.id) == mailbox.binding
+                                        && current.number == mailbox.id
+                                        && current.first_name == mailbox.first_name
+                                        && current.callsign == mailbox.callsign
+                                })
+                            })
+                    })?;
+                }
+                if !host.step_network_accounts(attempt, 4)? {
+                    return Ok(false);
+                }
+                host.runtime.confirm_station_replacements(&configuration)?;
+                host.confirm_private_media();
+                host.finish_asl_selection(attempt)?;
+                state.1 = observed;
+                gate.store(false, Ordering::Release);
+                Ok(true)
+            });
+            match result {
+                Ok(true) => return Ok(AdoptionOutcome::Confirmed),
+                Ok(false) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                Err(error) => return Err(error),
             }
-            let gate = engine
-                .management_state
-                .gate
-                .get()
-                .ok_or(RuntimeError::Rejected)?;
-            // All physical and site handoffs succeeded. Release only this generation's
-            // affected stations on the same serialized turn as native confirmation.
-            host.runtime.check_station_confirmation(&configuration)?;
-            let finish_phone = host.prepare_account_release(attempt)?;
-            if !host.step_network_accounts(attempt, 2)? { return Ok(false); }
-            host.begin_account_release(attempt)?;
-            if finish_phone { host.finish_private_accounts(attempt,|local, mailbox| {
-                let Ok(port) = local.parse::<ResourceId>() else { return false };
-                configuration.scopes.get(&ResourceScope::Port(port)).is_some_and(|scope|
-                    scope.mailboxes.effective.values().any(|current|
-                        Some(current.binding.id) == mailbox.binding && current.number == mailbox.id
-                            && current.first_name == mailbox.first_name && current.callsign == mailbox.callsign))
-            })?; }
-            if !host.step_network_accounts(attempt, 4)? { return Ok(false); }
-            host.runtime.confirm_station_replacements(&configuration)?;
-            host.confirm_private_media();
-            host.finish_asl_selection(attempt)?;
-            state.1 = observed;
-            gate.store(false, Ordering::Release);
-            Ok(true)
-        });
-        match result {
-            Ok(true) => return Ok(AdoptionOutcome::Confirmed),
-            Ok(false) => std::thread::sleep(std::time::Duration::from_millis(5)),
-            Err(error) => return Err(error),
-        }
         }
     }
 
@@ -298,6 +467,34 @@ impl Engine {
         })
     }
 
+    pub(crate) fn dispatch_maintenance(
+        self: &Arc<Self>,
+        grant: Arc<crate::management::maintenance::Grant>,
+        intent: Invocation,
+    ) -> Effect {
+        let Some(gate) = self.management_state.gate.get().cloned() else {
+            return Effect::Rejected;
+        };
+        grant.gate.get_or_init(|| Arc::clone(&gate));
+        self.run(move |host| {
+            if gate.load(Ordering::Acquire)
+                || !host.modular_revision_matches(&grant.revision)
+                || !grant.valid()
+                || intent.context.recheck(false).is_err()
+                || intent.context.generation.id() != grant.generation
+                || intent.context.owner != ResourceScope::Port(grant.port)
+            {
+                return Ok(Effect::Rejected);
+            }
+            let rpt_advanced_core::command_language::Action::Maintenance(action) = intent.action
+            else {
+                return Ok(Effect::Rejected);
+            };
+            Ok(host.execute_maintenance(grant, action))
+        })
+        .unwrap_or(Effect::Rejected)
+    }
+
     pub(crate) fn dispatch_registered(
         self: &Arc<Self>,
         expected: &str,
@@ -327,3 +524,7 @@ impl Engine {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_observability_tests.rs"]
+mod observability;

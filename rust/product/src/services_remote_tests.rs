@@ -115,7 +115,7 @@ fn remote_tickets_preserve_pending_source_and_completion_ownership() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let services = host_services(|table| table.radio_remote_submit = Some(submit));
-    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    let mut radio = crate::fixture::station::radio(services, 8);
     MODE.set(0);
     let operation = operation();
     let mut ticket = radio.remote_submit(&operation, false, true).unwrap();
@@ -139,7 +139,7 @@ fn remote_ticket_admission_releases_only_transferred_contexts_with_destructors()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let services = host_services(|table| table.radio_remote_submit = Some(submit));
-    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    let mut radio = crate::fixture::station::radio(services, 8);
     for case in 1..9 {
         MODE.set(case);
         let before = DESTROYED.get();
@@ -152,7 +152,7 @@ fn remote_ticket_admission_releases_only_transferred_contexts_with_destructors()
     }
     MODE.set(0);
     let services = host_services(|table| table.radio_remote_submit = None);
-    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    let mut radio = crate::fixture::station::radio(services, 8);
     assert_eq!(
         radio.remote_submit(&operation(), true, false).err(),
         Some(-7)
@@ -166,7 +166,7 @@ fn remote_ticket_copy_validates_provider_spans_and_retains_original_errors() {
         .unwrap_or_else(|error| error.into_inner());
     MODE.set(0);
     let services = host_services(|table| table.radio_remote_submit = Some(submit));
-    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    let mut radio = crate::fixture::station::radio(services, 8);
     let mut ticket = radio.remote_submit(&operation(), true, false).unwrap();
     MODE.set(9);
     assert_eq!(ticket.source_state(false, true), Err(-29));
@@ -195,7 +195,7 @@ fn remote_radio_lifecycle_maps_optional_operations_and_original_failures() {
         table.radio_ready = None;
         table.radio_quiesce = None;
     });
-    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    let mut radio = crate::fixture::station::radio(services, 8);
     assert_eq!(radio.service(), Ok(()));
     assert_eq!(radio.activation_ready(), Ok(true));
     assert_eq!(radio.poll_quiesce(), Ok(true));
@@ -204,14 +204,14 @@ fn remote_radio_lifecycle_maps_optional_operations_and_original_failures() {
         table.radio_ready = Some(radio_response);
         table.radio_quiesce = Some(radio_response);
     });
-    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    let mut radio = crate::fixture::station::radio(services, 8);
     for (code, expected) in [(0, Ok(true)), (1, Ok(false)), (-47, Err(-47))] {
         RADIO_CODE.set(code);
         assert_eq!(radio.activation_ready(), expected);
         assert_eq!(radio.poll_quiesce(), expected);
     }
     let services = host_services(|table| table.radio_service = Some(radio_response));
-    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    let mut radio = crate::fixture::station::radio(services, 8);
     assert_eq!(radio.activation_ready(), Err(-47));
     RADIO_CODE.set(0);
     assert_eq!(radio.service(), Ok(()));

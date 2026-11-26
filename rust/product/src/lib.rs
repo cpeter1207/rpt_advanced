@@ -7,7 +7,6 @@ pub(crate) mod abi {
     include!(concat!(env!("OUT_DIR"), "/abi.rs"));
 }
 
-mod configuration;
 #[cfg(target_os = "linux")]
 pub mod configuration_capture;
 #[cfg(target_os = "linux")]
@@ -22,6 +21,8 @@ pub mod configuration_radio;
 pub mod configuration_transaction;
 pub mod control;
 pub mod directory;
+#[path = "configuration_echolink.rs"]
+mod echo_configuration;
 pub mod host;
 pub mod lifecycle;
 pub mod link;
@@ -29,7 +30,6 @@ pub mod link;
 pub mod management;
 pub mod media;
 pub mod phone;
-mod radio_control;
 mod remote_reply;
 pub mod schedule_zone;
 mod scheduler_health;

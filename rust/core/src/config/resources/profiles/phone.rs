@@ -2,10 +2,11 @@
 
 use super::{
     CandidateWarning, jitter,
-    normalize::{Fields, Layers, Rule, timings, warn},
+    normalize::{Fields, Layers, Path, Rule, timings},
 };
-use crate::config::echolink;
+use crate::{config::echolink, link::MailboxId};
 use serde_json::Value;
+use std::collections::HashSet;
 
 const POSITIVE_MS: Rule = Rule::Unsigned(1, u32::MAX as u64);
 pub(super) const FIELDS: Fields = &[
@@ -25,6 +26,8 @@ pub(super) const FIELDS: Fields = &[
         "playout_destination",
         Rule::Choice(&["local", "local_and_links"]),
     ),
+    ("allow_mailboxes", Rule::Value(mailbox_list)),
+    ("deny_mailboxes", Rule::Value(mailbox_list)),
     ("isolate_peers", Rule::Bool),
     (
         "timing",
@@ -37,7 +40,7 @@ pub(super) const FIELDS: Fields = &[
         "vad",
         Rule::Object(&[
             ("enabled", Rule::Bool),
-            ("mode", Rule::Choice(&["kerchunk", "continuous"])),
+            ("mode", Rule::Choice(&["continuous"])),
             (
                 "timing",
                 Rule::Object(&[("hang_ms", Rule::Unsigned(0, 32767))]),
@@ -46,6 +49,32 @@ pub(super) const FIELDS: Fields = &[
     ),
     ("jitter", Rule::Object(jitter::FIELDS)),
 ];
+
+fn mailbox_list(value: &Value) -> Option<Value> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    for entry in value.as_array()? {
+        let number = entry.as_str()?;
+        MailboxId::new(number).ok()?;
+        if seen.insert(number) {
+            entries.push(entry.clone());
+        }
+    }
+    Some(Value::Array(entries))
+}
+
+fn resolved_mailboxes(layers: &Layers<'_>, path: Path) -> Vec<MailboxId> {
+    layers
+        .get(path)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|entry| {
+            MailboxId::new(entry.as_str().expect("normalized mailbox string"))
+                .expect("normalized mailbox number")
+        })
+        .collect()
+}
 
 fn username(value: &Value) -> Option<Value> {
     value
@@ -146,6 +175,10 @@ pub struct PhonePatchProfileSettings {
     pub provider: PhoneProviderSettings,
     /// Where eligible phone speech can be played.
     pub playout_destination: PhonePlayoutDestination,
+    /// Exact mailbox IDs allowed to authenticate. An empty list imposes no allow filter.
+    pub allow_mailboxes: Vec<MailboxId>,
+    /// Exact mailbox IDs denied even when also allowed.
+    pub deny_mailboxes: Vec<MailboxId>,
     /// Keep separately attached network peers isolated during phone use.
     pub isolate_peers: bool,
     /// End-to-end playout timing.
@@ -155,6 +188,12 @@ pub struct PhonePatchProfileSettings {
 }
 
 impl PhonePatchProfileSettings {
+    /// Check an exact mailbox identity before granting authenticated access.
+    pub fn allows_mailbox(&self, mailbox: &MailboxId) -> bool {
+        !self.deny_mailboxes.contains(mailbox)
+            && (self.allow_mailboxes.is_empty() || self.allow_mailboxes.contains(mailbox))
+    }
+
     pub(super) fn resolve(layers: &Layers<'_>, warnings: &mut Vec<CandidateWarning>) -> Self {
         let (budgets, selected) = timings(
             layers,
@@ -166,18 +205,6 @@ impl PhonePatchProfileSettings {
             |[target, maximum]| target <= maximum,
             warnings,
         );
-        let enabled = layers.flag(&["vad", "enabled"]).unwrap_or(true);
-        let mut mode = VadMode::Continuous;
-        for (value, resource) in layers.values(&["vad", "mode"]) {
-            if value.as_str() != Some("kerchunk") {
-                break;
-            }
-            if !enabled {
-                mode = VadMode::Kerchunk;
-                break;
-            }
-            warn(warnings, resource, "vad.mode");
-        }
         Self {
             provider: PhoneProviderSettings {
                 protocol: match layers.text(&["provider", "protocol"]) {
@@ -193,14 +220,16 @@ impl PhonePatchProfileSettings {
                 Some("local_and_links") => PhonePlayoutDestination::LocalAndLinks,
                 _ => PhonePlayoutDestination::Local,
             },
+            allow_mailboxes: resolved_mailboxes(layers, &["allow_mailboxes"]),
+            deny_mailboxes: resolved_mailboxes(layers, &["deny_mailboxes"]),
             isolate_peers: layers.flag(&["isolate_peers"]).unwrap_or(true),
             timing: PhoneLatencyTiming {
                 target_latency_ms: budgets[0][selected[0]].milliseconds,
                 maximum_latency_ms: budgets[1][selected[1]].milliseconds,
             },
             vad: PhoneVadSettings {
-                enabled,
-                mode,
+                enabled: layers.flag(&["vad", "enabled"]).unwrap_or(true),
+                mode: VadMode::Continuous,
                 hang_ms: layers
                     .number(&["vad", "timing", "hang_ms"])
                     .map_or(1000, |value| value as u16),

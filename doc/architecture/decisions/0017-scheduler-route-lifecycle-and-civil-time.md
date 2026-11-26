@@ -111,6 +111,16 @@ rejection during reload or shutdown is not a failed submission or live cycle.
 Counters belong to the shared executor, survive reload, and reset when the
 product starts again. Status samples each atomic field independently.
 
+The cached HAL status for a confirmed port owner also exposes the last two
+distinct accepted calendar seconds and the most recent forward jump that skipped
+a complete minute. This gap can outlive ordinary ticks and does not replay or
+declare a missed event. Each event retains its latest terminal start, end and
+warning observations. The port records the latest serialized disconnect's
+selected and removed counts with at most 16 selected public node identities,
+and the terminal attachment outcome for the current ASL account. These
+observations belong to the active owner, are not durable, and carry no
+credentials, private call identities or transport addresses.
+
 Admission and cycle warnings share a monotonic one-minute rate limit; queue
 delay warnings have an independent one-minute limit. Counts are never
 rate-limited. Existing notice callbacks encode command completion or directory

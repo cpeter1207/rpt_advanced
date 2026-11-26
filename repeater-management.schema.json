@@ -794,6 +794,26 @@
           },
           "additionalProperties": false
         },
+        "allow_mailboxes": {
+          "type": "array",
+          "description": "Exact incoming mailbox IDs. An empty list imposes no allow filter.",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{1,32}$"
+          },
+          "default": []
+        },
+        "deny_mailboxes": {
+          "type": "array",
+          "description": "Exact incoming mailbox IDs denied even when also allowed.",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{1,32}$"
+          },
+          "default": []
+        },
         "playout_destination": {
           "type": "string",
           "enum": [
@@ -826,6 +846,11 @@
         },
         "vad": {
           "$ref": "#/$defs/vad",
+          "properties": {
+            "mode": {
+              "const": "continuous"
+            }
+          },
           "default": {
             "enabled": true,
             "mode": "continuous",
@@ -833,7 +858,7 @@
               "hang_ms": 1000
             }
           },
-          "description": "Shared VAD settings with phone-context default enabled continuous/1000ms hang. When enabled, voice admission qualifies the caller; when disabled, caller reception is continuous for a live usable call, subject to receiver mute and other applicable keying/safety gates. No separate keying_mode exists."
+          "description": "Phone VAD supports continuous mode with a default 1000 ms hang and is enabled by default. When enabled, voice admission qualifies the caller; when disabled, caller reception is continuous for a live usable call, subject to receiver mute and other applicable keying/safety gates. No separate keying_mode exists."
         },
         "jitter": {
           "$ref": "#/$defs/jitter"
@@ -2393,7 +2418,8 @@
           "type": "string",
           "enum": [
             "receiver",
-            "link"
+            "link",
+            "phone"
           ]
         },
         "remote_node": {
@@ -12046,6 +12072,44 @@
       "readOnly": true,
       "description": "The only credential readback representation. Redact secrets after inheritance and before query-path projection."
     },
+    "allstarlinkStaticNodes": {
+      "description": "Static AllStarLink dial endpoints and independent pinned source IPs, keyed by exact node number strings. An empty table overrides inherited entries.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[0-9]{1,63}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "string",
+            "minLength": 1
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "source": {
+            "type": "string",
+            "anyOf": [
+              {
+                "format": "ipv4"
+              },
+              {
+                "format": "ipv6"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "host",
+          "port",
+          "source"
+        ]
+      }
+    },
     "allstarlink": {
       "type": "object",
       "properties": {
@@ -12063,8 +12127,8 @@
           },
           "uniqueItems": true
         },
-        "static_directory_file": {
-          "type": "string"
+        "static_nodes": {
+          "$ref": "#/$defs/allstarlinkStaticNodes"
         },
         "directory_file": {
           "type": "string"
@@ -12421,8 +12485,8 @@
           },
           "uniqueItems": true
         },
-        "static_directory_file": {
-          "type": "string"
+        "static_nodes": {
+          "$ref": "#/$defs/allstarlinkStaticNodes"
         },
         "directory_file": {
           "type": "string"
@@ -12541,6 +12605,12 @@
           },
           "additionalProperties": false
         },
+        "allow_mailboxes": {
+          "$ref": "#/$defs/phonePatch/properties/allow_mailboxes"
+        },
+        "deny_mailboxes": {
+          "$ref": "#/$defs/phonePatch/properties/deny_mailboxes"
+        },
         "playout_destination": {
           "type": "string",
           "enum": [
@@ -12573,6 +12643,11 @@
         },
         "vad": {
           "$ref": "#/$defs/vad",
+          "properties": {
+            "mode": {
+              "const": "continuous"
+            }
+          },
           "default": {
             "enabled": true,
             "mode": "continuous",
@@ -12580,7 +12655,7 @@
               "hang_ms": 1000
             }
           },
-          "description": "Shared VAD settings with phone-context default enabled continuous/1000ms hang. When enabled, voice admission qualifies the caller; when disabled, caller reception is continuous for a live usable call, subject to receiver mute and other applicable keying/safety gates. No separate keying_mode exists."
+          "description": "Phone VAD supports continuous mode with a default 1000 ms hang and is enabled by default. When enabled, voice admission qualifies the caller; when disabled, caller reception is continuous for a live usable call, subject to receiver mute and other applicable keying/safety gates. No separate keying_mode exists."
         },
         "jitter": {
           "$ref": "#/$defs/jitter"
@@ -19351,7 +19426,7 @@
             "target"
           ],
           "additionalProperties": false,
-          "description": "Toggle all currently connected network peers, optionally filtered by link_type. Phone callers are separate. Mixed selection mutes all; all-muted selection unmutes all; empty is a no-op.",
+          "description": "Toggle receive audio and keying for all connected peers, including attached phone callers. With link_type, select only that exact network protocol. Mixed selection mutes all; all-muted selection unmutes all; empty is a no-op.",
           "x-availability": "new_design_action"
         },
         {

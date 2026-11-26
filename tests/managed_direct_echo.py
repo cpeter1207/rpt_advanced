@@ -1,4 +1,5 @@
 """Loopback directory and direct UDP peer for the managed foreground fixture."""
+
 import ctypes
 import os
 import select
@@ -50,14 +51,20 @@ def handle_directory(listener, events, boot):
 def listen(events, port):
     # Independently guard standalone invocation of this peer before opening fixed ports.
     parent = os.environ["RPTADV_TEST_PARENT_NETNS"]
-    if (not parent.startswith("net:[") or not parent.endswith("]")
-            or os.readlink("/proc/self/ns/net") == parent):
+    if (
+        not parent.startswith("net:[")
+        or not parent.endswith("]")
+        or os.readlink("/proc/self/ns/net") == parent
+    ):
         raise RuntimeError("private network namespace required")
     interfaces = Path("/proc/net/dev").read_text().splitlines()[2:]
     if [line.split(":", 1)[0].strip() for line in interfaces] != ["lo"]:
         raise RuntimeError("loopback-only network namespace required")
-    with socket.socket() as directory, socket.socket(type=socket.SOCK_DGRAM) as audio, \
-            socket.socket(type=socket.SOCK_DGRAM) as control:
+    with (
+        socket.socket() as directory,
+        socket.socket(type=socket.SOCK_DGRAM) as audio,
+        socket.socket(type=socket.SOCK_DGRAM) as control,
+    ):
         directory.bind(("127.0.0.3", 5200))
         directory.listen()
         audio.bind(("127.0.0.2", 5198))
@@ -81,8 +88,13 @@ def listen(events, port):
                         connected = True
                 if audio in readable:
                     packet, source = audio.recvfrom(2048)
-                    if (connected and not pcm_seen and len(packet) == 144
-                            and packet[0] == 0xc0 and packet[1] & 0x7f == 3):
+                    if (
+                        connected
+                        and not pcm_seen
+                        and len(packet) == 144
+                        and packet[0] == 0xC0
+                        and packet[1] & 0x7F == 3
+                    ):
                         assert source == ("127.0.0.1", port)
                         if decoded_signal(packet[12:]):
                             (events / f"pcm-{boot}").touch()
@@ -96,8 +108,11 @@ def decoded_signal(payload):
     gsm = ctypes.CDLL("libgsm.so.1")
     gsm.gsm_create.argtypes = []
     gsm.gsm_create.restype = ctypes.c_void_p
-    gsm.gsm_decode.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ubyte),
-                               ctypes.POINTER(ctypes.c_short)]
+    gsm.gsm_decode.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_ubyte),
+        ctypes.POINTER(ctypes.c_short),
+    ]
     gsm.gsm_decode.restype = ctypes.c_int
     gsm.gsm_destroy.argtypes = [ctypes.c_void_p]
     gsm.gsm_destroy.restype = None

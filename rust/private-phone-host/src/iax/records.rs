@@ -1,9 +1,10 @@
 // Typed wrappers for the released provider-account listener tail.
 // Each synchronous operation runs on its listener owner, never an audio callback.
 
-use super::{IaxClient, IaxError, IaxPeer, IaxServer};
+use super::{IaxClient, IaxError, IaxPeer, IaxServer, ProviderDialDescriptor};
 use crate::abi;
 use std::{
+    ffi::c_void,
     mem::size_of,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6},
     ptr::{self, NonNull},
@@ -70,6 +71,23 @@ pub struct DialRequest<'a> {
     pub timeout_ms: u32,
 }
 
+impl DialRequest<'_> {
+    fn options(&self) -> abi::rptadv_iax2_provider_dial_options_v1 {
+        abi::rptadv_iax2_provider_dial_options_v1 {
+            struct_size: size_of::<abi::rptadv_iax2_provider_dial_options_v1>() as u32,
+            abi_version: 1,
+            generation: self.generation,
+            account: bytes(self.account),
+            destination: bytes(self.destination),
+            caller_number: bytes(self.caller_number),
+            caller_name: bytes(self.caller_name),
+            context: bytes(self.context),
+            timeout_ms: self.timeout_ms,
+            reserved: 0,
+        }
+    }
+}
+
 /// Exact provider lifecycle receipt copied before borrowed metadata expires.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CallReceipt {
@@ -95,6 +113,68 @@ pub struct ProviderCall {
     pub peer: IaxPeer,
     /// Transport provenance, not mailbox or RF permission.
     pub receipt: CallReceipt,
+}
+
+/// One pending provider-owned setup, retained on its serialized account worker.
+pub(super) struct PendingProviderDial {
+    owner: IaxClient,
+    api: ProviderDialDescriptor,
+    token: Option<NonNull<c_void>>,
+    generation: u64,
+}
+
+impl PendingProviderDial {
+    /// Advance the exact attempt without waiting for a backend operation.
+    pub(super) fn poll(&mut self) -> Result<Option<ProviderCall>, IaxError> {
+        let token = self.token.ok_or(IaxError::Operation)?;
+        let mut receipt = empty_call_receipt();
+        let mut handle = ptr::null_mut();
+        let result = unsafe { self.api.poll.unwrap()(token.as_ptr(), &mut handle, &mut receipt) };
+        if result == 1 {
+            return Ok(None);
+        }
+        // Both terminal statuses consume this token. These outputs are always valid.
+        self.token = None;
+        status(result)?;
+        self.call(handle, receipt).map(Some)
+    }
+
+    fn call(
+        &self,
+        handle: *mut c_void,
+        receipt: abi::rptadv_iax2_provider_call_receipt_v1,
+    ) -> Result<ProviderCall, IaxError> {
+        let peer = unsafe { self.owner.clone().adopt_inbound(handle) }?;
+        let receipt = call_receipt(receipt, self.generation)?;
+        Ok(ProviderCall { peer, receipt })
+    }
+
+    /// Request cancellation without taking this poll owner out of service.
+    pub(super) fn cancel(&self) {
+        if let Some(token) = self.token {
+            unsafe { self.api.cancel.unwrap()(token.as_ptr()) };
+        }
+    }
+}
+
+impl Drop for PendingProviderDial {
+    fn drop(&mut self) {
+        if self.token.is_some() {
+            self.cancel();
+            // Only reached on account-worker teardown. Keep the listener and DSO
+            // alive until the detached native setup actually acknowledges cancellation.
+            while matches!(self.poll(), Ok(None)) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+}
+
+fn empty_call_receipt() -> abi::rptadv_iax2_provider_call_receipt_v1 {
+    // SAFETY: this sized ABI record has no references or invalid zero bit patterns.
+    let mut receipt: abi::rptadv_iax2_provider_call_receipt_v1 = unsafe { std::mem::zeroed() };
+    receipt.struct_size = size_of::<abi::rptadv_iax2_provider_call_receipt_v1>() as u32;
+    receipt
 }
 
 /// Transport-authenticated provider policy callback; caller fields remain untrusted.
@@ -203,27 +283,41 @@ impl IaxServer {
             .api
             .dial_provider_account
             .ok_or(IaxError::IncompatibleAdapter)?;
-        let options = abi::rptadv_iax2_provider_dial_options_v1 {
-            struct_size: size_of::<abi::rptadv_iax2_provider_dial_options_v1>() as u32,
-            abi_version: 1,
-            generation: request.generation,
-            account: bytes(request.account),
-            destination: bytes(request.destination),
-            caller_number: bytes(request.caller_number),
-            caller_name: bytes(request.caller_name),
-            context: bytes(request.context),
-            timeout_ms: request.timeout_ms,
-            reserved: 0,
-        };
-        // SAFETY: this sized ABI record has no references or invalid zero bit patterns.
-        let mut receipt: abi::rptadv_iax2_provider_call_receipt_v1 = unsafe { std::mem::zeroed() };
-        receipt.struct_size = size_of::<abi::rptadv_iax2_provider_call_receipt_v1>() as u32;
+        let options = request.options();
+        let mut receipt = empty_call_receipt();
         let mut handle = ptr::null_mut();
         status(unsafe { dial(self.handle.as_ptr(), &options, &mut handle, &mut receipt) })?;
         // Adopt before checking metadata so a malformed success still destroys its unique peer.
         let peer = unsafe { self._owner.clone().adopt_inbound(handle) }?;
         let receipt = call_receipt(receipt, request.generation)?;
         Ok(ProviderCall { peer, receipt })
+    }
+
+    /// True when the retained DSO can advance independent configured-account attempts.
+    pub(super) fn supports_pending_dial(&self) -> bool {
+        self._owner.0.provider_dial.is_some()
+    }
+
+    /// Begin one exact call attempt without waiting for provider setup or answer.
+    pub(super) fn begin_provider_dial(
+        &mut self,
+        request: &DialRequest<'_>,
+    ) -> Result<PendingProviderDial, IaxError> {
+        let api = self
+            ._owner
+            .0
+            .provider_dial
+            .ok_or(IaxError::IncompatibleAdapter)?;
+        let mut token = ptr::null_mut();
+        status(unsafe {
+            api.begin.unwrap()(self.handle.as_ptr(), &request.options(), &mut token)
+        })?;
+        Ok(PendingProviderDial {
+            owner: self._owner.clone(),
+            api,
+            token: Some(NonNull::new(token).ok_or(IaxError::Operation)?),
+            generation: request.generation,
+        })
     }
 
     /// Poll exactly one mixed numeric/provider admission stream.

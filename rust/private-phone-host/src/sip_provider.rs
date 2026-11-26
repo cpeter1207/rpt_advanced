@@ -128,6 +128,10 @@ pub struct Call {
     source: [u8; 16],
     /// Incoming=0, outgoing=1; direction is not mailbox/control authority.
     pub direction: u32,
+    /// The exact pending outgoing INVITE has received a real 180 response.
+    pub alerting_seen: u32,
+    /// Terminal INVITE rejection retained across later teardown notifications.
+    pub invite_failure_status: u32,
 }
 impl Default for Call {
     fn default() -> Self {
@@ -143,11 +147,13 @@ impl Default for Call {
             source_port: 0,
             source: [0; 16],
             direction: 0,
+            alerting_seen: 0,
+            invite_failure_status: 0,
         }
     }
 }
 impl Call {
-    /// Remote offer/answer, empty before an outgoing answer; never mailbox authority.
+    /// Remote offer, provisional description or final answer, scoped to this call.
     pub fn offer(&self) -> &[u8] {
         &self.offer[..self.offer_length as usize]
     }
@@ -167,11 +173,7 @@ impl Call {
         Ok(std::net::SocketAddr::new(ip, self.source_port))
     }
 
-    fn validate(&mut self, generation: u64, supports_outgoing: bool) -> Result<(), Error> {
-        if !supports_outgoing {
-            // This field was padding in the released incoming-only record.
-            self.direction = 0;
-        }
+    fn validate(&self, generation: u64) -> Result<(), Error> {
         let absent_answer = self.direction == 1
             && matches!(self.state, 1 | 4 | 5)
             && self.offer_length == 0
@@ -183,6 +185,10 @@ impl Call {
             || self.call == 0
             || !(1..=5).contains(&self.state)
             || self.direction > 1
+            || self.alerting_seen > 1
+            || (self.direction == 0 && (self.alerting_seen != 0 || self.invite_failure_status != 0))
+            || (self.invite_failure_status != 0
+                && (self.state < 4 || !(300..=699).contains(&self.invite_failure_status)))
             || self.offer_length as usize > self.offer.len()
             || (!absent_answer && (self.source().is_err() || self.offer_length == 0))
         {
@@ -193,6 +199,7 @@ impl Call {
 }
 
 type CallOriginate = unsafe extern "C" fn(*mut c_void, u64, Span, Span, *mut u64) -> i32;
+type ProvisionalRead = unsafe extern "C" fn(*mut c_void, u64, u64, *mut Call) -> i32;
 type CallRead = unsafe extern "C" fn(*mut c_void, u64, *mut Call) -> i32;
 type CallResponse = unsafe extern "C" fn(*mut c_void, u64, u64, u32, Span) -> i32;
 type CallAction = unsafe extern "C" fn(*mut c_void, u64, u64) -> i32;
@@ -218,6 +225,7 @@ struct Descriptor {
     release_call: Option<CallAction>,
     originate_call: Option<CallOriginate>,
     acknowledge_call: Option<CallAction>,
+    first_provisional: Option<ProvisionalRead>,
 }
 impl Descriptor {
     unsafe fn read(pointer: *const Self) -> Result<Self, Error> {
@@ -225,23 +233,17 @@ impl Descriptor {
             return Err(Error::Contract);
         }
         let size = unsafe { std::ptr::addr_of!((*pointer).struct_size).read_unaligned() } as usize;
-        let prefix = std::mem::offset_of!(Self, originate_call);
-        if size < prefix || (size > prefix && size < size_of::<Self>()) {
+        if size < size_of::<Self>() {
             return Err(Error::Contract);
         }
-        // Zero initializes nullable optional slots without reading past the released prefix.
-        let mut api = std::mem::MaybeUninit::<Self>::zeroed();
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                pointer.cast::<u8>(),
-                api.as_mut_ptr().cast::<u8>(),
-                size.min(size_of::<Self>()),
-            );
+        if unsafe { std::ptr::addr_of!((*pointer).abi_version).read_unaligned() } != 2 {
+            return Err(Error::Contract);
         }
-        let api = unsafe { api.assume_init() };
-        if api.abi_version != 1
-            || api.capability != *b"rptadv.sip\0\0\0\0\0\0"
-            || api.originate_call.is_some() != api.acknowledge_call.is_some()
+        let api = unsafe { pointer.read_unaligned() };
+        if api.capability != *b"rptadv.sip\0\0\0\0\0\0"
+            || api.originate_call.is_none()
+            || api.acknowledge_call.is_none()
+            || api.first_provisional.is_none()
             || ![
                 api.create.is_some(),
                 api.service.is_some(),
@@ -283,7 +285,7 @@ impl Provider {
         let library = unsafe { Library::new(path) }.map_err(|_| Error::Load)?;
         let get = unsafe {
             library.get::<unsafe extern "C" fn() -> *const Descriptor>(
-                b"rptadv_sip_adapter_descriptor_v1\0",
+                b"rptadv_sip_adapter_descriptor_v2\0",
             )
         }
         .map_err(|_| Error::Contract)?;
@@ -383,7 +385,36 @@ impl Account {
         };
         match code {
             0 => {
-                call.validate(self.generation, self.provider.api.originate_call.is_some())?;
+                call.validate(self.generation)?;
+                Ok(Some(call))
+            }
+            1 => Ok(None),
+            _ => Err(Error::Status(code)),
+        }
+    }
+    /// First early answer for this exact caller-issued token, including after coalescing.
+    pub fn first_provisional(&self, token: u64) -> Result<Option<Call>, Error> {
+        let context = self.context.get().ok_or(Error::Contract)?;
+        let mut call = Call::default();
+        let code = unsafe {
+            self.provider.api.first_provisional.unwrap()(
+                context.as_ptr(),
+                self.generation,
+                token,
+                &mut call,
+            )
+        };
+        match code {
+            0 => {
+                call.validate(self.generation)?;
+                if call.call != token
+                    || call.direction != 1
+                    || call.state != 1
+                    || !(101..200).contains(&call.sip_status)
+                    || call.offer_length == 0
+                {
+                    return Err(Error::Contract);
+                }
                 Ok(Some(call))
             }
             1 => Ok(None),
@@ -411,7 +442,7 @@ impl Account {
             Err(Error::Status(code))
         }
     }
-    /// Originate one exact call using the optional outgoing tail and retained local offer.
+    /// Originate one exact call using the retained local offer.
     pub fn originate_call(&self, destination: &str, offer: &[u8]) -> Result<u64, Error> {
         let action = self.provider.api.originate_call.ok_or(Error::Contract)?;
         let context = self.context.get().ok_or(Error::Contract)?;
@@ -491,6 +522,9 @@ mod tests {
     unsafe extern "C" fn call_read(_: *mut c_void, _: u64, _: *mut Call) -> i32 {
         1
     }
+    unsafe extern "C" fn provisional(_: *mut c_void, _: u64, _: u64, _: *mut Call) -> i32 {
+        1
+    }
     unsafe extern "C" fn call_response(_: *mut c_void, _: u64, _: u64, _: u32, _: Span) -> i32 {
         0
     }
@@ -503,7 +537,7 @@ mod tests {
     fn descriptor() -> Descriptor {
         Descriptor {
             struct_size: size_of::<Descriptor>() as u32,
-            abi_version: 1,
+            abi_version: 2,
             capability: *b"rptadv.sip\0\0\0\0\0\0",
             create: Some(create),
             service: Some(action),
@@ -519,6 +553,7 @@ mod tests {
             release_call: Some(call_action),
             originate_call: Some(originate),
             acknowledge_call: Some(call_action),
+            first_provisional: Some(provisional),
         }
     }
     #[test]
@@ -537,12 +572,12 @@ mod tests {
         table.struct_size -= 1;
         assert!(unsafe { Descriptor::read(&table) }.is_err());
         table = descriptor();
-        table.abi_version = 2;
+        table.abi_version = 1;
         assert!(unsafe { Descriptor::read(&table) }.is_err());
         table = descriptor();
         table.capability[0] = 0;
         assert!(unsafe { Descriptor::read(&table) }.is_err());
-        for absent in 0..14 {
+        for absent in 0..15 {
             table = descriptor();
             match absent {
                 0 => table.create = None,
@@ -558,7 +593,8 @@ mod tests {
                 10 => table.hangup_call = None,
                 11 => table.release_call = None,
                 12 => table.originate_call = None,
-                _ => table.acknowledge_call = None,
+                13 => table.acknowledge_call = None,
+                _ => table.first_provisional = None,
             }
             assert!(unsafe { Descriptor::read(&table) }.is_err());
         }
@@ -567,7 +603,7 @@ mod tests {
         assert!(unsafe { Descriptor::read(std::ptr::from_ref(&prefix).cast()) }.is_err());
         assert_eq!(size_of::<Status>(), 40);
         assert_eq!(size_of::<Config>(), 16 + 12 * size_of::<usize>());
-        assert_eq!(size_of::<Descriptor>(), 24 + size_of::<[usize; 14]>());
+        assert_eq!(size_of::<Descriptor>(), 24 + size_of::<[usize; 15]>());
     }
     #[test]
     fn outgoing_offer_is_absent_until_a_validated_answer_arrives() {
@@ -579,69 +615,58 @@ mod tests {
             ..Call::default()
         };
         assert!(
-            call.validate(7, true).is_ok(),
+            call.validate(7).is_ok(),
             "outgoing setup has no remote SDP yet"
         );
         for state in [4, 5] {
             call.state = state;
             assert!(
-                call.validate(7, true).is_ok(),
+                call.validate(7).is_ok(),
                 "failed outgoing setup still owns its token"
             );
         }
         for state in [2, 3] {
             call.state = state;
-            assert_eq!(call.validate(7, true), Err(Error::Contract));
+            assert_eq!(call.validate(7), Err(Error::Contract));
         }
         call.offer_length = 1;
         call.source_family = 4;
         call.source_port = 5060;
-        assert!(call.validate(7, true).is_ok());
+        assert!(call.validate(7).is_ok());
         call.direction = 2;
-        assert_eq!(call.validate(7, true), Err(Error::Contract));
+        assert_eq!(call.validate(7), Err(Error::Contract));
         call.direction = 0;
-        assert!(call.validate(7, true).is_ok());
+        assert!(call.validate(7).is_ok());
         call.offer_length = 0;
         assert_eq!(
-            call.validate(7, true),
+            call.validate(7),
             Err(Error::Contract),
             "incoming admission requires an offer"
         );
     }
     #[test]
-    fn optional_outgoing_tail_preserves_incoming_prefix_without_reading_old_padding() {
+    fn v2_rejects_short_tables_and_invalid_progress() {
+        assert_eq!(size_of::<Call>(), 4160);
         let mut table = descriptor();
-        let prefix = std::mem::offset_of!(Descriptor, originate_call) as u32;
-        table.struct_size = prefix;
-        let incoming =
-            unsafe { Descriptor::read(&table) }.expect("released incoming prefix remains usable");
-        assert!(incoming.originate_call.is_none());
-        assert!(incoming.acknowledge_call.is_none());
-        for size in prefix + 1..size_of::<Descriptor>() as u32 {
-            table.struct_size = size;
-            assert!(
-                unsafe { Descriptor::read(&table) }.is_err(),
-                "partial outgoing group rejected"
-            );
+        for size in std::mem::offset_of!(Descriptor, originate_call)..size_of::<Descriptor>() {
+            table.struct_size = size as u32;
+            assert!(unsafe { Descriptor::read(&table) }.is_err());
         }
-        table = descriptor();
-        table.originate_call = None;
-        table.acknowledge_call = None;
-        assert!(unsafe { Descriptor::read(&table) }.is_ok());
         let mut call = Call {
-            generation: 7,
             call: 1,
+            generation: 7,
+            direction: 1,
             state: 1,
-            direction: 0xdeadbeef,
-            source_family: 4,
-            source_port: 5060,
-            offer_length: 1,
             ..Call::default()
         };
-        assert!(call.validate(7, false).is_ok());
-        assert_eq!(
-            call.direction, 0,
-            "old ABI padding cannot become outgoing authority"
-        );
+        call.alerting_seen = 2;
+        assert_eq!(call.validate(7), Err(Error::Contract));
+        call.alerting_seen = 1;
+        call.invite_failure_status = 407;
+        assert_eq!(call.validate(7), Err(Error::Contract));
+        call.state = 5;
+        assert!(call.validate(7).is_ok());
+        call.invite_failure_status = 200;
+        assert_eq!(call.validate(7), Err(Error::Contract));
     }
 }

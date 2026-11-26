@@ -78,6 +78,53 @@ unsafe extern "C" fn submit(
     0
 }
 
+pub(super) fn remote_services() -> HostServices {
+    let mut table = service_table();
+    table.radio_remote_submit = Some(submit);
+    table.radio_metadata_bind = Some(bind_metadata);
+    table.radio_service = Some(service);
+    table.radio_quiesce = Some(service);
+    table.radio_ready = Some(service);
+    unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
+}
+
+pub(super) fn remote_configuration() -> PreparedConfiguration {
+    configuration(
+        "usb",
+        &[
+            (Kind::Radio, "", json!({"startup_memory":1})),
+            (
+                Kind::Control,
+                "",
+                json!({"enabled":true,"backend":"hamlib","access":"open","hamlib":{"model":"RIG_MODEL_DUMMY"}}),
+            ),
+            (
+                Kind::Limits,
+                "",
+                json!({"rx_ranges_mhz":[[144,148]],"tx_ranges_mhz":[[144,148]],"modes":["FM"]}),
+            ),
+            (
+                Kind::Memories,
+                "",
+                json!({"entries":[{"frequency":146.52,"offset":{"enabled":false,"direction":"plus","frequency":0.6},"mode":"FM","tx_ctcss":{"enabled":false,"frequency":100},"rx_ctcss":{"enabled":false,"frequency":100}}]}),
+            ),
+        ],
+    )
+}
+
+fn active_device(host: &Host) -> &str {
+    &host
+        .runtime
+        .modular_configuration()
+        .unwrap()
+        .radio
+        .port(LOCAL.parse().unwrap())
+        .unwrap()
+        .interface
+        .audio
+        .device_identifier
+}
+
 #[test]
 fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
     let _serial = crate::fixture::LIFECYCLE
@@ -88,16 +135,9 @@ fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
     DESTROYED.set(0);
     MODE.set(0);
     EXPECTED_FLAGS.set(1);
-    let mut table = unsafe { crate::fixture::host_descriptor().read() };
-    table.radio_remote_submit = Some(submit);
-    table.radio_metadata_bind = Some(bind_metadata);
-    table.radio_service = Some(service);
-    table.radio_quiesce = Some(service);
-    table.radio_ready = Some(service);
-    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let config = "[remote_base 1000]\nenabled=yes\nbackend=hamlib\nhamlib_model=RIG_MODEL_DUMMY\ndtmf_access=open\nstartup_memory=local\nallowed_modes=FM\nallowed_rx_ranges_hz=144000000-148000000\nallowed_tx_ranges_hz=144000000-148000000\n[remote_memory 1000 local]\nselector=1\nrx_frequency_hz=146520000\ntx_frequency_hz=146520000\nmode=FM\n";
-    let mut host = Host::start(
-        document("usb", config),
+    let services = remote_services();
+    let mut host = Host::fixture_start(
+        remote_configuration(),
         media(),
         services,
         Instant::now(),
@@ -122,7 +162,7 @@ fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
         });
         operation
     };
-    host.immediate("1000", LinkEffect::RemoteBase(operation()), clock())
+    host.immediate(LOCAL, LinkEffect::RemoteBase(operation()), clock())
         .unwrap();
     assert_eq!(host.remote_pending.len(), 1);
     host.pump(clock()).unwrap();
@@ -134,9 +174,11 @@ fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
     assert_eq!(DESTROYED.get(), 1);
     assert_eq!(SOURCE.get(), 0);
     READY.set(false);
-    host.immediate("1000", LinkEffect::RemoteBase(operation()), clock())
+    host.immediate(LOCAL, LinkEffect::RemoteBase(operation()), clock())
         .unwrap();
-    host.reload(document("usb", config), clock()).unwrap();
+    host.fixture_reload(remote_configuration(), clock())
+        .unwrap();
+    host.pump_remote(clock());
     assert!(host.remote_pending.is_empty());
     assert_eq!(DESTROYED.get(), 2);
     assert_eq!(SOURCE.get(), 0);
@@ -145,19 +187,19 @@ fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
     let mut denied = operation();
     denied.remote = None;
     assert_eq!(
-        host.submit_remote("1000", denied, clock()),
+        host.submit_remote(LOCAL, denied, clock()),
         Err(RuntimeError::Rejected)
     );
     for mode in [1, 2] {
         MODE.set(mode);
-        host.submit_remote("1000", operation(), clock()).unwrap();
+        host.submit_remote(LOCAL, operation(), clock()).unwrap();
         assert!(host.remote_pending.is_empty());
         assert_eq!(DESTROYED.get(), 2);
     }
     READY.set(true);
     for (offset, mode) in [3, 4, 5].into_iter().enumerate() {
         MODE.set(mode);
-        host.submit_remote("1000", operation(), clock()).unwrap();
+        host.submit_remote(LOCAL, operation(), clock()).unwrap();
         assert_eq!(host.remote_pending.len(), 1);
         host.pump_remote(clock());
         assert!(host.remote_pending.is_empty());
@@ -167,28 +209,27 @@ fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
     MODE.set(0);
     READY.set(false);
     EXPECTED_FLAGS.set(0);
-    host.runtime.incoming("1000", "2000", true).unwrap();
+    host.runtime.incoming(LOCAL, "2000", true).unwrap();
     let signals = rpt_advanced_core::link::PeerSignals::new();
     let reply = signals.reply_target();
-    host.runtime.node("1000").unwrap().links().peer_digit(
-        "2000",
-        '*',
-        clock().now_ms,
-        reply.clone(),
-    );
+    let links = host.runtime.node(LOCAL).unwrap().links();
+    links
+        .attach_ingress(PeerIdentity::from_operator("2000").unwrap(), reply.clone())
+        .unwrap();
+    links.peer_digit("2000", '*', clock().now_ms, reply.clone());
     let mut request = operation();
     request.origin = Some("2000".into());
     request.reply = Some(reply);
-    host.submit_remote("1000", request, clock()).unwrap();
+    host.submit_remote(LOCAL, request, clock()).unwrap();
     assert_eq!(host.remote_pending.len(), 1);
     signals.end();
     host.pump_remote(clock());
     assert!(host.remote_pending.is_empty());
     assert_eq!(DESTROYED.get(), 6);
     assert_eq!(SOURCE.get(), 0);
-    host.runtime.node("1000").unwrap().links().ended("2000");
-    host.runtime.peer_detached("1000", "2000", clock().now_ms);
-    host.stop(1000);
+    host.runtime.node(LOCAL).unwrap().links().ended("2000");
+    host.runtime.peer_detached(LOCAL, "2000", clock().now_ms);
+    assert!(host.fixture_stop(1000));
 }
 
 #[test]
@@ -196,10 +237,9 @@ fn remote_configuration_requires_complete_host_operations_before_device_activati
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let config = "[remote_base 1000]\nenabled=yes\nbackend=hamlib\nhamlib_model=RIG_MODEL_DUMMY\nstartup_memory=local\nallowed_modes=FM\nallowed_rx_ranges_hz=144000000-148000000\nallowed_tx_ranges_hz=144000000-148000000\n[remote_memory 1000 local]\nselector=1\nrx_frequency_hz=146520000\ntx_frequency_hz=146520000\nmode=FM\n";
     assert!(
-        Host::start(
-            document("usb", config),
+        Host::fixture_start(
+            remote_configuration(),
             media(),
             services(),
             Instant::now(),
@@ -222,11 +262,11 @@ fn host_keeps_reload_configuration_until_radio_activation_is_ready() {
         }
         status
     }
-    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    let mut table = service_table();
     table.radio_ready = Some(ready);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let mut host = Host::start(
-        document("usb", ""),
+    let mut host = Host::fixture_start(
+        configuration("usb", &[]),
         media(),
         services,
         Instant::now(),
@@ -235,25 +275,25 @@ fn host_keeps_reload_configuration_until_radio_activation_is_ready() {
     .unwrap();
     let revision = host.runtime.revision();
     ACTIVATION.set(1);
-    host.reload(document("replacement", ""), clock()).unwrap();
+    let mut adoption = host
+        .fixture_begin_reload(configuration("replacement", &[]), clock())
+        .unwrap();
     assert_eq!(
-        host.reload(document("second", ""), clock()),
-        Err(RuntimeError::Busy)
+        host.fixture_begin_reload(configuration("second", &[]), clock())
+            .err(),
+        Some(RuntimeError::Busy)
     );
     assert_eq!(host.runtime.revision(), revision);
-    assert_eq!(host.runtime.settings("1000").unwrap().channel, "usb");
-    host.pump(clock()).unwrap();
+    assert_eq!(active_device(&host), "usb");
+    assert!(!adoption.poll(&mut host, clock()).unwrap());
     assert_eq!(host.runtime.revision(), revision);
     ACTIVATION.set(0);
-    host.pump(clock()).unwrap();
+    pump_until(&mut host, |host| adoption.poll(host, clock()).unwrap());
     assert!(host.runtime.revision() > revision);
-    assert_eq!(
-        host.runtime.settings("1000").unwrap().channel,
-        "replacement"
-    );
-    assert!(host.stop(1000));
-    let mut host = Host::start(
-        document("usb", ""),
+    assert_eq!(active_device(&host), "replacement");
+    assert!(host.fixture_stop(1000));
+    let mut host = Host::fixture_start(
+        configuration("usb", &[]),
         media(),
         services,
         Instant::now(),
@@ -262,18 +302,26 @@ fn host_keeps_reload_configuration_until_radio_activation_is_ready() {
     .unwrap();
     let revision = host.runtime.revision();
     ACTIVATION.set(1);
-    host.reload(document("rejected", ""), clock()).unwrap();
+    let mut adoption = host
+        .fixture_begin_reload(configuration("rejected", &[]), clock())
+        .unwrap();
     ACTIVATION.set(-123);
-    host.pump(clock()).unwrap();
-    assert_eq!(host.poll_reload(clock()), Err(RuntimeError::Device));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let result = loop {
+        match adoption.poll(&mut host, clock()) {
+            Ok(false) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(1)),
+            terminal => break terminal,
+        }
+    };
+    assert_eq!(result, Err(RuntimeError::Device));
     assert_eq!(host.runtime.revision(), revision);
-    assert_eq!(host.runtime.settings("1000").unwrap().channel, "usb");
+    assert_eq!(active_device(&host), "usb");
     assert!(
         crate::fixture::SCHEDULER_NOTICES
             .lock()
             .unwrap()
             .iter()
-            .any(|notice| notice.contains("radio 1000 activation failed: -123"))
+            .any(|notice| notice.contains(&format!("radio {LOCAL} activation failed: -123")))
     );
     host.stop(1000);
 }

@@ -1,8 +1,14 @@
 //! Private telephone transport ownership shared by the standalone and Asterisk hosts.
-#[allow(warnings,missing_docs,clippy::all)]
-pub mod abi { include!(concat!(env!("OUT_DIR"), "/abi.rs")); }
+#[allow(warnings, missing_docs, clippy::all)]
+pub mod abi {
+    include!(concat!(env!("OUT_DIR"), "/abi.rs"));
+}
 pub mod accounts;
+mod progress;
 mod sip;
+#[cfg(test)]
+#[path = "../tests/support/sip_registrar.rs"]
+mod test_sip_registrar;
 
 mod jitter;
 pub use jitter::JitterProvider;

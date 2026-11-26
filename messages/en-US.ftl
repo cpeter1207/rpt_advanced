@@ -635,7 +635,7 @@ phone-authentication =
     .text = { $state ->
         [login] Enter mailbox number followed by pound
         [password] Enter password followed by pound
-        [authenticated] Mailbox authenticated. Protected commands still require node unlock
+        [authenticated] Mailbox authenticated
         [unavailable] Requested operation is unavailable
         [failed] Command failed
        *[retry] Login unsuccessful. Enter your mailbox number followed by pound
@@ -643,7 +643,7 @@ phone-authentication =
     .tts = { $state ->
         [login] Enter your mailbox number followed by pound
         [password] Enter your passcode followed by pound
-        [authenticated] Mailbox authenticated. Protected commands still require node unlock
+        [authenticated] Mailbox authenticated
         [unavailable] Requested operation is unavailable
         [failed] Command failed
        *[retry] Login unsuccessful. Enter your mailbox number followed by pound
@@ -651,8 +651,35 @@ phone-authentication =
     .morse = { $state ->
         [login] MAILBOX POUND
         [password] PASSWORD POUND
-        [authenticated] LOGIN OK UNLOCK SEPARATE
+        [authenticated] LOGIN OK
         [unavailable] OPERATION UNAVAILABLE
         [failed] COMMAND FAILED
        *[retry] LOGIN FAILED MAILBOX POUND
         }
+
+operation-result =
+    .text = { operation-result.tts }
+    .tts = { $result ->
+        [unavailable] Requested operation is unavailable
+        [failed] Command failed
+        [muted] Muted
+        [unmuted] Unmuted
+       *[completed] Command completed
+        }
+    .morse = { $result ->
+        [unavailable] OPERATION UNAVAILABLE
+        [failed] COMMAND FAILED
+        [muted] MUTED
+        [unmuted] UNMUTED
+       *[completed] COMMAND COMPLETE
+        }
+
+phone-dial-failure =
+    .text = { phone-dial-failure.tts }
+    .tts = { $reason ->
+        [busy] The line is busy.
+        [unanswered] The call was not answered.
+        [declined] The call was declined.
+       *[failed] The call could not be completed.
+        }
+    .morse = CALL FAILED

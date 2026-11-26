@@ -6,14 +6,14 @@
 #include <stddef.h>
 #include <string.h>
 
-_Static_assert(sizeof(struct rptadv_product_descriptor_v1) == 128,
-               "preserve the original complete product table");
+_Static_assert(sizeof(struct rptadv_product_descriptor_v1) == 96,
+               "preserve the complete Product-8 table");
 _Static_assert(sizeof(struct rptadv_store_maintenance_v1) == 32,
                "maintenance is a separate complete descriptor");
 _Static_assert(RPTADV_STORE_MAINTENANCE_ABI_VERSION == 1,
                "update the optional maintenance probe deliberately");
-_Static_assert(RPTADV_PRODUCT_ABI_VERSION == 7, "update product ABI probe deliberately");
-_Static_assert(RPTADV_HOST_ABI_VERSION == 10, "update host ABI probe deliberately");
+_Static_assert(RPTADV_PRODUCT_ABI_VERSION == 8, "update product ABI probe deliberately");
+_Static_assert(RPTADV_HOST_ABI_VERSION == 11, "update host ABI probe deliberately");
 _Static_assert(RPTADV_PEER_PHONE == 3 && RPTADV_PEER_PRIVATE_CALL == 32,
                "phone identity requires an explicit private-call capability");
 _Static_assert(RPTADV_PEER_INFO_PREFIX_SIZE == 80, "preserve the original peer metadata prefix");
@@ -23,38 +23,35 @@ _Static_assert(URP_AST_DIRECT_CALLBACKS_ABI_VERSION == 6,
                "use the canonical metadata-aware SDK callbacks");
 _Static_assert(sizeof(UrpNativeReceiveMetadata) == 72,
                "preserve the source-associated receive metadata record");
-_Static_assert(offsetof(struct rptadv_host_services_v10, radio_metadata_bind) == 360,
-               "preserve the complete pre-remote ABI-10 prefix");
-_Static_assert(offsetof(struct rptadv_host_services_v10, radio_service) == 368,
+_Static_assert(offsetof(struct rptadv_host_services_v11, radio_metadata_bind) == 344,
+               "preserve the complete ABI-11 metadata offset");
+_Static_assert(offsetof(struct rptadv_host_services_v11, radio_service) == 352,
                "preserve the complete metadata tail");
-_Static_assert(offsetof(struct rptadv_host_services_v10, radio_quiesce) == 376,
+_Static_assert(offsetof(struct rptadv_host_services_v11, radio_quiesce) == 360,
                "preserve remote callback order");
-_Static_assert(offsetof(struct rptadv_host_services_v10, radio_remote_submit) == 384,
+_Static_assert(offsetof(struct rptadv_host_services_v11, radio_remote_submit) == 368,
                "preserve remote callback order");
-_Static_assert(offsetof(struct rptadv_host_services_v10, radio_ready) == 392,
+_Static_assert(offsetof(struct rptadv_host_services_v11, radio_ready) == 376,
                "preserve the complete remote tail");
-_Static_assert(offsetof(struct rptadv_host_services_v10, station_binding) == 400,
-               "complete old host services prefix");
+_Static_assert(offsetof(struct rptadv_host_services_v11, station_binding) == 384,
+               "ABI-11 station binding offset");
 _Static_assert(sizeof(struct rptadv_station_request_v1) == 48, "station request");
 _Static_assert(sizeof(struct rptadv_station_binding_v1) == 48, "station binding operations");
-_Static_assert(offsetof(struct rptadv_host_services_v10, phone_provider) == 408, "complete station tail");
-_Static_assert(offsetof(struct rptadv_host_services_v10, asl_provider) == 416, "complete phone tail");
+_Static_assert(offsetof(struct rptadv_host_services_v11, phone_provider) == 392,
+               "complete station tail");
+_Static_assert(offsetof(struct rptadv_host_services_v11, asl_provider) == 400,
+               "complete phone tail");
 _Static_assert(sizeof(struct rptadv_asl_admission_v1) == 24, "complete admission callbacks");
-_Static_assert(sizeof(struct rptadv_asl_provider_v1) == 40, "complete managed ASL operations");
-_Static_assert(offsetof(struct rptadv_host_services_v10, managed_echo_provider) == 424, "complete ASL tail");
-_Static_assert(sizeof(struct rptadv_managed_echo_provider_v1) == 40, "complete managed Echo operations");
-_Static_assert(sizeof(struct rptadv_host_services_v10) == 432,
-               "update the complete ABI-10 size deliberately");
-
-static int node(void *context, const struct rptadv_node_host_configuration *record) {
-    assert(record);
-    assert(record->struct_size == sizeof(*record));
-    assert(record->node_length == 4 && memcmp(record->node, "1000", 4) == 0);
-    assert(record->enabled == 0);
-    assert(record->radio);
-    ++*(unsigned *)context;
-    return 0;
-}
+_Static_assert(sizeof(struct rptadv_asl_provider_v2) == 48, "complete managed ASL operations");
+_Static_assert(offsetof(struct rptadv_host_services_v11, managed_echo_provider) == 408,
+               "complete ASL tail");
+_Static_assert(sizeof(struct rptadv_managed_echo_status_v1) == 32, "managed Echo observation");
+_Static_assert(offsetof(struct rptadv_managed_echo_status_v1, generation) == 8,
+               "managed Echo observation generation");
+_Static_assert(sizeof(struct rptadv_managed_echo_provider_v2) == 48,
+               "complete managed Echo operations");
+_Static_assert(sizeof(struct rptadv_host_services_v11) == 416,
+               "update the complete ABI-11 size deliberately");
 
 int main(int argc, char **argv) {
     assert(argc == 2);
@@ -65,8 +62,7 @@ int main(int argc, char **argv) {
     assert(descriptor);
     const struct rptadv_product_descriptor_v1 *product = descriptor();
     assert(product);
-    _Static_assert(sizeof(struct rptadv_product_descriptor_v1) == 128,
-                   "frozen legacy product table");
+    _Static_assert(sizeof(struct rptadv_product_descriptor_v1) == 96, "complete Product-8 table");
     _Static_assert(sizeof(struct rptadv_product_management_v1) == 32, "management startup table");
     _Static_assert(sizeof(struct rptadv_product_inspection_v1) == 32, "managed read-only table");
     const struct rptadv_product_inspection_v1 *(*inspection_getter)(void) =
@@ -101,16 +97,15 @@ int main(int argc, char **argv) {
                   sizeof(maintenance_capability)) == 0);
     assert(maintenance->run);
     assert(maintenance->run(999, NULL, 0, NULL, NULL) < 0);
-    assert(strcmp(RPTADV_HOST_CAPABILITY, "rptadv.hst10") == 0);
-    assert(product->start && product->reload && product->stop && product->authorize_incoming);
+    assert(strcmp(RPTADV_HOST_CAPABILITY, "rptadv.hst11") == 0);
+    assert(product->reload_working && product->stop && product->authorize_incoming);
     assert(product->incoming && product->link_command && product->link_status && product->digit);
-    assert(product->inspect_configuration && product->inspect_secrets);
     assert(product->site_command);
-    const char configuration[] = "[1000]\nnode_enabled=no\n";
-    unsigned count = 0;
-    assert(product->inspect_configuration(configuration, sizeof(configuration) - 1, node, &count,
-                                          NULL, NULL) == 0);
-    assert(count == 1);
+    const char invalid_service[] = "[1000]\nnode_enabled=no\n";
+    assert(inspection->inspect(invalid_service, sizeof(invalid_service) - 1, NULL, NULL, NULL,
+                               NULL) < 0);
+    assert(product->reload_working() < 0);
+    assert(product->stop() == 0);
     assert(dlclose(library) == 0);
     return 0;
 }

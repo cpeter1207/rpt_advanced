@@ -371,6 +371,14 @@ impl LinkScheduler {
         }
         true
     }
+    pub(super) fn held_group(&self, reservation: &LinkReservation) -> Option<&str> {
+        let route = &self.routes[reservation.index];
+        route
+            .event_held
+            .then_some(route.spec.group_label.as_deref())
+            .flatten()
+    }
+
     /// Current immutable endpoint declarations, useful for building a reload candidate.
     pub fn route_specs(&self) -> Vec<RouteSpec> {
         self.routes.iter().map(|route| route.spec.clone()).collect()
@@ -386,11 +394,14 @@ impl LinkScheduler {
     pub(super) fn owns_target(&self, remote: &str) -> bool {
         self.routes.iter().any(|r| r.spec.remote == remote)
     }
-    /// Whether a direct peer is managed as a member of any permanent group.
-    pub fn is_group_member(&self, remote: &str) -> bool {
-        self.routes
-            .iter()
-            .any(|route| route.spec.remote == remote && route.spec.group_label.is_some())
+    /// Group telemetry replaces automatic member notices. An operator pause
+    /// still acknowledges each connected node that was actually disconnected.
+    pub(super) fn suppresses_member_notice(&self, remote: &str, connected: bool) -> bool {
+        self.routes.iter().any(|route| {
+            route.spec.remote == remote
+                && route.spec.group_label.is_some()
+                && (connected || !route.paused)
+        })
     }
     /// Current immutable window declarations.
     pub fn window_specs(&self) -> Vec<ReplacementSpec> {
@@ -539,15 +550,32 @@ impl LinkScheduler {
 
     /// Reserve withdrawals first. Pending withdrawal must settle before any new attachment.
     pub fn next_operation(&mut self) -> Option<LinkReservation> {
+        self.next_operation_with_members(|_, _| false)
+    }
+
+    pub(super) fn next_operation_with_members(
+        &mut self,
+        attached_member: impl Fn(&str, &str) -> bool,
+    ) -> Option<LinkReservation> {
+        let withdraw = |route: &Route| {
+            !route.wanted()
+                && (route.issued
+                    || route.event_held
+                        && route
+                            .spec
+                            .group_label
+                            .as_deref()
+                            .is_some_and(|group| attached_member(&route.spec.remote, group)))
+        };
         let withdrawal_pending = self
             .routes
             .iter()
-            .any(|route| !route.paused && route.issued && !route.wanted());
+            .any(|route| !route.paused && withdraw(route));
         let selected = self.routes.iter().enumerate().find(|(_, route)| {
             !route.paused
                 && route.pending.is_none()
                 && if withdrawal_pending {
-                    route.issued && !route.wanted()
+                    withdraw(route)
                 } else {
                     !route.issued && route.wanted()
                 }

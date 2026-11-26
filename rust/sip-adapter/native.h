@@ -65,7 +65,14 @@ void sip_native_admission(void *context, int enabled);
  * @param call Writable complete call snapshot.
  * @return Zero on an observation or one when empty.
  */
-int sip_native_next_call(void *context, rptadv_sip_call_v1 *call);
+int sip_native_next_call(void *context, rptadv_sip_call_v2 *call);
+/** Read the first provisional SDP independently of the current state.
+ * @param context Live serial account.
+ * @param token Exact outgoing call.
+ * @param output Complete observation destination.
+ * @return Zero when observed, one when absent, or -2 after release.
+ */
+int sip_native_first_provisional(void *context, uint64_t token, rptadv_sip_call_v2 *output);
 /** Answer or reject the exact invited call.
  * @param context Live native account.
  * @param call Exact token from next_call.

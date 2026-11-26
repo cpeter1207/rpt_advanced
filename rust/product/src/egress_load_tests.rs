@@ -1,8 +1,9 @@
 //! Opt-in full-path loopback experiment, never a timing-threshold CI test.
 use super::*;
-use rpt_advanced_standalone::{
-    host_services::HostServicesOwner, providers::ProviderSet, secrets::SecretsFile,
-};
+use crate::fixture::{self, station};
+use rpt_advanced_core::config::resources::candidate::ResourceKind;
+use rpt_advanced_standalone::{host_services::HostServicesOwner, providers::ProviderSet};
+use serde_json::json;
 use std::{
     fs,
     sync::{
@@ -64,10 +65,9 @@ impl Drop for Radio {
         }
     }
 }
-unsafe extern "C" fn radio_open(
+unsafe extern "C" fn open_radio(
     _: *mut c_void,
-    _: *const std::ffi::c_char,
-    _: usize,
+    _: *const c_void,
     _: usize,
     output: *mut *mut c_void,
 ) -> i32 {
@@ -82,6 +82,19 @@ unsafe extern "C" fn radio_open(
 }
 unsafe extern "C" fn radio_destroy(_: *mut c_void, radio: *mut c_void) {
     drop(unsafe { Box::from_raw(radio.cast::<Radio>()) });
+}
+unsafe extern "C" fn refuse_unexpected_originate(
+    _: *mut c_void,
+    _: *const abi::rptadv_asl_identity_v1,
+    _: abi::rptadv_peer_bytes_v1,
+    _: abi::rptadv_peer_bytes_v1,
+    _: usize,
+    _: abi::rptadv_current_v1,
+    _: *mut c_void,
+    _: *mut *mut c_void,
+) -> i32 {
+    // This experiment establishes each explicit loopback call itself.
+    -1
 }
 unsafe extern "C" fn bind_radio(_: *mut c_void, _: *mut c_void, _: *mut c_void) -> i32 {
     0
@@ -258,30 +271,62 @@ fn egress_full_path_load() {
     providers.validate_runtime().unwrap();
     // Host and executor are dropped before this stable provider box, including on unwind.
     let retained = unsafe { &*(providers.as_ref() as *const ProviderSet) };
-    let owner =
-        HostServicesOwner::new(vec![], Some(retained), SecretsFile::parse("").unwrap()).unwrap();
+    let owner = HostServicesOwner::new(Some(retained)).unwrap();
+    let client = owner.managed_iax_client().unwrap();
+    let mut binding = station::BINDING.0;
+    binding.open_prepared = Some(open_radio);
+    let mut accounts = fixture::asl::PROVIDER;
+    accounts.media_kind = 1;
+    accounts.originate = Some(refuse_unexpected_originate);
+    // SAFETY: the paired frontend descriptor has the very same generated Host11 layout.
     let mut table = Box::new(unsafe {
         ptr::from_ref(owner.descriptor())
-            .cast::<abi::rptadv_host_services_v10>()
+            .cast::<abi::rptadv_host_services_v11>()
             .read()
     });
-    table.radio_open = Some(radio_open);
+    table.station_binding = &binding;
+    table.asl_provider = &accounts;
+    // The load fixture owns a distinct radio layout. All required callbacks that
+    // still inspect the station must belong to this test's fake radio edge.
     table.radio_activate = Some(radio_activate);
     table.radio_destroy = Some(radio_destroy);
+    table.radio_update = Some(station::finish);
+    let radio = unsafe { &*fixture::host_descriptor() };
+    table.radio_control = radio.radio_control;
+    table.radio_metadata_bind = radio.radio_metadata_bind;
+    table.radio_service = radio.radio_service;
+    table.radio_ready = radio.radio_ready;
+    table.radio_quiesce = radio.radio_quiesce;
+    table.radio_remote_submit = radio.radio_remote_submit;
+    table.radio_site_bind = radio.radio_site_bind;
+    table.radio_site_publish = radio.radio_site_publish;
+    table.radio_site_snapshot = radio.radio_site_snapshot;
     table.peer_bind_radio = Some(bind_radio);
     SEND.set(table.peer_send_prepared.unwrap()).unwrap();
     table.peer_send_prepared = Some(send_prepared);
     let services = unsafe { HostServices::open(&*table) }.unwrap();
     let simulator = simulator::Simulator::start(peers);
     let epoch = Instant::now();
-    let mut host = Host::start(
-        document("load-radio", ""),
-        media(),
-        services,
-        epoch,
-        load_clock(epoch),
-    )
-    .unwrap();
+    let local = station::LOCAL;
+    let config = station::prepare(
+        &[(local, "load-radio", json!({}))],
+        &[
+            (
+                local,
+                ResourceKind::Radio,
+                "",
+                json!({"duplex_mode":"full"}),
+            ),
+            (
+                local,
+                ResourceKind::Allstarlink,
+                "",
+                json!({"node_number":1000,"iax":{"registration_url":""}}),
+            ),
+        ],
+    );
+    let mut host =
+        Host::fixture_start(config, media(), services, epoch, load_clock(epoch)).unwrap();
     host.peers.try_reserve(peers).unwrap();
     let source_clock = host.leases[0].1.lock().unwrap().status.source_clock.clone();
     for index in 0..peers {
@@ -289,7 +334,7 @@ fn egress_full_path_load() {
         let LinkEffect::Connect(attempt) = host
             .runtime
             .command(
-                "1000",
+                local,
                 operation(LinkAction::Transceive, &remote),
                 load_clock(epoch),
                 false,
@@ -298,15 +343,23 @@ fn egress_full_path_load() {
         else {
             panic!("peer admission failed at {index}");
         };
-        let io = services.dial(
-            &format!("radio@{}/{remote}", simulator.address),
-            "1000",
-            MAXIMUM_FRAMES,
-            || true,
-        );
+        let io = client
+            .clone()
+            .dial(simulator.address, "1000", &remote, "", 5000)
+            .map(|peer| owner.peer_handle(peer, local, &remote))
+            .map(|handle| {
+                // SAFETY: ownership transfers to the exact native services on success.
+                match unsafe { services.peer(handle) } {
+                    Ok(peer) => peer,
+                    Err(error) => {
+                        owner.destroy_peer(handle);
+                        panic!("simulator peer validation: {error:?}");
+                    }
+                }
+            });
         assert!(
             host.runtime
-                .finish_connect("1000", attempt, io.is_ok(), load_clock(epoch))
+                .finish_connect(local, attempt, io.is_ok(), load_clock(epoch))
                 .unwrap()
         );
         // Prepare real sessions, then publish one membership generation. Normal
@@ -314,12 +367,12 @@ fn egress_full_path_load() {
         // repeatedly rebuilding N rings would time setup, not sustained egress.
         let (_, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
         let (mut session, control) =
-            PeerSession::prepare(io.unwrap(), outbound, "1000", &remote, true).unwrap();
+            PeerSession::prepare(io.unwrap(), outbound, local, &remote, true).unwrap();
         session.bind_clock(source_clock.clone());
         assert!(host.peer_io.attach(session).is_ok());
         host.peers.push(PeerOwner {
             superseded: false,
-            local: "1000".into(),
+            local: local.into(),
             remote,
             mode: Mode::TRANSCEIVE,
             group: None,
@@ -335,7 +388,7 @@ fn egress_full_path_load() {
             );
         }
     }
-    host.refresh("1000", load_clock(epoch)).unwrap();
+    host.refresh(local, load_clock(epoch)).unwrap();
     settled(&mut host, epoch);
     // The initial unconnected session rings have no audio consumer. Begin the
     // ingress workload only after all real generation endpoints are installed.
@@ -442,10 +495,7 @@ fn egress_full_path_load() {
         }
     }
     let generation = host.runtime.status(0)[0].1.active.unwrap();
-    let control = host
-        .runtime
-        .adapter_control_mut("1000", generation)
-        .unwrap();
+    let control = host.runtime.adapter_control_mut(local, generation).unwrap();
     let (batches, dispatch_ns) = control.dispatcher.timing();
     let dropped = control.status.dropped_blocks();
     let callback_histogram = callbacks
@@ -495,5 +545,5 @@ fn egress_full_path_load() {
     if seconds > 11 {
         assert!(paused_media > 0, "control pause stopped real audio");
     }
-    assert!(host.stop(load_clock(epoch).now_ms));
+    assert!(host.fixture_stop(load_clock(epoch).now_ms));
 }

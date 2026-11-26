@@ -1,14 +1,13 @@
 use super::*;
-use crate::config::{ConfigDocument, NodeId, ResolvedSiteSettings};
 use crate::site::{Observation, ReadingQuality};
+use crate::{config::resources::candidate::ResourceKind, station_fixture::equipment};
+use serde_json::{Value, json};
 
-fn settings(extra: &str) -> crate::config::SensorSettings {
-    let document = ConfigDocument::parse(&format!(
-        "[1000]\n[sensor 1000 supply]\nenabled=yes\nbackend=iio\ndevice=adc0\nchannel=voltage0\n{extra}"
-    )).unwrap();
-    ResolvedSiteSettings::resolve(&document, &NodeId::new("1000").unwrap())
-        .unwrap()
-        .value
+fn settings(extra: Value) -> crate::config::SensorSettings {
+    let mut fields =
+        json!({"enabled":true,"source":{"type":"iio","device":"adc0","channel":"voltage0"}});
+    json_patch::merge(&mut fields, &extra);
+    equipment(&[(ResourceKind::Sensor, "supply", fields)])
         .sensors
         .remove(0)
 }
@@ -24,7 +23,7 @@ fn reading(value: f64, time: u64) -> Observation<f64> {
 #[test]
 fn site_measurement_scale_once() {
     let mut policy = settings(
-        "calibration=two_point\ninput_low=0\nvalue_low=0\ninput_high=5\nvalue_high=20\nunit=A\n",
+        json!({"calibration":{"mode":"two_point","input":{"low":0.0,"high":5.0},"value":{"low":0.0,"high":20.0}},"unit":"A"}),
     );
     let mut state = SensorState::new(policy.clone());
     state.observe(reading(2.0, 1000), 1000);
@@ -38,7 +37,7 @@ fn site_measurement_scale_once() {
 
 #[test]
 fn site_measurement_quality_extrema() {
-    let policy = settings("");
+    let policy = settings(json!({}));
     let mut state = SensorState::new(policy.clone());
     assert_eq!(
         state.snapshot(0).current.quality,
@@ -73,7 +72,7 @@ fn site_measurement_quality_extrema() {
 
 #[test]
 fn site_measurement_smoothing_uses_elapsed_acquisition_time() {
-    let mut state = SensorState::new(settings("smoothing_ms=1000\n"));
+    let mut state = SensorState::new(settings(json!({"timing":{"smoothing_ms":1000}})));
     state.observe(reading(0.0, 1000), 1000);
     state.observe(reading(10.0, 1500), 1500);
     assert!((state.snapshot(1500).smoothed.unwrap() - 3.9346934).abs() < 0.000001);
@@ -89,7 +88,7 @@ fn site_measurement_smoothing_uses_elapsed_acquisition_time() {
 
 #[test]
 fn site_measurement_cached_or_bad_timestamps_do_not_refresh_values() {
-    let policy = settings("");
+    let policy = settings(json!({}));
     let mut state = SensorState::new(policy);
     state.observe(reading(4.0, 1000), 1000);
     state.observe(reading(9.0, 1000), 2000);
@@ -102,7 +101,7 @@ fn site_measurement_cached_or_bad_timestamps_do_not_refresh_values() {
         assert_eq!(snapshot.maximum.unwrap().value, 4.0);
     }
     state.reconfigure(settings(
-        "calibration=two_point\ninput_low=0\ninput_high=5\nvalue_low=0\nvalue_high=20\n",
+        json!({"calibration":{"mode":"two_point","input":{"low":0.0,"high":5.0},"value":{"low":0.0,"high":20.0}}}),
     ));
     assert!(state.snapshot(2000).maximum.is_none());
     state.observe(reading(1.0, 2000), 2000);
@@ -111,7 +110,7 @@ fn site_measurement_cached_or_bad_timestamps_do_not_refresh_values() {
 
 #[test]
 fn site_measurement_disabled_reload_never_preserves_a_valid_reading() {
-    let mut policy = settings("");
+    let mut policy = settings(json!({}));
     let mut state = SensorState::new(policy.clone());
     state.observe(reading(12.0, 1000), 1000);
     policy.enabled = false;

@@ -1,10 +1,17 @@
 /** @file
- * @brief ABI 2 for streaming file and speech PCM at decoded source rate.
+ * @brief ABI 3 for streaming file and speech PCM at decoded source rate.
  *
  * No function may be called by an audio worker. The host keeps the adapter and
  * callback code loaded until all calls and handles are finished; replacements
  * activate only at controlled restart or module reload. Contexts allow concurrent
  * requests, each with independent child ownership. Destroy follows quiescence.
+ * Open and close may block on local I/O and process lifecycle. Step never
+ * waits for data or child exit. Transfer a handle only with exclusive sequential
+ * ownership; never call step and close concurrently for the same handle.
+ * Cancellation observed before spawn leaves no handle. Once setup succeeds,
+ * open transfers ownership even if cancellation races that success. The host
+ * rechecks cancellation before using the stream and closes every transferred
+ * handle exactly once. A cancelled step reports RPTADV_MEDIA_CANCELLED.
  * All input pointers are borrowed for the synchronous call. Strings are terminated;
  * paths use native bytes, text uses UTF-8. No pointer may refer to invalid memory.
  */
@@ -17,7 +24,7 @@ extern "C" {
 #endif
 
 /** @brief Current incompatible-artifact discriminator. */
-#define RPTADV_MEDIA_ABI_VERSION 2U
+#define RPTADV_MEDIA_ABI_VERSION 3U
 
 /** @brief Stable status values returned by preparation and creation. */
 enum rptadv_media_status {
@@ -55,10 +62,19 @@ struct rptadv_media_speech_request {
     int32_t level_db;       /**< Inclusive range -60 through 0; speech only. */
 };
 
-/** @brief Open mono stream and immutable source-rate metadata. */
-struct rptadv_media_stream {
-    void *handle;            /**< Close exactly once through the originating descriptor. */
-    uint32_t sample_rate_hz; /**< Source rate; telemetry ring owns conversion. */
+/** @brief Successful events from one nonblocking stream step. */
+enum rptadv_media_step_kind {
+    RPTADV_MEDIA_STEP_PENDING = 0,      /**< No samples or format ready on this visit. */
+    RPTADV_MEDIA_STEP_FORMAT_READY = 1, /**< Once per stream, before any samples. */
+    RPTADV_MEDIA_STEP_SAMPLES = 2,      /**< Nonzero count in the caller buffer. */
+    RPTADV_MEDIA_STEP_EOF = 3           /**< All samples returned and child succeeded. */
+};
+
+/** @brief Tagged step result; fields unused by the event are zero. */
+struct rptadv_media_step {
+    uint32_t kind;           /**< One of enum rptadv_media_step_kind. */
+    uint32_t sample_rate_hz; /**< Decoded source rate for FORMAT_READY only. */
+    size_t samples;          /**< Output count for SAMPLES only, within capacity. */
 };
 
 #ifdef __cplusplus

@@ -15,18 +15,22 @@ use std::{
 fn private_sip_account_registers_on_activation_and_retires_on_its_owner() {
     let path = std::env::var_os("RPTADV_SIP_TEST_PROVIDER")
         .map(PathBuf::from)
-        .unwrap_or_else(|| "librptadv_sip_adapter.so.1".into());
+        .unwrap_or_else(|| "librptadv_sip_adapter.so.2".into());
     // SAFETY: the deployment/staged SDK selects this native provider.
     let provider = unsafe { Provider::load(&path) }.expect("load the real native SIP provider");
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-    socket.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(4)))
+        .unwrap();
     let address = socket.local_addr().unwrap().to_string();
     let retained = Arc::clone(&provider);
     let registrar = thread::spawn(move || {
         let mut bytes = [0; 8192];
         let (initial, address) = registrar::receive_register(&socket, &mut bytes).unwrap();
         assert!(initial.starts_with("REGISTER "));
-        socket.send_to(registrar::response(&initial, 401, true).as_bytes(), address).unwrap();
+        socket
+            .send_to(registrar::response(&initial, 401, true).as_bytes(), address)
+            .unwrap();
         let (authenticated, peer) = registrar::receive_register(&socket, &mut bytes).unwrap();
         assert_eq!(peer, address);
         assert!(
@@ -69,16 +73,18 @@ fn private_sip_account_registers_on_activation_and_retires_on_its_owner() {
     });
     // The outer provider lease survives the owning thread and its native TLS.
     thread::spawn(move || {
-        let account = retained.prepare(&Settings {
-            generation: 7,
-            expires: 60,
-            bind: "127.0.0.1:0",
-            next_hop: &address,
-            registrar: "sip:registrar.invalid",
-            aor: "sip:synthetic@registrar.invalid",
-            username: "synthetic",
-            password: "test-only",
-        }).unwrap();
+        let account = retained
+            .prepare(&Settings {
+                generation: 7,
+                expires: 60,
+                bind: "127.0.0.1:0",
+                next_hop: &address,
+                registrar: "sip:registrar.invalid",
+                aor: "sip:synthetic@registrar.invalid",
+                username: "synthetic",
+                password: "test-only",
+            })
+            .unwrap();
         assert_eq!(account.status().unwrap().state, 0);
         account.activate().unwrap();
         let wait = |state| {
@@ -90,7 +96,11 @@ fn private_sip_account_registers_on_activation_and_retires_on_its_owner() {
                 if status.state == state {
                     return status;
                 }
-                assert!(Instant::now() < deadline, "account stalled at state {}", status.state);
+                assert!(
+                    Instant::now() < deadline,
+                    "account stalled at state {}",
+                    status.state
+                );
                 thread::sleep(Duration::from_millis(5));
             }
         };
@@ -109,7 +119,9 @@ fn private_sip_account_registers_on_activation_and_retires_on_its_owner() {
         account.shutdown().unwrap();
         assert_eq!(wait(7).sip_status, 200);
         account.destroy().unwrap();
-    }).join().unwrap();
+    })
+    .join()
+    .unwrap();
     let (count, first_two) = registrar.join().unwrap();
     drop(provider);
 

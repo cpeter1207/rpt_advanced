@@ -10,7 +10,9 @@ User=rpt-advanced
 Group=rpt-advanced
 SupplementaryGroups=audio
 ExecStart=/usr/bin/rpt-advanced --foreground /etc/rpt_advanced/rpt_advanced.service.json
-ExecReload=/bin/kill -HUP $MAINPID
+Environment=RPT_ADVANCED_API_URL=https://localhost:8443/api/v1/
+ExecReload=/usr/bin/rpt-advanced-cli --url ${RPT_ADVANCED_API_URL} --ca %d/rpt-advanced.cli.server-ca --cert %d/rpt-advanced.cli.client-cert --key %d/rpt-advanced.cli.client-key reload
+ImportCredential=rpt-advanced.cli.*
 ImportCredential=rpt-advanced.tls.*
 ImportCredential=rpt-advanced.aead.*
 Restart=on-failure

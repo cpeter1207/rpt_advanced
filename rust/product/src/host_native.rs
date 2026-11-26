@@ -25,8 +25,12 @@ pub(crate) struct RadioTicket {
 }
 
 impl RadioTicket {
-    pub(crate) fn attempt(&self) -> std::num::NonZeroU64 { self.serial }
-    pub(super) fn reservation(&self) -> Weak<()> { Arc::downgrade(&self.key) }
+    pub(crate) fn attempt(&self) -> std::num::NonZeroU64 {
+        self.serial
+    }
+    pub(super) fn reservation(&self) -> Weak<()> {
+        Arc::downgrade(&self.key)
+    }
     pub(super) fn matches(&self, key: &Weak<()>) -> bool {
         key.ptr_eq(&Arc::downgrade(&self.key))
     }
@@ -42,6 +46,7 @@ pub(super) struct PhonePolicy {
 }
 
 pub(crate) struct RadioPlan {
+    pub(super) progress: super::phone_progress::Registry,
     pub(super) media_isolation: Arc<rpt_advanced_core::link::MediaIsolation>,
     pub(super) phone: Option<PhonePolicy>,
     pub(crate) station: PreparedStation,
@@ -84,6 +89,11 @@ pub(super) struct AccountReservation {
 }
 
 impl RadioPreparation {
+    #[cfg(test)]
+    pub(super) fn fixture_set_api(&mut self, api: RadioPreparationApi) {
+        assert!(self.api.is_none());
+        self.api = Some(api);
+    }
     pub(super) fn active_plan(&self, local: &str) -> Result<&RadioPlan, RuntimeError> {
         let port = local.parse().map_err(|_| RuntimeError::MissingNode)?;
         self.active.0.get(&port).ok_or(RuntimeError::MissingNode)
@@ -95,7 +105,9 @@ impl Host {
     pub(crate) fn confirm_private_media(&self) {
         for plan in self.radio_preparation.active.0.values() {
             if let Some(policy) = &plan.phone {
-                policy.confirmed.store(true, std::sync::atomic::Ordering::Release);
+                policy
+                    .confirmed
+                    .store(true, std::sync::atomic::Ordering::Release);
             }
         }
     }
@@ -141,24 +153,43 @@ impl Host {
             let incoming = api
                 .prepare_link(profile.processing.link.as_ref())
                 .map_err(|_| RuntimeError::Preparation)?;
-            let configured = configuration.protocols.port(id).ok_or(RuntimeError::MissingNode)?;
+            let configured = configuration
+                .protocols
+                .port(id)
+                .ok_or(RuntimeError::MissingNode)?;
             let phone = configured.phone_patch.as_ref().map(|profile| {
-                let previous = owner.active.0.get(&id).and_then(|plan| plan.phone.as_ref())
+                let previous = owner
+                    .active
+                    .0
+                    .get(&id)
+                    .and_then(|plan| plan.phone.as_ref())
                     .filter(|prior| prior.account == profile.binding.id);
-                let confirmed = previous.filter(|prior| prior.settings == profile.settings)
-                    .map_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)), |prior| Arc::clone(&prior.confirmed));
+                let confirmed = previous
+                    .filter(|prior| prior.settings == profile.settings)
+                    .map_or_else(
+                        || Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        |prior| Arc::clone(&prior.confirmed),
+                    );
                 PhonePolicy {
                     account: profile.binding.id,
                     settings: profile.settings.clone(),
                     confirmed,
-                    hold_isolation: profile.settings.isolate_peers || previous.is_some_and(|prior|
-                        prior.settings.isolate_peers || (!prior.confirmed.load(std::sync::atomic::Ordering::Acquire) && prior.hold_isolation)),
+                    hold_isolation: profile.settings.isolate_peers
+                        || previous.is_some_and(|prior| {
+                            prior.settings.isolate_peers
+                                || (!prior.confirmed.load(std::sync::atomic::Ordering::Acquire)
+                                    && prior.hold_isolation)
+                        }),
                 }
             });
             plans.0.insert(
                 id,
                 RadioPlan {
-                    media_isolation: owner.active.0.get(&id)
+                    progress: super::phone_progress::Registry::new(phone.is_some())?,
+                    media_isolation: owner
+                        .active
+                        .0
+                        .get(&id)
                         .map_or_else(Default::default, |prior| Arc::clone(&prior.media_isolation)),
                     phone,
                     station,

@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // The leading @ is outside the authenticated TLS ServiceId alphabet.
 const HOST_RELOAD: &str = "@host-lifecycle";
 struct OperationInput<'a> {
+    connection: Option<&'a rptadv_peer_support::https::ConnectionProof>,
     actor: &'a str,
     method: Method,
     target: &'a str,
@@ -73,6 +74,7 @@ pub(super) struct Record {
     submitted_from: Option<String>,
     timestamp: u64,
     outcomes: BTreeMap<Id, &'static str>,
+    results: BTreeMap<Id, maintenance::QueryResult>,
 }
 
 type Key = (Id, Id);
@@ -169,6 +171,21 @@ impl Ledger {
                 };
                 outcomes.insert(k, v);
             }
+            let mut results = BTreeMap::new();
+            if let Some(values) = row.get("results") {
+                for (key, value) in values.as_object().ok_or(Fault::Storage)? {
+                    let id = id(&json!(key)).map_err(|_| Fault::Storage)?;
+                    if outcomes.get(&id) != Some(&"admitted") {
+                        return Err(Fault::Storage);
+                    }
+                    let result: maintenance::QueryResult =
+                        serde_json::from_value(value.clone()).map_err(|_| Fault::Storage)?;
+                    if !result.valid(id) {
+                        return Err(Fault::Storage);
+                    }
+                    results.insert(id, result);
+                }
+            }
             let submitted_from = match row.get("submitted_from") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(tag))
@@ -193,6 +210,7 @@ impl Ledger {
                 submitted_from,
                 timestamp: time,
                 outcomes,
+                results,
             };
             if ledger.rows.insert(key, record).is_some() {
                 return Err(Fault::Storage);
@@ -223,7 +241,7 @@ impl Ledger {
     ) -> Result<(), Fault> {
         let rows=self.rows.iter().map(|((boot,request),r)|{
             let outcomes=r.outcomes.iter().map(|(id,s)|(id.to_string(),json!(s))).collect::<serde_json::Map<_,_>>();
-            json!({"boot":boot.to_string(),"request":request.to_string(),"time":r.timestamp,"actor":r.actor.as_str(),"phase":r.phase.name(),"version":r.version.to_string(),"protected":r.protected,"submitted_from":r.submitted_from,"configuration":r.body,"outcomes":outcomes})
+            json!({"boot":boot.to_string(),"request":request.to_string(),"time":r.timestamp,"actor":r.actor.as_str(),"phase":r.phase.name(),"version":r.version.to_string(),"protected":r.protected,"submitted_from":r.submitted_from,"configuration":r.body,"outcomes":outcomes,"results":r.results.iter().map(|(id,v)|(id.to_string(),json!(v))).collect::<serde_json::Map<_,_>>()})
         }).collect::<Vec<_>>();
         let bytes = serde_json::to_vec(&json!({"format_version":2,"requests":rows}))
             .map_err(|_| Fault::Storage)?;
@@ -249,7 +267,13 @@ impl Ledger {
         let outcomes = record
             .outcomes
             .iter()
-            .map(|(id, v)| json!({"target":id.to_string(),"outcome":v}))
+            .map(|(id, v)| {
+                let mut row = json!({"target":id.to_string(),"outcome":v});
+                if let Some(query) = record.results.get(id) {
+                    row["result"] = json!(query);
+                }
+                row
+            })
             .collect::<Vec<_>>();
         Ok(
             json!({"_links":links,"configuration":record.body,"meta":{"request_version":record.version.to_string()},"receipt":{"state":record.phase.name(),"outcomes":outcomes}}),
@@ -282,6 +306,7 @@ fn validate(body: &Value, actor: &str, submitted: bool) -> Result<(), Fault> {
             "action",
             "targets",
             "expected_active_revision",
+            "maintenance_lease",
             "desired_etag",
             "working_fingerprint",
             "restore",
@@ -326,6 +351,15 @@ fn validate(body: &Value, actor: &str, submitted: bool) -> Result<(), Fault> {
         && !matches!(s.as_str(), Some("desired" | "last_known_good"))
     {
         return Err(Fault::Invalid);
+    }
+    if let Some(href) = fields.get("maintenance_lease") {
+        if body["action"]["action"] != "radio_maintenance"
+            || !href
+                .as_str()
+                .is_some_and(|s| s.starts_with('/') && s.len() <= 1024)
+        {
+            return Err(Fault::Invalid);
+        }
     }
     let Some(action) = fields.get("action") else {
         return if submitted {
@@ -379,7 +413,11 @@ fn validate(body: &Value, actor: &str, submitted: bool) -> Result<(), Fault> {
 }
 
 pub(super) enum Work<P> {
-    Domain(String, Vec<(Id, Invocation)>),
+    Domain(
+        String,
+        Vec<(Id, Invocation)>,
+        Option<Arc<maintenance::Grant>>,
+    ),
     Configuration(Box<super::Recovery<P>>),
 }
 
@@ -479,6 +517,7 @@ impl<R: Runtime> Backend<R> {
         self.edit_operation(
             OperationInput {
                 actor: req.actor.as_str(),
+                connection: Some(&req.connection),
                 method: req.method.clone(),
                 headers: &req.headers,
                 body: req.body.as_bytes(),
@@ -516,6 +555,7 @@ impl<R: Runtime> Backend<R> {
         let (_, receipt) = self.edit_operation(
             OperationInput {
                 actor: HOST_RELOAD,
+                connection: None,
                 method: Method::PUT,
                 target: &target,
                 headers: &headers,
@@ -705,12 +745,33 @@ impl<R: Runtime> Backend<R> {
                         {
                             return Err(Fault::Unavailable);
                         }
+                        let grant = if body["action"]["action"] == "radio_maintenance" {
+                            let [target] =
+                                body["targets"].as_array().ok_or(Fault::Invalid)?.as_slice()
+                            else {
+                                return Err(Fault::Invalid);
+                            };
+                            Some(
+                                self.maintenance_grant(
+                                    body["maintenance_lease"].as_str().ok_or(Fault::Forbidden)?,
+                                    id(target)?,
+                                    body["expected_active_revision"]
+                                        .as_str()
+                                        .ok_or(Fault::Invalid)?,
+                                    req.actor,
+                                    req.connection.ok_or(Fault::Forbidden)?,
+                                )?,
+                            )
+                        } else {
+                            None
+                        };
                         Some(Work::Domain(
                             body["expected_active_revision"]
                                 .as_str()
                                 .ok_or(Fault::Invalid)?
                                 .to_owned(),
                             operands.with_full(&body, |full| self.admit_domain(req.actor, full))?,
+                            grant,
                         ))
                     }
                 }
@@ -741,6 +802,7 @@ impl<R: Runtime> Backend<R> {
                         Phase::Draft
                     },
                     outcomes: BTreeMap::new(),
+                    results: BTreeMap::new(),
                 },
             );
             if let Some(lease) = fresh_lease {
@@ -784,17 +846,27 @@ impl<R: Runtime> Backend<R> {
             work.expect("submitted operation admitted")
         };
         let mut outcomes = BTreeMap::new();
+        let mut results = BTreeMap::new();
         let phase = match work {
-            Work::Domain(expected, targets) => {
+            Work::Domain(expected, targets, grant) => {
                 for (id, intent) in targets {
                     let result = if intent.context.recheck(false).is_err()
                         || self.runtime.observed().active_revision.as_deref() != Some(&expected)
                     {
                         Effect::Rejected
+                    } else if let Some(grant) = &grant {
+                        if grant.valid() && grant.generation == intent.context.generation.id() {
+                            self.runtime.maintenance(Arc::clone(grant), intent)
+                        } else {
+                            Effect::Rejected
+                        }
                     } else {
                         self.runtime.dispatch(&expected, intent)
                     };
                     outcomes.insert(id, result.label());
+                    if let Effect::Query(query) = result {
+                        results.insert(id, query);
+                    }
                 }
                 if outcomes.values().any(|s| *s == "indeterminate") {
                     Phase::Indeterminate
@@ -821,6 +893,7 @@ impl<R: Runtime> Backend<R> {
                 .ok_or(Fault::Conflict)?;
             r.phase = phase;
             r.outcomes = outcomes;
+            r.results = results;
             ledger.write(&guard, || Ok(()))?;
             let doc = ledger.document(&self.api, boot, request)?;
             *self.ledger.write().expect("operation snapshot") = Some(Arc::new(ledger));

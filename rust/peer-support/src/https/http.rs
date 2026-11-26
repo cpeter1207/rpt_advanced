@@ -187,6 +187,7 @@ async fn handle(
     state: Shared,
     policy: Arc<OriginPolicy>,
     chain: Chain,
+    connection: super::ConnectionProof,
 ) -> Result<Response<Vec<u8>>, StatusCode> {
     let trust = state
         .lock()
@@ -217,7 +218,16 @@ async fn handle(
     let body = timeout(BODY_TIME, read_body(body, allowed))
         .await
         .map_err(|_| StatusCode::REQUEST_TIMEOUT)??;
-    Ok(dispatch(state, chain, actor, parts.method, target, headers, body).await)
+    Ok(dispatch(
+        state,
+        chain,
+        (actor, connection),
+        parts.method,
+        target,
+        headers,
+        body,
+    )
+    .await)
 }
 
 pub(super) fn encode(response: Response<Vec<u8>>) -> Response<Full<Bytes>> {
@@ -302,8 +312,10 @@ pub(super) async fn serve(
                     let Ok(Ok(stream)) = tls else { return; };
                     let Some(certs) = stream.get_ref().1.peer_certificates() else { return; };
                     let chain: Chain = Arc::from(certs);
+                    let owner = super::ConnectionOwner(super::ConnectionProof(Arc::new(true.into())));
+                    let proof = owner.0.clone();
                     let service = service_fn(move |req| {
-                        let response = handle(req, state.clone(), policy.clone(), chain.clone());
+                        let response = handle(req, state.clone(), policy.clone(), chain.clone(), proof.clone());
                         async move { Ok::<_, Infallible>(encode(response.await.unwrap_or_else(empty))) }
                     });
                     let mut http = http1::Builder::new();

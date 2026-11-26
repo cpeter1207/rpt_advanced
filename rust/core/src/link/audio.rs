@@ -192,22 +192,45 @@ pub trait PeerInput: Send {
 
 enum AudioOrigin {
     Direct(String),
-    Phone { call:super::PeerReply, isolate:bool, staged:Option<(Arc<AtomicBool>,bool)> },
+    Phone {
+        call: super::PeerReply,
+        isolate: bool,
+        staged: Option<(Arc<AtomicBool>, bool)>,
+    },
 }
 impl AudioOrigin {
     fn direct(&self) -> Option<&str> {
-        match self { Self::Direct(name) => Some(name), Self::Phone { .. } => None }
+        match self {
+            Self::Direct(name) => Some(name),
+            Self::Phone { .. } => None,
+        }
     }
     fn isolates(&self) -> bool {
         match self {
             Self::Direct(_) => false,
-            Self::Phone {call, isolate, staged} => call.phone_media_allowed() &&
-                staged.as_ref().filter(|(permit,_)| !permit.load(Ordering::Acquire))
-                    .map_or(*isolate, |(_,held)| *held),
+            Self::Phone {
+                call,
+                isolate,
+                staged,
+            } => {
+                call.phone_media_allowed()
+                    && staged
+                        .as_ref()
+                        .filter(|(permit, _)| !permit.load(Ordering::Acquire))
+                        .map_or(*isolate, |(_, held)| *held)
+            }
         }
     }
     fn current(&self) -> bool {
-        match self { Self::Direct(_) => true, Self::Phone { call, staged, .. } => call.phone_media_allowed() && staged.as_ref().is_none_or(|(permit,_)|permit.load(Ordering::Acquire)) }
+        match self {
+            Self::Direct(_) => true,
+            Self::Phone { call, staged, .. } => {
+                call.phone_media_allowed()
+                    && staged
+                        .as_ref()
+                        .is_none_or(|(permit, _)| permit.load(Ordering::Acquire))
+            }
+        }
     }
 }
 
@@ -236,35 +259,81 @@ impl<P: PeerInput> AudioPeer<P> {
         maximum: usize,
         kerchunk_ms: u32,
     ) -> Result<Self, AdmissionError> {
-        if !super::decimal_identity(direct) { return Err(AdmissionError::Invalid); }
-        Self::prepare(AudioOrigin::Direct(direct.into()),mode,input,outbound,maximum,kerchunk_ms)
+        if !super::decimal_identity(direct) {
+            return Err(AdmissionError::Invalid);
+        }
+        Self::prepare(
+            AudioOrigin::Direct(direct.into()),
+            mode,
+            input,
+            outbound,
+            maximum,
+            kerchunk_ms,
+        )
     }
 
     /// Prepare caller audio only for its exact authenticated source. A private
     /// call has no direct network-node identity or link-status announcements.
-    pub fn for_phone(source: &super::PhoneSource, reply: &super::PeerReply, mode: Mode, input:P,
-        outbound: LinkAudioProducer, maximum:usize) -> Result<Self,AdmissionError> {
-        if !reply.phone_media_allowed() || reply.phone_source()!=Some(source)
-            || input.signals().reply_target().phone_source()!=Some(source) {
+    pub fn for_phone(
+        source: &super::PhoneSource,
+        reply: &super::PeerReply,
+        mode: Mode,
+        input: P,
+        outbound: LinkAudioProducer,
+        maximum: usize,
+    ) -> Result<Self, AdmissionError> {
+        if !reply.phone_media_allowed()
+            || reply.phone_source() != Some(source)
+            || input.signals().reply_target().phone_source() != Some(source)
+        {
             return Err(AdmissionError::Invalid);
         }
         input.signals().set_telemetry_allowed(false);
-        Self::prepare(AudioOrigin::Phone {call:reply.clone(),isolate:false,staged:None},mode,input,outbound,maximum,0)
+        Self::prepare(
+            AudioOrigin::Phone {
+                call: reply.clone(),
+                isolate: false,
+                staged: None,
+            },
+            mode,
+            input,
+            outbound,
+            maximum,
+            0,
+        )
     }
 
     /// Keep source admission and routing tied to the candidate's native confirmation.
     /// During handoff a retained caller holds any existing or newly required isolation.
-    pub fn with_phone_policy(mut self, isolate:bool, held_isolation:bool, confirmed:Arc<AtomicBool>)->Self {
-        if let AudioOrigin::Phone {isolate: target, staged, ..}=&mut self.origin {
-            *target=isolate;
-            *staged=Some((confirmed,held_isolation));
+    pub fn with_phone_policy(
+        mut self,
+        isolate: bool,
+        held_isolation: bool,
+        confirmed: Arc<AtomicBool>,
+    ) -> Self {
+        if let AudioOrigin::Phone {
+            isolate: target,
+            staged,
+            ..
+        } = &mut self.origin
+        {
+            *target = isolate;
+            *staged = Some((confirmed, held_isolation));
         }
         self
     }
 
-    fn prepare(origin:AudioOrigin, mode:Mode, input:P, outbound:LinkAudioProducer,
-        maximum:usize, kerchunk_ms:u32) -> Result<Self,AdmissionError> {
-        if maximum==0 { return Err(AdmissionError::Invalid); }
+    fn prepare(
+        origin: AudioOrigin,
+        mode: Mode,
+        input: P,
+        outbound: LinkAudioProducer,
+        maximum: usize,
+        kerchunk_ms: u32,
+    ) -> Result<Self, AdmissionError> {
+        if maximum == 0 {
+            return Err(AdmissionError::Invalid);
+        }
         let receive = ReceiveState::with_policy(input.source_rate(), input.receive_policy())?;
         Ok(Self {
             origin,
@@ -415,9 +484,16 @@ impl LinkDispatcher {
             let destination = block.routing[index];
             let mut notify = self.activity_edges[index] != destination.activity_edge;
             self.activity_edges[index] = destination.activity_edge;
-            let epoch = if destination.direct { block.isolation_epoch } else { 0 };
+            let epoch = if destination.direct {
+                block.isolation_epoch
+            } else {
+                0
+            };
             let current = !destination.direct
-                || self.media_isolation.as_ref().is_none_or(|gate| gate.epoch() == epoch);
+                || self
+                    .media_isolation
+                    .as_ref()
+                    .is_none_or(|gate| gate.epoch() == epoch);
             if destination.eligible && current {
                 let offset = (index + 1) * self.scratch.len();
                 for (frame, sample) in self.scratch[..block.frames].iter_mut().enumerate() {
@@ -434,8 +510,10 @@ impl LinkDispatcher {
                     }
                 }
                 if self.outbound[index].write_at_isolation_epoch(
-                    destination.span, &self.scratch[..block.frames], epoch)
-                    < block.frames
+                    destination.span,
+                    &self.scratch[..block.frames],
+                    epoch,
+                ) < block.frames
                 {
                     notify = true;
                 }
@@ -469,7 +547,10 @@ impl<P: PeerInput> LinkAudio<P> {
             return Err(AdmissionError::Invalid);
         }
         let status = LinkAudioStatus {
-            names: peers.iter().map(|peer| peer.origin.direct().map(str::to_owned)).collect(),
+            names: peers
+                .iter()
+                .map(|peer| peer.origin.direct().map(str::to_owned))
+                .collect(),
             last_keyed: Arc::new(AtomicUsize::new(0)),
             dropped: Arc::new(AtomicU64::new(0)),
         };
@@ -557,7 +638,9 @@ impl<P: PeerInput> LinkAudio<P> {
     }
     /// Recheck direct-peer programme at mixing and again at off-audio dispatch.
     pub fn with_media_isolation(
-        mut self, dispatcher: &mut LinkDispatcher, gate: Arc<super::MediaIsolation>,
+        mut self,
+        dispatcher: &mut LinkDispatcher,
+        gate: Arc<super::MediaIsolation>,
     ) -> Self {
         dispatcher.media_isolation = Some(Arc::clone(&gate));
         self.media_isolation = Some(gate);
@@ -597,7 +680,11 @@ impl<P: PeerInput> LinkAudio<P> {
             let mute_epoch = peer.input.signals().receive_epoch();
             let (pcm_epoch, available, ended) = {
                 let signal = peer.input.signals();
-                (signal.pcm_epoch(), peer.input.available(), signal.ended() || !peer.origin.current())
+                (
+                    signal.pcm_epoch(),
+                    peer.input.available(),
+                    signal.ended() || !peer.origin.current(),
+                )
             };
             let mut render_attempted = false;
             let audio_active = match peer.input.finite_playout() {
@@ -633,16 +720,21 @@ impl<P: PeerInput> LinkAudio<P> {
                 peer.input.silence(&mut peer.audio[..count]);
             }
             let muted = (outgoing_isolation && peer.origin.direct().is_some())
-                || mute_epoch & 1 != 0 || peer.input.signals().receive_epoch() != mute_epoch;
+                || mute_epoch & 1 != 0
+                || peer.input.signals().receive_epoch() != mute_epoch;
             if !audio_active || muted {
                 peer.audio[..count].fill(0.0);
             }
             let active = !ended && (audio_active || peer.input.signals().radio_keyed());
             peer.input.signals().set_active(active);
             let qualified = peer.input.signals().output_radio_keyed(mute_epoch);
-            peer.active = peer.origin.current() && !ended
+            peer.active = peer.origin.current()
+                && !ended
                 && !muted
-                && (qualified || (peer.origin.direct().is_some() && audio_active && peer.input.receive_audio_current()));
+                && (qualified
+                    || (peer.origin.direct().is_some()
+                        && audio_active
+                        && peer.input.receive_audio_current()));
         }
         let inputs_idle = !receiving && self.peers.iter().all(|peer| !peer.active);
         for (index, group) in self.groups.iter().enumerate() {
@@ -657,13 +749,17 @@ impl<P: PeerInput> LinkAudio<P> {
             });
             let active = peer.active && selected;
             if active {
-                if !peer.reported_active && let Some(direct)=peer.origin.direct() {
+                if !peer.reported_active
+                    && let Some(direct) = peer.origin.direct()
+                {
                     controller.link_keyed(direct);
                     peer.duration = 0;
                     self.status.last_keyed.store(index + 1, Ordering::Release);
                 }
                 peer.duration = peer.duration.saturating_add(count as u64);
-            } else if peer.reported_active && let Some(direct)=peer.origin.direct() {
+            } else if peer.reported_active
+                && let Some(direct) = peer.origin.direct()
+            {
                 let mut storage = [0; 64];
                 let signal = peer.input.signals();
                 let source = signal
@@ -674,6 +770,15 @@ impl<P: PeerInput> LinkAudio<P> {
                     source,
                     peer.kerchunk_samples != 0 && peer.duration <= peer.kerchunk_samples,
                 );
+            }
+            if active != peer.reported_active
+                && let AudioOrigin::Phone { call, .. } = &peer.origin
+                && peer.origin.current()
+                && !peer.input.signals().ended()
+                && !peer.input.signals().rx_muted()
+                && let Some(source) = call.phone_source()
+            {
+                controller.phone_voice_edge(source.ingress(), active);
             }
             peer.reported_active = active;
             if active {
@@ -708,7 +813,11 @@ impl<P: PeerInput> LinkAudio<P> {
         for sample in &mut self.parrot_mix[..count] {
             *sample = sample.clamp(-1.0, 1.0);
         }
-        controller.observe_parrot_at_epoch(receiving || any_peer_active, &self.parrot_mix[..count], isolation_epoch);
+        controller.observe_parrot_at_epoch(
+            receiving || any_peer_active,
+            &self.parrot_mix[..count],
+            isolation_epoch,
+        );
         let mut parrot_active = false;
         for sample in &mut self.regeneration_samples[..count] {
             *sample = self
@@ -743,45 +852,85 @@ impl<P: PeerInput> LinkAudio<P> {
         if count == 0 || self.peers.is_empty() {
             return Ok(keyed);
         }
-        let isolate_peers=self.peers.iter().any(|p| p.origin.isolates());
-        let forwarding_sources = self
-            .peers
-            .iter()
-            .filter(|peer| {
-                peer.active
-                    && peer.mode.forwards()
-                    && peer.group_index.is_none_or(|group| {
-                        peer.group
-                            .as_ref()
-                            .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
-                    })
+        let isolate_peers = self.peers.iter().any(|p| p.origin.isolates());
+        let is_selected = |peer: &AudioPeer<P>| {
+            peer.group_index.is_none_or(|group| {
+                peer.group
+                    .as_ref()
+                    .is_some_and(|(_, slot)| selected_groups[group] == slot.get())
             })
-            .count();
+        };
+        let mut forwarding_sources = 0;
+        let mut forwarding_phone_sources = 0;
+        let mut local_phone_sources = 0;
+        // Reuse the consumed parrot tap for the direct sources removed from
+        // public destinations during isolation.
+        let direct_forwarding = &mut self.parrot_mix[..count];
+        if isolate_peers {
+            direct_forwarding.fill(0.0);
+        }
+        // The RF mix has been consumed. Reuse its scratch for callers whose
+        // speech stays off ordinary public links but can reach other callers.
+        let local_phone = &mut self.mix[..count];
+        for peer in self.peers.iter().filter(|peer| peer.active) {
+            let forwards = peer.mode.forwards();
+            let direct = peer.origin.direct().is_some();
+            if forwards && !direct {
+                forwarding_phone_sources += 1;
+            }
+            if !is_selected(peer) {
+                continue;
+            }
+            if forwards {
+                forwarding_sources += 1;
+                if isolate_peers && direct {
+                    for (frame, sample) in direct_forwarding.iter_mut().enumerate() {
+                        if !self.reply_output[frame].suppress_repeat {
+                            *sample += peer.audio[frame];
+                        }
+                    }
+                }
+            } else if peer.mode.transmits() && !direct {
+                if local_phone_sources == 0 {
+                    local_phone.fill(0.0);
+                }
+                local_phone_sources += 1;
+                for (frame, sample) in local_phone.iter_mut().enumerate() {
+                    if !self.reply_output[frame].suppress_repeat {
+                        *sample += peer.audio[frame];
+                    }
+                }
+            }
+        }
         // Track activity even when both blocks are in flight. Dropped callbacks
         // remain source-time gaps and cannot hide a new destination burst.
         for (route, peer) in self.routing.iter_mut().zip(&self.peers) {
             route.activity_edge = peer.input.signals().activity_edge();
             route.direct = peer.origin.direct().is_some();
-            let selected = peer.group_index.is_none_or(|group| {
-                peer.group
-                    .as_ref()
-                    .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
-            });
-            let own_source = usize::from(peer.active && peer.mode.forwards() && selected);
+            let selected = is_selected(peer);
+            let own_source = usize::from(
+                peer.active
+                    && selected
+                    && (peer.mode.forwards() || (!route.direct && peer.mode.transmits())),
+            );
             let ended = peer.input.signals().ended() || !peer.origin.current();
             route.target = if ended {
                 0
             } else {
                 peer.input.signals().reply_identity()
             };
-            route.enabled = !ended
-                && !(outgoing_isolation && route.direct)
+            route.enabled = !(ended || outgoing_isolation && route.direct)
                 && (parrot_active
                     || ((peer.mode.transmits() || peer.group.is_some())
                         && selected
-                        && (receiving || if isolate_peers && peer.origin.direct().is_some() {
-                            self.peers.iter().any(|p| p.active && p.mode.forwards() && p.origin.direct().is_none())
-                        } else { forwarding_sources > own_source })));
+                        && (receiving
+                            || if !route.direct {
+                                forwarding_sources + local_phone_sources > own_source
+                            } else if isolate_peers {
+                                forwarding_phone_sources != 0
+                            } else {
+                                forwarding_sources > own_source
+                            })));
             route.broadcast = !ended && peer.mode.transmits() && selected;
             route.telemetry = peer.input.signals().telemetry_allowed();
             let eligible = route.target != 0
@@ -821,14 +970,7 @@ impl<P: PeerInput> LinkAudio<P> {
             }
         }
         for peer in &self.peers {
-            if peer.active
-                && peer.mode.forwards()
-                && peer.group_index.is_none_or(|group| {
-                    peer.group
-                        .as_ref()
-                        .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
-                })
-            {
+            if peer.active && peer.mode.forwards() && is_selected(peer) {
                 for (frame, output) in block.audio[..count].iter_mut().enumerate() {
                     if !self.reply_output[frame].suppress_repeat {
                         *output += peer.audio[frame];
@@ -843,28 +985,19 @@ impl<P: PeerInput> LinkAudio<P> {
             *output += parrot;
         }
         for (destination, peer) in self.peers.iter().enumerate() {
-            let selected = peer.group_index.is_none_or(|group| {
-                peer.group
-                    .as_ref()
-                    .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
-            });
+            let direct = block.routing[destination].direct;
             let offset = (destination + 1) * self.local.len();
             let own = &mut block.audio[offset..offset + count];
-            if isolate_peers && peer.origin.direct().is_some() {
-                // Subtract every separately attached public source for this public destination.
-                own.fill(0.0);
-                for other in &self.peers {
-                    if other.active && other.origin.direct().is_some() && other.mode.forwards()
-                        && other.group_index.is_none_or(|group| other.group.as_ref().is_some_and(|(_,slot)|self.selected_groups[group]==slot.get())) {
-                        for (frame, sample) in own.iter_mut().enumerate() {
-                            if !self.reply_output[frame].suppress_repeat { *sample+=other.audio[frame]; }
-                        }
-                    }
-                }
+            if isolate_peers && direct {
+                own.copy_from_slice(direct_forwarding);
                 continue;
             }
-            // Ordinary mix-minus removes this peer's own forwarding contribution.
-            if peer.active && peer.mode.forwards() && selected {
+            // A caller's own source is subtracted whether or not it is
+            // allowed to forward to ordinary public links.
+            if peer.active
+                && is_selected(peer)
+                && (peer.mode.forwards() || (!direct && peer.mode.transmits()))
+            {
                 for (frame, sample) in own.iter_mut().enumerate() {
                     *sample = if self.reply_output[frame].suppress_repeat {
                         0.0
@@ -874,6 +1007,13 @@ impl<P: PeerInput> LinkAudio<P> {
                 }
             } else {
                 own.fill(0.0);
+            }
+            if !direct && local_phone_sources != 0 {
+                // The dispatcher subtracts this slot from the public base mix.
+                // A negative local aggregate adds those callers only here.
+                for (sample, local) in own.iter_mut().zip(local_phone.iter()) {
+                    *sample -= local;
+                }
             }
         }
         // A popped recycle block guarantees space in the other equal-capacity queue.

@@ -57,6 +57,8 @@ const REQUIRED_IDS: &[&str] = &[
     "remote-command-unsupported",
     "dtmf-macro-stopped",
     "phone-authentication",
+    "operation-result",
+    "phone-dial-failure",
     "echo-peer-identity",
     "priority-group-selected",
     "priority-group-unavailable",
@@ -75,10 +77,20 @@ const REQUIRED_IDS: &[&str] = &[
 /// A typed built-in message request; callers cannot select arbitrary Fluent IDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message<'a> {
+    /// Terminal result of the initiating station's outgoing call, without destination or SIP reason text.
+    PhoneDialFailure {
+        /// Final INVITE response, or zero for a local/provider failure.
+        status: u32,
+    },
     /// Credential-free prompt prepared exclusively for an exact private call.
     PhoneAuthentication {
         /// Login/result stage; no caller-supplied digits can enter the catalog.
         prompt: PhoneAuthenticationPrompt,
+    },
+    /// Fixed outcome of an authenticated caller's command, without supplied digits or credentials.
+    OperationResult {
+        /// One of the credential-free confirmation or failure states.
+        result: OperationResult,
     },
     /// Explain a denied or expired source-owned command expansion without its digits.
     DtmfMacroStopped,
@@ -221,6 +233,21 @@ pub enum PhoneAuthenticationPrompt {
     Unavailable,
     /// Credential-free failure of the exact caller's requested operation.
     Failed,
+}
+
+/// Generic operation outcomes returned only to the command source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationResult {
+    /// The operation finished successfully.
+    Completed,
+    /// Command authorization, routing or availability did not permit the operation.
+    Unavailable,
+    /// The operation failed after admission.
+    Failed,
+    /// The originating caller's transmit audio and keying are muted.
+    CallerMuted,
+    /// The originating caller's transmit audio and keying are unmuted.
+    CallerUnmuted,
 }
 
 /// Ordered units used by localized compound durations.
@@ -933,7 +960,9 @@ impl MessageCatalog {
 impl Message<'_> {
     pub(crate) fn id(&self) -> &'static str {
         match self {
+            Self::PhoneDialFailure { .. } => "phone-dial-failure",
             Self::PhoneAuthentication { .. } => "phone-authentication",
+            Self::OperationResult { .. } => "operation-result",
             Self::DtmfMacroStopped => "dtmf-macro-stopped",
             Self::PadTestEmpty => "pad-test-empty",
             Self::PadTestOverflow => "pad-test-overflow",
@@ -995,6 +1024,29 @@ impl Message<'_> {
     fn args(&self) -> FluentArgs<'_> {
         let mut args = FluentArgs::new();
         match self {
+            Self::PhoneDialFailure { status } => {
+                args.set(
+                    "reason",
+                    match status {
+                        486 | 600 => "busy",
+                        408 | 480 => "unanswered",
+                        403 | 603 => "declined",
+                        _ => "failed",
+                    },
+                );
+            }
+            Self::OperationResult { result } => {
+                args.set(
+                    "result",
+                    match result {
+                        OperationResult::Completed => "completed",
+                        OperationResult::Unavailable => "unavailable",
+                        OperationResult::Failed => "failed",
+                        OperationResult::CallerMuted => "muted",
+                        OperationResult::CallerUnmuted => "unmuted",
+                    },
+                );
+            }
             Self::PhoneAuthentication { prompt } => {
                 args.set(
                     "state",
@@ -1215,6 +1267,8 @@ fn required_sample_args(id: &str) -> FluentArgs<'static> {
         return args;
     }
     match id {
+        "phone-dial-failure" => args.set("reason", "busy"),
+        "operation-result" => args.set("result", "completed"),
         "phone-authentication" => {
             args.set("state", "login");
         }

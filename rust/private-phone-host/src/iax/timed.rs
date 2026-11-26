@@ -178,7 +178,11 @@ impl IaxPeer {
         let record = request.prefix;
         #[cfg(test)]
         if status == 1 {
-            eprintln!("IAX source diagnostic native-required-buffer capacity={} required={}", pcm.len(), record.event_length);
+            eprintln!(
+                "IAX source diagnostic native-required-buffer capacity={} required={}",
+                pcm.len(),
+                record.event_length
+            );
         } else if status != 0 {
             eprintln!("IAX source diagnostic native-poll-error");
         }
@@ -198,7 +202,9 @@ impl IaxPeer {
             || (record.flags & 2 != 0 && matches!(record.event_kind, 1 | 7))
         {
             #[cfg(test)]
-            if status == 0 { eprintln!("IAX source diagnostic invalid-record-header-or-flags"); }
+            if status == 0 {
+                eprintln!("IAX source diagnostic invalid-record-header-or-flags");
+            }
             return Err(IaxError::Operation);
         }
         let length = record.event_length;

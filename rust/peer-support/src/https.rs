@@ -9,7 +9,7 @@ pub use trust::{ServerIdentity, ServiceId, ServiceTrust};
 use std::collections::VecDeque;
 use std::fmt;
 use std::net::{SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -57,12 +57,36 @@ impl fmt::Debug for RequestBody {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeliveryId(u64);
 
+/// Identity and liveness of one authenticated TLS connection.
+#[derive(Clone)]
+pub struct ConnectionProof(Arc<AtomicBool>);
+
+impl ConnectionProof {
+    /// True until the TLS task exits, including shutdown and timeout.
+    pub fn is_alive(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+    /// True only for requests using this exact connection.
+    pub fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+struct ConnectionOwner(ConnectionProof);
+impl Drop for ConnectionOwner {
+    fn drop(&mut self) {
+        self.0.0.store(false, Ordering::Release);
+    }
+}
+
 /// A request owned by the coordinator after admission, independently of its client.
 pub struct AdmittedRequest {
     /// Transport correlation only. Durable submission identity belongs to the resource.
     pub id: DeliveryId,
     /// Currently authorized TLS service.
     pub actor: ServiceId,
+    /// Authenticated connection which delivered this request.
+    pub connection: ConnectionProof,
     /// Original HTTP method.
     pub method: Method,
     /// Canonical origin-form path and query.
@@ -417,12 +441,13 @@ fn refresh_pending(state: &Shared) {
 async fn dispatch(
     state: Shared,
     chain: Chain,
-    actor: ServiceId,
+    identity: (ServiceId, ConnectionProof),
     method: Method,
     target: PathAndQuery,
     headers: HeaderMap,
     body: RequestBody,
 ) -> Response<Vec<u8>> {
+    let (actor, connection) = identity;
     let deadline = Instant::now() + ADMISSION;
     let trust = state.lock().expect("management state").trust();
     let Some(proof) = trust.and_then(|trust| ClaimProof::verify(trust, &chain, &actor)) else {
@@ -445,6 +470,7 @@ async fn dispatch(
         let request = AdmittedRequest {
             id,
             actor,
+            connection,
             method,
             target,
             headers,

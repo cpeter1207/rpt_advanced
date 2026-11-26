@@ -319,6 +319,19 @@ impl NodeController {
         ))
     }
 
+    /// Install an optional phone courtesy before publishing the station to audio.
+    pub(crate) fn set_phone_courtesy(&mut self, media: PreparedMedia) {
+        self.courtesy.set_phone(media);
+    }
+
+    /// Schedule an admitted caller's release or cancel its own pending cue on rekey.
+    pub(crate) fn phone_voice_edge(&mut self, ingress: u64, keyed: bool) {
+        let due = self
+            .now
+            .saturating_add(samples(self.settings.courtesy_delay_ms));
+        self.courtesy.phone_edge(ingress, keyed, due);
+    }
+
     /// Tail media is installed only during control-side construction, before publication.
     pub(crate) fn set_tails(&mut self, tails: Vec<Tail>) -> Result<(), ControllerError> {
         self.tails = TailPlanner::new(tails)?;
@@ -333,7 +346,11 @@ impl NodeController {
 
     /// Feed the already mixed receive tap to the preallocated parrot capture owner.
     pub fn observe_parrot(&mut self, active: bool, samples: &[f32]) {
-        self.observe_parrot_at_epoch(active, samples, self.telemetry.parrot_epoch.load(Ordering::Acquire));
+        self.observe_parrot_at_epoch(
+            active,
+            samples,
+            self.telemetry.parrot_epoch.load(Ordering::Acquire),
+        );
     }
 
     /// Cut parrot capture and playback at station isolation boundaries with no PCM handoff.
@@ -828,6 +845,19 @@ impl NodeController {
             status_idle && self.now.saturating_sub(self.receiver_unkey) >= 12_000,
         );
         self.telemetry.poll_status();
+        if may_transmit
+            && courtesy_ready
+            && self.telemetry.active == Some(Source::Status)
+            && self
+                .telemetry
+                .status
+                .as_ref()
+                .is_some_and(|m| !m.0.has_output())
+        {
+            // Yield the slot before first PCM. Keep the status attempt and its original deadline.
+            self.telemetry.active = None;
+            self.telemetry.held_status = true;
+        }
         let active_before = self.telemetry.active;
         let peer_before = active_before == Some(Source::Status)
             && self

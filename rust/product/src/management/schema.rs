@@ -15,6 +15,139 @@ fn definitions() -> &'static Value {
 fn object(properties: Value) -> Value {
     json!({"type":"object","properties":properties,"additionalProperties":false})
 }
+fn live_row_schema(target: Target) -> Value {
+    let text = json!({"type":"string"});
+    let flag = json!({"type":"boolean"});
+    if target == Target::Peers {
+        let mut peer = object(json!({"type":{"enum":["allstarlink","echolink","phone"]},
+            "node":text,"call_id":text,"muted":flag,"active":flag}));
+        peer["required"] = json!(["type", "muted", "active"]);
+        peer["oneOf"] = json!([{"required":["node"]},{"required":["call_id"]}]);
+        peer
+    } else {
+        let optional = json!({"type":["boolean","null"]});
+        let mut call = object(
+            json!({"call_id":text,"account":{"type":"string","format":"uuid"},
+            "generation":{"type":"integer","minimum":1},"direction":{"enum":["incoming","outgoing"]},
+            "phase":{"enum":["private","authenticated","attached"]},"attached":flag,
+            "muted":optional,"active":optional}),
+        );
+        call["required"] = json!([
+            "call_id",
+            "account",
+            "generation",
+            "direction",
+            "phase",
+            "attached",
+            "muted",
+            "active"
+        ]);
+        call
+    }
+}
+
+fn status_schema(kind: Kind, port: bool) -> Value {
+    let flag = json!({"type":"boolean"});
+    let boolean = json!({"type":["boolean","null"]});
+    let number = json!({"type":["number","null"]});
+    let uint = json!({"type":"integer","minimum":0});
+    let receiver = json!({"type":["object","null"],"properties":{"muted":flag,"active":flag},
+                          "required":["muted","active"],"additionalProperties":false});
+    let mut p = json!({"active_revision":{"type":["string","null"]},"owner_generation":{"type":["integer","null"],"minimum":0}});
+    match kind {
+        Kind::Metadata | Kind::Radio if port => {
+            p["receiver"] = receiver;
+            p["transmit_key_requested"] = boolean;
+            let seconds = json!({"type":"integer"});
+            let mut gap = object(json!({
+                "previous_wall_seconds":seconds,
+                "current_wall_seconds":seconds
+            }));
+            gap["required"] = json!(["previous_wall_seconds", "current_wall_seconds"]);
+            p["calendar"] = json!({"type":["object","null"],"properties":{
+                "previous_wall_seconds":seconds,"current_wall_seconds":seconds,"last_abnormal_gap":gap
+            },"required":["current_wall_seconds"],"additionalProperties":false});
+            p["last_disconnect"] = json!({"type":["object","null"],"properties":{
+                "selected_count":uint,"removed_count":uint,
+                "peer_nodes":{"type":"array","items":{"type":"string"},"maxItems":live::DISCONNECT_PEERS_LIMIT}
+            },"required":["selected_count","removed_count","peer_nodes"],"additionalProperties":false});
+            p["last_dial"] = json!({"type":["object","null"],"properties":{
+                "node":{"type":"string"},"attached":flag
+            },"required":["node","attached"],"additionalProperties":false});
+        }
+        Kind::RxSignaling if port => p["receiver"] = receiver,
+        Kind::TxSignaling if port => p["transmit_key_requested"] = boolean,
+        Kind::RxAudio | Kind::TxAudio if port => {
+            p["meter"] = json!({"type":["object","null"],"properties":{
+                "timestamp_ms":uint,"samples":uint,"peak":number,"rms":number,
+                "clipped_samples":uint,"dropped_snapshots":uint},"additionalProperties":false});
+        }
+        Kind::Allstarlink | Kind::Echolink | Kind::PhonePatch if port => {
+            p["registration"] = object(
+                json!({"state":{"enum":["unavailable","disabled","dormant","pending",
+                "registered","retry","withdrawn","registering","online","retrying","inactive","starting","retiring","failed"]},
+                "generation":uint,"registered":flag,"fresh":flag,"available":flag}),
+            );
+        }
+        Kind::Sensor => {
+            for name in ["value", "smoothed", "minimum", "maximum"] {
+                p[name] = number.clone();
+            }
+            p["quality"] = json!({"type":"string"});
+            for name in ["observed_at_ms", "minimum_at_ms", "maximum_at_ms"] {
+                p[name] = json!({"type":["integer","null"]});
+            }
+        }
+        Kind::Input => {
+            p["value"] = boolean;
+            p["quality"] = json!({"type":"string"});
+            p["observed_at_ms"] = json!({"type":["integer","null"]});
+        }
+        Kind::Alarm => {
+            for name in ["active", "acknowledged", "unsafe", "reset_ready"] {
+                p[name] = boolean.clone();
+            }
+        }
+        Kind::Output => {
+            for name in ["requested_on", "fault", "readback"] {
+                p[name] = boolean.clone();
+            }
+            p["submitted"] = json!({"type":["object","null"],"properties":{"level":number,"observed_at_ms":uint},"additionalProperties":false});
+            p["submission_quality"] = json!({"type":"string"});
+            p["pulse_deadline_ms"] = json!({"type":["integer","null"]});
+        }
+        Kind::Fan => {
+            p["requested_duty"] = number;
+            p["fault"] = flag;
+            p["run_on_until_ms"] = json!({"type":["integer","null"]});
+        }
+        Kind::Event => {
+            p["issue"] = json!({"type":["string","null"]});
+            let mut boundary = object(json!({
+                "nominal_wall_seconds":{"type":"integer"},
+                "observed_wall_seconds":{"type":"integer"},
+                "outcome":{"enum":["completed","rejected","cancelled","limit"]}
+            }));
+            boundary["required"] =
+                json!(["nominal_wall_seconds", "observed_wall_seconds", "outcome"]);
+            p["last_start"] = boundary.clone();
+            p["last_end"] = boundary.clone();
+            p["last_warning"] =
+                object(json!({"boundary":{"enum":["start","end"]},"result":boundary}));
+            p["last_warning"]["required"] = json!(["boundary", "result"]);
+        }
+        _ => {}
+    }
+    object(p)
+}
+
+fn lease_fields() -> Value {
+    let mut cfg = object(
+        json!({"active":{"type":"boolean"},"ttl_ms":{"type":"integer","minimum":1,"maximum":60000,"default":30000},"expected_active_revision":{"type":"string"}}),
+    );
+    cfg["required"] = json!(["active", "expected_active_revision"]);
+    cfg
+}
 fn ids() -> Value {
     json!({"type":"array","uniqueItems":true,"items":{"type":"string","format":"uuid"}})
 }
@@ -73,6 +206,7 @@ fn field_schema(kind: Kind, port: bool) -> Value {
             &[
                 "allow_nodes",
                 "deny_nodes",
+                "static_nodes",
                 "directory_file",
                 "lookup_method",
                 "iax",
@@ -174,9 +308,7 @@ pub(super) fn response_document(route: &Route) -> Value {
             properties["id"] = id;
             properties["key"] = text;
             if route.view == Some(View::Status) {
-                properties["status"] = object(
-                    json!({"active_revision":nullable_text,"owner_generation":{"type":["integer","null"],"minimum":0}}),
-                );
+                properties["status"] = status_schema(kind, route.path.contains("{port}"));
             } else {
                 let mut cfg = field_schema(kind, route.profile == "port");
                 if let Some(props) = cfg.get_mut("properties").and_then(Value::as_object_mut) {
@@ -201,6 +333,14 @@ pub(super) fn response_document(route: &Route) -> Value {
                     }
                 }
                 if kind == Kind::Event {
+                    if route.view == Some(View::Effective) {
+                        properties["meta"]["properties"]["timezones"] = json!({
+                            "type":"object",
+                            "readOnly":true,
+                            "additionalProperties":{"type":"string"},
+                            "description":"Effective IANA timezones keyed by JSON pointer to each calendar expression."
+                        });
+                    }
                     if let Some(fields) = cfg.get("properties").and_then(Value::as_object) {
                         properties
                             .as_object_mut()
@@ -231,6 +371,16 @@ pub(super) fn response_document(route: &Route) -> Value {
             properties["receipt"] = object(
                 json!({"state":{"enum":["draft","submitted","completed","rejected","indeterminate"]},"outcomes":{"type":"array","items":{"type":"object"}}}),
             );
+        }
+        Target::Peers | Target::Calls => {
+            properties["_embedded"] = object(json!({"item":{
+                "type":"array","maxItems":100,"items":live_row_schema(route.target)
+            }}));
+        }
+        Target::MaintenanceLease => {
+            properties["configuration"] = lease_fields();
+            properties["meta"] =
+                object(json!({"version":{"type":"integer"},"generation":{"type":"integer"}}));
         }
         Target::Operations => properties["boot_id"] = id,
         Target::Active => properties["active_revision"] = nullable_text,
@@ -265,9 +415,10 @@ pub(super) fn response_document(route: &Route) -> Value {
 /// Rooted schema with only transitively used reusable definitions.
 pub(super) fn document(route: &Route, create: bool) -> Value {
     let mut schema = match route.target {
+        Target::MaintenanceLease => object(json!({"configuration":lease_fields()})),
         Target::Operation => {
             let mut cfg = object(
-                json!({"submitted":{"type":"boolean"},"targets":ids(),"expected_active_revision":{"type":"string"},"desired_etag":{"type":"string"},
+                json!({"submitted":{"type":"boolean"},"targets":ids(),"maintenance_lease":{"type":"string","format":"uri-reference"},"expected_active_revision":{"type":"string"},"desired_etag":{"type":"string"},
                 "working_fingerprint":{"type":"string","pattern":"^[0-9a-f]{64}$"},"restore":{"enum":["desired","last_known_good"]},
                 "action":{"oneOf":[{"$ref":"#/$defs/controllerAction"},{"type":"object","properties":{"action":{"enum":["apply_configuration","reload_configuration","restore_configuration"]}},"required":["action"],"additionalProperties":false}]}}),
             );

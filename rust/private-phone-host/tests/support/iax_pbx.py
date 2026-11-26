@@ -91,9 +91,46 @@ def inbound_commands(command):
         print(step, channel, flush=True)
 
 
+def concurrent_outgoing_commands(command):
+    """Report the exact unanswered extension and observe actual channel retirement."""
+    def cli(text):
+        return subprocess.run(command + ["-rx", text], check=True, capture_output=True,
+                              text=True, timeout=2).stdout
+
+    def channels():
+        return [fields for row in cli("core show channels concise").splitlines()
+                if len(fields := row.split("!")) > 5 and fields[0].startswith("IAX2/")]
+
+    held = None
+    for line in sys.stdin:
+        step = line.strip()
+        if step == "held":
+            waiting = [row[0] for row in channels()
+                       if row[1:3] == ["phone-test", "998"] and row[4] != "Up" and row[5] == "Wait"]
+            if len(waiting) > 1 or (waiting and held not in (None, waiting[0])):
+                raise RuntimeError("unexpected held IAX leg")
+            if waiting:
+                held = waiting[0]
+            print(waiting[0] if waiting else "-", flush=True)
+            continue
+        if step not in ("wait-held-ended", "cleanup-held", "wait-all-ended") or not held:
+            raise ValueError("unexpected concurrent IAX fixture command")
+        if step == "cleanup-held" and any(row[0] == held for row in channels()):
+            cli(f"channel request hangup {held}")
+        deadline = time.monotonic() + 2
+        while True:
+            live = [row[0] for row in channels()]
+            pending = bool(live) if step == "wait-all-ended" else held in live
+            if not pending or time.monotonic() >= deadline:
+                print("pending" if pending else "ended", flush=True)
+                break
+            time.sleep(0.04)
+
+
 def run():
     managed = sys.argv[1:] == ["--managed-call"]
-    if sys.argv[1:] and not managed:
+    concurrent = sys.argv[1:] == ["--concurrent-outgoing"]
+    if sys.argv[1:] and not (managed or concurrent):
         raise ValueError("unknown private PBX fixture mode")
     with tempfile.TemporaryDirectory(prefix="phone-account-") as temporary:
         root = pathlib.Path(temporary)
@@ -117,6 +154,7 @@ def run():
         (root / "logger.conf").write_text("[logfiles]\nconsole => warning,error\n")
         (root / "extensions.conf").write_text(
             "[phone-test]\nexten => 999,1,Answer()\nsame => n,Echo()\nsame => n,Hangup()\n"
+            + ("exten => 998,1,Wait(60)\nsame => n,Hangup()\n" if concurrent else "")
             + (managed_dialplan(root) if managed else "")
         )
         (root / "iax.conf").write_text(
@@ -141,6 +179,8 @@ def run():
                 print(port, flush=True)
                 if managed:
                     inbound_commands(command)
+                elif concurrent:
+                    concurrent_outgoing_commands(command)
                 else:
                     sys.stdin.buffer.read()
             finally:

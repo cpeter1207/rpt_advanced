@@ -1,51 +1,49 @@
 use rpt_advanced_core::command::DtmfCommandMap;
 use rpt_advanced_core::link::{EchoAlias, PeerIdentity, ProtocolId};
 
-#[test]
-fn absent_schedule_is_a_configuration_error_not_an_identity_panic() {
-    use rpt_advanced_core::config::{
-        ConfigDocument, ConfigError, NodeId, ResolvedScheduleSettings,
-    };
-    let document = ConfigDocument::parse("[1000]\n").unwrap();
-    let error =
-        ResolvedScheduleSettings::resolve(&document, &NodeId::new("1000").unwrap(), "missing")
-            .unwrap_err();
-    assert!(matches!(error, ConfigError::Structure { .. }));
-}
+use rpt_advanced_core::config::{
+    self,
+    resources::{
+        PortKey,
+        candidate::{ResourceKind, ResourceScope},
+    },
+};
+use serde_json::json;
+#[path = "support/capture.rs"]
+mod capture;
 
 #[test]
 fn echo_aliases_are_canonical_before_configuration_and_access_comparisons() {
-    use rpt_advanced_core::{
-        access::AccessPolicy,
-        config::{
-            ConfigDocument, NodeId, ResolvedPermanentLinkSettings, ResolvedScheduleSettings, Schema,
-        },
+    use rpt_advanced_core::access::AccessPolicy;
+    let port = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let scope = ResourceScope::Port(port.parse().unwrap());
+    let groups = |rows: &[(&str, serde_json::Value)]| {
+        let resources: Vec<_> = rows
+            .iter()
+            .map(|(key, body)| (port, ResourceKind::PermanentGroup, *key, body.clone()))
+            .collect();
+        let fixture = capture::Fixture::new(&[(port, "radio")], &resources);
+        fixture
+            .candidate()
+            .permanent_groups(scope, &Default::default())
     };
-    let doc = ConfigDocument::parse("[1000]\nradio_channel=usb\n[permanent 1000 home]\nremote_node=4000\n[permanent 1000 echo]\nremote_node=30123456\n").unwrap();
-    let node = NodeId::new("1000").unwrap();
+    let routes = groups(&[
+        ("home", json!({"remote_node":["4000"]})),
+        ("echo", json!({"remote_node":["30123456"]})),
+    ])
+    .unwrap();
     assert_eq!(
-        ResolvedPermanentLinkSettings::resolve(&doc, &node, "echo")
-            .unwrap()
-            .value
-            .remote_nodes,
+        routes.effective[&PortKey::new("echo")].1.remote_nodes,
         ["3123456"]
     );
-    let schedule = "[1000]\nradio_channel=usb\n[permanent 1000 home]\nremote_node=4000\n[schedule 1000 one]\nremote_node=30123456\nreplace_permanent=home\ndays=monday\nstart_time=09:00\nend_time=10:00\n";
-    let doc = ConfigDocument::parse(schedule).unwrap();
-    assert_eq!(
-        ResolvedScheduleSettings::resolve(&doc, &node, "one")
-            .unwrap()
-            .value
-            .remote_nodes,
-        ["3123456"]
+    assert!(groups(&[("group", json!({"remote_node":["30123456","3123456"]}))]).is_err());
+    assert!(
+        groups(&[
+            ("one", json!({"remote_node":["30123456"]})),
+            ("two", json!({"remote_node":["3123456"]}))
+        ])
+        .is_err()
     );
-    for input in [
-        "[1000]\n[permanent 1000 group]\nremote_node=30123456,3123456\n".to_owned(),
-        "[1000]\n[permanent 1000 one]\nremote_node=30123456\n[permanent 1000 two]\nremote_node=3123456\n".to_owned(),
-        format!("{schedule}[schedule 1000 two]\nremote_node=3123456\nreplace_permanent=home\ndays=monday\nstart_time=09:00\nend_time=10:00\n"),
-    ] {
-        assert!(Schema::validate(&ConfigDocument::parse(&input).unwrap()).is_err());
-    }
     let deny = AccessPolicy::new("", "30123456").unwrap();
     assert!(!deny.allows("3123456", true));
     let allow = AccessPolicy::new("30123456", "").unwrap();
@@ -56,19 +54,36 @@ fn echo_aliases_are_canonical_before_configuration_and_access_comparisons() {
             .unwrap()
             .allows("00123456", true)
     );
-    let doc = ConfigDocument::parse(
-        "[1000]\n[courtesy 1000 echo]\ninput=link\nremote_node=30123456\nmorse_text=E\n",
-    )
-    .unwrap();
+    let courtesies = |numbers: &[&str]| {
+        let rows: Vec<_> = numbers
+            .iter()
+            .zip(["one", "two"])
+            .map(|(number, key)| {
+                (
+                    port,
+                    ResourceKind::Courtesy,
+                    key,
+                    json!({"input":"link","remote_node":number,"tone":{"sequence":"440/20"}}),
+                )
+            })
+            .collect();
+        let fixture = capture::Fixture::new(&[(port, "radio")], &rows);
+        let catalog = rpt_advanced_core::messages::MessageCatalog::from_sources(
+            "en-US",
+            include_str!("../../../messages/en-US.ftl"),
+            None,
+        )
+        .unwrap();
+        fixture
+            .candidate()
+            .prepare_telemetry(scope, catalog, &"en-US".parse().unwrap())
+            .map(|(_, _, prepared)| prepared)
+    };
     assert_eq!(
-        rpt_advanced_core::config::ResolvedCourtesySettings::resolve(&doc, &node, "echo")
-            .unwrap()
-            .value
-            .remote_node,
+        courtesies(&["30123456"]).unwrap().courtesies["one"].remote_node,
         "3123456"
     );
-    let duplicated = ConfigDocument::parse("[1000]\n[courtesy 1000 one]\ninput=link\nremote_node=30123456\nmorse_text=E\n[courtesy 1000 two]\ninput=link\nremote_node=3123456\nmorse_text=F\n").unwrap();
-    assert!(Schema::validate(&duplicated).is_err());
+    assert!(courtesies(&["30123456", "3123456"]).is_err());
     use rpt_advanced_core::runtime::link_schedule::{LinkScheduler, RouteSpec};
     let route = |remote: &str| RouteSpec {
         local: "1000".into(),
@@ -92,17 +107,10 @@ fn echo_aliases_are_canonical_before_configuration_and_access_comparisons() {
 
 #[test]
 fn echo_telemetry_has_no_default_dtmf_prefix_and_reuses_mapping_validation() {
-    use rpt_advanced_core::{
-        command::{CommandMapping, LinkAction},
-        config::{ConfigDocument, NodeId, ResolvedNodeSettings},
-    };
+    use rpt_advanced_core::command::{CommandMapping, LinkAction};
     assert!(DtmfCommandMap::standard().mappings().iter().any(|mapping| mapping.action == LinkAction::EchoTelemetry && mapping.digits.is_empty()));
-    let doc = ConfigDocument::parse("[1000]\nradio_channel=usb\nlink_command_echo_telemetry=83\n")
-        .unwrap();
-    let settings = ResolvedNodeSettings::resolve(&doc, &NodeId::new("1000").unwrap())
-        .unwrap()
-        .value;
-    let map = settings.command_map().unwrap();
+    let map =
+        DtmfCommandMap::new(vec![CommandMapping::new("83", LinkAction::EchoTelemetry)]).unwrap();
     let command = map.parse("833").unwrap();
     assert_eq!(
         (command.action, command.node.as_str()),

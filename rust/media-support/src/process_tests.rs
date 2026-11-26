@@ -3,6 +3,34 @@ use super::*;
 use std::{fs, path::PathBuf};
 use std::{path::Path, sync::atomic::Ordering};
 
+fn read_bytes(
+    stream: &mut ChildStream,
+    output: &mut [u8],
+    cancelled: &impl Fn() -> bool,
+) -> Result<usize, MediaError> {
+    loop {
+        if let Some(count) = stream.read(output, cancelled)? {
+            return Ok(count);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(file_adapter)]
+fn next_pcm_step(stream: &mut PcmStream, output: &mut [f32]) -> Result<RawStep, MediaError> {
+    // SAFETY: both views have the same layout, and step only writes valid f32.
+    let output = unsafe {
+        std::slice::from_raw_parts_mut(output.as_mut_ptr().cast::<MaybeUninit<f32>>(), output.len())
+    };
+    loop {
+        let step = stream.step(output, &|| false)?;
+        if step.kind != STEP_PENDING {
+            return Ok(step);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 #[cfg(speech_adapter)]
 fn speech_stdin_budget_covers_a_child_that_never_reads() {
@@ -22,7 +50,7 @@ fn speech_stdin_budget_covers_a_child_that_never_reads() {
     )
     .expect("spawn does not wait for child stdin capacity");
     assert!(matches!(
-        stream.read(&mut [0; 8], &|| false),
+        read_bytes(&mut stream, &mut [0; 8], &|| false),
         Err(MediaError::TimedOut)
     ));
 }
@@ -45,7 +73,7 @@ fn speech_stdin_cancellation_does_not_wait_for_input_drain() {
     )
     .unwrap();
     assert!(matches!(
-        stream.read(&mut [0; 8], &|| true),
+        read_bytes(&mut stream, &mut [0; 8], &|| true),
         Err(MediaError::Cancelled)
     ));
 }
@@ -64,7 +92,7 @@ fn speech_stdin_and_stdout_make_interleaved_bounded_progress() {
     let mut received = Vec::new();
     let mut block = [0; 4096];
     loop {
-        let count = stream.read(&mut block, &|| false).unwrap();
+        let count = read_bytes(&mut stream, &mut block, &|| false).unwrap();
         if count == 0 {
             break;
         }
@@ -149,7 +177,16 @@ fn pcm_stream(bytes: &[u8]) -> Result<PcmStream, MediaError> {
     };
     let mut command = Command::new("cat");
     let child = ChildStream::spawn(&config, &mut command, Some(bytes), &|| false)?;
-    PcmStream::f32_wave(child, &|| false)
+    let mut stream = PcmStream::f32_wave(child);
+    assert_eq!(
+        next_pcm_step(&mut stream, &mut [0.0])?,
+        RawStep {
+            kind: STEP_FORMAT_READY,
+            sample_rate_hz: 48_000,
+            ..RawStep::default()
+        }
+    );
+    Ok(stream)
 }
 
 #[test]
@@ -158,14 +195,86 @@ fn wave_stream_decodes_incrementally_and_drains_declared_data() {
     let mut data = 0.25_f32.to_le_bytes().to_vec();
     data.extend_from_slice(&(-0.5_f32).to_le_bytes());
     let format = format_chunk(16);
-    let wave = wave(&[(b"fmt ", &format), (b"data", &data)]);
+    let mut wave = wave(&[(b"fmt ", &format), (b"data", &data)]);
+    wave.extend_from_slice(&0.875_f32.to_le_bytes());
     let mut stream = pcm_stream(&wave).unwrap();
-    assert_eq!(stream.sample_rate_hz(), 48_000);
     let mut output = [0.0; 2];
-    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 2);
+    assert_eq!(
+        next_pcm_step(&mut stream, &mut output).unwrap(),
+        sample_step(2)
+    );
     assert_eq!(output, [0.25, -0.5]);
-    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 0);
-    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 0);
+    assert_eq!(
+        next_pcm_step(&mut stream, &mut output).unwrap().kind,
+        STEP_EOF
+    );
+    assert_eq!(
+        next_pcm_step(&mut stream, &mut output).unwrap().kind,
+        STEP_EOF
+    );
+}
+
+#[test]
+#[cfg(file_adapter)]
+fn partial_wave_leaves_an_independent_stream_free_to_finish() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+
+    let config = Config {
+        ffmpeg: "unused".into(),
+        process_timeout: Duration::from_secs(5),
+        child_reaper: None,
+    };
+    let (mut input, source) = UnixStream::pair().unwrap();
+    let mut command = Command::new("cat");
+    command.stdin(Stdio::from(OwnedFd::from(source)));
+    let child = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
+    let mut held = PcmStream::f32_wave(child);
+    let format = format_chunk(17);
+    let bytes = wave(&[
+        (b"JUNK", &[1, 2, 3]),
+        (b"fmt ", &format),
+        (b"data", &0.75_f32.to_le_bytes()),
+    ]);
+    let mut raw = [MaybeUninit::uninit(); 1];
+
+    input.write_all(&bytes[..1]).unwrap();
+    // Observe the first byte reaching the retained incomplete RIFF header.
+    while held.wave.as_ref().unwrap().filled != 1 {
+        assert_eq!(held.step(&mut raw, &|| false), Ok(RawStep::default()));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(held.step(&mut raw, &|| false), Ok(RawStep::default()));
+
+    let other_bytes = wave(&[(b"fmt ", &format), (b"data", &(-0.25_f32).to_le_bytes())]);
+    let mut other = pcm_stream(&other_bytes).unwrap();
+    let mut output = [0.0];
+    assert_eq!(next_pcm_step(&mut other, &mut output), Ok(sample_step(1)));
+    assert_eq!(output, [-0.25]);
+    assert_eq!(
+        next_pcm_step(&mut other, &mut output).unwrap().kind,
+        STEP_EOF
+    );
+
+    let split = bytes.len() - 3;
+    input.write_all(&bytes[1..split]).unwrap();
+    assert_eq!(
+        next_pcm_step(&mut held, &mut output),
+        Ok(RawStep {
+            kind: STEP_FORMAT_READY,
+            sample_rate_hz: 48_000,
+            samples: 0,
+        })
+    );
+    assert_eq!(held.step(&mut raw, &|| false), Ok(RawStep::default()));
+    input.write_all(&bytes[split..]).unwrap();
+    drop(input);
+    assert_eq!(next_pcm_step(&mut held, &mut output), Ok(sample_step(1)));
+    assert_eq!(output, [0.75]);
+    assert_eq!(
+        next_pcm_step(&mut held, &mut output).unwrap().kind,
+        STEP_EOF
+    );
 }
 
 #[test]
@@ -190,9 +299,15 @@ fn wave_stream_skips_unknown_and_odd_sized_chunks_and_accepts_unknown_data_size(
 
     let mut stream = pcm_stream(&file).unwrap();
     let mut output = [0.0; 1];
-    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 1);
+    assert_eq!(
+        next_pcm_step(&mut stream, &mut output).unwrap(),
+        sample_step(1)
+    );
     assert_eq!(output[0], 0.75);
-    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 0);
+    assert_eq!(
+        next_pcm_step(&mut stream, &mut output).unwrap().kind,
+        STEP_EOF
+    );
 }
 
 #[test]
@@ -286,7 +401,7 @@ fn empty_wave_data_is_rejected_after_declared_bytes_are_drained() {
     bytes.extend_from_slice(b"trailing bytes");
     let mut stream = pcm_stream(&bytes).unwrap();
     assert_eq!(
-        stream.read(&mut [0.0; 1], &|| false),
+        next_pcm_step(&mut stream, &mut [0.0; 1]),
         Err(MediaError::InvalidOutput)
     );
 }
@@ -297,20 +412,23 @@ fn pcm_reader_validates_requests_and_defers_errors_after_returned_samples() {
     let data = [0.5_f32.to_le_bytes(), f32::NAN.to_le_bytes()].concat();
     let mut stream = pcm_stream(&wave(&[(b"fmt ", &format_chunk(16)), (b"data", &data)])).unwrap();
     assert_eq!(
-        stream.read(&mut [], &|| false),
+        stream.step(&mut [], &|| false),
         Err(MediaError::InvalidRequest)
     );
     let mut output = [0.0; 2];
-    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 1);
+    assert_eq!(
+        next_pcm_step(&mut stream, &mut output).unwrap(),
+        sample_step(1)
+    );
     assert_eq!(output[0], 0.5);
     assert_eq!(
-        stream.read(&mut output, &|| false),
+        next_pcm_step(&mut stream, &mut output),
         Err(MediaError::InvalidOutput)
     );
 }
 
 #[test]
-fn child_wait_helpers_retry_interrupts_and_map_other_errors() {
+fn child_cleanup_retries_interruption_and_step_poll_defers_it() {
     let mut waits = 0;
     wait_until_reaped(&mut || {
         waits += 1;
@@ -328,60 +446,15 @@ fn child_wait_helpers_retry_interrupts_and_map_other_errors() {
     assert_eq!(
         poll_child(&mut || {
             polls += 1;
-            if polls == 1 {
-                Err(io::Error::from(io::ErrorKind::Interrupted))
-            } else {
-                Ok(None)
-            }
-        })
-        .unwrap(),
-        None
+            Err(io::Error::from(io::ErrorKind::Interrupted))
+        }),
+        Ok(None)
     );
-    assert_eq!(polls, 2);
+    assert_eq!(polls, 1);
     assert_eq!(
         poll_child(&mut || Err(io::Error::from(io::ErrorKind::PermissionDenied))),
         Err(MediaError::Io)
     );
-}
-
-#[test]
-fn interrupted_pipe_reads_are_the_only_errors_retried() {
-    assert!(super::retry_interrupted(&io::Error::from(
-        io::ErrorKind::Interrupted
-    )));
-    assert!(!super::retry_interrupted(&io::Error::from(
-        io::ErrorKind::WouldBlock
-    )));
-}
-
-#[test]
-fn child_read_retries_interrupted_calls_and_returns_the_next_result() {
-    let mut calls = 0;
-    assert_eq!(
-        super::read_retry_interrupted(|| {
-            calls += 1;
-            if calls == 1 {
-                Err(io::Error::from(io::ErrorKind::Interrupted))
-            } else {
-                Ok(7)
-            }
-        })
-        .unwrap(),
-        7
-    );
-    assert_eq!(calls, 2);
-
-    let mut calls = 0;
-    assert_eq!(
-        super::read_retry_interrupted(|| {
-            calls += 1;
-            Err::<usize, _>(io::Error::from(io::ErrorKind::PermissionDenied))
-        })
-        .unwrap_err()
-        .kind(),
-        io::ErrorKind::PermissionDenied
-    );
-    assert_eq!(calls, 1);
 }
 
 #[test]
@@ -420,20 +493,20 @@ fn stream_yields_output_before_exit_and_reports_failure_after_drain() {
     command.args(["-c", "printf first; sleep 1; printf last"]);
     let mut stream = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
     let mut bytes = [0; 16];
-    assert_eq!(stream.read(&mut bytes, &|| false).unwrap(), 5);
+    assert_eq!(read_bytes(&mut stream, &mut bytes, &|| false).unwrap(), 5);
     assert_eq!(&bytes[..5], b"first");
     assert!(stream.try_wait().unwrap().is_none());
-    assert_eq!(stream.read(&mut bytes, &|| false).unwrap(), 4);
+    assert_eq!(read_bytes(&mut stream, &mut bytes, &|| false).unwrap(), 4);
     assert_eq!(&bytes[..4], b"last");
-    assert_eq!(stream.read(&mut bytes, &|| false).unwrap(), 0);
+    assert_eq!(read_bytes(&mut stream, &mut bytes, &|| false).unwrap(), 0);
 
     let mut command = Command::new("sh");
     command.args(["-c", "printf audio; exit 9"]);
     let mut stream = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
-    assert_eq!(stream.read(&mut bytes, &|| false).unwrap(), 5);
+    assert_eq!(read_bytes(&mut stream, &mut bytes, &|| false).unwrap(), 5);
     assert_eq!(&bytes[..5], b"audio");
     assert_eq!(
-        stream.read(&mut bytes, &|| false),
+        read_bytes(&mut stream, &mut bytes, &|| false),
         Err(MediaError::ProcessFailed)
     );
 }
@@ -441,6 +514,9 @@ fn stream_yields_output_before_exit_and_reports_failure_after_drain() {
 #[test]
 #[cfg(unix)]
 fn eof_waits_for_a_child_that_closed_stdout_before_exiting() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+
     let config = Config {
         #[cfg(file_adapter)]
         ffmpeg: "ffmpeg".into(),
@@ -449,11 +525,21 @@ fn eof_waits_for_a_child_that_closed_stdout_before_exiting() {
         process_timeout: Duration::from_secs(2),
         child_reaper: None,
     };
+    let (mut input, source) = UnixStream::pair().unwrap();
     let mut command = Command::new("sh");
-    command.args(["-c", "exec 1>&-; sleep 0.02; exit 0"]);
+    command
+        .args(["-c", "exec 1>&-; read -r release"])
+        .stdin(Stdio::from(OwnedFd::from(source)));
     let mut stream = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
 
-    assert_eq!(stream.read(&mut [0; 1], &|| false), Ok(0));
+    while !stream.stdout_eof {
+        assert_eq!(stream.read(&mut [0; 1], &|| false), Ok(None));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(stream.read(&mut [0; 1], &|| false), Ok(None));
+    assert!(stream.try_wait().unwrap().is_none());
+    input.write_all(b"done\n").unwrap();
+    assert_eq!(read_bytes(&mut stream, &mut [0; 1], &|| false), Ok(0));
     assert!(stream.try_wait().unwrap().is_some());
 }
 
@@ -476,7 +562,8 @@ fn stream_cancellation_and_deadline_kill_and_reap_the_owned_child() {
     let cancelled = AtomicBool::new(true);
     let mut byte = [0];
     assert_eq!(
-        stream.read(&mut byte, &|| cancelled.load(Ordering::Relaxed)),
+        read_bytes(&mut stream, &mut byte, &|| cancelled
+            .load(Ordering::Relaxed)),
         Err(MediaError::Cancelled)
     );
     drop(stream);
@@ -491,7 +578,10 @@ fn stream_cancellation_and_deadline_kill_and_reap_the_owned_child() {
     let mut stream = ChildStream::spawn(&timed, &mut command, None, &|| false).unwrap();
     let pid = stream.id();
     std::thread::sleep(Duration::from_millis(20));
-    assert_eq!(stream.read(&mut byte, &|| false), Err(MediaError::TimedOut));
+    assert_eq!(
+        read_bytes(&mut stream, &mut byte, &|| false),
+        Err(MediaError::TimedOut)
+    );
     drop(stream);
     assert!(!Path::new("/proc").join(pid.to_string()).exists());
 }
@@ -513,14 +603,14 @@ fn child_stream_handles_pre_cancelled_spawn_stdin_failure_and_cached_exit() {
     ));
     let mut command = Command::new("cat");
     let mut empty = ChildStream::spawn(&config, &mut command, Some(&[]), &|| false).unwrap();
-    assert_eq!(empty.read(&mut [0; 8], &|| false), Ok(0));
+    assert_eq!(read_bytes(&mut empty, &mut [0; 8], &|| false), Ok(0));
 
     let mut command = Command::new("sh");
     command.args(["-c", "exec 0<&-; exec sleep 1"]);
     let mut stream =
         ChildStream::spawn(&config, &mut command, Some(&vec![0; 1_000_000]), &|| false).unwrap();
     assert!(matches!(
-        stream.read(&mut [0; 8], &|| false),
+        read_bytes(&mut stream, &mut [0; 8], &|| false),
         Err(MediaError::Io)
     ));
     drop(stream);
@@ -604,6 +694,7 @@ fn read_reports_a_child_without_a_stdout_pipe() {
         started: Instant::now(),
         timeout: config.process_timeout,
         status: None,
+        stdout_eof: false,
     };
     assert_eq!(stream.read(&mut [0], &|| false), Err(MediaError::Io));
 }

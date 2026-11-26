@@ -1,11 +1,12 @@
 # Runtime composition
 
-`Runtime<A, C>` is the serialized application owner. `reload` resolves the whole
-`ConfigDocument`, prepares controller media, command maps, event templates/macros,
-and permanent/replacement routes before touching a published generation. Failed
-preparation keeps the old revision. Changed devices quiesce with callback entry
-gated; an activation failure restores every already-changed lease in reverse
-order. Failed restoration leaves the affected node gated and observable.
+`Runtime<A, C>` is the serialized application owner. `prepare_configuration`
+stages an immutable `RuntimeConfiguration` resolved from registered JSON resources.
+It prepares station media, command profiles, calendar owners and configured link
+routes before publication. `adopt_configuration` checks the active revision and
+generation and submits the candidate to the device handoff. Changed devices
+quiesce with callback entry gated. Activation failure restores changed leases
+in reverse order. Failed restoration leaves the affected station gated and observable.
 
 `A` is unique TX-owned prepared adapter/link state. `C` is its control-owned
 dispatcher/lifecycle state. Preparation must not start or redirect live users.
@@ -41,11 +42,11 @@ windows before resuming retries. A returned `Detach` must stop/join the named
 peer and call `peer_detached`; configured replacement attachment remains gated
 until that acknowledgment. `take_effects` uses the same rule for reload removals.
 
-For events, `next_event` snapshots the trigger minute, `queue_event` admits its
-message exactly once, `event_command` validates the reservation before applying
-its macro, and `complete_event` settles it. Queue rejection leaves it pending;
-stale dispatches cannot synthesize or enqueue. Full-status RF speech remains the
-short direct-link report; `topology` supplies the separate operator diagnostic.
+The registered calendar tracks each event boundary and its macro on the station.
+`advance_commands` offers eligible work, checks its generation and returns the
+next domain effect with a receipt. The host settles that receipt after admission.
+Full-status RF speech uses the direct-link report. `topology` supplies the
+separate operator diagnostic.
 
 Actual Asterisk channel/task/ticker registration, artifact/SONAME installation,
 same-PID reload/unload, and the native platform coverage gate remain integration

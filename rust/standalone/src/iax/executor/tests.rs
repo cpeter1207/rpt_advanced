@@ -159,9 +159,12 @@ fn ordinary_executor_accepts_the_complete_released_prefix_without_private_jitter
         + std::mem::size_of_val(&api.peer_set_deadline);
     api.struct_size = end as u32;
     // Borrow exactly the released extent; the private setter slots are absent.
-    let prefix = unsafe { std::slice::from_raw_parts(std::ptr::from_ref(&api).cast::<u8>(), end) }.to_vec();
-    assert!(unsafe { valid_descriptor(prefix.as_ptr().cast()) },
-        "ordinary executor must admit the released deadline prefix");
+    let prefix =
+        unsafe { std::slice::from_raw_parts(std::ptr::from_ref(&api).cast::<u8>(), end) }.to_vec();
+    assert!(
+        unsafe { valid_descriptor(prefix.as_ptr().cast()) },
+        "ordinary executor must admit the released deadline prefix"
+    );
     api.struct_size -= 1;
     assert!(!unsafe { valid_descriptor(std::ptr::from_ref(&api).cast()) });
 }

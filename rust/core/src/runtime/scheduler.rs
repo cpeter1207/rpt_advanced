@@ -3,7 +3,8 @@
 #[path = "calendar.rs"]
 mod calendar;
 pub use calendar::{
-    BeginDecision, EventOrigin, EventTicket, EventWork, MacroAdmission, ReceiveActivity,
+    BeginDecision, CalendarObservation, EventOrigin, EventTerminals, EventTicket, EventWork,
+    MacroAdmission, ReceiveActivity,
 };
 
 use crate::{
@@ -52,6 +53,7 @@ pub struct DispatchContent {
 struct Occurrence {
     key: u64,
     civil: CivilTime,
+    #[cfg(test)]
     due_ms: i128,
     media: Option<Arc<MessageOccurrence>>,
 }
@@ -76,10 +78,12 @@ pub struct ScheduledDispatch {
 }
 impl ScheduledDispatch {
     /// One control/audio identity, retained without allocating on the callback.
+    #[cfg(test)]
     pub(crate) fn occurrence(&self) -> Option<Arc<MessageOccurrence>> {
         self.occurrence.media.clone()
     }
     /// Original scheduled minute in the host monotonic epoch, retained across retries.
+    #[cfg(test)]
     pub(crate) fn due_ms(&self) -> i128 {
         self.occurrence.due_ms
     }
@@ -167,7 +171,7 @@ impl EventScheduler {
     pub fn next(
         &mut self,
         captured_time: i64,
-        scheduled_ms: i128,
+        _scheduled_ms: i128,
         local: CivilTime,
         mut render: impl FnMut(&EventSpec, &CivilTime) -> Result<DispatchContent, SchedulerError>,
     ) -> Result<Option<ScheduledDispatch>, SchedulerError> {
@@ -204,7 +208,8 @@ impl EventScheduler {
                         event.ready = Some(Occurrence {
                             key,
                             civil: local,
-                            due_ms: scheduled_ms,
+                            #[cfg(test)]
+                            due_ms: _scheduled_ms,
                             media: event
                                 .spec
                                 .media

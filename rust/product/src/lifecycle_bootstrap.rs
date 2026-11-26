@@ -167,7 +167,7 @@ fn check(bytes: &[u8]) -> Result<crate::management::PreparedConfiguration, Runti
 /// The caller owns every descriptor and all code and contexts reachable from them through
 /// successful stop. The input is a readable JSON span for this synchronous call.
 unsafe extern "C" fn start_management(
-    host: *const abi::rptadv_host_services_v10,
+    host: *const abi::rptadv_host_services_v11,
     control: *const ControlDescriptor,
     file: *const FileDescriptor,
     speech: *const SpeechDescriptor,
@@ -255,7 +255,7 @@ static MANAGEMENT_DESCRIPTOR: abi::rptadv_product_management_v1 =
         start: Some(start_management),
     };
 
-/// Return immutable management startup metadata. The legacy product table retains its original size.
+/// Return immutable management startup metadata. The managed owner uses the matched product lifecycle table.
 #[unsafe(no_mangle)]
 pub extern "C" fn rptadv_product_management_descriptor_v1()
 -> *const abi::rptadv_product_management_v1 {

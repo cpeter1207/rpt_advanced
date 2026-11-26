@@ -1,5 +1,11 @@
 //! Real site handoff and shutdown policy with delayed hardware acknowledgments.
 use super::*;
+use crate::{
+    fixture::station::{self, LOCAL},
+    management::PreparedConfiguration,
+};
+use rpt_advanced_core::config::resources::candidate::ResourceKind as Kind;
+use serde_json::json;
 use std::sync::{Weak, atomic::AtomicUsize};
 
 struct Bank {
@@ -43,9 +49,9 @@ pub(crate) fn site_bank_sample(owner: &str, time: u64, quality: u32) -> (usize, 
 }
 
 static REJECT_AFTER: AtomicUsize = AtomicUsize::new(0);
-static CLOSE_AFTER: Mutex<Option<(usize, Weak<Engine>)>> = Mutex::new(None);
+static CLOSE_AFTER: Mutex<Option<(String, Weak<Engine>)>> = Mutex::new(None);
 
-pub(crate) fn install_delayed_site_bank(host: &mut abi::rptadv_host_services_v10) {
+pub(crate) fn install_delayed_site_bank(host: &mut abi::rptadv_host_services_v11) {
     let mut bank = BANK.lock().unwrap();
     bank.generation = 7;
     bank.mask = 0;
@@ -157,29 +163,36 @@ unsafe extern "C" fn submit(context: *mut c_void, task: abi::rptadv_control_task
     {
         return -1;
     }
-    let close = {
-        let mut pending = CLOSE_AFTER.lock().unwrap();
-        if let Some((remaining, _)) = pending.as_mut() {
-            *remaining -= 1;
-        }
-        if pending
-            .as_ref()
-            .is_some_and(|(remaining, _)| *remaining == 0)
-        {
-            pending.take().and_then(|(_, engine)| engine.upgrade())
-        } else {
-            None
-        }
-    };
     let result = unsafe { (*crate::fixture::control_descriptor()).submit.unwrap()(context, task) };
-    if let Some(engine) = close {
+    let mut checkpoint = CLOSE_AFTER.lock().unwrap();
+    if let Some((revision, observed)) = checkpoint.as_ref()
+        && let Some(engine) = observed.upgrade()
+        && engine.host.try_lock().is_ok_and(|host| {
+            host.as_ref()
+                .is_some_and(|host| host.modular_revision_matches(revision))
+        })
+    {
         engine.accepting.store(false, Ordering::Release);
+        checkpoint.take();
     }
     result
 }
 
-fn start(configuration: &str) -> Arc<Engine> {
-    assert_eq!(rptadv_product_stop(), 0);
+fn site_config(relay: bool) -> PreparedConfiguration {
+    let mut rows = vec![(
+        LOCAL,
+        Kind::Interface,
+        "",
+        json!({"audio":{"device_identifier":"3-1"},"gpio":{"wiring_profile":"dudeusb","pins":{"7":"out0"}}}),
+    )];
+    if relay {
+        rows.push((LOCAL,Kind::Output,"relay",json!({"enabled":true,"source":{"type":"interface","node":"1000","property":"/gpio/pins/7"},"startup_state":"on","safe_state":"off"})));
+    }
+    station::prepare(&[(LOCAL, "1000", json!({}))], &rows)
+}
+fn start(configuration: PreparedConfiguration) -> Arc<Engine> {
+    assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
+    *OBSERVED.lock().unwrap() = None;
     *BANK.lock().unwrap() = Bank {
         generation: 7,
         mask: 0,
@@ -194,22 +207,14 @@ fn start(configuration: &str) -> Arc<Engine> {
     host.radio_site_snapshot = Some(snapshot);
     let mut control = unsafe { crate::fixture::control_descriptor().read() };
     control.submit = Some(submit);
-    assert_eq!(
-        unsafe {
-            rptadv_product_start(
-                Box::leak(Box::new(host)),
-                Box::leak(Box::new(control)),
-                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
-                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
-                configuration.as_ptr().cast(),
-                configuration.len(),
-            )
-        },
-        0
-    );
-    let (engine, call) = selected().unwrap();
-    drop(call);
-    engine
+    unsafe {
+        crate::lifecycle::tests::fixture_engine(
+            configuration,
+            Box::leak(Box::new(host)),
+            Box::leak(Box::new(control)),
+        )
+    }
+    .unwrap()
 }
 
 #[test]
@@ -217,11 +222,7 @@ fn site_handoff_timeout_keeps_ownership_until_delayed_safe_service() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let engine = start(
-        "[1000]\nradio_channel=usb\nduplex=full\n\
-         [output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\n\
-         line=7\nstartup_state=on\nsafe_state=off\n",
-    );
+    let engine = start(site_config(true));
     engine
         .run(|host| {
             host.poll_sites(0);
@@ -250,7 +251,7 @@ fn site_handoff_timeout_keeps_ownership_until_delayed_safe_service() {
     assert_eq!(bank.mask, 0);
     assert_eq!(bank.high, 0);
     drop(bank);
-    assert_eq!(rptadv_product_stop(), 0);
+    assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
 }
 
 #[test]
@@ -258,11 +259,7 @@ fn site_shutdown_retries_pending_safe_service_before_releasing_the_owner() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let engine = start(
-        "[1000]\nradio_channel=usb\nduplex=full\n\
-         [output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\n\
-         line=7\nstartup_state=on\nsafe_state=off\n",
-    );
+    let engine = start(site_config(true));
     engine
         .run(|host| {
             host.poll_sites(0);
@@ -273,7 +270,7 @@ fn site_shutdown_retries_pending_safe_service_before_releasing_the_owner() {
     BANK.lock().unwrap().hold = 3;
     assert!(engine.stop_sites_until(Instant::now() + Duration::from_secs(1)));
     assert_eq!(BANK.lock().unwrap().mask, 0);
-    assert_eq!(rptadv_product_stop(), 0);
+    assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
 }
 
 #[test]
@@ -281,15 +278,27 @@ fn site_reload_publication_survives_concurrent_admission_close() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
-    let candidate = document("[1000]\nradio_channel=usb\nduplex=full\nhangtime_ms=123\n").unwrap();
+    let engine = start(site_config(false));
     let before = engine.revision.load(Ordering::Acquire);
-    // Basis, begin, barrier and publication are separate serialized tasks.
-    *CLOSE_AFTER.lock().unwrap() = Some((4, Arc::downgrade(&engine)));
-    assert_eq!(engine.reload_configuration(candidate), Ok(()));
+    let revision = format!("edit-{before}");
+    *CLOSE_AFTER.lock().unwrap() = Some((revision.clone(), Arc::downgrade(&engine)));
+    let outcome = crate::lifecycle::tests::reload(&engine, site_config(true));
+    // The core reached publication before admission closed. Final confirmation must
+    // report the loss of admission and cannot undo the already-selected site.
+    assert!(outcome.is_err());
+    assert!(CLOSE_AFTER.lock().unwrap().is_none());
+    assert!(
+        engine
+            .host
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .modular_revision_matches(&revision)
+    );
     assert!(!engine.accepting.load(Ordering::Acquire));
     assert_eq!(engine.revision.load(Ordering::Acquire), before + 1);
-    assert_eq!(rptadv_product_stop(), 0);
+    assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
 }
 
 #[test]
@@ -297,7 +306,7 @@ fn site_cleanup_submission_failure_is_observable_without_changing_digit_policy()
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    let engine = start(site_config(false));
     crate::fixture::SCHEDULER_NOTICES.lock().unwrap().clear();
     REJECT_AFTER.store(1, Ordering::Release);
     let result = engine.site_control(|_| ());
@@ -305,7 +314,7 @@ fn site_cleanup_submission_failure_is_observable_without_changing_digit_policy()
     let mut status = String::new();
     engine.health.status(&mut status);
     let notices = crate::fixture::SCHEDULER_NOTICES.lock().unwrap().clone();
-    assert_eq!(rptadv_product_stop(), 0);
+    assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
     assert_eq!(result, Err(RuntimeError::Rejected));
     assert!(!lost_digits);
     assert!(status.contains("submission_failures=1"), "{status}");
@@ -317,10 +326,10 @@ fn rejected_final_host_stop_retains_host_after_site_cleanup() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    let engine = start(site_config(false));
     // Site cleanup must succeed before rejecting the final Host stop task.
     REJECT_AFTER.store(2, Ordering::Release);
     assert!(!engine.stop());
     assert!(engine.host.lock().unwrap().is_some());
-    assert_eq!(rptadv_product_stop(), 0);
+    assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
 }

@@ -75,8 +75,13 @@ pub enum SiteEffect {
     },
     /// Existing validated controller action macro.
     Macro(String),
-    /// Named local-only message queued through ordinary telemetry admission.
-    Message(String),
+    /// Local-only notification queued from this alarm's compiled transition recipe.
+    Message {
+        /// Exact configured alarm name.
+        alarm: String,
+        /// Transition that selected the message.
+        event: AlarmEvent,
+    },
     /// A requested policy action could not be applied; later actions still run.
     Fault {
         /// Action source whose request failed.
@@ -470,14 +475,15 @@ impl SiteController {
     ) {
         let policy = &self.settings.alarms[index];
         let (actions, message) = match event {
-            AlarmEvent::Trip => (policy.on_trip.clone(), policy.trip_message.clone()),
-            AlarmEvent::Clear => (policy.on_clear.clone(), policy.clear_message.clone()),
-            AlarmEvent::Repeat => (Vec::new(), policy.repeat_message.clone()),
+            AlarmEvent::Trip => (policy.on_trip.clone(), &policy.trip_message),
+            AlarmEvent::Clear => (policy.on_clear.clone(), &policy.clear_message),
+            AlarmEvent::Repeat => (Vec::new(), &policy.repeat_message),
         };
-        let source = format!("alarm:{}", policy.name);
-        self.actions(&source, &actions, now_ms, effects);
-        if !message.is_empty() {
-            effects.push(SiteEffect::Message(message));
+        let alarm = policy.name.clone();
+        let notify = !message.is_empty();
+        self.actions(&format!("alarm:{alarm}"), &actions, now_ms, effects);
+        if notify {
+            effects.push(SiteEffect::Message { alarm, event });
         }
     }
     fn actions(

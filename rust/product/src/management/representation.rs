@@ -175,6 +175,7 @@ impl Api {
                 if !self.routes.values().any(|r| r.relation() == name)
                     && ![
                         "start-macro",
+                        "lease",
                         "end-macro",
                         "warning-macro",
                         "site",
@@ -309,6 +310,11 @@ impl Api {
                         links["rpt:source"] = self.href(&source);
                     }
                 }
+                if r.target == Target::Metadata
+                    && let Some(port) = p.port
+                {
+                    links["rpt:maintenance"] = self.href(&format!("/maintenance/ports/{port}/"));
+                }
                 links["rpt:changes"] = self.href("/changes/");
                 if r.view == Some(View::Configuration) {
                     links["rpt:effective"] =
@@ -323,7 +329,29 @@ impl Api {
                         links.as_object_mut().expect("links").remove("rpt:status");
                     }
                 }
-                if let Target::Collection(kind) = r.target {
+                if matches!(r.target, Target::Peers | Target::Calls) {
+                    let port = p.port.ok_or(Fault::Missing)?;
+                    let (offset, limit) = page.unwrap_or((0, 20));
+                    let (items, more) = live.domain.page(port, r.target, offset, limit);
+                    body["_embedded"] = json!({"item": items});
+                    links["canonical"] = self.href(relative);
+                    if page.is_some() {
+                        links["self"] =
+                            self.href(&format!("{relative}?offset={offset}&limit={limit}"));
+                    }
+                    if more {
+                        links["next"] = self.href(&format!(
+                            "{relative}?offset={}&limit={limit}",
+                            offset.saturating_add(limit)
+                        ));
+                    }
+                    if offset > 0 {
+                        links["prev"] = self.href(&format!(
+                            "{relative}?offset={}&limit={limit}",
+                            offset.saturating_sub(limit)
+                        ));
+                    }
+                } else if let Target::Collection(kind) = r.target {
                     let ids = routes::members(&snapshot.registry, scope, kind, r.view);
                     let items: Vec<_> = ids
                         .iter()
@@ -366,7 +394,10 @@ impl Api {
                     body["meta"]["credentials"] = json!(values);
                     body["meta"]["secrets_state"] = json!(snapshot.secrets_state);
                 } else if r.view == Some(View::Status) {
-                    body["status"] = json!({"active_revision":live.active_revision,"owner_generation":binding.and_then(|id|live.owners.get(&id))});
+                    let mut status = live.domain.fields(scope, binding, r.target);
+                    status["active_revision"] = json!(live.active_revision);
+                    status["owner_generation"] = json!(p.port.and_then(|id| live.owners.get(&id)));
+                    body["status"] = status;
                 } else {
                     let projections = &snapshot
                         .views
@@ -469,6 +500,9 @@ impl Api {
                     && let Ok(projections) = &snapshot.views.result
                     && let Some(event) = projections.public.event_links.get(&(scope, id))
                 {
+                    if r.view == Some(View::Effective) && !event.timezones.is_empty() {
+                        body["meta"]["timezones"] = json!(event.timezones);
+                    }
                     let macro_link =
                         |b: &rpt_advanced_core::config::resources::candidate::ResourceBinding| {
                             let scope = match b.scope {

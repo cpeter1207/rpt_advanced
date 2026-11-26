@@ -39,12 +39,27 @@ def test_standalone_package_is_independent_from_asterisk_adapter() -> None:
     assert "${asterisk:depends}" in adapter
 
 
+def test_operator_cli_installs_independently_from_radio_hosts() -> None:
+    stanzas = package_stanzas()
+    assert "rpt-advanced-cli" in stanzas, "operator CLI needs a separate Debian package"
+    deps = depends(stanzas["rpt-advanced-cli"])
+    assert all(
+        name not in deps
+        for name in ("asterisk", "librptadv", "usbradioplus", "rpt-advanced")
+    )
+    files = (ROOT / "debian/rpt-advanced-cli.install").read_text().splitlines()
+    assert files == ["usr/bin/rpt-advanced-cli"]
+    for other in (ROOT / "debian").glob("*.install"):
+        if other.name != "rpt-advanced-cli.install":
+            assert "usr/bin/rpt-advanced-cli" not in other.read_text().splitlines()
+
+
 def test_each_install_set_contains_only_its_entrypoint() -> None:
     standalone = (ROOT / "debian/rpt-advanced.install").read_text().splitlines()
     adapter = (ROOT / "debian/app-rpt-advanced.install").read_text().splitlines()
 
     assert "usr/bin/rpt-advanced" in standalone
-    sip = "usr/lib/*/rpt_advanced/librptadv_sip_adapter.so.1"
+    sip = "usr/lib/*/rpt_advanced/librptadv_sip_adapter.so.2"
     assert sip in standalone and sip not in adapter
     assert not any(
         "asterisk/modules/app_rpt_advanced.so" in item for item in standalone
@@ -73,7 +88,7 @@ def test_either_host_installs_the_dynamically_loaded_echolink_runtime() -> None:
     stanzas = package_stanzas()
     for host in ("rpt-advanced", "app-rpt-advanced"):
         assert "librptadvecholink1 (>= 0.1.0~alpha1)" in depends(stanzas[host])
-    assert "librptadvecholink" not in depends(stanzas["librptadv-product2"])
+    assert "librptadvecholink" not in depends(stanzas["librptadv-product3"])
 
 
 def test_radio_product_dependency_does_not_require_the_asterisk_integration() -> None:
@@ -84,14 +99,14 @@ def test_radio_product_dependency_does_not_require_the_asterisk_integration() ->
     standalone = depends(stanzas["rpt-advanced"])
     assert "libusbradioplus-product1 (>= 0.1.0~alpha38-1)" in standalone
     assert "usbradioplus" not in standalone.replace("libusbradioplus-product1", "")
-    for package in ("app-rpt-advanced", "librptadv-product2"):
+    for package in ("app-rpt-advanced", "librptadv-product3"):
         assert "usbradioplus" not in depends(stanzas[package]).replace(
             "libusbradioplus-product1", ""
         )
         assert "librptadv-resolver-adapter1" not in depends(stanzas[package])
         assert "librptadv-jitter-adapter1" not in depends(stanzas[package])
     assert "libusbradioplus-product1 (>= 0.1.0~alpha38-1)" in depends(
-        stanzas["librptadv-product2"]
+        stanzas["librptadv-product3"]
     )
     assert "libusbradioplus-product-dev (>= 0.1.0~alpha38-1)" in depends(
         stanzas["librptadv-product-dev"]
@@ -155,7 +170,7 @@ def test_site_packages_are_optional_and_separately_installable() -> None:
         assert f"{runtime} (= ${{binary:version}})" in depends(
             stanzas[f"librptadv-{name}-adapter-dev"]
         )
-        for entry in ("rpt-advanced", "app-rpt-advanced", "librptadv-product2"):
+        for entry in ("rpt-advanced", "app-rpt-advanced", "librptadv-product3"):
             assert runtime not in depends(stanzas[entry])
         assert (ROOT / f"debian/{runtime}.install").read_text().splitlines() == [
             f"usr/lib/*/rpt_advanced/librptadv_{name}_adapter.so.1*"
@@ -182,6 +197,7 @@ def test_standalone_build_profile_excludes_asterisk_adapter_packages() -> None:
 if __name__ == "__main__":
     tests = (
         test_standalone_package_is_independent_from_asterisk_adapter,
+        test_operator_cli_installs_independently_from_radio_hosts,
         test_each_install_set_contains_only_its_entrypoint,
         test_standalone_package_declares_its_native_runtime_providers,
         test_either_host_installs_the_dynamically_loaded_echolink_runtime,

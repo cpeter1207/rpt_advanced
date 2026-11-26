@@ -1,6 +1,8 @@
 //! Authenticated desired state is adopted by the actual checked product executor.
 use super::*;
 use crate::{fixture, lifecycle::Engine, management::native::NativeRuntime};
+#[path = "maintenance_session.rs"]
+mod maintenance_session;
 
 struct ConfirmationProbe {
     engine: std::sync::Weak<Engine>,
@@ -88,6 +90,9 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
     host.context = std::ptr::from_ref(&counters).cast_mut().cast();
     host.station_binding = &binding;
     host.radio_quiesce = Some(quiesce);
+    if case == "native-maintenance-session" {
+        host.radio_control = Some(maintenance_session::control);
+    }
     if review_radio
         || matches!(
             case,
@@ -120,7 +125,7 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
         )
     }
     .unwrap();
-    if two_live || case == "native-reopen" {
+    if two_live || matches!(case, "native-reopen" | "native-maintenance-session") {
         engine.start_fixture_ticker();
     }
     let runtime = Arc::new(NativeRuntime::new(Arc::clone(&engine)));
@@ -134,407 +139,575 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
     .unwrap();
     let client = scenario.client;
     let stopping = AtomicBool::new(false);
-    let mut exercise = || thread::scope(|scope| {
-        scope.spawn(|| {
-            while !stopping.load(Ordering::Acquire) {
-                if !coordinator.poll_listener(scenario.listener, scenario.inbox) {
-                    thread::sleep(Duration::from_millis(1));
+    let mut exercise = || {
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stopping.load(Ordering::Acquire) {
+                    if !coordinator.poll_listener(scenario.listener, scenario.inbox) {
+                        thread::sleep(Duration::from_millis(1));
+                    }
                 }
-            }
-        });
-        let _stop = Stop(&stopping);
-        let opens = fixture::RADIO_OPENS.load(Ordering::Acquire);
-        let health = client.get("/api/v1/health/").body;
-        assert_eq!(health["status"]["desired_revision"], "first");
-        assert!(health["status"]["active_revision"].is_null());
-        assert!(runtime.observed().active_revision.is_none());
-
-        let submitted = operation(
-            client,
-            json!({"submitted":true,
-            "action":{"action":"apply_configuration"},"desired_etag":client.etag(DESIRED)}),
-        );
-        assert!((200..300).contains(&submitted.code), "{}", submitted.body);
-        client.ready();
-        let site_name = || {
-            engine
-                .run(|host| {
-                    let configuration = host
-                        .runtime
-                        .modular_configuration()
-                        .ok_or(rpt_advanced_core::runtime::RuntimeError::MissingNode)?;
-                    let site = ResourceScope::Site(configuration.registry.site_id());
-                    assert!(host.runtime.node_names().is_empty());
-                    Ok(configuration.scopes[&site].metadata.name.clone())
-                })
-                .unwrap()
-        };
-        assert_eq!(site_name(), "first");
-        put(
-            client,
-            SITE_PATH,
-            json!({"name":"Second real owner","inherit_from":null}),
-        );
-        assert_eq!(site_name(), "Second real owner");
-        assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opens);
-
-        if matches!(case, "native-site-alarm-zero" | "native-site-action-fault") {
-            automatic_site_alarm(client, &engine, case, None);
-            return;
-        }
-        if case == "native-site-zero" {
-            shared_site_without_radios(client, &engine, opens);
-            return;
-        }
-
-        let resource = port(client);
-        let port_id: rpt_advanced_core::config::resources::candidate::ResourceId = resource
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-        if review_radio
-            || matches!(
-                case,
-                "native-stop"
-                    | "native-reopen"
-                    | "native-two-live"
-                    | "native-site-views"
-                    | "native-site-fence"
-                    | "native-site-fault-reload"
-                    | "native-confirm"
-                    | "native-confirm-failure"
-                    | "native-local"
-                    | "native-bookkeeping"
-                    | "native-repair"
-                    | "native-new-fault"
-            )
-        {
-            put(
-                client,
-                &format!("{resource}radio/"),
-                json!({"duplex_mode":"full"}),
-            );
-        }
-        let output_a = fixture::watch_output(&port_id.to_string());
-        let other = if two_live || case == "native-local" {
-            let key = if shared_views {
-                "selected radio"
-            } else {
-                "second"
-            };
-            let other=edit(client,"POST",PORTS,json!({"key":key,"configuration":{"name":"B","inherit_from":"site","enabled":false}})).headers["location"].clone();
-            put(
-                client,
-                &format!("{other}interface/"),
-                if shared_views {
-                    json!({"audio":{"device_identifier":"hw:other"},"gpio":{"pins":{"7":"out0","8":"in"}}})
-                } else {
-                    json!({"audio":{"device_identifier":"hw:other"}})
-                },
-            );
-            if two_live {
-                put(
-                    client,
-                    &format!("{other}radio/"),
-                    json!({"duplex_mode":"full"}),
-                );
-            }
-            Some(other)
-        } else {
-            None
-        };
-        *counters.port.lock().unwrap() = Some(port_id);
-        let enable = json!({"configuration":{"name":"Radio","inherit_from":"site","enabled":true}});
-        let disabled = runtime.observed().active_revision.unwrap();
-        let old_tag = client.etag(DESIRED);
-        // Exact selection with neither a device identifier nor a USB serial is
-        // an invalid stopped provider request, before selector publication.
-        let invalid = client.edit("PUT", &resource, Some(&enable));
-        assert_eq!(invalid.code, 503, "{}", invalid.body);
-        assert_eq!(client.etag(DESIRED), old_tag);
-        assert_eq!(
-            runtime.observed().active_revision.as_deref(),
-            Some(disabled.as_str())
-        );
-        assert_eq!(counters.prepared.load(Ordering::Acquire), 0);
-        put(
-            client,
-            &format!("{resource}interface/"),
-            if case == "native-stop" {
-                json!({"audio":{"device_identifier":"hw:fixture"},"gpio":{"pins":{"7":"out0"}}})
-            } else {
-                json!({"audio":{"device_identifier":"hw:fixture"}})
-            },
-        );
-        let old = runtime.observed().active_revision.unwrap();
-        let before_plans = counters.prepared.load(Ordering::Acquire);
-        REJECT_RESUME.store(case == "native-site-resume-uncertain", Ordering::Release);
-        let attempt = client.edit("PUT", &resource, Some(&enable));
-        assert!((200..300).contains(&attempt.code), "{}", attempt.body);
-        let deadline = Instant::now() + Duration::from_secs(8);
-        loop {
+            });
+            let _stop = Stop(&stopping);
+            let opens = fixture::RADIO_OPENS.load(Ordering::Acquire);
             let health = client.get("/api/v1/health/").body;
-            let state = &health["status"];
-            if case == "native-site-resume-uncertain"
-                && state["desired_revision"] == attempt.body["desired_revision"]
-                && matches!(state["historical_activation"].as_str(), Some("failed" | "recovery_required")) {
-                assert!(!REJECT_RESUME.load(Ordering::Acquire), "resume rejection was never exercised");
-                assert_eq!(counters.refused.load(Ordering::Acquire), 1, "station open must fail first");
-                assert_eq!(state["last_known_good"], old);
-                assert_eq!(state["historical_activation"], "recovery_required",
-                    "a known radio rollback cannot confirm a rejected site-resume submission");
-                assert!(state["active_revision"].is_null());
+            assert_eq!(health["status"]["desired_revision"], "first");
+            assert!(health["status"]["active_revision"].is_null());
+            assert!(runtime.observed().active_revision.is_none());
+
+            let submitted = operation(
+                client,
+                json!({"submitted":true,
+            "action":{"action":"apply_configuration"},"desired_etag":client.etag(DESIRED)}),
+            );
+            assert!((200..300).contains(&submitted.code), "{}", submitted.body);
+            client.ready();
+            let site_name = || {
+                engine
+                    .run(|host| {
+                        let configuration = host
+                            .runtime
+                            .modular_configuration()
+                            .ok_or(rpt_advanced_core::runtime::RuntimeError::MissingNode)?;
+                        let site = ResourceScope::Site(configuration.registry.site_id());
+                        assert!(host.runtime.node_names().is_empty());
+                        Ok(configuration.scopes[&site].metadata.name.clone())
+                    })
+                    .unwrap()
+            };
+            assert_eq!(site_name(), "first");
+            put(
+                client,
+                SITE_PATH,
+                json!({"name":"Second real owner","inherit_from":null}),
+            );
+            assert_eq!(site_name(), "Second real owner");
+            assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opens);
+
+            if matches!(case, "native-site-alarm-zero" | "native-site-action-fault") {
+                automatic_site_alarm(client, &engine, case, None);
                 return;
             }
-            if case != "native-site-resume-uncertain" && state["historical_activation"] == "failed" {
-                assert_eq!(state["active_revision"], old);
-                assert_eq!(state["last_known_good"], old);
-                assert_ne!(state["desired_revision"], old);
-                break;
+            if case == "native-site-zero" {
+                shared_site_without_radios(client, &engine, opens);
+                return;
             }
-            assert!(
-                Instant::now() < deadline,
-                "radio failure was never confirmed"
-            );
-            thread::sleep(Duration::from_millis(4));
-        }
-        assert_eq!(counters.prepared.load(Ordering::Acquire), before_plans + 1);
-        assert_eq!(counters.refused.load(Ordering::Acquire), 1);
-        assert_eq!(counters.released.load(Ordering::Acquire), before_plans + 1);
-        assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opens);
-        assert_eq!(
-            runtime.observed().active_revision.as_deref(),
-            Some(old.as_str())
-        );
 
-        // Reapply the same selected plan after the test physical owner becomes available.
-        // No working edit, implicit creation or special runtime activation entry.
-        counters.allow_open.store(true, Ordering::Release);
-        if matches!(
-            case,
-            "native-bookkeeping" | "native-repair" | "native-new-fault"
-        ) {
-            *counters.block_bookkeeping.lock().unwrap() = Some(path.clone());
-        }
-        let reply = operation(
-            client,
-            json!({"submitted":true,"action":{"action":"apply_configuration"},
-            "desired_etag":client.etag(DESIRED)}),
-        );
-        if matches!(
-            case,
-            "native-bookkeeping" | "native-repair" | "native-new-fault"
-        ) {
-            // Make only the selector replacement unwritable in open_prepared, after private
-            // preparation. Restore write permission after the synchronous apply has finished.
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-            let health = client.get("/api/v1/health/").body;
-            assert_eq!(
-                client.get(STORAGE).body["storage"],
-                "storage_fault",
-                "{health}"
-            );
-            if case == "native-bookkeeping" {
-                denied_save(client, &path, "storage_fault");
-                assert_eq!(
-                    health["status"]["active_revision"],
-                    health["status"]["desired_revision"]
-                );
-                assert_ne!(
-                    health["status"]["last_known_good"],
-                    health["status"]["active_revision"]
-                );
-                assert!(runtime.observed().owners.contains_key(&port_id));
-                assert!(matches!(
-                    WorkingFiles::open(&path).unwrap().try_writer_lease(),
-                    Err(CaptureError::Busy)
-                ));
-                fixture::REVIEW_CARRIER.store(true, Ordering::Release);
-                wait_until(|| fixture::REVIEW_CALLBACKS.load(Ordering::Acquire) > 8);
-                assert_eq!(fixture::REVIEW_OUTPUT.load(Ordering::Acquire), 0);
-                assert!(
-                    !runtime.permits_save(health["status"]["desired_revision"].as_str().unwrap())
-                );
-            } else {
-                if case == "native-new-fault" {
-                    *runtime.final_inspection_fixture.lock().unwrap() =
-                        Some(|| fixture_key_available(false));
-                }
-                let repair = operation(
-                    client,
-                    json!({"submitted":true,"action":{"action":"apply_configuration"},"desired_etag":client.etag(DESIRED)}),
-                );
-                if case == "native-new-fault" {
-                    assert!(
-                        matches!(
-                            repair.body["receipt"]["state"].as_str(),
-                            Some("rejected" | "indeterminate")
-                        ) || repair.code >= 400,
-                        "{}",
-                        repair.body
-                    );
-                    let health = client.get("/api/v1/health/").body;
-                    assert_eq!(health["status"]["secrets_state"], "locked", "{health}");
-                    assert!(
-                        !runtime
-                            .permits_save(health["status"]["desired_revision"].as_str().unwrap())
-                    );
-                    fixture_key_available(true);
-                } else {
-                    assert_eq!(
-                        repair.body["receipt"]["state"], "completed",
-                        "{}",
-                        repair.body
-                    );
-                    client.ready();
-                    assert!(
-                        runtime
-                            .permits_save(runtime.observed().active_revision.as_deref().unwrap())
-                    );
-                }
-            }
-            return;
-        }
-        assert!((200..300).contains(&reply.code), "{}", reply.body);
-        client.ready();
-        assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opens + 1);
-        let generation = runtime
-            .observed()
-            .owners
-            .get(&port_id)
-            .copied()
-            .expect("actual registered command owner");
-        assert_ne!(generation, 0);
-        assert_eq!(
-            engine
-                .run(move |host| {
-                    let node = host
-                        .runtime
-                        .node(&port_id.to_string())
-                        .ok_or(rpt_advanced_core::runtime::RuntimeError::MissingNode)?;
-                    Ok(node.command_work().unwrap().id())
-                })
-                .unwrap(),
-            generation
-        );
-        if case == "native-reopen" {
-            fixture::REVIEW_CARRIER.store(true, Ordering::Release);
-            wait_until(|| output_a.value.load(Ordering::Acquire) == 3);
-            let opened = fixture::RADIO_OPENS.load(Ordering::Acquire);
-            let drops = fixture::RADIO_DROPS.load(Ordering::Acquire);
-            counters.stage.store(1, Ordering::Release);
-            let target = format!("{resource}interface/");
-            let reply = client.edit(
-                "PUT",
-                &target,
-                Some(&json!({"configuration":{"audio":{"device_identifier":"hw:reopen"}}})),
-            );
-            assert_eq!(reply.code, 202, "{}", reply.body);
-            wait_until(|| {
-                client.get("/api/v1/health/").body["status"]["historical_activation"]
-                    == "recovery_required"
-            });
-            assert_eq!(counters.stages.load(Ordering::Acquire), 1);
-            assert_eq!(fixture::RADIO_DROPS.load(Ordering::Acquire), drops + 1);
-            wait_for_physical_state(&engine, &port_id.to_string(), true);
-            output_a.value.store(usize::MAX, Ordering::Release);
-            let fixed = operation(
-                client,
-                json!({"submitted":true,"action":{"action":"apply_configuration"},"desired_etag":client.etag(DESIRED)}),
-            );
-            assert_eq!(
-                fixed.body["receipt"]["state"], "completed",
-                "{}",
-                fixed.body
-            );
-            client.ready();
-            assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opened + 1);
-            assert_ne!(runtime.observed().owners[&port_id], generation);
-            assert!(
-                engine
-                    .run(move |host| Ok(host
-                        .runtime
-                        .node(&port_id.to_string())
-                        .unwrap()
-                        .register_audio()
-                        .is_none()))
-                    .unwrap(),
-                "the fresh node must already have registered its unique callback pair"
-            );
-            wait_until(|| output_a.value.load(Ordering::Acquire) == 3);
-            return;
-        }
-        if two_live {
-            let other = other.as_ref().unwrap();
-            let id: rpt_advanced_core::config::resources::candidate::ResourceId = other
+            let resource = port(client);
+            let port_id: rpt_advanced_core::config::resources::candidate::ResourceId = resource
                 .trim_end_matches('/')
                 .rsplit('/')
                 .next()
                 .unwrap()
                 .parse()
                 .unwrap();
-            *counters.other.lock().unwrap() = Some(id);
-            let output_b = fixture::watch_output(&id.to_string());
-            edit(client, "PUT", other, enable.clone());
-            if review_radio {
-                match case {
-                    "native-site-claim-release" | "native-site-output-override" => {
-                        reviewed_fan_claim(client, &resource, &port_id.to_string(), case)
-                    }
-                    "native-site-ptt-silence" => {
-                        selected_callback_silence(client, &engine, &id.to_string(), &output_b)
-                    }
-                    "native-site-alarm-live" => {
-                        automatic_site_alarm(client, &engine, case, Some(&output_b))
-                    }
-                    _ => unreachable!(),
+            if review_radio
+                || matches!(
+                    case,
+                    "native-stop"
+                        | "native-reopen"
+                        | "native-two-live"
+                        | "native-site-views"
+                        | "native-site-fence"
+                        | "native-site-fault-reload"
+                        | "native-confirm"
+                        | "native-confirm-failure"
+                        | "native-local"
+                        | "native-bookkeeping"
+                        | "native-repair"
+                        | "native-new-fault"
+                )
+            {
+                put(
+                    client,
+                    &format!("{resource}radio/"),
+                    json!({"duplex_mode":"full"}),
+                );
+            }
+            let output_a = fixture::watch_output(&port_id.to_string());
+            let other = if two_live || case == "native-local" {
+                let key = if shared_views {
+                    "selected radio"
+                } else {
+                    "second"
+                };
+                let other=edit(client,"POST",PORTS,json!({"key":key,"configuration":{"name":"B","inherit_from":"site","enabled":false}})).headers["location"].clone();
+                put(
+                    client,
+                    &format!("{other}interface/"),
+                    if shared_views {
+                        json!({"audio":{"device_identifier":"hw:other"},"gpio":{"pins":{"7":"out0","8":"in"}}})
+                    } else {
+                        json!({"audio":{"device_identifier":"hw:other"}})
+                    },
+                );
+                if two_live {
+                    put(
+                        client,
+                        &format!("{other}radio/"),
+                        json!({"duplex_mode":"full"}),
+                    );
                 }
-                return;
-            }
-            if case == "native-site-fault-reload" {
-                shared_fan_fault_reload(
-                    client,
-                    &engine,
-                    &resource,
-                    &id.to_string(),
-                    &port_id.to_string(),
-                    opens,
-                );
-                return;
-            }
-            if case == "native-site-fence" {
-                shared_output_fence(
-                    client,
-                    &engine,
-                    (id, &output_b),
-                    (port_id, &output_a),
-                    opens,
-                );
-                return;
-            }
-            if shared_views {
-                let surviving_radio = Arc::clone(&output_b);
-                let (sensor, override_path) = shared_radio_views(
-                    client,
-                    &engine,
-                    &resource,
-                    [(id, output_b), (port_id, output_a)],
-                    opens,
-                );
-                if std::env::var_os("RPTADV_SITE_FOCUS").is_some() {
+                Some(other)
+            } else {
+                None
+            };
+            *counters.port.lock().unwrap() = Some(port_id);
+            let enable =
+                json!({"configuration":{"name":"Radio","inherit_from":"site","enabled":true}});
+            let disabled = runtime.observed().active_revision.unwrap();
+            let old_tag = client.etag(DESIRED);
+            // Exact selection with neither a device identifier nor a USB serial is
+            // an invalid stopped provider request, before selector publication.
+            let invalid = client.edit("PUT", &resource, Some(&enable));
+            assert_eq!(invalid.code, 503, "{}", invalid.body);
+            assert_eq!(client.etag(DESIRED), old_tag);
+            assert_eq!(
+                runtime.observed().active_revision.as_deref(),
+                Some(disabled.as_str())
+            );
+            assert_eq!(counters.prepared.load(Ordering::Acquire), 0);
+            put(
+                client,
+                &format!("{resource}interface/"),
+                if case == "native-stop" {
+                    json!({"audio":{"device_identifier":"hw:fixture"},"gpio":{"pins":{"7":"out0"}}})
+                } else {
+                    json!({"audio":{"device_identifier":"hw:fixture"}})
+                },
+            );
+            let old = runtime.observed().active_revision.unwrap();
+            let before_plans = counters.prepared.load(Ordering::Acquire);
+            REJECT_RESUME.store(case == "native-site-resume-uncertain", Ordering::Release);
+            let attempt = client.edit("PUT", &resource, Some(&enable));
+            assert!((200..300).contains(&attempt.code), "{}", attempt.body);
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let health = client.get("/api/v1/health/").body;
+                let state = &health["status"];
+                if case == "native-site-resume-uncertain"
+                    && state["desired_revision"] == attempt.body["desired_revision"]
+                    && matches!(
+                        state["historical_activation"].as_str(),
+                        Some("failed" | "recovery_required")
+                    )
+                {
+                    assert!(
+                        !REJECT_RESUME.load(Ordering::Acquire),
+                        "resume rejection was never exercised"
+                    );
+                    assert_eq!(
+                        counters.refused.load(Ordering::Acquire),
+                        1,
+                        "station open must fail first"
+                    );
+                    assert_eq!(state["last_known_good"], old);
+                    assert_eq!(
+                        state["historical_activation"], "recovery_required",
+                        "a known radio rollback cannot confirm a rejected site-resume submission"
+                    );
+                    assert!(state["active_revision"].is_null());
                     return;
                 }
-                let original = runtime.observed();
-                let domain = engine
-                    .run(|host| Ok(Arc::clone(host.runtime.modular_configuration().unwrap())))
+                if case != "native-site-resume-uncertain"
+                    && state["historical_activation"] == "failed"
+                {
+                    assert_eq!(state["active_revision"], old);
+                    assert_eq!(state["last_known_good"], old);
+                    assert_ne!(state["desired_revision"], old);
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "radio failure was never confirmed"
+                );
+                thread::sleep(Duration::from_millis(4));
+            }
+            assert_eq!(counters.prepared.load(Ordering::Acquire), before_plans + 1);
+            assert_eq!(counters.refused.load(Ordering::Acquire), 1);
+            assert_eq!(counters.released.load(Ordering::Acquire), before_plans + 1);
+            assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opens);
+            assert_eq!(
+                runtime.observed().active_revision.as_deref(),
+                Some(old.as_str())
+            );
+
+            // Reapply the same selected plan after the test physical owner becomes available.
+            // No working edit, implicit creation or special runtime activation entry.
+            counters.allow_open.store(true, Ordering::Release);
+            if matches!(
+                case,
+                "native-bookkeeping" | "native-repair" | "native-new-fault"
+            ) {
+                *counters.block_bookkeeping.lock().unwrap() = Some(path.clone());
+            }
+            let reply = operation(
+                client,
+                json!({"submitted":true,"action":{"action":"apply_configuration"},
+            "desired_etag":client.etag(DESIRED)}),
+            );
+            if matches!(
+                case,
+                "native-bookkeeping" | "native-repair" | "native-new-fault"
+            ) {
+                // Make only the selector replacement unwritable in open_prepared, after private
+                // preparation. Restore write permission after the synchronous apply has finished.
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+                let health = client.get("/api/v1/health/").body;
+                assert_eq!(
+                    client.get(STORAGE).body["storage"],
+                    "storage_fault",
+                    "{health}"
+                );
+                if case == "native-bookkeeping" {
+                    denied_save(client, &path, "storage_fault");
+                    assert_eq!(
+                        health["status"]["active_revision"],
+                        health["status"]["desired_revision"]
+                    );
+                    assert_ne!(
+                        health["status"]["last_known_good"],
+                        health["status"]["active_revision"]
+                    );
+                    assert!(runtime.observed().owners.contains_key(&port_id));
+                    assert!(matches!(
+                        WorkingFiles::open(&path).unwrap().try_writer_lease(),
+                        Err(CaptureError::Busy)
+                    ));
+                    fixture::REVIEW_CARRIER.store(true, Ordering::Release);
+                    wait_until(|| fixture::REVIEW_CALLBACKS.load(Ordering::Acquire) > 8);
+                    assert_eq!(fixture::REVIEW_OUTPUT.load(Ordering::Acquire), 0);
+                    assert!(
+                        !runtime
+                            .permits_save(health["status"]["desired_revision"].as_str().unwrap())
+                    );
+                } else {
+                    if case == "native-new-fault" {
+                        *runtime.final_inspection_fixture.lock().unwrap() =
+                            Some(|| fixture_key_available(false));
+                    }
+                    let repair = operation(
+                        client,
+                        json!({"submitted":true,"action":{"action":"apply_configuration"},"desired_etag":client.etag(DESIRED)}),
+                    );
+                    if case == "native-new-fault" {
+                        assert!(
+                            matches!(
+                                repair.body["receipt"]["state"].as_str(),
+                                Some("rejected" | "indeterminate")
+                            ) || repair.code >= 400,
+                            "{}",
+                            repair.body
+                        );
+                        let health = client.get("/api/v1/health/").body;
+                        assert_eq!(health["status"]["secrets_state"], "locked", "{health}");
+                        assert!(
+                            !runtime.permits_save(
+                                health["status"]["desired_revision"].as_str().unwrap()
+                            )
+                        );
+                        fixture_key_available(true);
+                    } else {
+                        assert_eq!(
+                            repair.body["receipt"]["state"], "completed",
+                            "{}",
+                            repair.body
+                        );
+                        client.ready();
+                        assert!(
+                            runtime.permits_save(
+                                runtime.observed().active_revision.as_deref().unwrap()
+                            )
+                        );
+                    }
+                }
+                return;
+            }
+            assert!((200..300).contains(&reply.code), "{}", reply.body);
+            client.ready();
+            assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opens + 1);
+            let generation = runtime
+                .observed()
+                .owners
+                .get(&port_id)
+                .copied()
+                .expect("actual registered command owner");
+            assert_ne!(generation, 0);
+            assert_eq!(
+                engine
+                    .run(move |host| {
+                        let node = host
+                            .runtime
+                            .node(&port_id.to_string())
+                            .ok_or(rpt_advanced_core::runtime::RuntimeError::MissingNode)?;
+                        Ok(node.command_work().unwrap().id())
+                    })
+                    .unwrap(),
+                generation
+            );
+            if case == "native-maintenance-session" {
+                maintenance_session::exercise(client, &resource, &counters);
+                return;
+            }
+            if case == "native-reopen" {
+                fixture::REVIEW_CARRIER.store(true, Ordering::Release);
+                wait_until(|| output_a.value.load(Ordering::Acquire) == 3);
+                let opened = fixture::RADIO_OPENS.load(Ordering::Acquire);
+                let drops = fixture::RADIO_DROPS.load(Ordering::Acquire);
+                counters.stage.store(1, Ordering::Release);
+                let target = format!("{resource}interface/");
+                let reply = client.edit(
+                    "PUT",
+                    &target,
+                    Some(&json!({"configuration":{"audio":{"device_identifier":"hw:reopen"}}})),
+                );
+                assert_eq!(reply.code, 202, "{}", reply.body);
+                wait_until(|| {
+                    client.get("/api/v1/health/").body["status"]["historical_activation"]
+                        == "recovery_required"
+                });
+                assert_eq!(counters.stages.load(Ordering::Acquire), 1);
+                assert_eq!(fixture::RADIO_DROPS.load(Ordering::Acquire), drops + 1);
+                wait_for_physical_state(&engine, &port_id.to_string(), true);
+                output_a.value.store(usize::MAX, Ordering::Release);
+                let fixed = operation(
+                    client,
+                    json!({"submitted":true,"action":{"action":"apply_configuration"},"desired_etag":client.etag(DESIRED)}),
+                );
+                assert_eq!(
+                    fixed.body["receipt"]["state"], "completed",
+                    "{}",
+                    fixed.body
+                );
+                client.ready();
+                assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opened + 1);
+                assert_ne!(runtime.observed().owners[&port_id], generation);
+                assert!(
+                    engine
+                        .run(move |host| Ok(host
+                            .runtime
+                            .node(&port_id.to_string())
+                            .unwrap()
+                            .register_audio()
+                            .is_none()))
+                        .unwrap(),
+                    "the fresh node must already have registered its unique callback pair"
+                );
+                wait_until(|| output_a.value.load(Ordering::Acquire) == 3);
+                return;
+            }
+            if two_live {
+                let other = other.as_ref().unwrap();
+                let id: rpt_advanced_core::config::resources::candidate::ResourceId = other
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .parse()
                     .unwrap();
+                *counters.other.lock().unwrap() = Some(id);
+                let output_b = fixture::watch_output(&id.to_string());
+                edit(client, "PUT", other, enable.clone());
+                if review_radio {
+                    match case {
+                        "native-site-claim-release" | "native-site-output-override" => {
+                            reviewed_fan_claim(client, &resource, &port_id.to_string(), case)
+                        }
+                        "native-site-ptt-silence" => {
+                            selected_callback_silence(client, &engine, &id.to_string(), &output_b)
+                        }
+                        "native-site-alarm-live" => {
+                            automatic_site_alarm(client, &engine, case, Some(&output_b))
+                        }
+                        _ => unreachable!(),
+                    }
+                    return;
+                }
+                if case == "native-site-fault-reload" {
+                    shared_fan_fault_reload(
+                        client,
+                        &engine,
+                        &resource,
+                        &id.to_string(),
+                        &port_id.to_string(),
+                        opens,
+                    );
+                    return;
+                }
+                if case == "native-site-fence" {
+                    shared_output_fence(
+                        client,
+                        &engine,
+                        (id, &output_b),
+                        (port_id, &output_a),
+                        opens,
+                    );
+                    return;
+                }
+                if shared_views {
+                    let surviving_radio = Arc::clone(&output_b);
+                    let (sensor, override_path) = shared_radio_views(
+                        client,
+                        &engine,
+                        &resource,
+                        [(id, output_b), (port_id, output_a)],
+                        opens,
+                    );
+                    if std::env::var_os("RPTADV_SITE_FOCUS").is_some() {
+                        return;
+                    }
+                    let original = runtime.observed();
+                    let domain = engine
+                        .run(|host| Ok(Arc::clone(host.runtime.modular_configuration().unwrap())))
+                        .unwrap();
+                    counters.stage.store(2, Ordering::Release);
+                    fixture::RADIO_OPEN_RESULT.store(1, Ordering::Release);
+                    let reply = client.edit("PUT", &format!("{resource}interface/"),
+                    Some(&json!({"configuration":{"audio":{"device_identifier":"hw:replacement-refused"}}})));
+                    assert_eq!(reply.code, 202, "{}", reply.body);
+                    wait_until(|| {
+                        client.get("/api/v1/health/").body["status"]["historical_activation"]
+                            == "failed"
+                    });
+                    assert_eq!(runtime.observed().active_revision, original.active_revision);
+                    assert_eq!(runtime.observed().owners, original.owners);
+                    let source = client.get(&effective(&override_path)).body;
+                    assert_eq!(
+                        source["meta"]["sources"]["/source/property"]["href"],
+                        sensor
+                    );
+                    assert_eq!(source["meta"]["sources"]["/label"]["href"], override_path);
+                    let confirmed = Arc::clone(&domain);
+                    engine
+                        .run(move |host| {
+                            assert!(Arc::ptr_eq(
+                                &confirmed,
+                                host.runtime.modular_configuration().unwrap()
+                            ));
+                            for (owner, expected) in [
+                                (SITE.to_owned(), 5.0),
+                                (id.to_string(), 5.0),
+                                (port_id.to_string(), 10.0),
+                            ] {
+                                let status = host.status_text(&owner)?;
+                                assert!(
+                                    status.contains(&format!(
+                                        "sensor sense value=Some({expected:.1})"
+                                    )),
+                                    "{status}"
+                                );
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                    let audible = surviving_radio.audible.load(Ordering::Acquire);
+                    wait_until(|| surviving_radio.audible.load(Ordering::Acquire) >= audible + 4);
+                    // This time the native stage accepts but neither update nor reverse confirms.
+                    counters.stage.store(1, Ordering::Release);
+                    let failed = operation(
+                        client,
+                        json!({"submitted":true,"action":{"action":"apply_configuration"},
+                    "desired_etag":client.etag(DESIRED)}),
+                    );
+                    assert_ne!(
+                        failed.body["receipt"]["state"], "completed",
+                        "{}",
+                        failed.body
+                    );
+                    wait_until(|| {
+                        client.get("/api/v1/health/").body["status"]["historical_activation"]
+                            == "recovery_required"
+                    });
+                    assert!(runtime.observed().active_revision.is_none());
+                    wait_for_physical_state(&engine, &port_id.to_string(), true);
+                    assert_eq!(
+                        engine.fixture_schedule_tick(),
+                        Ok(()),
+                        "scheduled work must continue after failed station rollback"
+                    );
+                    assert!(
+                        engine
+                            .run(|host| Ok(host
+                                .runtime
+                                .configuration_gate()
+                                .load(Ordering::Acquire)))
+                            .unwrap()
+                    );
+                    let quiet = surviving_radio.dekeyed.load(Ordering::Acquire);
+                    let keyed = surviving_radio.keyed.load(Ordering::Acquire);
+                    let audible = surviving_radio.audible.load(Ordering::Acquire);
+                    wait_until(|| surviving_radio.dekeyed.load(Ordering::Acquire) >= quiet + 4);
+                    assert_eq!(surviving_radio.keyed.load(Ordering::Acquire), keyed);
+                    assert_eq!(surviving_radio.audible.load(Ordering::Acquire), audible);
+                    let view = client.get(&effective(&override_path)).body;
+                    assert_eq!(view["meta"]["sources"]["/source/property"]["href"], sensor);
+                    assert_eq!(view["meta"]["sources"]["/label"]["href"], override_path);
+                    engine
+                        .run(move |host| {
+                            assert!(Arc::ptr_eq(
+                                &domain,
+                                host.runtime.modular_configuration().unwrap()
+                            ));
+                            for (owner, expected) in [
+                                (SITE.to_owned(), 5.0),
+                                (id.to_string(), 5.0),
+                                (port_id.to_string(), 10.0),
+                            ] {
+                                let status = host.status_text(&owner)?;
+                                assert!(
+                                    status.contains(&format!(
+                                        "sensor sense value=Some({expected:.1})"
+                                    )),
+                                    "{status}"
+                                );
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                    return;
+                }
+                fixture::REVIEW_CARRIER.store(true, Ordering::Release);
+                let sample = |phase, a, b| {
+                    output_a.value.store(usize::MAX, Ordering::Release);
+                    output_b.value.store(usize::MAX, Ordering::Release);
+                    let until = Instant::now() + Duration::from_secs(4);
+                    loop {
+                        let actual = (
+                            output_a.value.load(Ordering::Acquire),
+                            output_b.value.load(Ordering::Acquire),
+                        );
+                        if actual == (a, b) {
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < until,
+                            "{phase}: expected PTT/audio {:?}, observed {actual:?}",
+                            (a, b)
+                        );
+                        thread::sleep(Duration::from_millis(4));
+                    }
+                };
+                sample("initial two transmitting incumbents", 3, 3);
+                wait_for_physical_state(&engine, &port_id.to_string(), false);
+                wait_for_physical_state(&engine, &id.to_string(), false);
+                let health = client.get("/api/v1/health/").body;
+                assert!(
+                    runtime.permits_save(health["status"]["desired_revision"].as_str().unwrap()),
+                    "{health}"
+                );
+                let a_dekeys = output_a.dekeyed.load(Ordering::Acquire);
+                let original = runtime.observed();
+                eprintln!(
+                    "two registered incumbent command generations A={} B={}",
+                    original.owners[&port_id], original.owners[&id]
+                );
                 counters.stage.store(2, Ordering::Release);
                 fixture::RADIO_OPEN_RESULT.store(1, Ordering::Release);
-                let reply = client.edit("PUT", &format!("{resource}interface/"),
-                    Some(&json!({"configuration":{"audio":{"device_identifier":"hw:replacement-refused"}}})));
+                let reply = client.edit(
+                    "PUT",
+                    &format!("{other}interface/"),
+                    Some(&json!({"configuration":{"audio":{"device_identifier":"hw:changed-b"}}})),
+                );
                 assert_eq!(reply.code, 202, "{}", reply.body);
                 wait_until(|| {
                     client.get("/api/v1/health/").body["status"]["historical_activation"]
@@ -542,422 +715,296 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
                 });
                 assert_eq!(runtime.observed().active_revision, original.active_revision);
                 assert_eq!(runtime.observed().owners, original.owners);
-                let source = client.get(&effective(&override_path)).body;
-                assert_eq!(
-                    source["meta"]["sources"]["/source/property"]["href"],
-                    sensor
+                assert_eq!(counters.stages.load(Ordering::Acquire), 1);
+                eprintln!(
+                    "confirmed rollback preserved A/B command generations {:?}; both physical handles are sampled independently",
+                    runtime.observed().owners
                 );
-                assert_eq!(source["meta"]["sources"]["/label"]["href"], override_path);
-                let confirmed = Arc::clone(&domain);
-                engine
-                    .run(move |host| {
-                        assert!(Arc::ptr_eq(
-                            &confirmed,
-                            host.runtime.modular_configuration().unwrap()
-                        ));
-                        for (owner, expected) in [
-                            (SITE.to_owned(), 5.0),
-                            (id.to_string(), 5.0),
-                            (port_id.to_string(), 10.0),
-                        ] {
-                            let status = host.status_text(&owner)?;
-                            assert!(
-                                status.contains(&format!("sensor sense value=Some({expected:.1})")),
-                                "{status}"
-                            );
-                        }
-                        Ok(())
-                    })
-                    .unwrap();
-                let audible = surviving_radio.audible.load(Ordering::Acquire);
-                wait_until(|| surviving_radio.audible.load(Ordering::Acquire) >= audible + 4);
-                // This time the native stage accepts but neither update nor reverse confirms.
-                counters.stage.store(1, Ordering::Release);
-                let failed = operation(
+                sample("confirmed rollback with restored B", 3, 0);
+                let assert_b_held = || {
+                    let keys = output_b.keyed.load(Ordering::Acquire);
+                    let frames = output_b.dekeyed.load(Ordering::Acquire);
+                    wait_until(|| output_b.dekeyed.load(Ordering::Acquire) >= frames + 8);
+                    assert_eq!(output_b.keyed.load(Ordering::Acquire), keys);
+                    assert_eq!(output_a.dekeyed.load(Ordering::Acquire), a_dekeys);
+                };
+                assert_b_held();
+                let manual = |value| {
+                    engine
+                        .run(move |host| {
+                            let node = host.runtime.node(&id.to_string()).unwrap();
+                            node.site_command(
+                                rpt_advanced_core::site::SiteCommand::Inhibit(value),
+                                0,
+                            )
+                            .unwrap();
+                            Ok(())
+                        })
+                        .unwrap()
+                };
+                manual(true);
+                manual(false);
+                assert_b_held();
+                if confirm {
+                    let success = case == "native-confirm";
+                    let health = client.get("/api/v1/health/").body;
+                    let desired = health["status"]["desired_revision"].as_str().unwrap();
+                    let (reached, observer) = std::sync::mpsc::sync_channel(1);
+                    let (release, proceed) = std::sync::mpsc::sync_channel(1);
+                    *CONFIRMATION.lock().unwrap() = Some(ConfirmationProbe {
+                        engine: Arc::downgrade(&engine),
+                        revision: desired.to_owned(),
+                        port: id.to_string(),
+                        original: original.owners[&id],
+                        reached,
+                        proceed,
+                    });
+                    let keys_before = output_b.keyed.load(Ordering::Acquire);
+                    let audible_before = output_b.audible.load(Ordering::Acquire);
+                    let (new_generation, premature, early_audio, a_interruptions, reply) =
+                        thread::scope(|jobs| {
+                            let job = jobs.spawn(|| operation(client, json!({"submitted":true,
+                        "action":{"action":"apply_configuration"},"desired_etag":client.etag(DESIRED)})));
+                            let new_generation =
+                                observer.recv_timeout(Duration::from_secs(5)).unwrap();
+                            let frames = || {
+                                output_b.keyed.load(Ordering::Acquire)
+                                    + output_b.dekeyed.load(Ordering::Acquire)
+                            };
+                            let start = frames();
+                            let start_a = output_a.audible.load(Ordering::Acquire);
+                            wait_until(|| {
+                                frames() >= start + 8
+                                    && output_a.audible.load(Ordering::Acquire) >= start_a + 8
+                            });
+                            let premature = output_b.keyed.load(Ordering::Acquire) - keys_before;
+                            let early_audio =
+                                output_b.audible.load(Ordering::Acquire) - audible_before;
+                            let a_interruptions =
+                                output_a.dekeyed.load(Ordering::Acquire) - a_dekeys;
+                            release.send(success).unwrap();
+                            (
+                                new_generation,
+                                premature,
+                                early_audio,
+                                a_interruptions,
+                                job.join().unwrap(),
+                            )
+                        });
+                    eprintln!(
+                        "new B generation {new_generation}, old {}, B keyed {premature} and audible {early_audio} before confirmation, A dekeys {a_interruptions}, receipt {}",
+                        original.owners[&id], reply.body["receipt"]["state"]
+                    );
+                    if success {
+                        assert_eq!(
+                            reply.body["receipt"]["state"], "completed",
+                            "{}",
+                            reply.body
+                        );
+                        client.ready();
+                        assert_eq!(runtime.observed().owners[&id], new_generation);
+                        sample("confirmed B now transmits", 3, 3);
+                    } else {
+                        assert_ne!(
+                            reply.body["receipt"]["state"], "completed",
+                            "{}",
+                            reply.body
+                        );
+                        wait_until(|| {
+                            client.get("/api/v1/health/").body["status"]["historical_activation"]
+                                == "recovery_required"
+                        });
+                        let quiet = output_b.dekeyed.load(Ordering::Acquire);
+                        let keys = output_b.keyed.load(Ordering::Acquire);
+                        wait_until(|| output_b.dekeyed.load(Ordering::Acquire) >= quiet + 8);
+                        assert_eq!(output_b.keyed.load(Ordering::Acquire), keys);
+                        assert_eq!(keys, keys_before, "B keyed during rejected confirmation");
+                        assert_eq!(
+                            output_b.audible.load(Ordering::Acquire),
+                            audible_before,
+                            "B emitted audio during rejected confirmation"
+                        );
+                    }
+                    assert_eq!(a_interruptions, 0, "unaffected A lost local repeat");
+                    assert_eq!(
+                        (premature, early_audio),
+                        (0, 0),
+                        "new B transmitted before native confirmation"
+                    );
+                    return;
+                }
+                manual(true);
+                let fixed = operation(
                     client,
-                    json!({"submitted":true,"action":{"action":"apply_configuration"},
-                    "desired_etag":client.etag(DESIRED)}),
+                    json!({"submitted":true,"action":{"action":"apply_configuration"},"desired_etag":client.etag(DESIRED)}),
                 );
-                assert_ne!(
-                    failed.body["receipt"]["state"], "completed",
+                assert_eq!(
+                    fixed.body["receipt"]["state"], "completed",
                     "{}",
-                    failed.body
+                    fixed.body
                 );
+                client.ready();
+                sample("confirmed recovery retains manual B inhibit", 3, 0);
+                manual(false);
+                sample("manual release after confirmed recovery", 3, 3);
+                return;
+            }
+            if matches!(case, "native-remove" | "native-disable") {
+                let previous = runtime.observed().active_revision.unwrap();
+                let drops = fixture::RADIO_DROPS.load(Ordering::Acquire);
+                counters.hold_stop.store(true, Ordering::Release);
+                let request = if case == "native-remove" {
+                    client.edit("DELETE", &resource, None)
+                } else {
+                    client.edit("PUT", &resource, Some(&json!({"configuration":{"name":"Radio","inherit_from":"site","enabled":false}})))
+                };
+                let deadline = Instant::now() + Duration::from_secs(4);
+                while counters.stop_attempts.load(Ordering::Acquire) == 0
+                    && Instant::now() < deadline
+                {
+                    thread::yield_now();
+                }
+                let held = fixture::RADIO_DROPS.load(Ordering::Acquire);
+                // A delayed stop spans several independent owner and durable-status turns.
+                thread::sleep(Duration::from_millis(120));
+                let health = client.get("/api/v1/health/").body;
+                counters.hold_stop.store(false, Ordering::Release);
+                assert_eq!(request.code, 202, "{}", request.body);
+                assert_eq!(held, drops);
+                assert_eq!(health["status"]["last_known_good"], previous, "{health}");
+                assert_eq!(health["status"]["active_revision"], previous, "{health}");
+                assert_ne!(health["status"]["historical_activation"], "confirmed");
+                client.ready();
+                assert_eq!(fixture::RADIO_DROPS.load(Ordering::Acquire), drops + 1);
+                return;
+            }
+            if case == "native-local" {
+                let other = other.as_ref().unwrap();
+                fixture::REVIEW_CARRIER.store(true, Ordering::Release);
+                wait_until(|| fixture::REVIEW_OUTPUT.load(Ordering::Acquire) == 3);
+                fixture::REVIEW_CARRIER.store(false, Ordering::Release);
+                fixture::REVIEW_OUTPUT.store(0, Ordering::Release);
+                let before = runtime.observed();
+                let prev_open = fixture::RADIO_OPENS.load(Ordering::Acquire);
+                *counters.other.lock().unwrap() = Some(
+                    other
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .unwrap()
+                        .parse()
+                        .unwrap(),
+                );
+                fixture::RADIO_OPEN_RESULT.store(1, Ordering::Release);
+                let reply = client.edit("PUT", other, Some(&enable));
+                assert_eq!(reply.code, 202, "{}", reply.body);
                 wait_until(|| {
                     client.get("/api/v1/health/").body["status"]["historical_activation"]
-                        == "recovery_required"
+                        == "failed"
                 });
-                assert!(runtime.observed().active_revision.is_none());
-                wait_for_physical_state(&engine, &port_id.to_string(), true);
-                assert_eq!(
-                    engine.fixture_schedule_tick(),
-                    Ok(()),
-                    "scheduled work must continue after failed station rollback"
-                );
-                assert!(
-                    engine
-                        .run(|host| Ok(host.runtime.configuration_gate().load(Ordering::Acquire)))
-                        .unwrap()
-                );
-                let quiet = surviving_radio.dekeyed.load(Ordering::Acquire);
-                let keyed = surviving_radio.keyed.load(Ordering::Acquire);
-                let audible = surviving_radio.audible.load(Ordering::Acquire);
-                wait_until(|| surviving_radio.dekeyed.load(Ordering::Acquire) >= quiet + 4);
-                assert_eq!(surviving_radio.keyed.load(Ordering::Acquire), keyed);
-                assert_eq!(surviving_radio.audible.load(Ordering::Acquire), audible);
-                let view = client.get(&effective(&override_path)).body;
-                assert_eq!(view["meta"]["sources"]["/source/property"]["href"], sensor);
-                assert_eq!(view["meta"]["sources"]["/label"]["href"], override_path);
-                engine
-                    .run(move |host| {
-                        assert!(Arc::ptr_eq(
-                            &domain,
-                            host.runtime.modular_configuration().unwrap()
-                        ));
-                        for (owner, expected) in [
-                            (SITE.to_owned(), 5.0),
-                            (id.to_string(), 5.0),
-                            (port_id.to_string(), 10.0),
-                        ] {
-                            let status = host.status_text(&owner)?;
-                            assert!(
-                                status.contains(&format!("sensor sense value=Some({expected:.1})")),
-                                "{status}"
-                            );
-                        }
-                        Ok(())
-                    })
-                    .unwrap();
-                return;
-            }
-            fixture::REVIEW_CARRIER.store(true, Ordering::Release);
-            let sample = |phase, a, b| {
-                output_a.value.store(usize::MAX, Ordering::Release);
-                output_b.value.store(usize::MAX, Ordering::Release);
-                let until = Instant::now() + Duration::from_secs(4);
-                loop {
-                    let actual = (
-                        output_a.value.load(Ordering::Acquire),
-                        output_b.value.load(Ordering::Acquire),
-                    );
-                    if actual == (a, b) {
-                        break;
-                    }
-                    assert!(
-                        Instant::now() < until,
-                        "{phase}: expected PTT/audio {:?}, observed {actual:?}",
-                        (a, b)
-                    );
-                    thread::sleep(Duration::from_millis(4));
-                }
-            };
-            sample("initial two transmitting incumbents", 3, 3);
-            wait_for_physical_state(&engine, &port_id.to_string(), false);
-            wait_for_physical_state(&engine, &id.to_string(), false);
-            let health = client.get("/api/v1/health/").body;
-            assert!(
-                runtime.permits_save(health["status"]["desired_revision"].as_str().unwrap()),
-                "{health}"
-            );
-            let a_dekeys = output_a.dekeyed.load(Ordering::Acquire);
-            let original = runtime.observed();
-            eprintln!(
-                "two registered incumbent command generations A={} B={}",
-                original.owners[&port_id], original.owners[&id]
-            );
-            counters.stage.store(2, Ordering::Release);
-            fixture::RADIO_OPEN_RESULT.store(1, Ordering::Release);
-            let reply = client.edit(
-                "PUT",
-                &format!("{other}interface/"),
-                Some(&json!({"configuration":{"audio":{"device_identifier":"hw:changed-b"}}})),
-            );
-            assert_eq!(reply.code, 202, "{}", reply.body);
-            wait_until(|| {
-                client.get("/api/v1/health/").body["status"]["historical_activation"] == "failed"
-            });
-            assert_eq!(runtime.observed().active_revision, original.active_revision);
-            assert_eq!(runtime.observed().owners, original.owners);
-            assert_eq!(counters.stages.load(Ordering::Acquire), 1);
-            eprintln!(
-                "confirmed rollback preserved A/B command generations {:?}; both physical handles are sampled independently",
-                runtime.observed().owners
-            );
-            sample("confirmed rollback with restored B", 3, 0);
-            let assert_b_held = || {
-                let keys = output_b.keyed.load(Ordering::Acquire);
-                let frames = output_b.dekeyed.load(Ordering::Acquire);
-                wait_until(|| output_b.dekeyed.load(Ordering::Acquire) >= frames + 8);
-                assert_eq!(output_b.keyed.load(Ordering::Acquire), keys);
-                assert_eq!(output_a.dekeyed.load(Ordering::Acquire), a_dekeys);
-            };
-            assert_b_held();
-            let manual = |value| {
-                engine
-                    .run(move |host| {
-                        let node = host.runtime.node(&id.to_string()).unwrap();
-                        node.site_command(rpt_advanced_core::site::SiteCommand::Inhibit(value), 0)
-                            .unwrap();
-                        Ok(())
-                    })
-                    .unwrap()
-            };
-            manual(true);
-            manual(false);
-            assert_b_held();
-            if confirm {
-                let success = case == "native-confirm";
+                assert_eq!(runtime.observed().owners, before.owners);
                 let health = client.get("/api/v1/health/").body;
-                let desired = health["status"]["desired_revision"].as_str().unwrap();
-                let (reached, observer) = std::sync::mpsc::sync_channel(1);
-                let (release, proceed) = std::sync::mpsc::sync_channel(1);
-                *CONFIRMATION.lock().unwrap() = Some(ConfirmationProbe {
-                    engine: Arc::downgrade(&engine),
-                    revision: desired.to_owned(),
-                    port: id.to_string(),
-                    original: original.owners[&id],
-                    reached,
-                    proceed,
-                });
-                let keys_before = output_b.keyed.load(Ordering::Acquire);
-                let audible_before = output_b.audible.load(Ordering::Acquire);
-                let (new_generation, premature, early_audio, a_interruptions, reply) =
-                    thread::scope(|jobs| {
-                        let job = jobs.spawn(|| operation(client, json!({"submitted":true,
-                        "action":{"action":"apply_configuration"},"desired_etag":client.etag(DESIRED)})));
-                        let new_generation = observer.recv_timeout(Duration::from_secs(5)).unwrap();
-                        let frames = || {
-                            output_b.keyed.load(Ordering::Acquire)
-                                + output_b.dekeyed.load(Ordering::Acquire)
-                        };
-                        let start = frames();
-                        let start_a = output_a.audible.load(Ordering::Acquire);
-                        wait_until(|| {
-                            frames() >= start + 8
-                                && output_a.audible.load(Ordering::Acquire) >= start_a + 8
-                        });
-                        let premature = output_b.keyed.load(Ordering::Acquire) - keys_before;
-                        let early_audio = output_b.audible.load(Ordering::Acquire) - audible_before;
-                        let a_interruptions = output_a.dekeyed.load(Ordering::Acquire) - a_dekeys;
-                        release.send(success).unwrap();
-                        (
-                            new_generation,
-                            premature,
-                            early_audio,
-                            a_interruptions,
-                            job.join().unwrap(),
-                        )
-                    });
-                eprintln!(
-                    "new B generation {new_generation}, old {}, B keyed {premature} and audible {early_audio} before confirmation, A dekeys {a_interruptions}, receipt {}",
-                    original.owners[&id], reply.body["receipt"]["state"]
-                );
-                if success {
-                    assert_eq!(
-                        reply.body["receipt"]["state"], "completed",
-                        "{}",
-                        reply.body
-                    );
-                    client.ready();
-                    assert_eq!(runtime.observed().owners[&id], new_generation);
-                    sample("confirmed B now transmits", 3, 3);
-                } else {
-                    assert_ne!(
-                        reply.body["receipt"]["state"], "completed",
-                        "{}",
-                        reply.body
-                    );
-                    wait_until(|| {
-                        client.get("/api/v1/health/").body["status"]["historical_activation"]
-                            == "recovery_required"
-                    });
-                    let quiet = output_b.dekeyed.load(Ordering::Acquire);
-                    let keys = output_b.keyed.load(Ordering::Acquire);
-                    wait_until(|| output_b.dekeyed.load(Ordering::Acquire) >= quiet + 8);
-                    assert_eq!(output_b.keyed.load(Ordering::Acquire), keys);
-                    assert_eq!(keys, keys_before, "B keyed during rejected confirmation");
-                    assert_eq!(
-                        output_b.audible.load(Ordering::Acquire),
-                        audible_before,
-                        "B emitted audio during rejected confirmation"
-                    );
-                }
-                assert_eq!(a_interruptions, 0, "unaffected A lost local repeat");
                 assert_eq!(
-                    (premature, early_audio),
-                    (0, 0),
-                    "new B transmitted before native confirmation"
+                    health["status"]["active_revision"].as_str(),
+                    before.active_revision.as_deref()
                 );
+                assert_eq!(
+                    health["status"]["last_known_good"],
+                    health["status"]["active_revision"]
+                );
+                assert_ne!(
+                    health["status"]["desired_revision"],
+                    health["status"]["active_revision"]
+                );
+                assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), prev_open);
+                fixture::REVIEW_CARRIER.store(true, Ordering::Release);
+                wait_until(|| fixture::REVIEW_OUTPUT.load(Ordering::Acquire) == 3);
                 return;
             }
-            manual(true);
-            let fixed = operation(
-                client,
-                json!({"submitted":true,"action":{"action":"apply_configuration"},"desired_etag":client.etag(DESIRED)}),
-            );
-            assert_eq!(
-                fixed.body["receipt"]["state"], "completed",
-                "{}",
-                fixed.body
-            );
-            client.ready();
-            sample("confirmed recovery retains manual B inhibit", 3, 0);
-            manual(false);
-            sample("manual release after confirmed recovery", 3, 3);
-            return;
-        }
-        if matches!(case, "native-remove" | "native-disable") {
-            let previous = runtime.observed().active_revision.unwrap();
-            let drops = fixture::RADIO_DROPS.load(Ordering::Acquire);
-            counters.hold_stop.store(true, Ordering::Release);
-            let request = if case == "native-remove" {
-                client.edit("DELETE", &resource, None)
-            } else {
-                client.edit("PUT", &resource, Some(&json!({"configuration":{"name":"Radio","inherit_from":"site","enabled":false}})))
-            };
-            let deadline = Instant::now() + Duration::from_secs(4);
-            while counters.stop_attempts.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
-                thread::yield_now();
+            if case == "native-stop" {
+                fixture::REVIEW_CARRIER.store(true, Ordering::Release);
+                wait_until(|| fixture::REVIEW_OUTPUT.load(Ordering::Acquire) == 3);
+                edit(
+                    client,
+                    "POST",
+                    &format!("{resource}outputs/"),
+                    json!({"key":"relay","configuration":{"enabled":true,"source":{"type":"interface","node":"radio","property":"/gpio/pins/7"},"startup_state":"on","safe_state":"off"}}),
+                );
+                wait_until(|| crate::lifecycle::site_bank_delay(0) == 0x40);
+                crate::lifecycle::site_bank_delay(usize::MAX);
+                let stopped = engine.stop();
+                let held = crate::lifecycle::site_bank_delay(0);
+                assert!(
+                    !stopped,
+                    "shutdown returned before the site acknowledged its safe value"
+                );
+                assert_eq!(held, 0x40);
+                let owned = WorkingFiles::open(&path).unwrap();
+                assert!(matches!(
+                    owned.try_writer_lease(),
+                    Err(rptadv_peer_support::working_files::CaptureError::Busy)
+                ));
+                wait_until(|| fixture::REVIEW_OUTPUT.load(Ordering::Acquire) == 0);
+                return;
             }
-            let held = fixture::RADIO_DROPS.load(Ordering::Acquire);
-            // A delayed stop spans several independent owner and durable-status turns.
-            thread::sleep(Duration::from_millis(120));
-            let health = client.get("/api/v1/health/").body;
-            counters.hold_stop.store(false, Ordering::Release);
-            assert_eq!(request.code, 202, "{}", request.body);
-            assert_eq!(held, drops);
-            assert_eq!(health["status"]["last_known_good"], previous, "{health}");
-            assert_eq!(health["status"]["active_revision"], previous, "{health}");
-            assert_ne!(health["status"]["historical_activation"], "confirmed");
-            client.ready();
-            assert_eq!(fixture::RADIO_DROPS.load(Ordering::Acquire), drops + 1);
-            return;
-        }
-        if case == "native-local" {
-            let other = other.as_ref().unwrap();
-            fixture::REVIEW_CARRIER.store(true, Ordering::Release);
-            wait_until(|| fixture::REVIEW_OUTPUT.load(Ordering::Acquire) == 3);
-            fixture::REVIEW_CARRIER.store(false, Ordering::Release);
-            fixture::REVIEW_OUTPUT.store(0, Ordering::Release);
-            let before = runtime.observed();
-            let prev_open = fixture::RADIO_OPENS.load(Ordering::Acquire);
-            *counters.other.lock().unwrap() = Some(
-                other
-                    .trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .unwrap()
-                    .parse()
-                    .unwrap(),
-            );
-            fixture::RADIO_OPEN_RESULT.store(1, Ordering::Release);
-            let reply = client.edit("PUT", other, Some(&enable));
-            assert_eq!(reply.code, 202, "{}", reply.body);
-            wait_until(|| {
-                client.get("/api/v1/health/").body["status"]["historical_activation"] == "failed"
-            });
-            assert_eq!(runtime.observed().owners, before.owners);
-            let health = client.get("/api/v1/health/").body;
-            assert_eq!(
-                health["status"]["active_revision"].as_str(),
-                before.active_revision.as_deref()
-            );
-            assert_eq!(
-                health["status"]["last_known_good"],
-                health["status"]["active_revision"]
-            );
-            assert_ne!(
-                health["status"]["desired_revision"],
-                health["status"]["active_revision"]
-            );
-            assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), prev_open);
-            fixture::REVIEW_CARRIER.store(true, Ordering::Release);
-            wait_until(|| fixture::REVIEW_OUTPUT.load(Ordering::Acquire) == 3);
-            return;
-        }
-        if case == "native-stop" {
-            fixture::REVIEW_CARRIER.store(true, Ordering::Release);
-            wait_until(|| fixture::REVIEW_OUTPUT.load(Ordering::Acquire) == 3);
-            edit(
-                client,
-                "POST",
-                &format!("{resource}outputs/"),
-                json!({"key":"relay","configuration":{"enabled":true,"source":{"type":"interface","node":"radio","property":"/gpio/pins/7"},"startup_state":"on","safe_state":"off"}}),
-            );
-            wait_until(|| crate::lifecycle::site_bank_delay(0) == 0x40);
-            crate::lifecycle::site_bank_delay(usize::MAX);
-            let stopped = engine.stop();
-            let held = crate::lifecycle::site_bank_delay(0);
-            assert!(
-                !stopped,
-                "shutdown returned before the site acknowledged its safe value"
-            );
-            assert_eq!(held, 0x40);
-            let owned = WorkingFiles::open(&path).unwrap();
-            assert!(matches!(
-                owned.try_writer_lease(),
-                Err(rptadv_peer_support::working_files::CaptureError::Busy)
-            ));
-            wait_until(|| fixture::REVIEW_OUTPUT.load(Ordering::Acquire) == 0);
-            return;
-        }
-        if let Some(document) = &inspection_document {
-            assert_eq!(managed_check(document, None), 0);
-            let mut records = Vec::new();
-            assert_eq!(managed_check(document, Some(&mut records)), 0);
-            assert_eq!(
-                records,
-                vec![(*port_id.uuid().as_bytes(), "radio".to_owned(), 1)]
-            );
-            fixture_key_available(false);
-            assert_eq!(managed_check(document, None), -1);
-            assert_eq!(managed_check(document, Some(&mut records)), -1);
-            assert_eq!(records.len(), 1);
-            fixture_key_available(true);
-            return;
-        }
-        let active = runtime.observed().active_revision.unwrap();
-        let request = |expected: &str| {
-            json!({"submitted":true,"targets":[port_id.to_string()],
+            if let Some(document) = &inspection_document {
+                assert_eq!(managed_check(document, None), 0);
+                let mut records = Vec::new();
+                assert_eq!(managed_check(document, Some(&mut records)), 0);
+                assert_eq!(
+                    records,
+                    vec![(*port_id.uuid().as_bytes(), "radio".to_owned(), 1)]
+                );
+                fixture_key_available(false);
+                assert_eq!(managed_check(document, None), -1);
+                assert_eq!(managed_check(document, Some(&mut records)), -1);
+                assert_eq!(records.len(), 1);
+                fixture_key_available(true);
+                return;
+            }
+            let active = runtime.observed().active_revision.unwrap();
+            let request = |expected: &str| {
+                json!({"submitted":true,"targets":[port_id.to_string()],
             "expected_active_revision":expected,"action":{"action":"set_transmit_inhibit","enabled":true}})
-        };
-        let stale = operation(client, request("retired-active-revision"));
-        assert_eq!(stale.code, 409);
-        let effect = operation(client, request(&active));
-        assert!((200..300).contains(&effect.code), "{}", effect.body);
-        assert_eq!(effect.body["receipt"]["state"], "completed");
-        assert_eq!(
-            effect.body["receipt"]["outcomes"],
-            json!([{"target":port_id.to_string(),"outcome":"admitted"}])
-        );
-        let inspect = || {
-            engine
-                .run(move |host| {
-                    let node = host
-                        .runtime
-                        .node(&port_id.to_string())
-                        .ok_or(rpt_advanced_core::runtime::RuntimeError::MissingNode)?;
-                    Ok((
-                        node.command_work().unwrap().id(),
-                        node.site().transmit_inhibited(),
-                    ))
-                })
-                .unwrap()
-        };
-        assert_eq!(inspect(), (generation, true));
-        put(
-            client,
-            SITE_PATH,
-            json!({"name":"Metadata only with active radio","inherit_from":null}),
-        );
-        // A committed configuration retires prior command authority, while the radio
-        // stays open and the operator's manual inhibit survives policy reconfiguration.
-        assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opens + 1);
-        let (current, inhibited) = inspect();
-        assert!(current > generation);
-        assert!(inhibited);
-        assert_eq!(operation(client, request(&active)).code, 409);
-    });
+            };
+            let stale = operation(client, request("retired-active-revision"));
+            assert_eq!(stale.code, 409);
+            let effect = operation(client, request(&active));
+            assert!((200..300).contains(&effect.code), "{}", effect.body);
+            assert_eq!(effect.body["receipt"]["state"], "completed");
+            assert_eq!(
+                effect.body["receipt"]["outcomes"],
+                json!([{"target":port_id.to_string(),"outcome":"admitted"}])
+            );
+            let inspect = || {
+                engine
+                    .run(move |host| {
+                        let node = host
+                            .runtime
+                            .node(&port_id.to_string())
+                            .ok_or(rpt_advanced_core::runtime::RuntimeError::MissingNode)?;
+                        Ok((
+                            node.command_work().unwrap().id(),
+                            node.site().transmit_inhibited(),
+                        ))
+                    })
+                    .unwrap()
+            };
+            assert_eq!(inspect(), (generation, true));
+            put(
+                client,
+                SITE_PATH,
+                json!({"name":"Metadata only with active radio","inherit_from":null}),
+            );
+            // A committed configuration retires prior command authority, while the radio
+            // stays open and the operator's manual inhibit survives policy reconfiguration.
+            assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opens + 1);
+            let (current, inhibited) = inspect();
+            assert!(current > generation);
+            assert!(inhibited);
+            assert_eq!(operation(client, request(&active)).code, 409);
+        })
+    };
     let outcome = if case == "native-site-resume-uncertain" {
         // Preserve the assertion payload until the adoption job has released its callbacks.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(exercise))
@@ -966,7 +1013,7 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
         Ok(())
     };
     drop(coordinator);
-    assert!(engine.stop());
+    wait_until(|| engine.stop());
     if let Err(failure) = outcome {
         std::panic::resume_unwind(failure);
     }
@@ -1057,7 +1104,7 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
             assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), start);
         });
         drop(app);
-        assert!(second.stop());
+        wait_until(|| second.stop());
     }
     if case == "native-cold" {
         let locked = WorkingFiles::open(&path).unwrap();
@@ -1123,7 +1170,7 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
             );
         });
         drop(app);
-        assert!(second.stop());
+        wait_until(|| second.stop());
     }
     assert_eq!(
         counters.prepared.load(Ordering::Acquire),
@@ -1133,6 +1180,7 @@ pub(super) fn run(scenario: &mut Scenario<'_>, case: &str) {
 
 #[derive(Default)]
 struct Counters {
+    maintenance: Mutex<Vec<(u32, i64)>>,
     port: std::sync::Mutex<Option<rpt_advanced_core::config::resources::candidate::ResourceId>>,
     allow_open: AtomicBool,
     other: std::sync::Mutex<Option<rpt_advanced_core::config::resources::candidate::ResourceId>>,
@@ -1937,6 +1985,12 @@ fn wait_until(mut ready: impl FnMut() -> bool) {
 unsafe extern "C" fn quiesce(ctx: *mut std::ffi::c_void, _: *mut std::ffi::c_void) -> i32 {
     // SAFETY: engine borrows this fixture for the entire callback lifetime.
     let counters = unsafe { &*ctx.cast::<Counters>() };
+    {
+        let mut events = counters.maintenance.lock().unwrap();
+        if events.last() == Some(&(101, 0)) {
+            events.push((102, 0));
+        }
+    }
     counters.stop_attempts.fetch_add(1, Ordering::Relaxed);
     i32::from(counters.hold_stop.load(Ordering::Acquire))
 }
@@ -1985,7 +2039,7 @@ fn ops() -> crate::abi::rptadv_station_binding_v1 {
     unsafe extern "C" fn open(
         context: *mut c_void,
         plan: *const c_void,
-        maximum: usize,
+        _: usize,
         radio: *mut *mut c_void,
     ) -> i32 {
         if plan.is_null() {
@@ -2006,15 +2060,7 @@ fn ops() -> crate::abi::rptadv_station_binding_v1 {
         }
         // SAFETY: delegate transport allocation to the existing deterministic physical
         // test owner. Its activate/stop/release callbacks remain on the same checked host.
-        unsafe {
-            (*fixture::host_descriptor()).radio_open.unwrap()(
-                context,
-                name.as_ptr().cast(),
-                name.len(),
-                maximum,
-                radio,
-            )
-        }
+        unsafe { fixture::open_radio(name, radio) }
     }
     unsafe extern "C" fn stage(context: *mut c_void, _: *mut c_void, _: *const c_void) -> i32 {
         // SAFETY: the fixture retains its counters until the engine stops.
@@ -2251,7 +2297,7 @@ pub(super) fn bootstrap(scenario: &Scenario<'_>) {
             json!({"name":"After maintenance","inherit_from":null}),
         );
         assert_ne!(client.get(DESIRED).body["desired_revision"], "first");
-        assert_eq!(crate::lifecycle::rptadv_product_stop(), 0);
+        assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
         assert_eq!(start(&bytes), 0);
         client.ready();
         assert_eq!(
@@ -2268,14 +2314,14 @@ pub(super) fn bootstrap(scenario: &Scenario<'_>) {
         assert!(matches!(owner.try_writer_lease(), Err(CaptureError::Busy)));
         assert_eq!(apply().code, 503);
         assert_eq!(fs::read(root.join("operations.json")).unwrap(), ledger);
-        assert_eq!(crate::lifecycle::rptadv_product_stop(), 0);
+        assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
         assert_eq!(start(&bytes), 0);
         let health = client.get("/api/v1/health/").body;
         assert!(health["status"]["active_revision"].is_null());
         assert_eq!(health["status"]["storage"], "storage_fault");
         assert!(owner.try_writer_lease().is_ok());
         assert_eq!(fs::read(root.join("operations.json")).unwrap(), ledger);
-        assert_eq!(crate::lifecycle::rptadv_product_stop(), 0);
+        assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
         if offline_first {
             // A live offline transaction can hold both locks during bootstrap.
             let lease = owner.try_writer_lease().unwrap();
@@ -2283,7 +2329,7 @@ pub(super) fn bootstrap(scenario: &Scenario<'_>) {
             assert_eq!(start(&bytes), 0);
             assert_eq!(client.get("/api/v1/health/").code, 200);
             assert_eq!(client.get("/api/v1/").code, 200);
-            assert_eq!(crate::lifecycle::rptadv_product_stop(), 0);
+            assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
             drop(edit);
             drop(lease);
         }
@@ -2335,15 +2381,9 @@ pub(super) fn bootstrap(scenario: &Scenario<'_>) {
                 assert!(Instant::now() < deadline, "working edit was not observed");
                 thread::sleep(Duration::from_millis(4));
             }
-            // No caller-supplied controller text is accepted on this path.
-            let legacy = b"[station]";
-            // SAFETY: the span is readable for the call; managed reload must refuse it.
-            assert_eq!(
-                unsafe { product.reload.unwrap()(legacy.as_ptr().cast(), legacy.len()) },
-                -1
-            );
-            // SAFETY: null/zero requests the fixed trusted-host reload.
-            let mut result = unsafe { product.reload.unwrap()(std::ptr::null(), 0) };
+            // The zero-argument host ABI reloads only the registered working files.
+            // SAFETY: the selected Product descriptor and provider remain live.
+            let mut result = unsafe { product.reload_working.unwrap()() };
             let deadline = Instant::now() + Duration::from_secs(8);
             while result == 1 && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(5));
@@ -2377,7 +2417,7 @@ pub(super) fn bootstrap(scenario: &Scenario<'_>) {
             store.try_writer_lease(),
             Err(rptadv_peer_support::working_files::CaptureError::Busy)
         ));
-        assert_eq!(crate::lifecycle::rptadv_product_stop(), 0);
+        assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
         assert!(store.try_writer_lease().is_ok());
     }
 }
@@ -2489,21 +2529,21 @@ impl Foreground {
     }
 }
 
+#[path = "native_phone_caller.rs"]
+mod phone_caller;
 #[path = "native_phone_iax.rs"]
 mod phone_iax;
 #[path = "native_phone_owner.rs"]
 mod phone_owner;
-#[path = "native_phone_caller.rs"]
-mod phone_caller;
 #[path = "native_phone_positive.rs"]
 mod phone_positive;
 pub(super) use phone_positive::positive_phone;
-#[path = "native_private_phone.rs"]
-mod private_phone;
 #[path = "native_managed_asl.rs"]
 pub(super) mod managed_asl;
 #[path = "native_managed_echo.rs"]
 pub(super) mod managed_echo;
+#[path = "native_private_phone.rs"]
+mod private_phone;
 
 #[path = "native_managed_phone_dial.rs"]
 pub(super) mod managed_phone_dial;
@@ -2525,9 +2565,39 @@ pub(super) fn standalone(scenario: &Scenario<'_>, phone: bool) {
             .unwrap()
     };
     assert!(!check().success());
+    let store = WorkingFiles::open(&scenario.fixture.0).unwrap();
+    if !phone {
+        let mut rejected = Foreground(
+            Command::new(&binary)
+                .arg("--foreground")
+                .arg(&document)
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let status = loop {
+            if let Some(status) = rejected.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "foreground did not reject controller INI"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(1));
+        let mut diagnostic = String::new();
+        std::io::Read::read_to_string(&mut rejected.0.stderr.take().unwrap(), &mut diagnostic)
+            .unwrap();
+        assert!(
+            diagnostic.contains("standalone product startup failed"),
+            "{diagnostic}"
+        );
+        assert!(store.try_writer_lease().is_ok());
+    }
     fs::write(&document, serde_json::to_vec(&service).unwrap()).unwrap();
     assert!(check().success());
-    let store = WorkingFiles::open(&scenario.fixture.0).unwrap();
     assert!(store.try_writer_lease().is_ok());
     let mut process = Foreground(
         Command::new(&binary)
@@ -2648,7 +2718,11 @@ pub(super) fn asterisk(scenario: &Scenario<'_>, phone: bool) {
         // this fixture never requests a hardware reservation or a physical device.
         assert!(modules.join("chan_usbradioplus.so").is_file());
         assert!(!std::path::Path::new("/dev/snd").exists());
-        fs::write(directory.join("usbradioplus.conf"), "[task48-driver-only]\n").unwrap();
+        fs::write(
+            directory.join("usbradioplus.conf"),
+            "[task48-driver-only]\n",
+        )
+        .unwrap();
         "[modules]\nautoload=no\nload=chan_usbradioplus.so\nload=app_rpt_advanced.so\n"
     } else {
         "[modules]\nautoload=no\nload=app_rpt_advanced.so\n"
@@ -2679,20 +2753,34 @@ pub(super) fn asterisk(scenario: &Scenario<'_>, phone: bool) {
         }
         let mut status = cli("module show like chan_usbradioplus");
         while !status.contains("Running") {
-            assert!(Instant::now() < deadline, "real driver did not register: {status}");
+            assert!(
+                Instant::now() < deadline,
+                "real driver did not register: {status}"
+            );
             process.running(deadline);
             status = cli("module show like chan_usbradioplus");
         }
         let names = cli("radioplus channel list");
-        assert!(names.lines().any(|line| line.trim() == "task48-driver-only"), "{names}");
+        assert!(
+            names
+                .lines()
+                .any(|line| line.trim() == "task48-driver-only"),
+            "{names}"
+        );
         assert!(cli("core show channels count").contains("0 active channels"));
         let mappings = fs::read_to_string(format!("/proc/{}/maps", process.0.id())).unwrap();
         let expected = fs::read_to_string(modules.join("phone-driver-maps.txt")).unwrap();
         for path in expected.lines() {
-            assert!(mappings.lines().any(|line| line.split_whitespace().last() == Some(path)),
-                "real Asterisk is missing the qualified module or backend {path}");
+            assert!(
+                mappings
+                    .lines()
+                    .any(|line| line.split_whitespace().last() == Some(path)),
+                "real Asterisk is missing the qualified module or backend {path}"
+            );
         }
-        eprintln!("genuine USBRadioPlus driver registered {names}; zero active channels and all staged backend mappings verified");
+        eprintln!(
+            "genuine USBRadioPlus driver registered {names}; zero active channels and all staged backend mappings verified"
+        );
     }
     let store = WorkingFiles::open(&scenario.fixture.0).unwrap();
     check_frontend_reload(scenario, address, &store, &mut process, phone, |_| {
@@ -2701,13 +2789,22 @@ pub(super) fn asterisk(scenario: &Scenario<'_>, phone: bool) {
     });
     if phone {
         assert!(cli("module show like chan_usbradioplus").contains("Running"));
-        assert!(cli("radioplus channel list").lines().any(|line| line.trim() == "task48-driver-only"));
+        assert!(
+            cli("radioplus channel list")
+                .lines()
+                .any(|line| line.trim() == "task48-driver-only")
+        );
         assert!(cli("core show channels count").contains("0 active channels"));
     }
     let unload = cli("module unload app_rpt_advanced.so");
     let remaining = cli("module show like app_rpt_advanced");
-    assert!(remaining.contains("0 modules loaded"), "{unload}\n{remaining}");
-    if phone { eprintln!("private process loader completed: {unload} {remaining}"); }
+    assert!(
+        remaining.contains("0 modules loaded"),
+        "{unload}\n{remaining}"
+    );
+    if phone {
+        eprintln!("private process loader completed: {unload} {remaining}");
+    }
     assert!(store.try_writer_lease().is_ok());
     if phone {
         cli("module unload chan_usbradioplus.so");

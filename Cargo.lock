@@ -1012,6 +1012,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpt-advanced-cli"
+version = "0.1.0-alpha24"
+dependencies = [
+ "rptadv-json",
+ "rustls",
+ "serde_json",
+ "ureq",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "rpt-advanced-core"
 version = "0.1.0-alpha24"
 dependencies = [
@@ -1054,10 +1067,15 @@ name = "rptadv-asterisk-adapter"
 version = "0.1.0-alpha24"
 dependencies = [
  "bindgen",
+ "crossbeam-queue",
  "libloading",
  "rptadv-control-standalone-adapter",
+ "rptadv-json",
  "rptadv-peer-support",
  "rptadv-private-phone-host",
+ "serde_json",
+ "ureq",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

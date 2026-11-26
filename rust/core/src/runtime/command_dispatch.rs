@@ -22,14 +22,13 @@ pub struct CommandRenderers<'a> {
 pub(super) struct CommandMessages {
     messages: Arc<crate::config::resources::profiles::public_messages::ScopedMessages>,
     fixed: Arc<std::collections::BTreeMap<String, crate::composition::Composition>>,
-    port: super::super::MessagePortIdentity,
+    pub(super) port: super::super::MessagePortIdentity,
     selectors: std::collections::BTreeMap<String, String>,
 }
 pub(super) struct PreparedCommands {
     profile: Arc<CommandProfile>,
     messages: CommandMessages,
     scheduler: EventScheduler,
-    pending: bool,
 }
 
 impl PreparedCommands {
@@ -43,7 +42,6 @@ impl PreparedCommands {
         previous: Option<&RuntimeNode<A, C>>,
         generation: u64,
         route_generation: Option<u64>,
-        clock: RuntimeClock,
     ) -> Result<Self, RuntimeError> {
         let owner = commands.scope;
         let prior = previous
@@ -57,24 +55,9 @@ impl PreparedCommands {
                 .max(generation),
             None => generation,
         };
-        let mut scheduler = EventScheduler::from_profiles(generation, events, prior)
+        let mut scheduler = EventScheduler::from_profiles(generation, events, None)
             .map_err(|_| RuntimeError::Preparation)?;
         scheduler.bind_warning_routes(|command| warning_route(&commands.language, &command.key));
-        let activity = previous.map_or(
-            super::super::scheduler::ReceiveActivity {
-                active: false,
-                last_active_ms: Some(clock.now_ms),
-            },
-            RuntimeNode::event_activity,
-        );
-        let pending = match scheduler.activate(clock, activity) {
-            Ok(()) => false,
-            Err(
-                super::super::scheduler::SchedulerError::Clock
-                | super::super::scheduler::SchedulerError::Calendar(_),
-            ) => true,
-            Err(_) => return Err(RuntimeError::Clock),
-        };
         let selectors = messages
             .effective
             .iter()
@@ -104,14 +87,24 @@ impl PreparedCommands {
                 port: registered.into(),
             },
             scheduler,
-            pending,
         })
     }
 
-    pub(super) fn install<A: Send, C: Send>(self, node: &mut RuntimeNode<A, C>) {
+    pub(super) fn install<A: Send, C: Send>(
+        mut self,
+        node: &mut RuntimeNode<A, C>,
+        clock: RuntimeClock,
+        activity: super::super::scheduler::ReceiveActivity,
+    ) {
+        node.programs.generation = None;
+        // Physical adoption may take several passes while the incumbent still runs.
+        // Copy its latest work while the queue is still available to settle its tickets.
+        if let Some(previous) = &node.programs.scheduler {
+            self.scheduler.retain_calendar_progress(previous);
+        }
+        let pending = self.scheduler.activate(clock, activity).is_err();
         let generation = self.scheduler.generation();
-        node.programs
-            .activate_scheduler(self.scheduler, self.pending);
+        node.programs.activate_scheduler(self.scheduler, pending);
         node.programs.generation =
             Some(super::super::generation::ScopedGeneration::new(generation));
         node.programs.owner = Some(self.profile.owner);
@@ -208,11 +201,17 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
             Some(self),
             self.control.generation,
             self.links.schedule().map(LinkScheduler::generation),
-            clock,
         )?;
-        prepared.install(self);
+        let activity = self.event_activity();
+        prepared.install(self, clock, activity);
         Ok(())
     }
+}
+
+enum MessageTrigger<'a> {
+    None,
+    Scheduled(&'a super::super::scheduler::EventTicket),
+    Connection(&'a crate::link::PeerReply),
 }
 
 impl<A: Send, C: Send> RuntimeNode<A, C> {
@@ -223,7 +222,7 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         configured_audience: bool,
         reply: Option<crate::link::PeerReply>,
         clock: RuntimeClock,
-        event: Option<&super::super::scheduler::EventTicket>,
+        trigger: MessageTrigger<'_>,
     ) -> Result<LinkEffect, RuntimeError> {
         use crate::{composition::MorseRequirement, controller::PreparedMedia};
         let source = self
@@ -263,15 +262,13 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         if !phone && !self.control.telemetry.can_queue_status() {
             return Err(RuntimeError::Busy);
         }
-        let profile = self.links.command_profile().ok_or(RuntimeError::Rejected)?;
-        let mut values = self.message_values(
-            clock,
-            &source.messages.catalog,
-            profile.public_key.as_str(),
-            source.port.clone(),
-        )?;
-        if let Some(ticket) = event {
-            capture_event_message(ticket, &source.messages.catalog, &mut values)?;
+        let mut values = self.message_values(clock, &source.messages.catalog)?;
+        match trigger {
+            MessageTrigger::None => {}
+            MessageTrigger::Scheduled(ticket) => {
+                capture_event_message(ticket, &source.messages.catalog, &mut values)?;
+            }
+            MessageTrigger::Connection(reply) => values.event = self.command_message_event(reply),
         }
         let program = recipe
             .prepare(&source.messages.catalog, &values)
@@ -645,6 +642,11 @@ impl<A: Send, C: Send> Runtime<A, C> {
             },
             deadline: sequence.map(|(deadline, _)| deadline),
         };
+        let message_trigger = match (sequence.and_then(|(_, ticket)| ticket), source) {
+            (Some(ticket), _) => MessageTrigger::Scheduled(ticket),
+            (None, CommandSource::Connection { reply, .. }) => MessageTrigger::Connection(reply),
+            (None, _) => MessageTrigger::None,
+        };
         let dtmf = invocation.origin == ParameterOrigin::Dtmf;
         let mut op = match invocation.action {
             Action::PhoneDial(number) => {
@@ -711,12 +713,22 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 }
                 return Ok(LinkEffect::SiteCommand(command, permit));
             }
-            Action::Host(action @ (crate::command_language::HostAction::PhoneGrammar(_)
-                |crate::command_language::HostAction::PhoneAuthenticate(..)
-                |crate::command_language::HostAction::PhoneRetire))=>{
-                let CommandSource::Connection{reply,..}=source else{return Err(RuntimeError::Rejected)};
-                if reply.phone_source().is_none(){return Err(RuntimeError::Rejected);}
-                return Ok(LinkEffect::PrivatePhoneControl(reply.clone(),action,permit));
+            Action::Host(
+                action @ (crate::command_language::HostAction::PhoneGrammar(_)
+                | crate::command_language::HostAction::PhoneAuthenticate(..)
+                | crate::command_language::HostAction::PhoneRetire),
+            ) => {
+                let CommandSource::Connection { reply, .. } = source else {
+                    return Err(RuntimeError::Rejected);
+                };
+                if reply.phone_source().is_none() {
+                    return Err(RuntimeError::Rejected);
+                }
+                return Ok(LinkEffect::PrivatePhoneControl(
+                    reply.clone(),
+                    action,
+                    permit,
+                ));
             }
             Action::Host(crate::command_language::HostAction::LinkStatus) => {
                 return Ok(LinkEffect::Telemetry(
@@ -739,6 +751,17 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 node.links
                     .toggle_ingress(&target, source)
                     .map_err(RuntimeError::Link)?;
+                if matches!(target, crate::command_language::MuteTarget::PhonePatch(_))
+                    && let Some(reply) = permit.reply.filter(|reply| reply.phone_source().is_some())
+                {
+                    use crate::messages::OperationResult;
+                    let result = if reply.rx_muted() {
+                        OperationResult::CallerMuted
+                    } else {
+                        OperationResult::CallerUnmuted
+                    };
+                    return Ok(LinkEffect::PrivatePhoneResult(reply, result));
+                }
                 return Ok(LinkEffect::None);
             }
             Action::Pause(_) | Action::ExecuteDtmf(_) => {
@@ -763,9 +786,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     &name,
                     Some(audience),
                     false,
-                    None,
+                    permit.reply.filter(|reply| reply.phone_source().is_some()),
                     clock,
-                    sequence.and_then(|(_, t)| t),
+                    message_trigger,
                 );
             }
             Action::Radio(RadioAction::Command(remote)) => {
@@ -819,7 +842,30 @@ impl<A: Send, C: Send> Runtime<A, C> {
             }
             return Ok(LinkEffect::VerifyCommandTarget(op));
         }
-        let result = self.command(local, op, clock, false)?;
+        let (peer, reply) = (op.command.node.clone(), op.reply.clone());
+        let result = match self.command(local, op, clock, false) {
+            Ok(effect) => effect,
+            Err(RuntimeError::Link(
+                reason @ (crate::link::AdmissionError::Loop
+                | crate::link::AdmissionError::UnsupportedRoute),
+            )) if dtmf
+                && reply
+                    .as_ref()
+                    .is_none_or(|reply| reply.phone_source().is_none()) =>
+            {
+                if let Some(reply) = &reply {
+                    self.echo_response_requested(local, reply, clock.now_ms);
+                }
+                match reason {
+                    crate::link::AdmissionError::Loop => {
+                        self.queue_loop_rejected(local, &peer, reply)?
+                    }
+                    _ => self.queue_remote_command_unsupported(local, &peer, reply)?,
+                }
+                return Ok(LinkEffect::None);
+            }
+            Err(error) => return Err(error),
+        };
         if let LinkEffect::Message { selector, reply } = result {
             let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
             let name = node
@@ -828,14 +874,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 .and_then(|source| source.selectors.get(&selector))
                 .cloned()
                 .ok_or(RuntimeError::Rejected)?;
-            node.queue_command_message(
-                &name,
-                None,
-                true,
-                reply,
-                clock,
-                sequence.and_then(|(_, t)| t),
-            )
+            node.queue_command_message(&name, None, true, reply, clock, message_trigger)
         } else {
             Ok(result)
         }

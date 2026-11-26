@@ -272,18 +272,20 @@ mod tests {
     #[test]
     fn pending_and_failed_rollback_retain_native_owner_until_acknowledged() {
         // SAFETY: the generated descriptor has nullable function slots, integer fields and raw pointers.
-        let mut table: abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        let mut table: Box<abi::UrpAstDescriptor> = Box::new(unsafe { std::mem::zeroed() });
         table.native_begin_update = Some(begin);
         table.native_accept_update = Some(accept);
         table.native_finish_update = Some(finish);
         table.native_destroy = Some(native_destroy);
         table.native_destroy_update = Some(token_destroy);
         let product = Arc::new(Product {
-            product: NonNull::from(&mut table),
+            product: NonNull::from(table.as_mut()),
             // This control-only test never reads station or independent-role tables.
             station: NonNull::dangling(),
             link: NonNull::dangling(),
             _library: libloading::os::unix::Library::this().into(),
+            _fixture_descriptor: Some(table),
+            _fixture_roles: None,
         });
         let mut stub = Stub::default();
         let ptr = NonNull::from(&mut stub).cast();

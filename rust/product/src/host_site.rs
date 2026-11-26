@@ -7,8 +7,8 @@ use rpt_advanced_core::{
         candidate::{ResourceKind, ResourceScope},
         generation::RuntimeConfiguration,
     },
-    runtime::dtmf::{ActionPermit, DigitOperation},
-    site::{SiteCommand, SiteEffect, SiteError, SiteObservations},
+    runtime::dtmf::ActionPermit,
+    site::{AlarmEvent, SiteCommand, SiteEffect, SiteError, SiteObservations},
 };
 use std::collections::BTreeMap;
 
@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 #[derive(Default)]
 pub(super) struct Delivery {
     revision: u64,
-    pending: Vec<(String, String, Option<ActionPermit>)>,
+    pending: Vec<(String, String, AlarmEvent, Option<ActionPermit>)>,
     faults: BTreeMap<(String, String, Option<ResourceKind>), SiteError>,
     links: Vec<(String, LinkEffect)>,
 }
@@ -125,6 +125,73 @@ impl Host {
         }
         Ok(())
     }
+    #[cfg(target_os = "linux")]
+    pub(super) fn live_site_status(
+        &mut self,
+        result: &mut crate::management::live::Domain,
+        now: u64,
+    ) {
+        use rpt_advanced_core::site::ReadingQuality;
+        use serde_json::json;
+        let label = |quality| match quality {
+            ReadingQuality::Valid => "valid",
+            ReadingQuality::Stale => "stale",
+            ReadingQuality::Fault => "fault",
+            ReadingQuality::Unavailable => "unavailable",
+        };
+        let Some(domain) = self.runtime.modular_configuration().cloned() else {
+            return;
+        };
+        let snapshots: BTreeMap<_, _> = domain
+            .scopes
+            .keys()
+            .filter_map(|scope| {
+                let site = self.runtime.site_controller(&scope_name(*scope))?;
+                Some((*scope, site.snapshot(now)))
+            })
+            .collect();
+        for (scope, view) in &domain.scopes {
+            if !snapshots.contains_key(scope) {
+                continue;
+            }
+            for ((kind, key), (binding, _)) in &view.equipment.effective {
+                let owner = match kind {
+                    ResourceKind::Alarm | ResourceKind::Output | ResourceKind::Fan => binding.scope,
+                    _ => *scope,
+                };
+                let Some(s) = snapshots.get(&owner) else {
+                    continue;
+                };
+                let name = key.as_str();
+                let observation = match kind {
+                    ResourceKind::Sensor => s.sensors.get(name).map(|r| json!({
+                        "value":r.current.value,"quality":label(r.current.quality),"observed_at_ms":r.current.observed_at_ms,
+                        "smoothed":r.smoothed,"minimum":r.minimum.map(|v|v.value),"maximum":r.maximum.map(|v|v.value),
+                        "minimum_at_ms":r.minimum.map(|v|v.observed_at_ms),"maximum_at_ms":r.maximum.map(|v|v.observed_at_ms)})),
+                    ResourceKind::Input => s.inputs.get(name).map(|r| json!({
+                        "value":r.value,"quality":label(r.quality),"observed_at_ms":r.observed_at_ms})),
+                    ResourceKind::Alarm => s.alarms.get(name).map(|r| json!({
+                        "active":r.active,"acknowledged":r.acknowledged,"unsafe":r.unsafe_condition,"reset_ready":r.reset_ready})),
+                    ResourceKind::Fan => s.fans.get(name).map(|r| json!({
+                        "requested_duty":r.duty,"fault":r.fault,"run_on_until_ms":r.run_on_until_ms})),
+                    ResourceKind::Output => s.outputs.get(name).map(|r| {
+                        let local=scope_name(owner);
+                        let submitted=self.site_radio.output_status(&local,name)
+                            .or_else(|| self.site_acquisition.output_status(&local,name));
+                        json!({"requested_on":r.requested_on,"fault":r.fault,"pulse_deadline_ms":r.pulse_deadline_ms,
+                            "submitted":submitted.as_ref().and_then(|s|s.submitted).map(|(level,at)|json!({"level":level,"observed_at_ms":at})),
+                            "submission_quality":label(submitted.map_or(ReadingQuality::Unavailable,|s|s.quality)),
+                            "readback":null})
+                    }),
+                    _ => None,
+                };
+                if let Some(fields) = observation {
+                    result.resources.insert((*scope, binding.id), fields);
+                }
+            }
+        }
+    }
+
     /// Append control snapshots only; requested/submitted values never imply electrical readback.
     pub(super) fn write_site_status(
         &mut self,
@@ -313,14 +380,14 @@ impl Host {
             let _ = self.site_effects(&local, effects, clock, None);
         }
         let mut pending = std::mem::take(&mut self.site_delivery.pending);
-        pending.retain(|(local, name, permit)| {
+        pending.retain(|(local, name, event, permit)| {
             match if permit
                 .as_ref()
                 .is_some_and(|p| !p.current(Some(clock.now_ms)))
             {
                 Err(RuntimeError::Rejected)
             } else {
-                self.runtime.queue_named_message(local, name)
+                self.runtime.queue_alarm_message(local, name, *event)
             } {
                 Ok(accepted) => !accepted,
                 Err(_) => {
@@ -394,45 +461,25 @@ impl Host {
                 // RuntimeNode publishes the aggregate gate before handing effects to this host.
                 SiteEffect::TransmitInhibit(_) => continue,
                 SiteEffect::Macro(name) => {
-                    let result = if self.runtime.modular_configuration().is_some() {
-                        self.runtime.equipment_macro(radio, &name, permit, clock)
-                    } else {
-                        self.runtime.site_macro(radio, &name).and_then(|command| {
-                            self.runtime.command(
-                                radio,
-                                DigitOperation::new(command, None),
-                                clock,
-                                false,
-                            )
+                    let result = self
+                        .runtime
+                        .equipment_macro(radio, &name, permit, clock)
+                        .and_then(|effect| {
+                            if matches!(effect, LinkEffect::Connect(_)) {
+                                self.site_delivery.links.push((radio.to_owned(), effect));
+                                Ok(())
+                            } else {
+                                self.immediate(radio, effect, clock)
+                            }
                         })
-                    }
-                    .and_then(|effect| {
-                        if matches!(effect, LinkEffect::Connect(_)) {
-                            self.site_delivery.links.push((radio.to_owned(), effect));
-                            Ok(())
-                        } else {
-                            self.immediate(radio, effect, clock)
-                        }
-                    })
-                    .map_err(|_| SiteError::Unavailable);
+                        .map_err(|_| SiteError::Unavailable);
                     (name, result)
                 }
-                SiteEffect::Message(name) if self.runtime.node(radio).is_none() => {
-                    (name, Err(SiteError::Unavailable))
-                }
-                SiteEffect::Message(name) => {
-                    if !self
-                        .site_delivery
-                        .pending
-                        .iter()
-                        .any(|(station, message, _)| station == radio && message == &name)
-                    {
-                        self.site_delivery
-                            .pending
-                            .push((radio.to_owned(), name, permit.cloned()));
-                    }
+                SiteEffect::Message { alarm, event } if self.runtime.node(radio).is_some() => {
+                    self.defer_alarm(radio, &alarm, event, permit);
                     continue;
                 }
+                SiteEffect::Message { alarm, .. } => (alarm, Err(SiteError::Unavailable)),
                 SiteEffect::Fault { target, error } => (target, Err(error)),
             };
             let key = (local.to_owned(), target, actuator);
@@ -445,6 +492,22 @@ impl Host {
         }
         outcome
     }
+    fn defer_alarm(
+        &mut self,
+        radio: &str,
+        alarm: &str,
+        event: AlarmEvent,
+        permit: Option<&ActionPermit>,
+    ) {
+        let pending = &mut self.site_delivery.pending;
+        if !pending
+            .iter()
+            .any(|(station, name, phase, _)| station == radio && name == alarm && *phase == event)
+        {
+            pending.push((radio.to_owned(), alarm.to_owned(), event, permit.cloned()));
+        }
+    }
+
     pub(super) fn defer_link(&mut self, local: &str, effect: LinkEffect) {
         self.site_delivery.links.push((local.to_owned(), effect));
     }
@@ -452,29 +515,6 @@ impl Host {
     pub(crate) fn take_site_links(&mut self) -> Vec<(String, LinkEffect)> {
         std::mem::take(&mut self.site_delivery.links)
     }
-    /// Identify radio replacements and removed nodes using the runtime's own comparison.
-    pub(crate) fn site_basis(&self, document: &ConfigDocument) -> Result<SiteBasis, RuntimeError> {
-        use rpt_advanced_core::config::NodeId;
-        let mut replaced = std::collections::BTreeSet::new();
-        let names = document.nodes();
-        for name in self.runtime.node_names() {
-            let next = ResolvedNodeSettings::resolve(document, &NodeId::new(name)?)?.value;
-            let old = self.runtime.settings(name).expect("active node settings");
-            if !names.contains(&name)
-                || !next.enabled
-                || old.channel != next.channel
-                || old.radio != next.radio
-            {
-                replaced.insert(name.to_owned());
-            }
-        }
-        Ok(SiteBasis {
-            revision: self.runtime.revision(),
-            known: self.site_acquisition.keys(),
-            replaced,
-        })
-    }
-
     /// Fence prepared site bindings before replacing controller or radio ownership.
     pub(crate) fn begin_site_reload(
         &mut self,
@@ -600,11 +640,6 @@ impl Host {
         self.site_transition.as_mut().unwrap().complete = true;
         Ok(true)
     }
-    /// Install owners prepared outside control after successful radio activation.
-    pub(crate) fn install_sites(&mut self, acquisition: Acquisition, radio: RadioSite) {
-        self.site_acquisition = acquisition;
-        self.site_radio = radio;
-    }
     /// Move quiesced device owners out of control before their threads are joined.
     pub(crate) fn take_sites(&mut self) -> (Acquisition, Vec<crate::site::worker::DeviceWorker>) {
         (
@@ -637,7 +672,7 @@ impl Host {
 }
 
 /// Use the committed live reservation; a stopped or merely staged same-name lease has no sample.
-fn live_station<'a>(
+pub(super) fn live_station<'a>(
     leases: &'a [(String, Arc<Mutex<Lease>>)],
     name: &str,
     modular: bool,

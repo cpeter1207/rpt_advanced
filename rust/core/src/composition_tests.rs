@@ -1,308 +1,218 @@
-use crate::composition::{Composition, CompositionError, MorseRequirement, Segment};
-use crate::config::{BindingSource, ConfigDocument, NodeId, ResolvedMessageSettings};
-use std::collections::BTreeMap;
+use crate::composition::{
+    Composition, CompositionError, MorseRequirement, PublicMessageSource, Segment,
+};
+use crate::config::{BindingSource, resources::candidate::ResourceKind};
+use crate::messages::patterns::NativePattern;
+use crate::station_fixture::{PORT, SITE, configuration, projected_telemetry};
+use serde_json::json;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[test]
-fn composition_identifier_content_preserves_media_inheritance() {
-    let config = ConfigDocument::parse("[524950]\n[identifier]\ncontent={message}\nmessage_id=site-time\narg_time=time\nspeech_level_db=-3\n[identifier 524950]\narg_time=\n[speech]\nlevel_db=-8\n[identifier 524950 regular]\ncontent={message_macro_time}\nmorse_text=ID\n").unwrap();
-    let resolved = crate::config::ResolvedIdentifierSettings::resolve(
-        &config,
-        &NodeId::new("524950").unwrap(),
-        Some("regular"),
-    )
-    .unwrap();
-    assert!(resolved.warnings.is_empty());
-    assert_eq!(resolved.value.content, "{message_macro_time}");
-    assert_eq!(resolved.value.message_id.as_deref(), Some("site-time"));
-    assert!(resolved.value.bindings.is_empty());
-    assert_eq!(resolved.value.speech_level_db, -8);
-    assert_eq!(resolved.value.morse_text, "ID");
-}
-
-fn definitions(text: &str, names: &[&str]) -> BTreeMap<String, ResolvedMessageSettings> {
-    let document = ConfigDocument::parse(&format!("[524950]\n{text}")).unwrap();
-    names
-        .iter()
-        .map(|name| {
-            (
-                name.to_string(),
-                ResolvedMessageSettings::resolve(&document, &NodeId::new("524950").unwrap(), name)
-                    .unwrap()
-                    .value,
-            )
-        })
-        .collect()
+fn optional_morse_admits_real_media_and_is_inherited_by_nested_macros() {
+    let (_, m, _) = projected_telemetry(&[]).unwrap();
+    for (file, morse, allowed) in [
+        (false, None, false),
+        (true, None, true),
+        (false, Some("MSG"), true),
+        (true, Some("MSG"), true),
+    ] {
+        let mut settings = m.renderer_defaults().clone();
+        if file {
+            settings.media.file = Some("message.wav".into());
+        }
+        if let Some(text) = morse {
+            settings.media.morse = Some(crate::media::MorseSource {
+                text: text.into(),
+                speed_wpm: 20,
+                frequency_hz: 800.0,
+                level_db: -6,
+            });
+        }
+        let defs = Arc::new(BTreeMap::from([("recording".into(), settings)]));
+        let sources = BTreeMap::from([(
+            "recording".into(),
+            PublicMessageSource::Media {
+                speech: None,
+                morse: morse.map(|t| NativePattern::parse(t).unwrap()),
+            },
+        )]);
+        for (requirement, want) in [
+            (MorseRequirement::Optional, allowed),
+            (MorseRequirement::Required, morse.is_some()),
+        ] {
+            assert_eq!(
+                Composition::compile_public(
+                    m.renderer_defaults().clone(),
+                    &PublicMessageSource::Content(
+                        NativePattern::parse("Before. { recording }").unwrap()
+                    ),
+                    defs.clone(),
+                    &sources,
+                    &BTreeMap::new(),
+                    &m.catalog,
+                    requirement
+                )
+                .is_ok(),
+                want
+            );
+        }
+    }
 }
 
 fn compile(
     content: &str,
-    definitions: &BTreeMap<String, ResolvedMessageSettings>,
+    parts: &BTreeMap<String, String>,
 ) -> Result<Composition, CompositionError> {
-    let document =
-        ConfigDocument::parse("[524950]\n[message root]\nmessage_id=site-time\nmorse_text=ID\n")
-            .unwrap();
-    let mut root =
-        ResolvedMessageSettings::resolve(&document, &NodeId::new("524950").unwrap(), "root")
-            .unwrap()
-            .value;
-    root.content = content.into();
-    Composition::compile(
-        root,
-        std::sync::Arc::new(definitions.clone()),
+    let (_, m, _) = projected_telemetry(&[]).unwrap();
+    let lower = |s: &str| {
+        NativePattern::parse(s)
+            .map(PublicMessageSource::Content)
+            .map_err(|_| CompositionError::Syntax)
+    };
+    let defs = Arc::new(
+        parts
+            .keys()
+            .map(|k| (k.clone(), m.renderer_defaults().clone()))
+            .collect(),
+    );
+    let sources = parts
+        .iter()
+        .map(|(k, v)| Ok((k.clone(), lower(v)?)))
+        .collect::<Result<BTreeMap<_, _>, CompositionError>>()?;
+    Composition::compile_public(
+        m.renderer_defaults().clone(),
+        &lower(content)?,
+        defs,
+        &sources,
+        &BTreeMap::new(),
+        &m.catalog,
         MorseRequirement::Required,
     )
 }
 
 #[test]
-fn optional_morse_admits_real_media_and_is_inherited_by_nested_macros() {
-    for (source, usable) in [
-        ("", false),
-        ("sound_file=message.wav", true),
-        ("speech_text=Message", true),
-        ("sound_file=message.wav\nspeech_text=Message", true),
-        ("morse_text=MSG", true),
-    ] {
-        let defs = definitions(
-            &format!(
-                "[message root]\ncontent={{message_macro_media}}\n[message media]\ncontent={{media}}\n{source}\n"
-            ),
-            &["root", "media"],
-        );
-        let optional = Composition::compile(
-            defs["root"].clone(),
-            std::sync::Arc::new(defs.clone()),
-            MorseRequirement::Optional,
-        );
-        assert_eq!(optional.is_ok(), usable, "{source}");
-        let required = Composition::compile(
-            defs["root"].clone(),
-            std::sync::Arc::new(defs),
-            MorseRequirement::Required,
-        );
-        assert_eq!(required.is_ok(), source == "morse_text=MSG", "{source}");
-    }
-}
-
-#[test]
-fn composition_literal_multiple_macros() {
-    let defs = definitions(
-        "[message time]\nmessage_id=site-time\n[message temperature]\nmessage_id=site-temperature\n",
-        &["time", "temperature"],
-    );
-    let composition = compile(
-        "Station {{KG0BP}}. {message_macro_time} {message_macro_temperature}",
-        &defs,
-    )
-    .unwrap();
-    assert_eq!(
-        composition.segments(),
-        &[
-            Segment::Literal {
-                text: "Station {KG0BP}.".into(),
-                owner: None
-            },
-            Segment::Message(Some("time".into())),
-            Segment::Message(Some("temperature".into())),
-        ]
-    );
-}
-
-#[test]
-fn composition_file_then_macros() {
-    let defs = definitions("[message time]\nmessage_id=site-time\n", &["time"]);
-    assert_eq!(
-        compile("{media} {message_macro_time}", &defs)
-            .unwrap()
-            .segments(),
-        &[Segment::Media(None), Segment::Message(Some("time".into())),]
-    );
-}
-
-#[test]
-fn composition_media_requires_a_renderable_nonempty_morse_fallback() {
-    for text in ["", " ", "你好"] {
-        let mut defs = definitions("[message file]\ncontent={media}\nmorse_text=E\n", &["file"]);
-        defs.get_mut("file")
-            .unwrap()
-            .media
-            .morse
-            .as_mut()
-            .unwrap()
-            .text = text.into();
-        assert_eq!(
-            compile("{message_macro_file}", &defs),
-            Err(CompositionError::MissingDefinition)
-        );
-    }
-}
-
-#[test]
-fn composition_attention_positions() {
-    let defs = definitions(
-        "[message attention]\ncontent={tone_sequence}\ntone_sequence=1000Hz / 200ms / -20dB\n[message time]\nmessage_id=site-time\n[message temperature]\nmessage_id=site-temperature\n",
-        &["attention", "time", "temperature"],
-    );
-    let composition = compile("{message_macro_attention} {message_macro_time} {message_macro_attention} {message_macro_temperature} {message_macro_attention}", &defs).unwrap();
-    assert_eq!(
-        composition.segments(),
-        &[
-            Segment::Tone(Some("attention".into())),
-            Segment::Message(Some("time".into())),
-            Segment::Tone(Some("attention".into())),
-            Segment::Message(Some("temperature".into())),
-            Segment::Tone(Some("attention".into())),
-        ]
-    );
-}
-
-#[test]
 fn composition_cycle_or_overflow_is_rejected_before_expansion() {
-    let mut defs = definitions(
-        "[message a]\ncontent={message_macro_b}\n[message b]\ncontent={message_macro_a}\n",
-        &["a", "b"],
-    );
-    assert_eq!(
-        compile("{message_macro_a}", &defs),
-        Err(CompositionError::Cycle)
-    );
-    let base = defs["a"].clone();
-    defs.clear();
-    for index in (0..usize::BITS + 1).rev() {
-        let mut definition = base.clone();
-        definition.content = if index == usize::BITS {
+    let mut parts = BTreeMap::from([
+        ("first".into(), "{ second }".into()),
+        ("second".into(), "{ first }".into()),
+    ]);
+    assert_eq!(compile("{ first }", &parts), Err(CompositionError::Cycle));
+    parts.clear();
+    for i in (0..=usize::BITS).rev() {
+        let content = if i == usize::BITS {
             "x".into()
         } else {
-            format!("{{message_macro_n{0}}}{{message_macro_n{0}}}", index + 1)
+            format!("{{ n{0} }}{{ n{0} }}", i + 1)
         };
-        defs.insert(format!("n{index}"), definition);
+        parts.insert(format!("n{i}"), content);
     }
+    assert_eq!(compile("{ n0 }", &parts), Err(CompositionError::TooLarge));
+}
+
+#[test]
+fn composition_literal_multiple_references_preserve_owners_and_bounds() {
+    let parts = BTreeMap::from([
+        ("first".into(), "First".into()),
+        ("second".into(), "Second".into()),
+    ]);
+    let value = compile("Station. { first } { second }", &parts).unwrap();
+    let owners = value
+        .segments()
+        .iter()
+        .map(|s| match s {
+            Segment::Fluent { owner, .. } => owner.as_deref(),
+            _ => panic!("unexpected segment"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(owners, [None, Some("first"), Some("second")]);
+    assert!(compile("{ missing }", &parts).is_err());
+    assert!(compile("{ malformed", &parts).is_err());
+    assert!(compile(&"x".repeat(128), &parts).is_err());
+}
+
+#[test]
+fn composition_media_and_attention_preserve_sequence_and_require_fallback() {
+    let rows = [
+        (
+            ResourceKind::Message,
+            "attention",
+            json!({"tone":{"sequence":"440/20"}}),
+        ),
+        (
+            ResourceKind::Message,
+            "recorded",
+            json!({"file":"id.wav","morse":{"text":"ID"}}),
+        ),
+    ];
+    let (_, m, _) = projected_telemetry(&rows).unwrap();
+    let recipe = m
+        .compile_inline(
+            "{ attention } { recorded } { attention }",
+            MorseRequirement::Required,
+        )
+        .unwrap();
     assert_eq!(
-        compile("{message_macro_n0}", &defs),
-        Err(CompositionError::TooLarge)
+        recipe
+            .segments()
+            .iter()
+            .map(|s| match s {
+                Segment::FluentMedia { owner, .. } => owner.as_deref(),
+                _ => panic!("unexpected segment"),
+            })
+            .collect::<Vec<_>>(),
+        [Some("attention"), Some("recorded"), Some("attention")]
     );
-}
-
-#[test]
-fn composition_segment_bounds_and_bad_tokens() {
-    let defs = definitions(
-        &format!("[message a]\ncontent={}\n", "x".repeat(100)),
-        &["a"],
-    );
-    let composition = compile("{message_macro_a}{message_macro_a}", &defs).unwrap();
-    assert_eq!(composition.segments().len(), 2);
-    for bad in [
-        "{unknown}",
-        "{message_macro_unknown}",
-        "{broken",
-        "broken}",
-        &"x".repeat(128),
-    ] {
-        assert!(compile(bad, &defs).is_err(), "{bad}");
-    }
-    assert_eq!(
-        compile("{{message_macro_a}}", &defs).unwrap().segments(),
-        &[Segment::Literal {
-            text: "{message_macro_a}".into(),
-            owner: None
-        }]
-    );
-}
-
-#[test]
-fn composition_configuration_inherits_values_and_warns_invalid_bindings() {
-    let text = "[524950]\n[speech]\nlevel_db=-6\n[message status]\nmessage_id=site-test\narg_node=node\narg_value=sensor:temperature\ndtmf_id=1\n[message 524950 status]\narg_value=invalid\nspeech_speed_percent=125\ndtmf_id=01\n";
-    let doc = ConfigDocument::parse(text).unwrap();
-    let resolution =
-        ResolvedMessageSettings::resolve(&doc, &NodeId::new("524950").unwrap(), "status").unwrap();
-    assert_eq!(resolution.value.content, "{message}");
-    assert_eq!(
-        resolution.value.bindings["value"],
-        BindingSource::Sensor("temperature".into())
-    );
-    assert_eq!(resolution.value.dtmf_id.as_deref(), Some("1"));
-    assert_eq!(resolution.warnings.len(), 2);
-    let mut args = resolution.value.bindings;
-    args.insert("remaining".into(), BindingSource::TimeRemaining);
-    assert!(!args["remaining"].available_in_context(false));
-    assert!(args["remaining"].available_in_context(true));
-}
-
-#[test]
-fn composition_configuration_invalid_content_falls_back_and_preserves_media_defaults() {
-    let doc = ConfigDocument::parse("[524950]\n[speech]\nlevel_db=-6\n[morse]\nfrequency_hz=500\n[message time]\ncontent={message}\nmessage_id=site-time\nspeech_speed_percent=125\n[message 524950 time]\ncontent={broken\nspeech_speed_percent=0\n").unwrap();
-    let resolved =
-        ResolvedMessageSettings::resolve(&doc, &NodeId::new("524950").unwrap(), "time").unwrap();
-    assert_eq!(resolved.value.content, "{message}");
-    assert_eq!(resolved.warnings.len(), 2);
-    // Catalog segments need effective voice/Morse settings even without literal text.
-    assert_eq!(resolved.value.speech_defaults.speed_percent, 125);
-    assert_eq!(resolved.value.speech_defaults.level_db, -6);
-    assert_eq!(resolved.value.morse_defaults.frequency_hz, 500);
-}
-
-#[test]
-fn composition_configuration_clears_bindings_and_validates_shapes() {
-    let doc = ConfigDocument::parse("[524950]\n[message a]\ncontent=Hello\narg_value=time\ndtmf_id=1\n[message 524950 a]\narg_value=\ndtmf_id=\n").unwrap();
-    let resolved =
-        ResolvedMessageSettings::resolve(&doc, &NodeId::new("524950").unwrap(), "a").unwrap();
-    assert!(resolved.value.bindings.is_empty());
-    assert!(resolved.value.dtmf_id.is_none());
-    assert!(resolved.warnings.is_empty());
-    for invalid in [
-        "[message]\n",
-        "[message 524950 a extra]\n",
-        "[message unknown a]\n",
-        "[message a]\n[message a]\n",
-    ] {
-        assert!(crate::config::Schema::validate(&ConfigDocument::parse(invalid).unwrap()).is_err());
-    }
-    for value in [
-        "callsign",
-        "node",
-        "date",
-        "time",
-        "day_of_week",
-        "greeting",
-        "link_status",
-        "input:door",
-        "sensor:temperature",
-    ] {
+    for text in ["", " ", "你好"] {
         assert!(
-            value
-                .parse::<BindingSource>()
-                .unwrap()
-                .available_in_context(false)
+            projected_telemetry(&[(
+                ResourceKind::Message,
+                "recorded",
+                json!({"file":"id.wav","morse":{"text":text}})
+            )])
+            .is_err()
         );
     }
-    for value in ["sensor:", "input:a:b", "sensor:two names", "unknown:name"] {
-        assert!(value.parse::<BindingSource>().is_err());
+}
+
+#[test]
+fn composition_configuration_retains_inherited_media_defaults_and_registered_bindings() {
+    let cfg = configuration(
+        &[(PORT, "radio")],
+        &[
+            (
+                SITE,
+                ResourceKind::TelemetrySettings,
+                "",
+                json!({"speech":{"level_db":-6},"morse":{"frequency_hz":500}}),
+            ),
+            (
+                SITE,
+                ResourceKind::Message,
+                "report",
+                json!({"content":"Temperature { $reading }","bindings":{"reading":"sensor:temperature"},"dtmf_id":"1"}),
+            ),
+            (
+                PORT,
+                ResourceKind::Message,
+                "report",
+                json!({"speech":{"timing":{"speed_percent":125}}}),
+            ),
+        ],
+    );
+    let scope = crate::config::resources::candidate::ResourceScope::Port(PORT.parse().unwrap());
+    let recipe = &cfg.scopes[&scope].messages.recipes["report"];
+    let settings = recipe.settings_for(None);
+    assert_eq!(settings.speech_defaults.speed_percent, 125);
+    assert_eq!(settings.speech_defaults.level_db, -6);
+    assert_eq!(settings.morse_defaults.frequency_hz, 500);
+    assert_eq!(
+        settings.bindings["reading"],
+        BindingSource::Sensor("temperature".into())
+    );
+    assert_eq!(settings.dtmf_id.as_deref(), Some("1"));
+    for s in ["sensor:", "input:a:b", "sensor:two names", "unknown:name"] {
+        assert!(BindingSource::from_public_path(s).is_none());
     }
-    assert!(
-        format!("sensor:{}", "x".repeat(64))
-            .parse::<BindingSource>()
-            .is_err()
-    );
-    assert!(
-        ResolvedMessageSettings::resolve(&doc, &NodeId::new("524950").unwrap(), "missing").is_err()
-    );
-    let long = "1".repeat(128);
-    let doc = ConfigDocument::parse(&format!(
-        "[524950]\n[message a]\nmessage_id=site-time\ndtmf_id=1\n\
-         [message 524950 a]\nmessage_id=\ndtmf_id={long}\n\
-         [message b]\nmessage_id=1bad\n"
-    ))
-    .unwrap();
-    let resolved =
-        ResolvedMessageSettings::resolve(&doc, &NodeId::new("524950").unwrap(), "a").unwrap();
-    assert!(resolved.value.message_id.is_none());
-    assert_eq!(resolved.value.dtmf_id.as_deref(), Some("1"));
-    let invalid =
-        ResolvedMessageSettings::resolve(&doc, &NodeId::new("524950").unwrap(), "b").unwrap();
-    assert!(invalid.value.message_id.is_none());
-    assert!(
-        invalid
-            .warnings
-            .iter()
-            .any(|warning| warning.value == "1bad")
-    );
+    assert!(!BindingSource::TimeRemaining.available_in_context(false));
+    assert!(BindingSource::TimeRemaining.available_in_context(true));
 }

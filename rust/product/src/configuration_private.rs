@@ -79,6 +79,18 @@ pub(crate) struct RetainedCredential {
     reference: PrivateReference,
 }
 impl RetainedCredential {
+    #[cfg(test)]
+    pub(crate) fn fixture(owner: ResourceId, version: ResourceId, bytes: &[u8]) -> Self {
+        Self {
+            bytes: Arc::new(SecretBytes::new(bytes.to_vec())),
+            reference: PrivateReference {
+                record: owner,
+                version,
+                sha256: ContentHash::from_bytes([0; 32]),
+            },
+        }
+    }
+
     /// Immutable record selected after affinity, masking and inheritance checks.
     pub(crate) fn version(&self) -> ResourceId {
         self.reference.version

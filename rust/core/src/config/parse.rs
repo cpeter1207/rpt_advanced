@@ -1,63 +1,10 @@
-//! Line-level configuration syntax.
-
-/// A parsed configuration line before it is retained by the owned document.
-pub(crate) enum ParsedLine<'a> {
-    Empty,
-    Section(&'a str),
-    Option(&'a str, &'a str),
-}
-
-/// Parse one physical line using the configuration file's whitespace and comment rules.
-pub(crate) fn parse_line(line: &str) -> Result<ParsedLine<'_>, ()> {
-    let line = line.split(';').next().unwrap_or_default().trim();
-    if line.is_empty() {
-        return Ok(ParsedLine::Empty);
-    }
-    if let Some(section) = line.strip_prefix('[') {
-        let Some(end) = section.find(']') else {
-            return Err(());
-        };
-        let (name, trailing) = section.split_at(end);
-        if name.trim().is_empty() || !trailing[1..].trim().is_empty() {
-            return Err(());
-        }
-        return Ok(ParsedLine::Section(name.trim()));
-    }
-    let Some(equal) = line.find('=') else {
-        return Err(());
-    };
-    let key = line[..equal].trim();
-    if key.is_empty() {
-        return Err(());
-    }
-    Ok(ParsedLine::Option(key, line[equal + 1..].trim()))
-}
-
+//! Bounded scalar parsing for protocol settings.
 /// Parse an unsigned decimal value with inclusive bounds.
 pub(crate) fn unsigned(text: &str, min: u64, max: u64) -> Option<u64> {
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let value = text.parse::<u64>().ok()?;
-    (min..=max).contains(&value).then_some(value)
-}
-
-/// Parse a nonempty comma-separated list of positive decimal durations.
-pub(crate) fn positive_milliseconds(text: &str) -> Option<Vec<u64>> {
-    let values = text
-        .split(',')
-        .map(|value| unsigned(value.trim(), 1, u64::MAX))
-        .collect::<Option<Vec<_>>>()?;
-    (!values.is_empty()).then_some(values)
-}
-
-/// Parse a signed decimal value with inclusive bounds.
-pub(crate) fn signed(text: &str, min: i64, max: i64) -> Option<i64> {
-    let digits = text.strip_prefix('-').unwrap_or(text);
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let value = text.parse::<i64>().ok()?;
     (min..=max).contains(&value).then_some(value)
 }
 

@@ -4,11 +4,10 @@ use rptadv_peer_support::echolink::{abi as echo, host::Provider};
 #[path = "../../../peer-support/tests/support/mod.rs"]
 pub(crate) mod support;
 use crate::bindings as host_abi;
+#[path = "../../../peer-support/tests/support/host_accounts.rs"]
+pub(crate) mod accounts;
 #[path = "../../../peer-support/tests/support/host_media.rs"]
 mod media;
-
-#[path = "../../../peer-support/tests/support/host_accounts.rs"]
-mod accounts;
 
 #[path = "../../../peer-support/tests/support/peer_metadata.rs"]
 mod peer_metadata;
@@ -69,11 +68,6 @@ fn peer_metadata_writes_only_the_supported_caller_prefix_for_both_protocols() {
         -1
     );
     crate::fixture::host(|state| state.clean());
-}
-
-#[test]
-fn echo_accounts_prepare_before_activation_and_dial_from_the_stable_context() {
-    accounts::check(HostServicesOwner::new());
 }
 
 #[test]

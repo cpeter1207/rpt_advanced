@@ -18,6 +18,9 @@ pub extern "C" fn fixture_pending_validations() -> usize { PENDING_VALIDATIONS.l
 static UPDATES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 static ACCOUNT_CALLBACKS: std::sync::Mutex<Vec<(usize, abi::EventFn, usize)>> = std::sync::Mutex::new(Vec::new());
 static ACCOUNT_STATE: AtomicUsize = AtomicUsize::new(2);
+static STOP_REJECTIONS: AtomicUsize = AtomicUsize::new(0);
+#[unsafe(no_mangle)]
+pub extern "C" fn fixture_stop_rejections() -> usize { STOP_REJECTIONS.load(Ordering::Acquire) }
 static DISABLED_STOP_FAILURE: AtomicUsize = AtomicUsize::new(0);
 static RECORD_FAULT: AtomicUsize = AtomicUsize::new(0);
 /// Mutate one copied foreign record while retaining every real fixture owner.
@@ -164,10 +167,10 @@ unsafe extern "C" fn apply(target: *mut abi::Account, prepared: *mut abi::Accoun
     unsafe { ptr::swap(target.cast::<u32>(), prepared.cast::<u32>()) };
     abi::Status::Ok
 }
-unsafe extern "C" fn account_observe(_: *const abi::Account, out: *mut abi::AccountObservation) -> abi::Status {
+unsafe extern "C" fn account_observe(account: *const abi::Account, out: *mut abi::AccountObservation) -> abi::Status {
     assert!(!NOTIFYING.get(), "account observation reentered its notification callback");
     unsafe { out.write(abi::AccountObservation { struct_size: size_of::<abi::AccountObservation>() as u32,
-        abi_version: 1, state: ACCOUNT_STATE.load(Ordering::Acquire) as u32,
+        abi_version: 1, node_number: if cfg!(managed) { *account.cast::<u32>() } else { 0 }, state: ACCOUNT_STATE.load(Ordering::Acquire) as u32,
         generation: ACCOUNT_GENERATION.load(Ordering::Acquire), directory_failures: 7, ..Default::default() }) };
     let out = unsafe { &mut *out };
     match RECORD_FAULT.load(Ordering::Acquire) {
@@ -398,7 +401,8 @@ unsafe extern "C" fn prepare(
     abi::Status::Ok
 }
 unsafe extern "C" fn stop(account: *mut abi::Account) -> abi::Status {
-    if account as usize == DISABLED_STOP_FAILURE.load(Ordering::Acquire) {
+    if (cfg!(managed) && RECORD_FAULT.load(Ordering::Acquire) == 80) || account as usize == DISABLED_STOP_FAILURE.load(Ordering::Acquire) {
+        STOP_REJECTIONS.fetch_add(1, Ordering::Release);
         return abi::Status::Failed;
     }
     if CONTEXTS.load(Ordering::SeqCst) == 1 && unsafe { *account.cast::<u32>() } != 99 {
@@ -427,6 +431,33 @@ pub extern "C" fn fixture_peers() -> usize {
     PEERS.load(Ordering::SeqCst)
 }
 
+#[cfg(managed)]
+#[repr(C)]
+struct Timing { minimum: u32, initial: u32, maximum: u32 }
+#[cfg(managed)]
+#[repr(C)]
+struct Receipt { size: u32, version: u32, attempt: u64, generation: u64, outcome: u32, reserved: u32 }
+#[cfg(managed)]
+unsafe extern "C" fn stage(_: *mut abi::Account, timing: *const Timing) -> abi::Status {
+    let value = unsafe { &*timing };
+    if value.minimum <= value.initial && value.initial <= value.maximum { abi::Status::Ok } else { abi::Status::Invalid }
+}
+#[cfg(managed)]
+unsafe extern "C" fn swap(target: *mut abi::Account, candidate: *mut abi::Account, attempt: u64, output: *mut Receipt) -> abi::Status {
+    let status = unsafe { apply(target, candidate) };
+    let receipt = unsafe { &mut *output };
+    receipt.attempt = attempt;
+    receipt.generation = ACCOUNT_GENERATION.load(Ordering::Acquire);
+    if status == abi::Status::Ok { receipt.outcome = 2; status } else { receipt.outcome = 3; abi::Status::Failed }
+}
+#[cfg(managed)]
+#[repr(C)]
+struct Managed {
+    base: abi::Descriptor,
+    egress: [usize; 2],
+    stage: unsafe extern "C" fn(*mut abi::Account, *const Timing) -> abi::Status,
+    swap: unsafe extern "C" fn(*mut abi::Account, *mut abi::Account, u64, *mut Receipt) -> abi::Status,
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn rptadv_echolink_descriptor_v1() -> *const abi::Descriptor {
     static TABLE: abi::Descriptor = abi::Descriptor {
@@ -486,5 +517,13 @@ pub extern "C" fn rptadv_echolink_descriptor_v1() -> *const abi::Descriptor {
         account_observe: if cfg!(network) { Some(account_observe) } else { None },
         peer_observe: if cfg!(network) { Some(peer_observe) } else { None },
     };
+    #[cfg(managed)] {
+        static MANAGED: Managed = Managed {
+            base: abi::Descriptor { struct_size: size_of::<Managed>() as u32, ..TABLE },
+            egress: [0; 2], stage, swap,
+        };
+        ptr::from_ref(&MANAGED.base)
+    }
+    #[cfg(not(managed))]
     ptr::from_ref(&TABLE)
 }

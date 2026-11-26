@@ -12,9 +12,15 @@ pub struct CourtesySettings {
     pub peers: Vec<(String, PreparedMedia)>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    RadioOrLink([u8; 64]),
+    Phone(u64),
+}
+
 #[derive(Clone, Copy)]
 struct Pending {
-    source: [u8; 64],
+    source: Source,
     media: usize,
     due: u64,
 }
@@ -24,6 +30,7 @@ pub(super) struct CourtesyPlanner {
     peers: Vec<(String, usize)>,
     receiver: Option<usize>,
     link: Option<usize>,
+    phone: Option<usize>,
     pending: Option<Pending>,
 }
 
@@ -52,17 +59,18 @@ impl CourtesyPlanner {
             peers,
             receiver,
             link,
+            phone: None,
             pending: None,
         }
     }
-    fn identity(source: &str) -> Option<[u8; 64]> {
+    fn identity(source: &str) -> Option<Source> {
         if source.len() >= 64 {
             return None;
         }
         let mut key = [0; 64];
         key.get_mut(..source.len())?
             .copy_from_slice(source.as_bytes());
-        Some(key)
+        Some(Source::RadioOrLink(key))
     }
     pub fn cancel(&mut self, source: &str) {
         let Some(key) = Self::identity(source) else {
@@ -95,6 +103,23 @@ impl CourtesyPlanner {
             media,
             due,
         });
+    }
+    pub fn set_phone(&mut self, media: PreparedMedia) {
+        if media.1 {
+            self.phone = Some(self.media.len());
+            self.media.push(media);
+        }
+    }
+    pub fn phone_edge(&mut self, ingress: u64, keyed: bool, due: u64) {
+        let Some(media) = self.phone else {
+            return;
+        };
+        let source = Source::Phone(ingress);
+        if !keyed {
+            self.pending = Some(Pending { source, media, due });
+        } else if self.pending.is_some_and(|item| item.source == source) {
+            self.pending = None;
+        }
     }
     pub fn pending(&self) -> bool {
         self.pending.is_some()

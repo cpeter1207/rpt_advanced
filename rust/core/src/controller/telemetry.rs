@@ -205,6 +205,7 @@ impl PreparedMedia {
     }
 
     /// Retain the scheduler's single occurrence identity through queueing and reclamation.
+    #[cfg(test)]
     pub(crate) fn with_occurrence(mut self, occurrence: Option<Arc<MessageOccurrence>>) -> Self {
         self.6 = occurrence;
         self
@@ -414,15 +415,24 @@ impl ControllerControl {
         self.messages.as_mut()?.take_request()
     }
 
+    /// Borrow the trigger retained with this exact deferred playback attempt.
+    pub(crate) fn message_event(
+        &self,
+        attempt: super::MessageAttemptId,
+    ) -> Option<&crate::runtime::MessageEventIdentity> {
+        self.messages.as_ref()?.event(attempt)
+    }
+
     /// Allocate a one-shot reader on control; values are requested only when playback starts.
     pub(crate) fn prepare_message(
         &mut self,
         content_index: usize,
+        event: Option<crate::runtime::MessageEventIdentity>,
     ) -> Result<PreparedMedia, ControllerError> {
         self.messages
             .as_mut()
             .ok_or(ControllerError)?
-            .register(content_index)
+            .register_with_event(content_index, event)
     }
 
     /// Complete the exact attempt, retaining rejected ownership on control for retry or disposal.
@@ -540,7 +550,11 @@ impl ControllerControl {
     }
 
     /// Preserve the capture's epoch through any off-audio recording preparation.
-    pub(crate) fn queue_captured_parrot(&mut self, clip: &CapturedParrot, media: PreparedMedia) -> bool {
+    pub(crate) fn queue_captured_parrot(
+        &mut self,
+        clip: &CapturedParrot,
+        media: PreparedMedia,
+    ) -> bool {
         self.queue_parrot(media, clip.isolation_epoch)
     }
 
@@ -556,7 +570,11 @@ impl ControllerControl {
         {
             return false;
         }
-        if self.parrot_pending.push(QueuedParrot { media, epoch }).is_err() {
+        if self
+            .parrot_pending
+            .push(QueuedParrot { media, epoch })
+            .is_err()
+        {
             self.parrot_busy.store(false, Ordering::Release);
             return false;
         }

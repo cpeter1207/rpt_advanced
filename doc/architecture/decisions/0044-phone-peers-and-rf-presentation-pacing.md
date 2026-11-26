@@ -21,12 +21,45 @@ and radio-node identities remain distinct. SIP/IAX signaling, codecs, packet
 jitter and telephone events remain off audio. Phone ingress uses existing inbound
 rings and shared DSP; no AllStar handshake/topology is sent to a phone provider.
 
-Incoming calls authenticate mailbox/PIN and start command-only. Explicit `*3`
-admits permitted transceive media. Private replies require a call-addressed sink
-independent of attachment. `*4` addresses local/remote commands, with phone-only
-literal quoting and source-scoped grants. Remote private/protected operations
-require verified origin/reply/lifecycle support; ordinary legacy digit forwarding
-alone does not establish per-call isolation.
+Each incoming call owns a separate connected provider peer, ingress, and reply
+sink scoped to its exact call generation. Before mailbox/PIN verification,
+caller audio stays in that call's private transport for digit detection. The
+authentication prompts go only to that call's egress, including while other
+callers or network peers are connected. Successful mailbox/PIN verification
+queues automatic attachment to the called account’s local port. The existing
+generation publication owns the attachment. The caller hears its eligible
+mix-minus after attachment. Its audio and keying remain muted until its own
+`*99#` command. The initial mute survives media redirects and administrative or group
+mute changes. `*3#` for the owning port preserves attachment and mute state.
+A verified, permitted mailbox opens source-scoped commands.
+The effective phone profile's `allow_mailboxes` and `deny_mailboxes` use exact
+mailbox numbers, including leading zeroes. Deny takes precedence. An empty allow
+list permits any verified mailbox outside the deny list. A policy change
+retires each newly denied live call and its media and command grants. Outgoing
+media-only calls use the initiating station's grant.
+Each attached call receives its own mix-minus from eligible local receiver
+audio, linked peers, and the other authenticated, attached callers. Its own
+upstream audio is excluded from that mix. Ordinary network blocking,
+forwarding, and isolation rules continue to govern audio to and from linked
+peers. Unfiltered all-peer receive mute uses each attached call's existing
+receive gate for audio and keying. Private replies retain their call-addressed
+sink independently of attachment. Available CPU, memory, and bandwidth determine the controller's
+call capacity. Keep storage bounded per call and scale the number of calls
+with those resources.
+
+The [JSON/REST phone-patch contract](../../../docs/superpowers/specs/2026-11-18-json-rest-configuration-design.md#protocol-jitter-and-phone-patch-keying)
+supersedes the phone port selector and per-call isolation bypass. Authenticated
+callers use their account's port for every command and retain call-scoped grants
+and private replies. Phone `*4` and addressed digit mode are unavailable. The
+outgoing account's isolation policy applies independently to each live attempt
+and call.
+
+Fixed, credential-free outcomes for phone commands go only to the initiating
+call through its existing private media queue. Telephone mute confirmation
+reflects the actual new state. A successful node dial is confirmed only after
+the media owner acknowledges the link ingress. When a phone command connects
+or disconnects a node, the command transition is reported privately. Ordinary
+link lifecycle events retain their configured audience.
 
 Add one bounded RF programme presentation FIFO on the existing transmit owner,
 after fresh peer processing/mixing and before the controller's local RF mix.
@@ -74,7 +107,7 @@ phone protocol/capabilities, and new products reject incomplete phone metadata.
 This additive record extension does not authorize mixing an incompatible SDK
 cohort elsewhere.
 
-The product's bounded private call owner retains its handle without directory
+The product's private call owner, with bounded queues per call, retains its handle without directory
 lookup, ASL handshake/topology, radio binding, or a radio-peer slot. Calls start
 unauthenticated. The serialized verifier checks the configured salted Argon2id
 hash before publishing the mailbox profile. Invalid records remain unavailable;
@@ -84,7 +117,8 @@ administration. Selected-node
 collection retains the exact private reply token and actual source, suppresses
 idle RF regeneration, and rejects legacy remote forwarding without the required
 private-origin/reply/lifecycle profile. Retiring the source ends queued replies
-and source-owned grants/collectors; committed reload and stop retire all calls.
+and source-owned grants/collectors. Reload rechecks the retained account and
+mailbox grants, and stop retires all calls.
 
 Private status preparation reuses the existing status formatter and producer
 PCM stream. A bounded per-call queue feeds the existing `Playback` renderer,
@@ -102,7 +136,7 @@ requests. It implements `*3`, `*4`, one-symbol `**` quoting and the existing
 collection bounds; syntax alone grants no authority or RF attachment. Its
 caller must retain the verified source and private reply on every dispatch.
 Provider egress, the private digit/media worker,
-grammar integration/configuration/allowlists, explicit `*3` media attachment,
+grammar integration/configuration/allowlists, verified media attachment,
 per-handle DSP ownership, and negotiated remote lifecycle remain dependent work;
 this foundation does not enable a usable phone provider or claim complete Task 3.
 
@@ -149,3 +183,78 @@ still need implementation and automated evidence.
 Actual provider/NAT and physical switching/STE/listening acceptance remain
 separate. The [implementation plan](../../../docs/superpowers/plans/2026-11-09-phone-patch-implementation.md)
 records task ordering; this ADR does not claim completion or authorize deployment.
+
+## Outgoing SIP call progress (approved implementation contract, pending)
+
+The selected call owner may receive early media on the same local RTP port it
+offered in the INVITE. A genuine 180 enables local ringback on the initiating
+radio. Receipt of original decoded provider audio takes precedence, including
+when no 180 preceded it. A 183 or SDP alone supplies no audio. Keep this
+presentation scoped to the pending attempt, account generation and authorized
+radio. Final answer/ACK and native readiness still govern ordinary microphone,
+DTMF and call media attachment. Terminal failures use the station's existing
+localized speech path. Cancellation retires that attempt's audio.
+[RFC 3960, sections 3.2 and 3.3](https://www.rfc-editor.org/rfc/rfc3960.html#section-3.2)
+
+Under ADR 0040 the coordinated phone provider v2 replaces blocking originate
+with begin, poll and cancel. The ten-pointer group is 88 bytes on AArch64;
+validate its complete extent and version before any operation. Pending calls
+are fallibly reserved and advanced by the existing serialized control tick,
+account worker and native reactor. There is no per-dial operating-system thread
+or fixed total-attempt limit. Poll never waits for signaling, queue space or
+media. A full handoff retains the exact request for a later turn. Final answer
+starts the existing separate two-second native-readiness window.
+
+A caller-owned, sized progress sink is borrowed only during a poll. The frontend
+retains no Product pointer across that operation. Each attempt retains its own
+bounded original-PCM queue and exact account, generation, command permit,
+revision and initiating station. Cancellation, timeout, reload and stop fence
+playback immediately while the native owner completes actual dialog cleanup.
+A SIP v2 observation retains a genuine 180 and final INVITE failure across
+coalescing; a retried challenge is not a failed INVITE. The first usable early
+answer must remain available even when later signaling coalesces before the
+consumer polls. Preserve the offered RTP socket and validate the final answer
+against the selected early negotiation. The initial 4,160-byte call observation
+and its descriptor are qualified prerequisites, not proof of audible progress.
+Commit matched headers, consumers, tests and package inputs together.
+
+| Interface | Coordinated producer and consumer changes |
+| --- | --- |
+| SIP observation and loader | Revise `rust/sip-adapter/include/rptadv_sip_adapter.h`, native shim, Rust descriptor/getter and build SONAME. Update `rust/private-phone-host/src/sip_provider.rs` and both frontend private transport loaders to the matched v2 getter and `librptadv_sip_adapter.so.2`. |
+| Product phone group | Update `rust/product/include/rptadv_product.h`, product group validation and nonblocking dial ownership, shared private-phone-host frontend operations, and standalone/Asterisk instances. The outer host pointer offsets stay fixed. An old version with the same extent must fail admission. |
+| Build and qualification | Update `debian/rpt-advanced.install`, the SDK manifest and trial producer/descriptor receipts. Update package/ABI tests and fixtures that load the v1 SIP filename, getter or record. Capture matched SIP DSO, product DSO and foreground hashes. Shared codec/jitter/Sofia contracts stay as published. |
+
+The shared account worker retains native transaction ownership. A full selection
+mailbox leaves the exact request on its pending handle for the next poll. The
+Product advances pending dials once on the outer control tick, since station
+refreshes can recursively pump media. Shutdown drops these handles before
+withdrawing account generations. Alerting and original-PCM playback require
+separate media qualification.
+
+Private IAX account owners can use the optional
+`rptadv_iax2_provider_dial_descriptor_v1` capability to begin and poll each dial
+on the account's registered socket while continuing incoming admission. Each
+attempt owns an exact provider route through answer or cancellation. Cancel
+requests only that route's termination and the owner retains its token through
+terminal poll. The existing IAX client/server descriptors and SONAME remain ABI
+2. Older providers continue to dial synchronously and serialize call setup on
+each account until the matched provider capability is installed.
+
+## Resource-based call scaling (implementation in progress)
+
+No configured or compiled total-call maximum may substitute for available CPU,
+memory and network capacity. Reserve additional call and pending-attempt records
+fallibly off audio, before publication. Keep bounded queues per call and fair
+service quanta; a service quantum is not an admission limit. A saturated handoff
+must retain the exact pending call rather than silently close it. Existing peer
+access, receive mute, forwarding, selected-group and isolation policies still
+apply in both directions.
+
+Station prompt jobs must yield independently on full PCM rings, pending provider
+output and reader retirement. Filesystem/model setup, process spawning and child
+reaping remain off the station scheduler and audio callbacks, with separate
+owned retirement capacity. The coordinated media descriptor ABI 3 replaces its
+blocking read with bounded Pending, FormatReady, Samples and EOF steps, and file
+and speech adapters move to SONAME .so.2. Current consumers and package inputs
+change together; no compatibility-only blocking interface is retained. This
+prerequisite and the fair station scheduler remain pending verification.

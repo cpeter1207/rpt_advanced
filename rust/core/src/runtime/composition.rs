@@ -3,99 +3,31 @@
 use super::render;
 use crate::{
     composition::{Composition, CompositionError, MorseRequirement, Segment},
-    config::{
-        BindingSource, ResolvedIdentifierSettings, ResolvedMessageSettings, ResolvedSiteSettings,
-    },
+    config::{BindingSource, ResolvedMessageSettings},
     media::{MediaProgram, MediaSource, MorseSource, SpeechSource},
     messages::{
         Daypart, MAX_MESSAGE_BYTES, Message, MessageArgument, MessageCatalog, MessageForms,
     },
     schedule::CivilTime,
     site::{Observation, ReadingQuality},
-    template::MessageTemplate,
     time::TimeFormat,
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::BTreeMap;
 
 /// Immutable recipes and selectors retained with their controller/media generation.
 #[derive(Default)]
 pub(super) struct MessageRecipes {
-    definitions: Arc<BTreeMap<String, ResolvedMessageSettings>>,
     prefix_length: usize,
-    // Configuration identity is independent of enablement or current read quality.
-    site_sources: Vec<BindingSource>,
     pub items: Vec<MessageRecipe>,
     pub selectors: BTreeMap<String, usize>,
     pub names: BTreeMap<String, usize>,
-    pub events: BTreeMap<String, usize>,
     pub site_selectors: BTreeMap<String, usize>,
+    pub alarm_messages: BTreeMap<(String, &'static str), usize>,
     pub site_unavailable: usize,
     pub warnings: Vec<crate::config::ConfigWarning>,
 }
 
 impl MessageRecipes {
-    pub fn new(
-        document: &crate::config::ConfigDocument,
-        node: &crate::config::NodeId,
-        catalog: &MessageCatalog,
-    ) -> Result<Self, super::RuntimeError> {
-        let prefix_length = crate::config::ResolvedNodeSettings::resolve(document, node)?
-            .value
-            .link_commands["link_command_message"]
-            .len();
-        let names = document
-            .named_sections("message", None)
-            .into_iter()
-            .chain(document.named_sections("message", Some(node.as_str())))
-            .filter_map(|section| section.rsplit(' ').next())
-            .collect::<BTreeSet<_>>();
-        let mut definitions = BTreeMap::new();
-        for name in names {
-            definitions.insert(
-                name.to_owned(),
-                ResolvedMessageSettings::resolve(document, node, name)?.value,
-            );
-        }
-        let site = ResolvedSiteSettings::resolve(document, node)?.value;
-        let mut result = Self {
-            definitions: Arc::new(definitions),
-            prefix_length,
-            site_sources: site
-                .sensors
-                .iter()
-                .map(|sensor| BindingSource::Sensor(sensor.name.clone()))
-                .chain(
-                    site.inputs
-                        .iter()
-                        .map(|input| BindingSource::Input(input.name.clone())),
-                )
-                .collect(),
-            ..Self::default()
-        };
-        let definitions = result.definitions.clone();
-        for (name, settings) in definitions.iter() {
-            let section = format!("message {} {name}", node.as_str());
-            if let Some(index) = result.add(
-                settings.clone(),
-                &section,
-                catalog,
-                MorseRequirement::Required,
-            )? {
-                result.names.insert(name.clone(), index);
-            }
-        }
-        let defaults = ResolvedMessageSettings::from_scopes(document, node, &[], "")?;
-        let site_prefix = crate::config::ResolvedNodeSettings::resolve(document, node)?
-            .value
-            .link_commands["link_command_site_status"]
-            .len();
-        result.register_site(&site, defaults, site_prefix, node.as_str(), catalog);
-        Ok(result)
-    }
-
     pub fn modular(
         scope: &crate::config::resources::generation::ScopeConfiguration,
         section: &str,
@@ -109,8 +41,15 @@ impl MessageRecipes {
             )?;
             result.names.insert(name.clone(), index);
         }
+        for (key, recipe) in &scope.equipment.alarm_messages {
+            let index = result.items.len();
+            result
+                .items
+                .push(MessageRecipe::Composition(Box::new(recipe.clone())));
+            result.alarm_messages.insert(key.clone(), index);
+        }
         result.register_site(
-            &scope.equipment.settings,
+            &scope.equipment,
             scope.messages.renderer_defaults().clone(),
             0,
             section,
@@ -121,13 +60,14 @@ impl MessageRecipes {
 
     fn register_site(
         &mut self,
-        site: &ResolvedSiteSettings,
+        equipment: &crate::config::resources::profiles::equipment::ScopedEquipment,
         defaults: ResolvedMessageSettings,
         site_prefix: usize,
         section: &str,
         catalog: &MessageCatalog,
     ) {
-        for (name, source, selector, label, unit, precision) in site
+        let site = &equipment.settings;
+        for (name, source, selector, unit, precision) in site
             .sensors
             .iter()
             .map(|sensor| {
@@ -135,7 +75,6 @@ impl MessageRecipes {
                     sensor.name.as_str(),
                     BindingSource::Sensor(sensor.name.clone()),
                     &sensor.dtmf_id,
-                    sensor.label_message_id.as_str(),
                     sensor.unit.as_str(),
                     sensor.precision,
                 )
@@ -145,7 +84,6 @@ impl MessageRecipes {
                     input.name.as_str(),
                     BindingSource::Input(input.name.clone()),
                     &input.dtmf_id,
-                    "",
                     "",
                     0,
                 )
@@ -165,9 +103,6 @@ impl MessageRecipes {
                 ));
                 continue;
             }
-            let label = catalog
-                .format_named(label, &BTreeMap::new())
-                .unwrap_or_else(|_| forms(name));
             let mut unit = catalog
                 .format_named(&format!("site-unit-{unit}"), &BTreeMap::new())
                 .unwrap_or_else(|_| forms(unit));
@@ -179,7 +114,8 @@ impl MessageRecipes {
             let index = self.items.len();
             self.items.push(MessageRecipe::Site(Box::new(SiteReport {
                 source: Some(source),
-                label,
+                label: forms(name),
+                label_recipe: equipment.labels.get(name).cloned(),
                 unit,
                 precision,
                 settings: defaults.clone(),
@@ -190,68 +126,11 @@ impl MessageRecipes {
         self.items.push(MessageRecipe::Site(Box::new(SiteReport {
             source: None,
             label: forms(""),
+            label_recipe: None,
             unit: forms(""),
             precision: 0,
             settings: defaults,
         })));
-    }
-
-    /// Compile one usable source and register its selector in the shared node namespace.
-    pub fn add(
-        &mut self,
-        settings: ResolvedMessageSettings,
-        section: &str,
-        catalog: &MessageCatalog,
-        morse: MorseRequirement,
-    ) -> Result<Option<usize>, super::RuntimeError> {
-        let selector = settings.dtmf_id.clone();
-        let recipe =
-            Composition::compile(settings, self.definitions.clone(), morse).and_then(|recipe| {
-                recipe.validate_catalog(catalog)?;
-                Ok(recipe)
-            });
-        match recipe {
-            Ok(recipe) => {
-                for segment in recipe.segments() {
-                    if let Segment::Message(owner) = segment {
-                        let bindings = &recipe.settings_for(owner.as_deref()).bindings;
-                        if bindings
-                            .values()
-                            .any(|source| !source.available_in_context(false))
-                        {
-                            self.disable(section, "time_remaining requires a deadline");
-                            return Ok(None);
-                        }
-                        for source in bindings.values() {
-                            if self.site_sources.contains(source) {
-                                continue;
-                            }
-                            if let BindingSource::Sensor(name) | BindingSource::Input(name) = source
-                            {
-                                self.warnings.push(crate::config::ConfigWarning::new(
-                                    0,
-                                    section,
-                                    "content",
-                                    name,
-                                    "site reading is unavailable until its source is configured",
-                                    "unavailable reading message",
-                                ));
-                            }
-                        }
-                    }
-                }
-                self.register(
-                    MessageRecipe::Composition(Box::new(recipe)),
-                    selector,
-                    section,
-                )
-                .map(Some)
-            }
-            Err(error) => {
-                self.disable(section, &format!("invalid composition: {error:?}"));
-                Ok(None)
-            }
-        }
     }
 
     /// Admit every configured recipe through the same selector bounds and collision checks.
@@ -283,34 +162,18 @@ impl MessageRecipes {
         self.items.push(recipe);
         Ok(index)
     }
-
-    fn disable(&mut self, section: &str, reason: &str) {
-        self.warnings.push(crate::config::ConfigWarning::new(
-            0,
-            section,
-            "content",
-            "",
-            reason,
-            "definition disabled",
-        ));
-    }
 }
 
 /// Recipes share admission, generation fencing and exact-source reply routing.
 pub(super) enum MessageRecipe {
     Composition(Box<Composition>),
     Site(Box<SiteReport>),
-    LegacyEvent {
-        template: MessageTemplate,
-        settings: Box<ResolvedIdentifierSettings>,
-        playback: crate::controller::PlaybackPolicy,
-        delivery: crate::controller::PoliteDelivery,
-    },
 }
 
 pub(super) struct SiteReport {
     source: Option<BindingSource>,
     label: MessageForms,
+    label_recipe: Option<Composition>,
     unit: MessageForms,
     precision: u8,
     settings: ResolvedMessageSettings,
@@ -330,9 +193,6 @@ impl MessageRecipe {
                 Some((settings.playback, settings.delivery))
             }
             Self::Site(_) => None,
-            Self::LegacyEvent {
-                playback, delivery, ..
-            } => Some((*playback, *delivery)),
         }
     }
 
@@ -343,40 +203,21 @@ impl MessageRecipe {
     ) -> Result<MediaProgram, CompositionError> {
         match self {
             Self::Composition(recipe) => recipe.prepare(catalog, values),
-            Self::LegacyEvent {
-                template, settings, ..
-            } => {
-                let expand = |node: &str, callsign: &str, status: &str| {
-                    render::message_with_status(
-                        template,
-                        values.civil,
-                        values.time_format,
-                        node,
-                        callsign,
-                        status,
-                        catalog,
-                    )
-                    .map_err(|_| CompositionError::Preparation)
-                };
-                let text = expand(&values.node, &values.callsign, &values.links.text)?;
-                let morse = render::morse(&text).ok_or(CompositionError::Preparation)?;
-                let speech = render::telemetry_speech(
-                    &expand(
-                        &render::scheduled_speech(&values.node, &values.node, "", ""),
-                        &render::scheduled_speech(&values.callsign, "", &values.callsign, ""),
-                        &values.links.tts,
-                    )?,
-                    &[],
-                );
-                Ok(MediaProgram::single(super::prepare::status_source(
-                    settings, &morse, &speech,
-                )))
-            }
             Self::Site(report) => {
-                let mut arguments = BTreeMap::from([(
-                    "label".into(),
-                    MessageArgument::Forms(report.label.clone()),
-                )]);
+                let label = match &report.label_recipe {
+                    Some(recipe) => {
+                        let mut label = forms("");
+                        for part in recipe.prepare_text(catalog, values)? {
+                            label.text.push_str(&part.text);
+                            label.tts.push_str(&part.tts);
+                            label.morse.push_str(&part.morse);
+                        }
+                        label
+                    }
+                    None => report.label.clone(),
+                };
+                let mut arguments =
+                    BTreeMap::from([("label".into(), MessageArgument::Forms(label))]);
                 let id = match &report.source {
                     None => "site-query-unavailable",
                     Some(source) => match values.binding(source, catalog)? {
@@ -790,6 +631,7 @@ fn spoken_source(
 
 impl Composition {
     /// Check catalog names, required bindings, and fallback forms without capturing live values.
+    #[cfg(test)]
     pub(crate) fn validate_catalog(
         &self,
         catalog: &MessageCatalog,
@@ -805,11 +647,6 @@ impl Composition {
         let spoken = usage != MorseRequirement::TextOnly;
         for segment in self.segments() {
             match segment {
-                Segment::Literal { text, .. } => {
-                    if spoken {
-                        render::morse(text).ok_or(CompositionError::Preparation)?;
-                    }
-                }
                 Segment::Message(owner) => {
                     let settings = self.settings_for(owner.as_deref());
                     let arguments = sample(&settings.bindings);
@@ -874,7 +711,6 @@ impl Composition {
                         .map_err(|_| CompositionError::Preparation)?;
                     }
                 }
-                Segment::Media(_) | Segment::Tone(_) => {}
             }
         }
         Ok(())
@@ -888,14 +724,6 @@ impl Composition {
         spoken: bool,
     ) -> Result<(&'a ResolvedMessageSettings, MessageForms), CompositionError> {
         let (owner, forms) = match segment {
-            Segment::Literal { text, owner } => (
-                owner,
-                MessageForms {
-                    text: text.clone(),
-                    tts: render::telemetry_speech(text, &[]),
-                    morse: text.clone(),
-                },
-            ),
             Segment::Message(owner) => {
                 let settings = self.settings_for(owner.as_deref());
                 (owner, message_forms(settings, values, catalog)?)
@@ -938,7 +766,7 @@ impl Composition {
         let mut complete_morse = true;
         for segment in self.segments() {
             let source = match segment {
-                Segment::Literal { .. } | Segment::Message(_) | Segment::Fluent { .. } => {
+                Segment::Message(_) | Segment::Fluent { .. } => {
                     let (settings, forms) = self.text_part(segment, catalog, values, true)?;
                     spoken_source(forms, settings)?
                 }
@@ -965,11 +793,6 @@ impl Composition {
                     }
                     media
                 }
-                Segment::Media(owner) => self.settings_for(owner.as_deref()).media.clone(),
-                Segment::Tone(owner) => MediaSource {
-                    tone: self.settings_for(owner.as_deref()).media.tone.clone(),
-                    ..MediaSource::default()
-                },
             };
             if let Some(morse) = &source.morse {
                 program.morse.push(morse.clone());

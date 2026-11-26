@@ -11,6 +11,8 @@ import time
 import wave
 from pathlib import Path
 
+from asterisk_working_store import WorkingStore
+
 
 def cli(configuration: Path, command: str) -> str:
     """! @brief Execute one CLI command against the test-owned Asterisk socket.
@@ -50,7 +52,7 @@ def assert_asl_modules_absent(configuration: Path) -> None:
 
 def audio_case(
     configuration: Path,
-    radio_configuration: Path,
+    radio_configuration: WorkingStore,
     logfile: Path,
     process: subprocess.Popen,
 ) -> None:
@@ -62,14 +64,15 @@ def audio_case(
     @return None; assertions verify transport and duplex behavior.
     """
     offset = len(logfile.read_text(encoding="utf-8", errors="replace"))
-    radio_configuration.write_text(
-        "[full]\nfull_duplex=yes\n"
-        "[half]\nfull_duplex=no\n"
-        "[identifier]\ninterval_ms=50\nmorse_text=E\n"
-        "[identifier full periodic]\n"
-        "[identifier half periodic]\n",
-        encoding="utf-8",
-    )
+    for name in ("full", "half"):
+        radio_configuration.station(name, name, name)
+        radio_configuration.telemetry(
+            name,
+            "identifiers",
+            "periodic",
+            {"morse": {"text": "E"}, "timing": {"interval_ms": 50}},
+        )
+        radio_configuration.enabled(name)
     cli(configuration, "module reload app_rpt_advanced.so")
     deadline = time.monotonic() + 30
     while (
@@ -81,7 +84,8 @@ def audio_case(
         if process.poll() is not None or time.monotonic() >= deadline:
             raise TimeoutError("radio exchange did not complete")
         time.sleep(0.1)
-    radio_configuration.write_text("", encoding="utf-8")
+    for name in ("full", "half"):
+        radio_configuration.remove(name)
     cli(configuration, "module reload app_rpt_advanced.so")
     records = re.findall(
         r"rpt_fixture RadioPlusAdvanced/(full|half) ticks=(\d+) "
@@ -105,16 +109,24 @@ def media_case(configuration, radio_configuration, logfile, process) -> None:
     @param process Test-owned running Asterisk.
     @return None; assertions require both prepared and fallback audio.
     """
-    source = radio_configuration.parent / "identifier.wav"
+    source = radio_configuration.directory / "identifier.wav"
     with wave.open(str(source), "wb") as output:
         output.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
         output.writeframes((2345).to_bytes(2, "little", signed=True) * 48000)
     offset = len(logfile.read_text(encoding="utf-8", errors="replace"))
-    radio_configuration.write_text(
-        "[media]\n[identifier media periodic]\ninterval_ms=50\n"
-        f"regardless_of_activity=yes\nsound_file={source}\nmorse_text=E\n",
-        encoding="utf-8",
+    radio_configuration.station("media", "media")
+    radio_configuration.telemetry(
+        "media",
+        "identifiers",
+        "periodic",
+        {
+            "file": str(source),
+            "morse": {"text": "E"},
+            "timing": {"interval_ms": 50},
+            "regardless_of_activity": True,
+        },
     )
+    radio_configuration.enabled("media")
     cli(configuration, "module reload app_rpt_advanced.so")
     deadline = time.monotonic() + 30
     while (
@@ -124,7 +136,7 @@ def media_case(configuration, radio_configuration, logfile, process) -> None:
         if process.poll() is not None or time.monotonic() >= deadline:
             raise TimeoutError("prepared identifier exchange did not complete")
         time.sleep(0.1)
-    radio_configuration.write_text("", encoding="utf-8")
+    radio_configuration.remove("media")
     cli(configuration, "module reload app_rpt_advanced.so")
     records = re.findall(
         r"rpt_fixture media file=(\d+) morse=(\d+)",
@@ -143,11 +155,17 @@ def announcement_case(configuration, radio_configuration, logfile, process) -> N
     @return None; assertions require balanced post-receive Morse transmission.
     """
     offset = len(logfile.read_text(encoding="utf-8", errors="replace"))
-    radio_configuration.write_text(
-        "[half]\nfull_duplex=no\ntransmit_hang_ms=20\n"
-        "[announcement half idle]\ninterval_ms=50\nmorse_text=E\n",
-        encoding="utf-8",
+    radio_configuration.station("half", "half", "half")
+    radio_configuration.profile(
+        "half", "tx/signaling/", {"ptt": {"timing": {"hang_ms": 20}}}
     )
+    radio_configuration.telemetry(
+        "half",
+        "announcements",
+        "idle",
+        {"timing": {"interval_ms": 50}, "morse": {"text": "E"}},
+    )
+    radio_configuration.enabled("half")
     cli(configuration, "module reload app_rpt_advanced.so")
     deadline = time.monotonic() + 30
     while (
@@ -157,7 +175,7 @@ def announcement_case(configuration, radio_configuration, logfile, process) -> N
         if process.poll() is not None or time.monotonic() >= deadline:
             raise TimeoutError("periodic announcement exchange did not complete")
         time.sleep(0.1)
-    radio_configuration.write_text("", encoding="utf-8")
+    radio_configuration.remove("half")
     cli(configuration, "module reload app_rpt_advanced.so")
     records = re.findall(
         r"rpt_fixture RadioPlusAdvanced/half ticks=(\d+) writes=(\d+) "
@@ -194,18 +212,13 @@ def main() -> None:
         (directory / "modules.conf").write_text(
             "[modules]\nautoload=no\nload=app_rpt_advanced.so\n", encoding="utf-8"
         )
-        radio_configuration = directory / "rpt_advanced.conf"
-        radio_configuration.write_text(
-            Path(
-                "build/stage/usr/share/doc/rpt-advanced/examples/rpt_advanced.conf"
-            ).read_text(encoding="utf-8"),
-            encoding="utf-8",
-        )
+        radio_configuration = WorkingStore(directory)
         logfile = directory / "console.log"
         with logfile.open("w", encoding="utf-8") as output:
             process = subprocess.Popen(
                 ["asterisk", "-f", "-C", str(configuration)],
                 stdin=subprocess.DEVNULL,
+                env=radio_configuration.environment,
                 stdout=output,
                 stderr=subprocess.STDOUT,
             )
@@ -236,18 +249,18 @@ def main() -> None:
                         raise RuntimeError(f"module did not start: {listing}")
                     time.sleep(0.1)
                 assert_asl_modules_absent(configuration)
-                radio_configuration.write_text(
-                    "[usb]\nfull_duplex=yes\n", encoding="utf-8"
-                )
+                radio_configuration.start()
+                radio_configuration.station("usb", "full")
+                previously_disabled = radio_configuration.disabled_revision("usb")
+                radio_configuration.enabled("usb", reject=True)
                 cli(configuration, "module reload app_rpt_advanced.so")
                 listing = cli(configuration, "module show like app_rpt_advanced")
                 assert "Running" in listing and "Not Running" not in listing, listing
                 # No driver is loaded: the rejected active node must not replace
                 # the original disabled configuration. Restore a valid reload
                 # before testing a fresh module load in this same process.
-                radio_configuration.write_text(
-                    "[usb]\nnode_enabled=no\nfull_duplex=yes\n", encoding="utf-8"
-                )
+                radio_configuration.restore_disabled("usb", previously_disabled)
+                radio_configuration.enabled("usb", False)
                 cli(configuration, "module reload app_rpt_advanced.so")
                 cli(configuration, "module unload app_rpt_advanced.so")
                 listing = cli(configuration, "module show like app_rpt_advanced")

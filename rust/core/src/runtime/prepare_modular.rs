@@ -45,7 +45,6 @@ impl RuntimeConfiguration {
             telemetry_duck_db: scope.telemetry.duck_db,
             courtesy_delay_ms: scope.telemetry.courtesy_delay_ms,
             channel: port.to_string(),
-            radio: Default::default(),
             language: scope.metadata.language.clone(),
             callsign: scope.metadata.callsign.clone(),
             statpost_url: asl
@@ -62,9 +61,6 @@ impl RuntimeConfiguration {
             link_static_directory_file: String::new(),
             link_directory_file: asl.map(|a| a.directory_file.clone()).unwrap_or_default(),
             link_lookup_method: asl.map(|a| a.lookup_method).unwrap_or_default(),
-            link_commands: Default::default(),
-            dtmf_admin_unlock_hash: String::new(),
-            dtmf_admin_lock_hash: String::new(),
             dtmf_admin_timeout_ms: scope.policy.admin_timeout_ms,
         })
     }
@@ -166,10 +162,13 @@ impl RuntimeConfiguration {
             }
         }
         let mut courtesy = CourtesySettings::default();
+        let mut phone_courtesy = None;
         for (name, entry) in &scope.media.courtesies {
             if let Some(media) = media_for(ResourceKind::Courtesy, "courtesies", name)? {
                 if entry.input == "receiver" {
                     courtesy.receiver = Some(media);
+                } else if entry.input == "phone" {
+                    phone_courtesy = Some(media);
                 } else if entry.remote_node.is_empty() {
                     courtesy.link = Some(media);
                 } else {
@@ -190,6 +189,9 @@ impl RuntimeConfiguration {
         let (mut controller, mut control) =
             NodeController::new(settings, identifiers, announcements, courtesy)
                 .map_err(|_| RuntimeError::Preparation)?;
+        if let Some(media) = phone_courtesy {
+            controller.set_phone_courtesy(media);
+        }
         controller
             .set_tails(tails)
             .map_err(|_| RuntimeError::Preparation)?;

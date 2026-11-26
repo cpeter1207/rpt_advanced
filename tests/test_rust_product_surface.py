@@ -22,16 +22,20 @@ FORBIDDEN_MAKE_TOKENS = (
     "librpt_advanced.a",
     "$(wildcard src/*.c)",
 )
-ADAPTERS = ("asterisk", "control_asterisk", "file", "speech")
+ASTERISK = "librptadv_asterisk_adapter.so.2"
+ASTERISK_CONTROL = "librptadv_control_asterisk_adapter.so.1"
+FILE = "librptadv_file_adapter.so.2"
+SPEECH = "librptadv_speech_adapter.so.2"
 STANDALONE_CONTROL = "librptadv_control_standalone_adapter.so.1"
 RESOLVER = "librptadv_resolver_adapter.so.1"
 JITTER = "librptadv_jitter_adapter.so.1"
-SIP = "librptadv_sip_adapter.so.1"
+SIP = "librptadv_sip_adapter.so.2"
 GPIOD = "librptadv_gpiod_adapter.so.1"
 HWMON = "librptadv_hwmon_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
 STORE_MAINTENANCE_BINARY = "rpt-advanced-store"
-PRODUCT = "librptadv_product.so.2"
+OPERATOR_BINARY = "rpt-advanced-cli"
+PRODUCT = "librptadv_product.so.3"
 RING_MINIMUM_VERSION = "3.0.0~alpha6"
 SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha3"
 TONE_MINIMUM_VERSION = "0.1.0~alpha1"
@@ -40,23 +44,23 @@ DTMF_MINIMUM_VERSION = "0.1.0~alpha3-1"
 TEMPLATE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 SCHEDULE_MINIMUM_VERSION = "0.1.0~alpha3-1"
 USBRADIO_MINIMUM_VERSION = "0.1.0~alpha38-1"
-LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
+RADIO_MINIMUM_VERSION = "0.1.0~alpha13"
+LIBRARIES = {PRODUCT, ASTERISK, ASTERISK_CONTROL, FILE, SPEECH}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
-    "librptadv_asterisk_adapter.so.1": set(),
+    ASTERISK: set(),
     PRODUCT: {
         "librate_adjusting_pcm_ring3.so.3",
         "librptadv_samplerate_adapter.so.2",
         "librptadvtone.so.1",
         "librptadvmorse.so.1",
         "librptadvdtmf.so.1",
-        "librptadvtemplate.so.1",
         "librptadvschedule.so.1",
-        "libusbradioplus_product.so.1",
+        "librptadvradio.so.5",
     },
-    "librptadv_control_asterisk_adapter.so.1": set(),
-    "librptadv_file_adapter.so.1": set(),
-    "librptadv_speech_adapter.so.1": set(),
+    ASTERISK_CONTROL: set(),
+    FILE: set(),
+    SPEECH: set(),
     STANDALONE_CONTROL: set(),
     RESOLVER: {"libresolv.so.2"},
     JITTER: {"libspeexdsp.so.1"},
@@ -65,9 +69,8 @@ ELF_DEPENDENCIES = {
     HWMON: {"libsensors.so.5"},
 }
 EXPORTS = {
-    "librptadv_asterisk_adapter.so.1": {
-        "rptadv_asterisk_descriptor_v1",
-        "rptadv_asterisk_load_management_v1",
+    ASTERISK: {
+        "rptadv_asterisk_descriptor_v2",
     },
     PRODUCT: {
         "rptadv_product_descriptor_v1",
@@ -75,13 +78,13 @@ EXPORTS = {
         "rptadv_product_inspection_descriptor_v1",
         "rptadv_product_store_maintenance_descriptor_v1",
     },
-    "librptadv_control_asterisk_adapter.so.1": {"rptadv_control_descriptor_v1"},
-    "librptadv_file_adapter.so.1": {"rptadv_file_adapter_descriptor"},
-    "librptadv_speech_adapter.so.1": {"rptadv_speech_adapter_descriptor"},
+    ASTERISK_CONTROL: {"rptadv_control_descriptor_v1"},
+    FILE: {"rptadv_file_adapter_descriptor"},
+    SPEECH: {"rptadv_speech_adapter_descriptor"},
     STANDALONE_CONTROL: {"rptadv_control_standalone_descriptor_v1"},
     RESOLVER: {"rptadv_resolver_adapter_descriptor_v1"},
     JITTER: {"rptadv_jitter_adapter_descriptor_v1"},
-    SIP: {"rptadv_sip_adapter_descriptor_v1"},
+    SIP: {"rptadv_sip_adapter_descriptor_v2"},
     GPIOD: {"rptadv_gpiod_adapter_descriptor_v1"},
     HWMON: {"rptadv_hwmon_adapter_descriptor_v1"},
 }
@@ -191,6 +194,7 @@ def staged(
         module,
         Path("usr/bin") / STANDALONE_BINARY,
         Path("usr/bin") / STORE_MAINTENANCE_BINARY,
+        Path("usr/bin") / OPERATOR_BINARY,
         *(library / name for name in LIBRARIES),
         library / STANDALONE_CONTROL,
         library / RESOLVER,
@@ -267,11 +271,14 @@ def staged(
         assert (stage / header).read_bytes() == (
             root / "rust" / crate / "include" / header.name
         ).read_bytes()
-    for name, crate in (("file", "file-adapter"), ("speech", "speech-adapter")):
+    for name, crate, soname in (
+        ("file", "file-adapter", FILE),
+        ("speech", "speech-adapter", SPEECH),
+    ):
         link = library / f"librptadv_{name}_adapter.so"
         expected.add(link)
         assert (stage / link).is_symlink(), f"missing developer link: {link}"
-        assert (stage / link).readlink() == Path(f"librptadv_{name}_adapter.so.1")
+        assert (stage / link).readlink() == Path(soname)
         directory = Path(f"usr/include/rpt_advanced/{name}")
         sources = (
             (
@@ -321,15 +328,15 @@ def staged(
     assert (stage / "usr/bin" / STANDALONE_BINARY).read_bytes() == (
         standalone_binary(root)
     ).read_bytes()
-    maintenance = stage / "usr/bin" / STORE_MAINTENANCE_BINARY
-    mode = maintenance.lstat().st_mode
-    assert stat.S_ISREG(mode) and stat.S_IMODE(mode) == 0o755, (
-        f"incorrect staged executable mode: {maintenance}"
-    )
-    assert (
-        maintenance.read_bytes()
-        == (standalone_binary(root).with_name(STORE_MAINTENANCE_BINARY)).read_bytes()
-    )
+    for name in (STORE_MAINTENANCE_BINARY, OPERATOR_BINARY):
+        installed = stage / "usr/bin" / name
+        mode = installed.lstat().st_mode
+        assert stat.S_ISREG(mode) and stat.S_IMODE(mode) == 0o755, (
+            f"incorrect staged executable mode: {installed}"
+        )
+        assert installed.read_bytes() == (
+            standalone_binary(root).with_name(name).read_bytes()
+        )
     assert (stage / module).read_bytes() == (
         root / "build/app_rpt_advanced.so"
     ).read_bytes()
@@ -401,12 +408,18 @@ def package(control: Path) -> None:
     }
     standalone = stanzas["rpt-advanced"].split("Description:", 1)[0]
     adapter = stanzas["app-rpt-advanced"].split("Description:", 1)[0]
-    product = stanzas["librptadv-product2"].split("Description:", 1)[0]
+    product = stanzas["librptadv-product3"].split("Description:", 1)[0]
     assert "${asterisk:Depends}" not in standalone, (
         "standalone package depends on Asterisk"
     )
     assert "${asterisk:Depends}" in adapter, "Asterisk adapter lost its dependency"
     assert "libusbradioplus-product1" in standalone, "missing dynamic radio product"
+    assert f"libusbradioplus-product1 (>= {USBRADIO_MINIMUM_VERSION})" in product, (
+        "product must depend on the runtime-loaded USBRadioPlus provider"
+    )
+    assert f"librptadvradio5 (>= {RADIO_MINIMUM_VERSION})" in product, (
+        "product must depend directly on the released radio runtime"
+    )
     assert f"librptadvtone1 (>= {TONE_MINIMUM_VERSION})" in product, (
         "product must depend directly on the released tone runtime"
     )
@@ -1124,10 +1137,11 @@ def verify_stage_policy() -> None:
             write(root, f"build/{name}")
             write(stage, f"{library}/{name}")
         target_directory = "coverage-target"
-        for name in (STANDALONE_BINARY, STORE_MAINTENANCE_BINARY):
+        for name in (STANDALONE_BINARY, STORE_MAINTENANCE_BINARY, OPERATOR_BINARY):
             write(root, f"{target_directory}/release/{name}")
             write(stage, f"usr/bin/{name}")
-        (stage / "usr/bin" / STORE_MAINTENANCE_BINARY).chmod(0o755)
+        for name in (STORE_MAINTENANCE_BINARY, OPERATOR_BINARY):
+            (stage / "usr/bin" / name).chmod(0o755)
         write(root, "build/app_rpt_advanced.so")
         write(stage, "usr/lib/test-linux-gnu/asterisk/modules/app_rpt_advanced.so")
         write(root, "rust/resolver-adapter/include/rptadv_resolver_adapter.h")
@@ -1165,15 +1179,16 @@ def verify_stage_policy() -> None:
             (stage / library / f"librptadv_{name}_adapter.so").symlink_to(
                 f"librptadv_{name}_adapter.so.1"
             )
-        for name, crate in (("file", "file-adapter"), ("speech", "speech-adapter")):
+        for name, crate, soname in (
+            ("file", "file-adapter", FILE),
+            ("speech", "speech-adapter", SPEECH),
+        ):
             header = f"rptadv_{name}_adapter.h"
             write(root, f"rust/{crate}/include/{header}")
             write(root, "rust/media-support/include/rptadv_media_types.h")
             write(stage, f"usr/include/rpt_advanced/{name}/{header}")
             write(stage, f"usr/include/rpt_advanced/{name}/rptadv_media_types.h")
-            (stage / library / f"librptadv_{name}_adapter.so").symlink_to(
-                f"librptadv_{name}_adapter.so.1"
-            )
+            (stage / library / f"librptadv_{name}_adapter.so").symlink_to(soname)
         for source, destination in (
             *((path, path) for path in MANUALS),
             ("COPYING", "copyright"),

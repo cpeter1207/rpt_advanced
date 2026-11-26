@@ -7,7 +7,7 @@
 use crate::{
     config::ResolvedMessageSettings,
     messages::{
-        MAX_MESSAGE_BYTES, MessageCatalog,
+        MessageCatalog,
         patterns::{CompositionPart, NativePattern},
         projection::{CompiledText, LocalizedMessage},
     },
@@ -20,13 +20,6 @@ use std::{
 /// One explicit sequence point, retaining its media/binding owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment {
-    /// Operator-authored text with a Morse fallback.
-    Literal {
-        /// Already parsed text; runtime argument values are never parsed here.
-        text: String,
-        /// Defining macro, or the invoking definition.
-        owner: Option<String>,
-    },
     /// Native text formatted as data using the named definition's renderer settings.
     Fluent {
         /// Defining message, or the invoking consumer.
@@ -45,10 +38,6 @@ pub enum Segment {
     },
     /// Catalog message and bindings from the named or invoking section.
     Message(Option<String>),
-    /// Existing file/speech/Morse fallback chain.
-    Media(Option<String>),
-    /// Attention tones; omitted in receive-driven Morse playback.
-    Tone(Option<String>),
 }
 
 /// Payload choice after public source-form inheritance.
@@ -115,20 +104,6 @@ struct Size {
 }
 
 impl Composition {
-    /// Compile owned effective settings on control; share named definitions per generation.
-    ///
-    /// Expanded segment count and bytes are checked before allocation; repeated
-    /// references use cached sizes, avoiding exponential work during validation.
-    pub fn compile(
-        invoking: ResolvedMessageSettings,
-        definitions: Arc<BTreeMap<String, ResolvedMessageSettings>>,
-        morse: MorseRequirement,
-    ) -> Result<Self, CompositionError> {
-        Self::compile_with(invoking, definitions, morse, |settings, owner| {
-            parse(&settings.content, owner)
-        })
-    }
-
     /// Lower an effective JSON message through the same checked size/cycle/media compiler.
     pub fn compile_public(
         invoking: ResolvedMessageSettings,
@@ -283,29 +258,6 @@ fn validate_sources(
                     && (ordinary || chain.tone.is_some() || has_morse)
                     && (!ordinary || morse == MorseRequirement::Optional || has_morse)
             }
-            Token::Segment(Segment::Tone(_)) => {
-                definition.media.tone.as_ref().is_some_and(|tone| {
-                    crate::audio::ToneSequence::new(&tone.sequence, tone.level_db).is_ok()
-                })
-            }
-            Token::Segment(Segment::Media(_)) => definition.media.morse.as_ref().map_or_else(
-                || {
-                    morse == MorseRequirement::Optional
-                        && (definition.media.file.is_some()
-                            || definition.media.speech.is_some()
-                            || definition.media.tone.is_some())
-                },
-                |morse| {
-                    crate::audio::MorseRenderer::new(
-                        &morse.text,
-                        morse.speed_wpm,
-                        morse.frequency_hz,
-                        morse.level_db,
-                    )
-                    .is_ok()
-                        && !morse.text.trim().is_empty()
-                },
-            ),
             _ => true,
         };
         if !valid {
@@ -329,15 +281,9 @@ fn measure(tokens: &[Token], sizes: &BTreeMap<String, Size>) -> Result<Size, Com
             Token::Reference(name) => sizes[name],
             Token::Segment(segment) => {
                 let bytes = match segment {
-                    Segment::Literal { text, owner } => text
-                        .len()
-                        .checked_add(owner.as_ref().map_or(0, String::len))
-                        .ok_or(CompositionError::TooLarge)?,
                     Segment::Fluent { owner: name, .. }
                     | Segment::FluentMedia { owner: name, .. }
-                    | Segment::Message(name)
-                    | Segment::Media(name)
-                    | Segment::Tone(name) => name.as_ref().map_or(0, String::len),
+                    | Segment::Message(name) => name.as_ref().map_or(0, String::len),
                 };
                 Size {
                     segments: 1,
@@ -371,10 +317,6 @@ fn copy_text(text: &str) -> Result<String, CompositionError> {
 
 fn copy_segment(segment: &Segment) -> Result<Segment, CompositionError> {
     Ok(match segment {
-        Segment::Literal { text, owner } => Segment::Literal {
-            text: copy_text(text)?,
-            owner: owner.as_deref().map(copy_text).transpose()?,
-        },
         Segment::Fluent { owner, text } => Segment::Fluent {
             owner: owner.as_deref().map(copy_text).transpose()?,
             text: text.clone(),
@@ -389,72 +331,5 @@ fn copy_segment(segment: &Segment) -> Result<Segment, CompositionError> {
             morse: morse.clone(),
         },
         Segment::Message(name) => Segment::Message(name.as_deref().map(copy_text).transpose()?),
-        Segment::Media(name) => Segment::Media(name.as_deref().map(copy_text).transpose()?),
-        Segment::Tone(name) => Segment::Tone(name.as_deref().map(copy_text).transpose()?),
     })
-}
-
-fn parse(content: &str, owner: Option<&str>) -> Result<Vec<Token>, CompositionError> {
-    let mut result = Vec::new();
-    let mut literal = String::new();
-    let mut chars = content.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '{' | '}' if chars.peek() == Some(&ch) => {
-                chars.next();
-                literal.push(ch);
-            }
-            '}' => return Err(CompositionError::Syntax),
-            '{' => {
-                flush_literal(&mut result, &mut literal, owner)?;
-                let mut name = String::new();
-                loop {
-                    match chars.next() {
-                        Some('}') => break,
-                        Some('{') | None => return Err(CompositionError::Syntax),
-                        Some(ch) => name.push(ch),
-                    }
-                }
-                let token = match name.as_str() {
-                    "message" => Token::Segment(Segment::Message(owner.map(str::to_owned))),
-                    "media" => Token::Segment(Segment::Media(owner.map(str::to_owned))),
-                    "tone_sequence" => Token::Segment(Segment::Tone(owner.map(str::to_owned))),
-                    name => Token::Reference(
-                        name.strip_prefix("message_macro_")
-                            .filter(|name| !name.is_empty())
-                            .ok_or(CompositionError::Syntax)?
-                            .into(),
-                    ),
-                };
-                result.push(token);
-            }
-            _ => literal.push(ch),
-        }
-    }
-    flush_literal(&mut result, &mut literal, owner)?;
-    Ok(result)
-}
-
-/// Schema and resolver share grammar validation; reference resolution occurs after inheritance.
-pub(crate) fn syntax_valid(content: &str) -> bool {
-    parse(content, None).is_ok()
-}
-
-fn flush_literal(
-    tokens: &mut Vec<Token>,
-    text: &mut String,
-    owner: Option<&str>,
-) -> Result<(), CompositionError> {
-    let value = text.trim();
-    if value.len() > MAX_MESSAGE_BYTES {
-        return Err(CompositionError::TooLarge);
-    }
-    if !value.is_empty() {
-        tokens.push(Token::Segment(Segment::Literal {
-            text: value.into(),
-            owner: owner.map(str::to_owned),
-        }));
-    }
-    text.clear();
-    Ok(())
 }

@@ -32,7 +32,7 @@ pub enum MuteTarget {
     Port,
     /// Exact current direct peer selection, never dialed.
     Peer(ProtectedOperand<String>),
-    /// Current network peers, optionally restricted by transport protocol.
+    /// Current connected peers, including attached callers when unfiltered.
     Peers(Option<ProtocolId>),
     /// Calling phone or explicit call identifier, otherwise unique attached caller.
     PhonePatch(Option<ProtectedOperand<String>>),
@@ -109,10 +109,14 @@ fn symbols(f: &mut Fields<'_>) -> Result<ProtectedOperand<String>> {
     Ok(s.into())
 }
 pub(super) fn phone_dial(parameter: Option<&str>) -> Result<Action> {
-    let number = parameter.filter(|number| {
-        (1..=64).contains(&number.len())
-            && number.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'*' | b'#' | b'+'))
-    }).ok_or(ActionError::Parameter)?;
+    let number = parameter
+        .filter(|number| {
+            (1..=64).contains(&number.len())
+                && number
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || matches!(b, b'*' | b'#' | b'+'))
+        })
+        .ok_or(ActionError::Parameter)?;
     Ok(Action::PhoneDial(number.into()))
 }
 pub(super) fn link_action(action: &str, f: &mut Fields<'_>) -> Result<Option<LinkAction>> {
@@ -235,7 +239,11 @@ fn host_action(action: &str, f: &mut Fields<'_>, p: Option<&str>) -> Result<Host
         action => {
             use PhoneDtmfAction as P;
             H::PhoneGrammar(Arc::new(match action {
-                "phone_attach" => P::Attach(p.filter(|text|!text.is_empty()).map(|text|node(Some(text))).transpose()?),
+                "phone_attach" => P::Attach(
+                    p.filter(|text| !text.is_empty())
+                        .map(|text| node(Some(text)))
+                        .transpose()?,
+                ),
                 "phone_select_command_target" => P::SelectTarget(node(p)?),
                 "phone_send_node_digit" => P::NodeDigit {
                     target: node(p)?,

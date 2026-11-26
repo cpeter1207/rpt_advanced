@@ -84,16 +84,16 @@ fn keeps_same_instant_order_until_outer_macro_terminates_and_rebinds_once() {
     assert!(s.offer().is_none());
     assert!(s.begin(&first));
     let mut next = EventScheduler::from_events(2, scope(), events, Some(&s)).unwrap();
-    assert!(!next.terminate(&first));
+    assert!(!next.terminate(&first, MacroOutcome::Completed));
     assert!(next.offer().is_none());
     let moved = next.rebind(&first).unwrap();
     assert!(!next.begin(&moved));
-    assert!(next.terminate(&moved));
+    assert!(next.terminate(&moved, MacroOutcome::Completed));
     let second = next.offer().unwrap();
     assert_eq!(second.event, id(2));
     assert!(next.admission(&second, MacroAdmission::Queued));
     assert!(next.begin(&second));
-    assert!(next.terminate(&second));
+    assert!(next.terminate(&second, MacroOutcome::Completed));
     next.observe(clock(0, 600000), idle()).unwrap();
     assert!(next.offer().is_none());
 }
@@ -125,19 +125,19 @@ fn startup_barrier_precedes_single_recovery_and_false_skips_the_entire_window() 
     assert_eq!(first.event, id(3));
     assert!(s.admission(&first, MacroAdmission::Queued));
     assert!(s.begin(&first));
-    assert!(s.terminate(&first));
+    assert!(s.terminate(&first, MacroOutcome::Completed));
     let recovered = s.offer().unwrap();
     assert_eq!(recovered.event, id(2));
     assert!(s.admission(&recovered, MacroAdmission::Queued));
     assert!(s.begin(&recovered));
-    assert!(s.terminate(&recovered));
+    assert!(s.terminate(&recovered, MacroOutcome::Completed));
     assert!(s.offer().is_none());
     s.observe(clock(300, 270000), idle()).unwrap();
     let end = s.offer().unwrap();
     assert_eq!(end.event, id(2));
     assert!(s.admission(&end, MacroAdmission::Queued));
     assert!(s.begin(&end));
-    assert!(s.terminate(&end));
+    assert!(s.terminate(&end, MacroOutcome::Completed));
     assert!(s.offer().is_none());
 }
 #[test]
@@ -157,7 +157,7 @@ fn warnings_keep_their_own_minute_and_missed_boundaries_do_not_catch_up() {
     assert_eq!(warning.kind, EventWork::StartWarning(0));
     assert!(s.admission(&warning, MacroAdmission::Queued));
     assert!(s.begin(&warning));
-    assert!(s.terminate(&warning));
+    assert!(s.terminate(&warning, MacroOutcome::Completed));
     assert!(s.offer().is_none());
 }
 
@@ -198,7 +198,7 @@ fn provider_actual_instant_deduplicates_historical_subminute_zone_boundaries() {
     assert_eq!(t.nominal, due);
     assert!(s.admission(&t, MacroAdmission::Queued));
     assert!(s.begin(&t));
-    assert!(s.terminate(&t));
+    assert!(s.terminate(&t, MacroOutcome::Completed));
     s.observe(clock(due + 34, 44000), idle()).unwrap();
     assert!(s.offer().is_none());
 }
@@ -230,7 +230,7 @@ fn inhibited_ticks_cannot_fire_startup_and_reactivation_cannot_replay_it() {
     assert_eq!(t.nominal, 90);
     assert!(s.admission(&t, MacroAdmission::Queued));
     assert!(s.begin(&t));
-    assert!(s.terminate(&t));
+    assert!(s.terminate(&t, MacroOutcome::Completed));
     s.activate(clock(150, 150000), idle()).unwrap();
     assert!(s.offer().is_none());
 }
@@ -239,7 +239,7 @@ fn finish(s: &mut EventScheduler) -> EventTicket {
     let t = s.offer().unwrap();
     assert!(s.admission(&t, MacroAdmission::Queued));
     assert!(s.begin(&t));
-    assert!(s.terminate(&t));
+    assert!(s.terminate(&t, MacroOutcome::Completed));
     t
 }
 #[test]
@@ -523,7 +523,7 @@ fn review_r1_warning_edit_retires_only_changed_continuation() {
         next.begin_at(&retained, clock(65, 65000), idle()),
         Ok(BeginDecision::Begin)
     );
-    assert!(next.terminate(&retained));
+    assert!(next.terminate(&retained, MacroOutcome::Completed));
     next.observe(clock(120, 120000), idle()).unwrap();
     assert_eq!(finish(&mut next).kind, EventWork::StartWarning(0));
 }
@@ -631,7 +631,7 @@ fn review_r1_reordered_unchanged_warning_transfers_its_real_queued_reservation()
         next.begin_at(&moved, clock(10, 10000), idle()),
         Ok(BeginDecision::Begin)
     );
-    assert!(next.terminate(&moved));
+    assert!(next.terminate(&moved, MacroOutcome::Completed));
     assert!(next.offer().is_none());
 }
 
@@ -650,5 +650,177 @@ fn review_r1_changed_warning_macro_retires_without_replaying_its_observed_occurr
     assert!(
         next.offer().is_none(),
         "same warning occurrence cannot run a replacement macro"
+    );
+}
+
+#[test]
+fn adjacent_group_hold_follows_start_admission_and_politeness() {
+    use crate::config::resources::PortKey;
+    use crate::runtime::link_schedule::{LinkScheduler, LinkTransition, RouteSpec};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Start {
+        Rejected,
+        Expired,
+        BusyReceiver,
+        Begun,
+    }
+    const CHANGE: &str = "every day at 0:05";
+    for path in [
+        Start::Rejected,
+        Start::Expired,
+        Start::BusyReceiver,
+        Start::Begun,
+    ] {
+        let mut closing = spec(2, Some(10), MID, Some(CHANGE), 0);
+        let mut next = spec(3, Some(20), CHANGE, Some("every day at 0:10"), 2);
+        next.end.as_mut().unwrap().politeness_minutes = 0;
+        add_warning(&mut next, CHANGE);
+        next.end.as_mut().unwrap().warnings = std::mem::take(&mut next.start.warnings);
+        let group = (
+            ResourceBinding {
+                id: id(90),
+                scope: scope(),
+                kind: ResourceKind::PermanentGroup,
+            },
+            PortKey::new("net"),
+        );
+        closing.replace_permanent = Some(group.clone());
+        next.replace_permanent = Some(group);
+        let profile = ScopedEvents {
+            owner: scope(),
+            port_key: Some(PortKey::new("station")),
+            events: vec![closing, next],
+            warnings: vec![],
+            local: Default::default(),
+        };
+        let mut s = EventScheduler::from_profiles(1, &profile, None).unwrap();
+        let mut links = LinkScheduler::new(
+            1,
+            vec![RouteSpec {
+                local: "station".into(),
+                remote: "506315".into(),
+                permanent: true,
+                group_label: Some("net".into()),
+                group_name: None,
+                group_priority: Some(0),
+            }],
+            vec![],
+            None,
+        )
+        .unwrap();
+        let old = links
+            .next_operation()
+            .expect("permanent route initially available");
+        s.activate(clock(-180, 0), idle()).unwrap();
+        s.observe(clock(0, 180_000), idle()).unwrap();
+        assert_eq!(finish(&mut s).event, id(2));
+        assert!(s.apply_group_holds("station", &mut links));
+        assert!(!links.current(&old));
+        assert!(links.next_operation().is_none());
+
+        let at_change = clock(300, 480_000);
+        s.observe(at_change, idle()).unwrap();
+        let close = finish(&mut s);
+        assert_eq!((close.event, close.kind), (id(2), EventWork::End));
+        let warning = s.offer().unwrap();
+        assert_eq!(
+            (warning.event, warning.kind),
+            (id(3), EventWork::EndWarning(0))
+        );
+        assert!(s.admission(&warning, MacroAdmission::Queued));
+        assert_eq!(
+            s.begin_at(&warning, at_change, idle()).unwrap(),
+            BeginDecision::Begin
+        );
+        assert!(s.apply_group_holds("station", &mut links));
+        assert!(
+            links.next_operation().is_none(),
+            "route remained suspended through the warning"
+        );
+        assert!(s.terminate(&warning, MacroOutcome::Completed));
+        let start = s.offer().unwrap();
+        assert_eq!((start.event, start.kind), (id(3), EventWork::Start));
+        match path {
+            Start::Rejected => assert!(s.admission(&start, MacroAdmission::Rejected)),
+            Start::Expired => {
+                assert!(s.admission(&start, MacroAdmission::Queued));
+                assert_eq!(
+                    s.begin_at(&start, clock(600, 780_000), idle()).unwrap(),
+                    BeginDecision::Retired
+                );
+            }
+            Start::BusyReceiver => {
+                s.observe(clock(301, 481_000), busy(481_000)).unwrap();
+                assert!(
+                    s.offer().is_none(),
+                    "new activity withdrew the polite offer"
+                );
+            }
+            Start::Begun => {
+                assert!(s.admission(&start, MacroAdmission::Queued));
+                assert_eq!(
+                    s.begin_at(&start, at_change, idle()).unwrap(),
+                    BeginDecision::Begin
+                );
+                assert!(s.terminate(&start, MacroOutcome::Completed));
+                assert!(s.apply_group_holds("station", &mut links));
+                assert!(
+                    links.next_operation().is_none(),
+                    "begun window retains its normal hold"
+                );
+                s.observe(clock(600, 780_000), idle()).unwrap();
+                assert_eq!(finish(&mut s).kind, EventWork::End);
+            }
+        }
+        assert!(s.apply_group_holds("station", &mut links));
+        let resumed = links
+            .next_operation()
+            .unwrap_or_else(|| panic!("route did not resume for {path:?}"));
+        assert_eq!(
+            (resumed.remote(), resumed.action()),
+            ("506315", LinkTransition::Attach)
+        );
+        if matches!(path, Start::BusyReceiver) {
+            s.observe(clock(420, 600_000), busy(600_000)).unwrap();
+            assert_eq!(s.offer().unwrap(), start);
+            assert!(s.apply_group_holds("station", &mut links));
+            assert!(
+                links.current(&resumed),
+                "later eligibility alone cannot reacquire the abandoned hold"
+            );
+        }
+    }
+}
+
+#[test]
+fn calendar_observation_keeps_last_unobserved_minute_gap() {
+    let mut s = scheduler(Vec::new());
+    s.activate(clock(59, 0), idle()).unwrap();
+    for (wall, now) in [(59, 1), (119, 2)] {
+        s.observe(clock(wall, now), idle()).unwrap();
+    }
+    assert_eq!(
+        serde_json::to_value(s.calendar_observation()).unwrap(),
+        serde_json::json!({"previous_wall_seconds":59,"current_wall_seconds":119})
+    );
+
+    for (wall, now) in [(180, 3), (181, 4), (60, 5), (61, 6)] {
+        s.observe(clock(wall, now), idle()).unwrap();
+    }
+    assert_eq!(
+        serde_json::to_value(s.calendar_observation()).unwrap(),
+        serde_json::json!({
+            "previous_wall_seconds":60,
+            "current_wall_seconds":61,
+            "last_abnormal_gap":{"previous_wall_seconds":119,"current_wall_seconds":180}
+        })
+    );
+
+    let mut next = EventScheduler::from_events(2, scope(), Vec::new(), Some(&s)).unwrap();
+    next.observe(clock(359, 7), idle()).unwrap();
+    assert_eq!(
+        serde_json::to_value(next.calendar_observation()).unwrap(),
+        serde_json::json!({"current_wall_seconds":359})
     );
 }

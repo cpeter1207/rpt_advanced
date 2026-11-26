@@ -1,8 +1,9 @@
 //! Owned offline subprocesses and incremental PCM streams.
-use crate::{Config, MediaError};
+use crate::{Config, MediaError, abi::*};
 #[cfg(file_adapter)]
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::mem::MaybeUninit;
 #[cfg(file_adapter)]
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
@@ -52,21 +53,9 @@ fn wait_until_reaped(wait: &mut dyn FnMut() -> io::Result<()>) {
 fn poll_child(
     poll: &mut dyn FnMut() -> io::Result<Option<ExitStatus>>,
 ) -> Result<Option<ExitStatus>, MediaError> {
-    loop {
-        match poll() {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(io_error(error)),
-            result => return result.map_err(io_error),
-        }
-    }
-}
-
-fn read_retry_interrupted<T>(mut read: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    loop {
-        match read() {
-            Err(error) if retry_interrupted(&error) => continue,
-            result => return result,
-        }
+    match poll() {
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(None),
+        result => result.map_err(io_error),
     }
 }
 
@@ -90,6 +79,7 @@ pub(crate) struct ChildStream {
     started: Instant,
     timeout: Duration,
     status: Option<ExitStatus>,
+    stdout_eof: bool,
 }
 
 impl ChildStream {
@@ -104,6 +94,12 @@ impl ChildStream {
             return Err(MediaError::Cancelled);
         }
         let started = Instant::now();
+        let input_bytes = input.unwrap_or_default();
+        let mut pending_input = Vec::new();
+        pending_input
+            .try_reserve_exact(input_bytes.len())
+            .map_err(|_| MediaError::Io)?;
+        pending_input.extend_from_slice(input_bytes);
         if let Some(reaper) = config.child_reaper {
             (reaper.acquire)();
         }
@@ -129,12 +125,13 @@ impl ChildStream {
             child: OwnedChild(child),
             stdout: None,
             stdin: None,
-            pending_input: input.unwrap_or_default().to_vec(),
+            pending_input,
             input_position: 0,
             _reaper: guard,
             started,
             timeout: config.process_timeout,
             status: None,
+            stdout_eof: false,
         };
         stream.stdout = stream.child.0.stdout.take();
         let stdout = stream.stdout.as_ref().ok_or(MediaError::Io)?;
@@ -151,40 +148,35 @@ impl ChildStream {
         Ok(stream)
     }
 
-    /// Read available bytes; returns zero only after a successful child exit.
+    /// Offer one block of input and attempt one output read without waiting.
+    /// None means pending; zero means stdout closed and the child succeeded.
     pub(crate) fn read(
         &mut self,
         output: &mut [u8],
         cancelled: &impl Fn() -> bool,
-    ) -> Result<usize, MediaError> {
-        loop {
-            self.check_cancel_and_timeout(cancelled)?;
-            self.pump_input()?;
+    ) -> Result<Option<usize>, MediaError> {
+        if cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        self.check_timeout()?;
+        self.pump_input()?;
+        if !self.stdout_eof {
             let stdout = self.stdout.as_mut().ok_or(MediaError::Io)?;
-            match read_retry_interrupted(|| stdout.read(output)) {
-                Ok(0) => return self.finish(cancelled),
-                Ok(count) => return Ok(count),
+            match stdout.read(output) {
+                Ok(0) => self.stdout_eof = true,
+                Ok(count) => return Ok(Some(count)),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(None),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     let _ = self.try_wait()?;
-                    std::thread::sleep(Duration::from_millis(2));
+                    return Ok(None);
                 }
                 Err(error) => return Err(io_error(error)),
             }
         }
-    }
-
-    fn finish(&mut self, cancelled: &impl Fn() -> bool) -> Result<usize, MediaError> {
-        loop {
-            self.check_cancel_and_timeout(cancelled)?;
-            self.pump_input()?;
-            if let Some(status) = self.try_wait()? {
-                return if status.success() {
-                    Ok(0)
-                } else {
-                    Err(MediaError::ProcessFailed)
-                };
-            }
-            std::thread::sleep(Duration::from_millis(2));
+        match self.try_wait()? {
+            Some(status) if status.success() => Ok(Some(0)),
+            Some(_) => Err(MediaError::ProcessFailed),
+            None => Ok(None),
         }
     }
 
@@ -213,10 +205,8 @@ impl ChildStream {
         Ok(())
     }
 
-    fn check_cancel_and_timeout(&self, cancelled: &impl Fn() -> bool) -> Result<(), MediaError> {
-        if cancelled() {
-            Err(MediaError::Cancelled)
-        } else if self.started.elapsed() >= self.timeout {
+    fn check_timeout(&self) -> Result<(), MediaError> {
+        if self.started.elapsed() >= self.timeout {
             Err(MediaError::TimedOut)
         } else {
             Ok(())
@@ -236,10 +226,6 @@ impl ChildStream {
     }
 }
 
-fn retry_interrupted(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::Interrupted
-}
-
 impl Drop for ChildStream {
     fn drop(&mut self) {
         // Close the pipe first so a child blocked writing can be killed and reaped.
@@ -255,7 +241,7 @@ fn set_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> io::Result<()> {
 
 #[cfg(not(unix))]
 fn set_nonblocking<T>(_pipe: &T) -> io::Result<()> {
-    Ok(())
+    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 #[cfg(unix)]
@@ -274,93 +260,35 @@ fn set_nonblocking_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
 /// Incremental normalized PCM decoded from one owned child process.
 pub(crate) struct PcmStream {
     child: ChildStream,
+    #[cfg(file_adapter)]
+    wave: Option<WaveHeader>,
     sample_rate_hz: u32,
+    format_announced: bool,
     width: usize,
     gain: f32,
     remaining_bytes: Option<u64>,
     input: [u8; 8192],
     input_pos: usize,
     input_len: usize,
-    carry: [u8; 4],
-    carry_len: usize,
-    samples_read: usize,
+    has_samples: bool,
     empty_error: MediaError,
     ended: bool,
     deferred_error: Option<MediaError>,
 }
 
 impl PcmStream {
-    /// Read a WAV header and return an incremental mono F32 decoder stream.
+    /// Own the WAV child before any header data has arrived.
     #[cfg(file_adapter)]
-    pub(crate) fn f32_wave(
-        mut child: ChildStream,
-        cancelled: &impl Fn() -> bool,
-    ) -> Result<Self, MediaError> {
-        let mut header = [0_u8; 12];
-        read_exact(&mut child, &mut header, cancelled)?;
-        if &header[..4] != b"RIFF" || &header[8..] != b"WAVE" {
-            return Err(MediaError::InvalidOutput);
-        }
-        let mut sample_rate_hz = None;
-        let data_size = loop {
-            let mut chunk_header = [0_u8; 8];
-            read_exact(&mut child, &mut chunk_header, cancelled)?;
-            let size = u32::from_le_bytes(chunk_header[4..8].try_into().unwrap());
-            match &chunk_header[..4] {
-                b"fmt " => {
-                    if sample_rate_hz.is_some() || !(16..=256).contains(&size) {
-                        return Err(MediaError::InvalidOutput);
-                    }
-                    let mut format = [0_u8; 256];
-                    read_exact(&mut child, &mut format[..size as usize], cancelled)?;
-                    let rate = u32::from_le_bytes(format[4..8].try_into().unwrap());
-                    if u16::from_le_bytes(format[0..2].try_into().unwrap()) != 3
-                        || u16::from_le_bytes(format[2..4].try_into().unwrap()) != 1
-                        || rate == 0
-                        || u16::from_le_bytes(format[12..14].try_into().unwrap()) != 4
-                        || u16::from_le_bytes(format[14..16].try_into().unwrap()) != 32
-                        || Some(u32::from_le_bytes(format[8..12].try_into().unwrap()))
-                            != rate.checked_mul(4)
-                    {
-                        return Err(MediaError::InvalidOutput);
-                    }
-                    sample_rate_hz = Some(rate);
-                    if size % 2 != 0 {
-                        skip_bytes(&mut child, 1, cancelled)?;
-                    }
-                }
-                b"data" => {
-                    if sample_rate_hz.is_none() || size % 4 != 0 && size != u32::MAX {
-                        return Err(MediaError::InvalidOutput);
-                    }
-                    break (size != u32::MAX).then_some(u64::from(size));
-                }
-                _ => {
-                    skip_bytes(&mut child, u64::from(size) + u64::from(size % 2), cancelled)?;
-                }
-            }
-        };
-        Ok(Self::new(
-            child,
-            sample_rate_hz.unwrap(),
-            4,
-            1.0,
-            data_size,
-            MediaError::InvalidOutput,
-        ))
+    pub(crate) fn f32_wave(child: ChildStream) -> Self {
+        let mut stream = Self::new(child, 0, 4, 1.0, MediaError::InvalidOutput);
+        stream.wave = Some(WaveHeader::new());
+        stream
     }
 
-    /// Wrap mono S16 raw output from Piper without waiting for synthesis to finish.
+    /// Wrap mono S16 raw output from Piper without waiting for synthesis.
     #[cfg(speech_adapter)]
     pub(crate) fn s16_raw(child: ChildStream, sample_rate_hz: u32, gain: f32) -> Self {
-        Self::new(
-            child,
-            sample_rate_hz,
-            2,
-            gain,
-            None,
-            MediaError::ProcessFailed,
-        )
+        Self::new(child, sample_rate_hz, 2, gain, MediaError::ProcessFailed)
     }
 
     fn new(
@@ -368,152 +296,272 @@ impl PcmStream {
         sample_rate_hz: u32,
         width: usize,
         gain: f32,
-        remaining_bytes: Option<u64>,
         empty_error: MediaError,
     ) -> Self {
         Self {
             child,
+            #[cfg(file_adapter)]
+            wave: None,
             sample_rate_hz,
+            format_announced: false,
             width,
             gain,
-            remaining_bytes,
+            remaining_bytes: None,
             input: [0; 8192],
             input_pos: 0,
             input_len: 0,
-            carry: [0; 4],
-            carry_len: 0,
-            samples_read: 0,
+            has_samples: false,
             empty_error,
             ended: false,
             deferred_error: None,
         }
     }
 
-    pub(crate) fn sample_rate_hz(&self) -> u32 {
-        self.sample_rate_hz
-    }
-
-    /// Return currently available samples; this waits only for the next pipe data.
-    pub(crate) fn read(
+    /// Advance at most one input buffer or emit the next format/terminal event.
+    pub(crate) fn step(
         &mut self,
-        output: &mut [f32],
+        output: &mut [MaybeUninit<f32>],
         cancelled: &impl Fn() -> bool,
-    ) -> Result<usize, MediaError> {
+    ) -> Result<RawStep, MediaError> {
         if output.is_empty() {
             return Err(MediaError::InvalidRequest);
+        }
+        if cancelled() {
+            return Err(MediaError::Cancelled);
         }
         if let Some(error) = self.deferred_error.take() {
             return Err(error);
         }
         if self.ended {
-            return Ok(0);
+            return Ok(RawStep {
+                kind: STEP_EOF,
+                ..RawStep::default()
+            });
         }
-        let mut written = 0;
-        loop {
-            while self.input_len - self.input_pos >= self.width && written < output.len() {
-                let sample = &self.input[self.input_pos..self.input_pos + self.width];
-                let value = if self.width == 2 {
-                    f32::from(i16::from_le_bytes([sample[0], sample[1]])) / 32768.0
-                } else {
-                    f32::from_le_bytes(sample.try_into().unwrap())
-                } * self.gain;
-                self.input_pos += self.width;
-                if !value.is_finite() {
-                    return self.fail_or_return(written, MediaError::InvalidOutput);
-                }
-                output[written] = value;
-                written += 1;
-                self.samples_read += 1;
-            }
-            if written != 0 {
-                return Ok(written);
-            }
-            if self.input_pos < self.input_len {
-                self.carry_len = self.input_len - self.input_pos;
-                self.carry[..self.carry_len]
-                    .copy_from_slice(&self.input[self.input_pos..self.input_len]);
-            }
-            self.input_pos = 0;
-            self.input_len = self.carry_len;
+        self.child.check_timeout()?;
 
-            if self.remaining_bytes == Some(0) {
-                let mut tail = [0_u8; 256];
-                while self.child.read(&mut tail, cancelled)? != 0 {}
-                return self.end_or_error(0);
-            }
-            let capacity = self.input.len() - self.carry_len;
-            let limit = self
-                .remaining_bytes
-                .map(|remaining| remaining.min(capacity as u64) as usize)
-                .unwrap_or(capacity);
-            let count = match self.child.read(
-                &mut self.input[self.carry_len..self.carry_len + limit],
-                cancelled,
-            ) {
-                Ok(count) => count,
-                Err(error) => return self.fail_or_return(written, error),
+        #[cfg(file_adapter)]
+        if let Some(wave) = &mut self.wave {
+            let Some(count) = self.child.read(&mut self.input, cancelled)? else {
+                return Ok(RawStep::default());
             };
-            if let Some(remaining) = &mut self.remaining_bytes {
-                *remaining -= count as u64;
+            if count == 0 {
+                return Err(MediaError::InvalidOutput);
+            }
+            let mut bytes = &self.input[..count];
+            let Some((rate, remaining)) = wave.consume(&mut bytes)? else {
+                return Ok(RawStep::default());
+            };
+            self.sample_rate_hz = rate;
+            self.remaining_bytes = remaining;
+            self.input_pos = count - bytes.len();
+            self.input_len = count;
+            self.wave = None;
+        }
+        if !self.format_announced {
+            self.format_announced = true;
+            return Ok(RawStep {
+                kind: STEP_FORMAT_READY,
+                sample_rate_hz: self.sample_rate_hz,
+                ..RawStep::default()
+            });
+        }
+
+        // Keep incomplete samples across reads, but discard bytes past a finite
+        // data chunk. The child must still exit successfully before EOF.
+        let mut available = self.input_len - self.input_pos;
+        if self.remaining_bytes == Some(0) {
+            available = 0;
+            self.input_pos = self.input_len;
+        }
+        if available < self.width {
+            self.input.copy_within(self.input_pos..self.input_len, 0);
+            self.input_pos = 0;
+            self.input_len = available;
+            let Some(count) = self.child.read(&mut self.input[available..], cancelled)? else {
+                return Ok(RawStep::default());
+            };
+            if count == 0 {
+                return self.finish();
+            }
+            if self.remaining_bytes == Some(0) {
+                return Ok(RawStep::default());
             }
             self.input_len += count;
-            if count == 0 {
-                return self.end_or_error(written);
+            available += count;
+        }
+
+        let mut count = (available / self.width).min(output.len());
+        if let Some(remaining) = self.remaining_bytes {
+            count = count.min((remaining / self.width as u64) as usize);
+        }
+        for (written, output) in output[..count].iter_mut().enumerate() {
+            let bytes = &self.input[self.input_pos..self.input_pos + self.width];
+            let sample = if self.width == 2 {
+                f32::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32768.0
+            } else {
+                f32::from_le_bytes(bytes.try_into().unwrap())
+            } * self.gain;
+            self.input_pos += self.width;
+            if let Some(remaining) = &mut self.remaining_bytes {
+                *remaining -= self.width as u64;
             }
+            if !sample.is_finite() {
+                if written == 0 {
+                    return Err(MediaError::InvalidOutput);
+                }
+                self.deferred_error = Some(MediaError::InvalidOutput);
+                return Ok(sample_step(written));
+            }
+            output.write(sample);
+            self.has_samples = true;
         }
-    }
-
-    fn end_or_error(&mut self, written: usize) -> Result<usize, MediaError> {
-        if self.carry_len != 0 || self.remaining_bytes.is_some_and(|remaining| remaining != 0) {
-            return self.fail_or_return(written, MediaError::InvalidOutput);
-        }
-        if self.samples_read == 0 {
-            return self.fail_or_return(written, self.empty_error);
-        }
-        self.ended = true;
-        Ok(written)
-    }
-
-    fn fail_or_return(&mut self, written: usize, error: MediaError) -> Result<usize, MediaError> {
-        if written == 0 {
-            Err(error)
+        Ok(if count == 0 {
+            RawStep::default()
         } else {
-            self.deferred_error = Some(error);
-            Ok(written)
-        }
+            sample_step(count)
+        })
     }
-}
 
-#[cfg(file_adapter)]
-fn read_exact(
-    child: &mut ChildStream,
-    bytes: &mut [u8],
-    cancelled: &impl Fn() -> bool,
-) -> Result<(), MediaError> {
-    let mut filled = 0;
-    while filled < bytes.len() {
-        let count = child.read(&mut bytes[filled..], cancelled)?;
-        if count == 0 {
+    fn finish(&mut self) -> Result<RawStep, MediaError> {
+        if self.input_len != self.input_pos
+            || self.remaining_bytes.is_some_and(|remaining| remaining != 0)
+        {
             return Err(MediaError::InvalidOutput);
         }
-        filled += count;
+        if !self.has_samples {
+            return Err(self.empty_error);
+        }
+        self.ended = true;
+        Ok(RawStep {
+            kind: STEP_EOF,
+            ..RawStep::default()
+        })
     }
-    Ok(())
+}
+
+fn sample_step(samples: usize) -> RawStep {
+    RawStep {
+        kind: STEP_SAMPLES,
+        samples,
+        ..RawStep::default()
+    }
 }
 
 #[cfg(file_adapter)]
-fn skip_bytes(
-    child: &mut ChildStream,
-    mut count: u64,
-    cancelled: &impl Fn() -> bool,
-) -> Result<(), MediaError> {
-    let mut scratch = [0_u8; 256];
-    while count != 0 {
-        let length = count.min(scratch.len() as u64) as usize;
-        read_exact(child, &mut scratch[..length], cancelled)?;
-        count -= length as u64;
+#[derive(Clone, Copy)]
+enum WavePart {
+    Riff,
+    Chunk,
+    Format(u32),
+    Skip(u64),
+}
+
+#[cfg(file_adapter)]
+struct WaveHeader {
+    part: WavePart,
+    bytes: [u8; 256],
+    filled: usize,
+    rate: Option<u32>,
+}
+
+#[cfg(file_adapter)]
+impl WaveHeader {
+    fn new() -> Self {
+        Self {
+            part: WavePart::Riff,
+            bytes: [0; 256],
+            filled: 0,
+            rate: None,
+        }
     }
-    Ok(())
+
+    fn consume(&mut self, input: &mut &[u8]) -> Result<Option<(u32, Option<u64>)>, MediaError> {
+        while !input.is_empty() {
+            self.part = match self.part {
+                WavePart::Riff => {
+                    if !self.collect(input, 12) {
+                        break;
+                    }
+                    if &self.bytes[..4] != b"RIFF" || &self.bytes[8..12] != b"WAVE" {
+                        return Err(MediaError::InvalidOutput);
+                    }
+                    WavePart::Chunk
+                }
+                WavePart::Chunk => {
+                    if !self.collect(input, 8) {
+                        break;
+                    }
+                    let size = u32::from_le_bytes(self.bytes[4..8].try_into().unwrap());
+                    match &self.bytes[..4] {
+                        b"fmt " => {
+                            if self.rate.is_some() || !(16..=256).contains(&size) {
+                                return Err(MediaError::InvalidOutput);
+                            }
+                            WavePart::Format(size)
+                        }
+                        b"data" => {
+                            let rate = self.rate.ok_or(MediaError::InvalidOutput)?;
+                            if size % 4 != 0 && size != u32::MAX {
+                                return Err(MediaError::InvalidOutput);
+                            }
+                            return Ok(Some((rate, (size != u32::MAX).then_some(u64::from(size)))));
+                        }
+                        _ if size == 0 => WavePart::Chunk,
+                        _ => WavePart::Skip(u64::from(size) + u64::from(size % 2)),
+                    }
+                }
+                WavePart::Format(size) => {
+                    if !self.collect(input, size as usize) {
+                        break;
+                    }
+                    self.rate = Some(wave_rate(&self.bytes)?);
+                    if size % 2 == 0 {
+                        WavePart::Chunk
+                    } else {
+                        WavePart::Skip(1)
+                    }
+                }
+                WavePart::Skip(remaining) => {
+                    let count = remaining.min(input.len() as u64) as usize;
+                    *input = &input[count..];
+                    match remaining - count as u64 {
+                        0 => WavePart::Chunk,
+                        rest => WavePart::Skip(rest),
+                    }
+                }
+            };
+        }
+        Ok(None)
+    }
+
+    /// Consume this fixed-size part while retaining any incomplete prefix.
+    fn collect(&mut self, input: &mut &[u8], length: usize) -> bool {
+        let count = (length - self.filled).min(input.len());
+        self.bytes[self.filled..self.filled + count].copy_from_slice(&input[..count]);
+        self.filled += count;
+        *input = &input[count..];
+        if self.filled != length {
+            return false;
+        }
+        self.filled = 0;
+        true
+    }
+}
+
+#[cfg(file_adapter)]
+fn wave_rate(format: &[u8]) -> Result<u32, MediaError> {
+    let rate = u32::from_le_bytes(format[4..8].try_into().unwrap());
+    if u16::from_le_bytes(format[0..2].try_into().unwrap()) != 3
+        || u16::from_le_bytes(format[2..4].try_into().unwrap()) != 1
+        || rate == 0
+        || u16::from_le_bytes(format[12..14].try_into().unwrap()) != 4
+        || u16::from_le_bytes(format[14..16].try_into().unwrap()) != 32
+        || Some(u32::from_le_bytes(format[8..12].try_into().unwrap())) != rate.checked_mul(4)
+    {
+        return Err(MediaError::InvalidOutput);
+    }
+    Ok(rate)
 }
 
 #[cfg(target_os = "linux")]

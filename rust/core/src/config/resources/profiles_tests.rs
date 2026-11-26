@@ -134,6 +134,131 @@ fn normalized_locals_keep_valid_siblings_and_omit_authored_secrets() {
 }
 
 #[test]
+fn allstarlink_static_nodes_normalize_complete_local_tables() {
+    let default = section(
+        1,
+        site(),
+        ResourceKind::Allstarlink,
+        json!({
+            "static_nodes": {
+                "0741": {"host": "PEER.example.NET", "port": 4570, "source": "::ffff:192.0.2.9"},
+                "741": {"host": "[2001:db8::2]", "port": 4569, "source": "2001:db8::1"}
+            }
+        }),
+    );
+    let malformed = section(
+        2,
+        port(FIRST),
+        ResourceKind::Allstarlink,
+        json!({
+            "node_number": 1000,
+            "lookup_method": "file",
+            "static_nodes": {
+                "800": {"host": "fallback.example.net", "port": 4569, "source": "192.0.2.10"},
+                "900": {"host": "invalid/host", "port": 4569, "source": "192.0.2.11"}
+            }
+        }),
+    );
+    let empty = section(
+        3,
+        port(SECOND),
+        ResourceKind::Allstarlink,
+        json!({"node_number": 1001, "static_nodes": {}}),
+    );
+    let (site_binding, malformed_binding, empty_binding) = (default.0, malformed.0, empty.0);
+    let profiles = resolve(&[default, malformed, empty]).unwrap();
+
+    assert_eq!(
+        profiles
+            .local(site_binding.id)
+            .unwrap()
+            .configuration
+            .get("static_nodes"),
+        Some(&json!({
+            "0741": {"host": "peer.example.net", "port": 4570, "source": "192.0.2.9"},
+            "741": {"host": "[2001:db8::2]", "port": 4569, "source": "2001:db8::1"}
+        })),
+        "a valid static table remains part of local authoring"
+    );
+    let malformed_local = &profiles.local(malformed_binding.id).unwrap().configuration;
+    assert_eq!(malformed_local.get("lookup_method"), Some(&json!("file")));
+    assert!(!malformed_local.contains_key("static_nodes"));
+    assert!(profiles.warnings().iter().any(|warning| {
+        warning.resource == malformed_binding
+            && warning.warning == super::super::ResourceWarning::InvalidValue("static_nodes")
+    }));
+    assert_eq!(
+        profiles
+            .local(empty_binding.id)
+            .unwrap()
+            .configuration
+            .get("static_nodes"),
+        Some(&json!({})),
+        "an explicit empty table remains an override"
+    );
+}
+
+#[test]
+fn allstarlink_static_nodes_select_one_valid_inheritance_layer() {
+    let default = section(
+        1,
+        site(),
+        ResourceKind::Allstarlink,
+        json!({
+            "static_nodes": {
+                "0741": {"host": "site.example.net", "port": 4569, "source": "192.0.2.2"}
+            }
+        }),
+    );
+    let invalid = section(
+        2,
+        port(FIRST),
+        ResourceKind::Allstarlink,
+        json!({
+            "node_number": 1000,
+            "static_nodes": {
+                "741": {"host": "port.example.net", "port": 4570, "source": "192.0.2.3"},
+                "741/1": {"host": "invalid.example.net", "port": 4569, "source": "192.0.2.4"}
+            }
+        }),
+    );
+    let empty = section(
+        3,
+        port(SECOND),
+        ResourceKind::Allstarlink,
+        json!({"node_number": 1001, "static_nodes": {}}),
+    );
+    let profiles = resolve(&[default, invalid, empty]).unwrap();
+    let first = &profiles
+        .port(id(FIRST))
+        .unwrap()
+        .allstarlink
+        .as_ref()
+        .unwrap()
+        .settings;
+    assert_eq!(
+        first
+            .static_nodes
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["0741"]
+    );
+    assert_eq!(
+        first.static_nodes["0741"].public_value(),
+        json!({"host":"site.example.net","port":4569,"source":"192.0.2.2"})
+    );
+    let second = &profiles
+        .port(id(SECOND))
+        .unwrap()
+        .allstarlink
+        .as_ref()
+        .unwrap()
+        .settings;
+    assert!(second.static_nodes.is_empty());
+}
+
+#[test]
 fn site_defaults_do_not_attach_accounts_and_absent_ordinary_locals_remain_empty() {
     let default_asl = section(
         1,
@@ -430,6 +555,77 @@ fn phone_patch_uses_context_vad_and_independent_playout_timing() {
             "timing":{"target_latency_ms":240}
         })
     );
+}
+
+#[test]
+fn phone_mailbox_access_uses_exact_inherited_lists_and_deny_precedence() {
+    let site_phone = section(
+        1,
+        site(),
+        ResourceKind::PhonePatch,
+        json!({"allow_mailboxes": ["0741", "741", "0741"], "deny_mailboxes": ["741"]}),
+    );
+    let local_invalid = section(
+        2,
+        port(FIRST),
+        ResourceKind::PhonePatch,
+        json!({"allow_mailboxes": ["0741", 741]}),
+    );
+    let explicit_empty = section(
+        3,
+        port(SECOND),
+        ResourceKind::PhonePatch,
+        json!({"allow_mailboxes": []}),
+    );
+    let invalid_binding = local_invalid.0;
+    let profiles = resolve(&[site_phone, local_invalid, explicit_empty]).unwrap();
+    let policy = |port| {
+        &profiles
+            .port(id(port))
+            .unwrap()
+            .phone_patch
+            .as_ref()
+            .unwrap()
+            .settings
+    };
+    let mailbox = |id| crate::link::MailboxId::new(id).unwrap();
+    let first = policy(FIRST);
+    assert_eq!(first.allow_mailboxes, [mailbox("0741"), mailbox("741")]);
+    assert!(first.allows_mailbox(&mailbox("0741")));
+    assert!(!first.allows_mailbox(&mailbox("741")));
+    assert!(!first.allows_mailbox(&mailbox("7410")));
+    assert!(
+        profiles
+            .warnings()
+            .iter()
+            .any(|warning| warning.resource == invalid_binding
+                && warning.warning
+                    == super::super::ResourceWarning::InvalidValue("allow_mailboxes"))
+    );
+    let second = policy(SECOND);
+    assert!(second.allow_mailboxes.is_empty());
+    assert!(second.allows_mailbox(&mailbox("7410")));
+    assert!(!second.allows_mailbox(&mailbox("741")));
+}
+
+#[test]
+fn phone_configuration_preserves_exact_mailbox_lists() {
+    let configured = section(
+        1,
+        port(FIRST),
+        ResourceKind::PhonePatch,
+        json!({
+            "provider": {"username": "desk"},
+            "allow_mailboxes": ["0741", "741"],
+            "deny_mailboxes": ["741"]
+        }),
+    );
+    let binding = configured.0;
+    let profiles = resolve(&[configured]).unwrap();
+    let local = &profiles.local(binding.id).unwrap().configuration;
+    assert_eq!(local["provider"]["username"], json!("desk"));
+    assert_eq!(local.get("allow_mailboxes"), Some(&json!(["0741", "741"])));
+    assert_eq!(local.get("deny_mailboxes"), Some(&json!(["741"])));
 }
 
 #[test]
@@ -890,4 +1086,43 @@ fn site_profiles_bind_credentials_even_without_a_port_instance() {
     assert!(defaults.phone_patch.is_some());
     let port = profiles.port(id(FIRST)).unwrap();
     assert!(port.echolink.is_none() && port.proxy_identity().is_none());
+}
+
+#[test]
+fn disabled_phone_vad_rejects_kerchunk_and_retains_hang() {
+    use crate::config::resources::ResourceWarning;
+    let phone = section(
+        1,
+        port(FIRST),
+        ResourceKind::PhonePatch,
+        json!({"vad":{"enabled":false,"mode":"kerchunk","timing":{"hang_ms":1375}}}),
+    );
+    let binding = phone.0;
+    let profiles = resolve(&[phone]).unwrap();
+    let selected = &profiles
+        .port(id(FIRST))
+        .unwrap()
+        .phone_patch
+        .as_ref()
+        .unwrap()
+        .settings
+        .vad;
+    assert!(!selected.enabled);
+    assert_eq!(selected.hang_ms, 1375);
+    assert_eq!(
+        selected.mode,
+        VadMode::Continuous,
+        "phone kerchunk has no effective mode"
+    );
+    assert_eq!(
+        profiles.local(binding.id).unwrap().configuration["vad"],
+        json!({"enabled":false,"timing":{"hang_ms":1375}})
+    );
+    assert!(
+        profiles
+            .warnings()
+            .iter()
+            .any(|warning| warning.resource == binding
+                && warning.warning == ResourceWarning::InvalidValue("mode"))
+    );
 }

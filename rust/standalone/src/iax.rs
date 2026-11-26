@@ -6,7 +6,7 @@ pub mod managed;
 /// Live, acknowledged jitter edits over an ordinary managed peer.
 pub mod playout;
 
-use crate::{abi, secrets::SecretsFile};
+use crate::abi;
 use std::{
     ffi::{CString, c_void},
     mem::size_of,
@@ -241,19 +241,6 @@ impl IaxClient {
         })
     }
 
-    /// Dial using the local node's separate secrets-file entry or empty-secret fallback.
-    pub fn dial_configured(
-        self,
-        remote: SocketAddr,
-        local_node: &str,
-        remote_node: &str,
-        secrets: &SecretsFile,
-        timeout_ms: u32,
-    ) -> Result<IaxPeer, IaxError> {
-        let secret = configured_secret(secrets, local_node);
-        self.dial(remote, local_node, remote_node, secret, timeout_ms)
-    }
-
     /// Adopt one peer handle returned by the matching inbound server descriptor.
     ///
     /// # Safety
@@ -410,10 +397,6 @@ fn server_handle(
         return Err(IaxError::Bind);
     }
     NonNull::new(handle).ok_or(IaxError::Bind)
-}
-
-fn configured_secret<'a>(secrets: &'a SecretsFile, local_node: &str) -> &'a str {
-    secrets.for_node(local_node).unwrap_or("")
 }
 
 fn dial_handle(
@@ -853,13 +836,17 @@ pub(crate) mod tests {
         let _shared = client.clone();
         let libraries: Arc<[libloading::Library]> = Arc::from([]);
         let lease = Arc::downgrade(&libraries);
-        assert!(matches!(client.with_provider_libraries(libraries), Err(IaxError::Operation)));
+        assert!(matches!(
+            client.with_provider_libraries(libraries),
+            Err(IaxError::Operation)
+        ));
         assert!(lease.upgrade().is_none());
     }
 
     /// The fixture owns this readable catalog storage through the final client drop.
     pub(crate) fn client_with_live_catalog(
-        destroy: unsafe extern "C" fn(*mut c_void), catalog: *mut c_void,
+        destroy: unsafe extern "C" fn(*mut c_void),
+        catalog: *mut c_void,
     ) -> IaxClient {
         let mut client = client_with_destroy(destroy);
         Arc::get_mut(&mut client.0).unwrap().catalog = NonNull::new(catalog).unwrap();
@@ -955,7 +942,10 @@ pub(crate) mod tests {
             assert_eq!(result.status, status as u32);
             position += result.consumed_frames;
             if result.consumed_frames == 0 && result.encoded_bytes == 0 {
-                assert!(flushing && status == 0, "encoder stalled before completing the segment");
+                assert!(
+                    flushing && status == 0,
+                    "encoder stalled before completing the segment"
+                );
                 break;
             }
             if result.encoded_bytes != 0 {
@@ -1480,26 +1470,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn configured_dial_uses_node_secret_and_reports_failed_setup() {
+    fn dial_sends_the_selected_credential_and_reports_failed_setup() {
         let _guard = dial_test_guard();
         let api = descriptor();
-        let secrets = SecretsFile::parse(
-            "[general]\niax_secret=global-secret\n[524950]\niax_secret=node-secret\n",
-        )
-        .unwrap();
-        assert_eq!(configured_secret(&secrets, "524950"), "node-secret");
-        assert_eq!(configured_secret(&secrets, "508422"), "global-secret");
-        assert_eq!(
-            configured_secret(&SecretsFile::parse("").unwrap(), "524950"),
-            ""
-        );
         DIAL_RESULT.with(|value| value.set(0));
         DIAL_OPTIONS_VALID.with(|value| value.set(0));
-        let peer = fixture_client(api).dial_configured(
+        let peer = fixture_client(api).dial(
             "127.0.0.1:4569".parse().unwrap(),
             "524950",
             "506315",
-            &secrets,
+            "node-secret",
             1000,
         );
         assert!(peer.is_ok());
@@ -1508,11 +1488,11 @@ pub(crate) mod tests {
         DIAL_RESULT.with(|value| value.set(1));
         assert_eq!(
             fixture_client(api)
-                .dial_configured(
+                .dial(
                     "127.0.0.1:4569".parse().unwrap(),
                     "524950",
                     "506315",
-                    &secrets,
+                    "node-secret",
                     1000,
                 )
                 .err(),

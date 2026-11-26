@@ -45,7 +45,12 @@ unsafe extern "C" {
     fn sip_native_shutdown(context: *mut c_void);
     fn sip_native_destroy(context: *mut c_void);
     fn sip_native_admission(context: *mut c_void, enabled: i32);
-    fn sip_native_next_call(context: *mut c_void, output: *mut abi::rptadv_sip_call_v1) -> i32;
+    fn sip_native_next_call(context: *mut c_void, output: *mut abi::rptadv_sip_call_v2) -> i32;
+    fn sip_native_first_provisional(
+        context: *mut c_void,
+        token: u64,
+        output: *mut abi::rptadv_sip_call_v2,
+    ) -> i32;
     fn sip_native_respond(
         context: *mut c_void,
         call: u64,
@@ -560,25 +565,51 @@ unsafe extern "C" fn destroy(context: *mut c_void, generation: u64) -> i32 {
     })
 }
 
-unsafe extern "C" fn next_call(
+unsafe fn read_call(
     context: *mut c_void,
     generation: u64,
-    output: *mut abi::rptadv_sip_call_v1,
+    output: *mut abi::rptadv_sip_call_v2,
+    read: impl FnOnce(*mut c_void, *mut abi::rptadv_sip_call_v2) -> i32,
 ) -> i32 {
     boundary(|| {
         let native = unsafe { (*checked(context, generation)?).native };
         if output.is_null()
-            || unsafe { (*output).struct_size } != size_of::<abi::rptadv_sip_call_v1>() as u32
+            || !output.is_aligned()
+            || unsafe { (*output).struct_size } != size_of::<abi::rptadv_sip_call_v2>() as u32
         {
             return Err(-1);
         }
-        // SAFETY: the native owner writes one bounded record synchronously.
-        let code = unsafe { sip_native_next_call(native, output) };
+        let code = read(native, output);
         if code == 0 {
             unsafe { (*output).generation = generation };
         }
         Ok(code)
     })
+}
+
+unsafe extern "C" fn next_call(
+    context: *mut c_void,
+    generation: u64,
+    output: *mut abi::rptadv_sip_call_v2,
+) -> i32 {
+    unsafe {
+        read_call(context, generation, output, |native, out| {
+            sip_native_next_call(native, out)
+        })
+    }
+}
+
+unsafe extern "C" fn first_provisional(
+    context: *mut c_void,
+    generation: u64,
+    token: u64,
+    output: *mut abi::rptadv_sip_call_v2,
+) -> i32 {
+    unsafe {
+        read_call(context, generation, output, |native, out| {
+            sip_native_first_provisional(native, token, out)
+        })
+    }
 }
 
 unsafe extern "C" fn respond_call(
@@ -667,10 +698,10 @@ unsafe extern "C" fn acknowledge_call(context: *mut c_void, generation: u64, cal
 
 /// Borrow the complete descriptor while retaining the DSO.
 #[unsafe(no_mangle)]
-pub extern "C" fn rptadv_sip_adapter_descriptor_v1() -> *const c_void {
-    static DESCRIPTOR: abi::rptadv_sip_descriptor_v1 = abi::rptadv_sip_descriptor_v1 {
-        struct_size: size_of::<abi::rptadv_sip_descriptor_v1>() as u32,
-        abi_version: 1,
+pub extern "C" fn rptadv_sip_adapter_descriptor_v2() -> *const c_void {
+    static DESCRIPTOR: abi::rptadv_sip_descriptor_v2 = abi::rptadv_sip_descriptor_v2 {
+        struct_size: size_of::<abi::rptadv_sip_descriptor_v2>() as u32,
+        abi_version: 2,
         capability: *b"rptadv.sip\0\0\0\0\0\0",
         create: Some(create),
         service: Some(service),
@@ -686,6 +717,7 @@ pub extern "C" fn rptadv_sip_adapter_descriptor_v1() -> *const c_void {
         release_call: Some(release_call),
         originate_call: Some(originate_call),
         acknowledge_call: Some(acknowledge_call),
+        first_provisional: Some(first_provisional),
     };
     ptr::from_ref(&DESCRIPTOR).cast()
 }

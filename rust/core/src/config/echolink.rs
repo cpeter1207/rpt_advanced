@@ -1,6 +1,6 @@
 //! Off-audio EchoLink account resolution. Identity never inherits across accounts.
-use super::{ConfigDocument, ConfigError, ConfigWarning, NodeId, Resolution, Schema, parse};
-use std::{collections::BTreeSet, net::Ipv4Addr, path::PathBuf};
+use super::parse;
+use std::{net::Ipv4Addr, path::PathBuf};
 
 /// Account transport; a Proxy is the EchoLink TCP protocol, not HTTP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,22 +291,6 @@ pub(super) fn value_valid(key: &str, value: &str) -> bool {
         _ => value.len() <= 4096 && !value.chars().any(char::is_control),
     }
 }
-fn raw<'a>(document: &'a ConfigDocument, node: &NodeId, key: &str) -> &'a str {
-    let section = format!("echolink {}", node.as_str());
-    let identity = matches!(key, "callsign" | "node_number");
-    [section.as_str(), "echolink"]
-        .into_iter()
-        .take(if identity { 1 } else { 2 })
-        .find_map(|scope| {
-            document.lookup(key, &[scope]).filter(|value| {
-                value_valid(key, value)
-                    && (key != "aprs_server"
-                        || aprs_supported(value, raw(document, node, "transport")))
-            })
-        })
-        .unwrap_or_else(|| default_value(key).expect("known account option"))
-}
-
 pub(super) fn aprs_supported(value: &str, transport: &str) -> bool {
     transport != "proxy"
         || value.is_empty()
@@ -318,52 +302,6 @@ pub(super) fn aprs_supported(value: &str, transport: &str) -> bool {
             == Ok(5199)
 }
 impl EchoLinkSettings {
-    /// Resolve shared defaults and node overrides, retaining all schema warnings.
-    pub fn resolve(
-        document: &ConfigDocument,
-        node: &NodeId,
-    ) -> Result<Resolution<Self>, ConfigError> {
-        let mut warnings = Schema::validate(document)?.warnings;
-        let value = Self::from_document(document, node)?;
-        let local = format!("echolink {}", node.as_str());
-        for entry in document.entries().iter().filter(|entry| {
-            entry.key == "aprs_server" && (entry.section == "echolink" || entry.section == local)
-        }) {
-            if value_valid("aprs_server", &entry.value)
-                && !aprs_supported(&entry.value, raw(document, node, "transport"))
-            {
-                warnings.push(ConfigWarning::new(
-                    entry.line,
-                    &entry.section,
-                    &entry.key,
-                    &entry.value,
-                    "EchoLink Proxy control requires UDP port 5199",
-                    &value.aprs_server,
-                ));
-            }
-        }
-        Ok(Resolution { value, warnings })
-    }
-    fn from_document(document: &ConfigDocument, node: &NodeId) -> Result<Self, ConfigError> {
-        let text = |key: &'static str| raw(document, node, key);
-        let mut settings = Self::from_public_fields(text, None);
-        settings.secrets_file =
-            (!text("secrets_file").is_empty()).then(|| PathBuf::from(text("secrets_file")));
-        if settings.enabled
-            && (!settings.complete_binding()
-                || settings
-                    .max_stations
-                    .checked_add(settings.max_pending_handshakes)
-                    .is_none())
-        {
-            return Err(ConfigError::structure(
-                &format!("echolink {}", node.as_str()),
-                "enabled account needs its own valid identity, transport and bounded setup budget",
-            ));
-        }
-        Ok(settings)
-    }
-
     /// Construct the shared settings. JSON passes its normalized directory array directly.
     pub(super) fn from_public_fields<'a>(
         text: impl Fn(&'static str) -> &'a str,
@@ -442,39 +380,4 @@ impl EchoLinkSettings {
             _ => false,
         }
     }
-}
-pub(super) fn validate_all(document: &ConfigDocument) -> Result<(), ConfigError> {
-    if !document
-        .sections()
-        .iter()
-        .any(|section| section == "echolink" || section.starts_with("echolink "))
-    {
-        return Ok(());
-    }
-    let mut accounts: Vec<EchoLinkSettings> = Vec::new();
-    let mut callsigns = BTreeSet::new();
-    let mut numbers = BTreeSet::new();
-    for name in document.nodes() {
-        let node = NodeId::new(name)?;
-        if parse::boolean(raw(document, &node, "enabled")) != Some(true) {
-            continue;
-        }
-        let account = EchoLinkSettings::from_document(document, &node)?;
-        if !callsigns.insert(account.callsign.clone()) || !numbers.insert(account.node_number) {
-            return Err(ConfigError::structure(
-                "echolink",
-                "duplicate enabled account identity",
-            ));
-        }
-        for previous in &accounts {
-            if account.shares_endpoint(previous) {
-                return Err(ConfigError::structure(
-                    "echolink",
-                    "enabled accounts share an ambiguous transport endpoint",
-                ));
-            }
-        }
-        accounts.push(account);
-    }
-    Ok(())
 }

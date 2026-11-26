@@ -1,14 +1,11 @@
-//! Owned configuration parsing, schema validation, and inherited settings.
+//! Checked JSON resource profiles and their effective station settings.
 
-mod document;
 mod dtmf_macros;
 mod echolink;
 mod messages;
 mod parse;
 mod phone_mailboxes;
 pub mod resources;
-mod schema;
-mod scope;
 mod settings;
 mod site;
 mod tails;
@@ -19,35 +16,23 @@ pub use site::{
 pub use tails::ResolvedTailSettings;
 
 #[cfg(test)]
-mod document_tests;
-#[cfg(test)]
 mod parse_tests;
 #[cfg(test)]
 mod resources_tests;
 #[cfg(test)]
-mod schema_tests;
-#[cfg(test)]
-mod scope_tests;
-#[cfg(test)]
 mod tests;
 
-pub use document::{ConfigDocument, ConfigEntry};
-pub use dtmf_macros::{ResolvedDtmfMacroSettings, resolve_dtmf_macros};
-pub(crate) use dtmf_macros::{compile_macros, macro_limits};
+pub use dtmf_macros::ResolvedDtmfMacroSettings;
 pub use echolink::{EchoLinkAnnouncement, EchoLinkSettings, EchoLinkTelemetry, EchoLinkTransport};
 pub(crate) use messages::selector_valid as message_selector_valid;
 pub use messages::{BindingSource, IdentitySource, ResolvedMessageSettings};
-pub use phone_mailboxes::{
-    PhoneMailbox, resolve_phone_mailboxes, valid_mailbox_pin_hash, verify_mailbox_pin,
-};
-pub use schema::Schema;
+pub use phone_mailboxes::{valid_mailbox_pin_hash, verify_mailbox_pin};
 pub use settings::valid_admin_hash;
 pub use settings::{
     LinkLookupMethod, NodeId, ResolvedAnnouncementSettings, ResolvedCourtesySettings,
-    ResolvedDtmfRegenerationSettings, ResolvedEventSettings, ResolvedIdentifierSettings,
-    ResolvedMacroSettings, ResolvedMorseSettings, ResolvedNodeSettings,
-    ResolvedPermanentLinkSettings, ResolvedRadioSettings, ResolvedScheduleSettings,
-    ResolvedSpeechSettings, ResolvedTemplateSettings, ResolvedTimeSettings,
+    ResolvedDtmfRegenerationSettings, ResolvedIdentifierSettings, ResolvedMorseSettings,
+    ResolvedNodeSettings, ResolvedPermanentLinkSettings, ResolvedSpeechSettings,
+    ResolvedTimeSettings,
 };
 
 /// A recoverable unknown option or invalid value.
@@ -114,17 +99,10 @@ pub struct Resolution<T> {
     pub warnings: Vec<ConfigWarning>,
 }
 
-/// Irrecoverable syntax or document-structure failure.
+/// Invalid configuration owner or resource relationship.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigError {
-    /// Malformed line with its one-based source line.
-    Syntax {
-        /// One-based physical source line.
-        line: usize,
-        /// Specific syntax diagnostic.
-        message: String,
-    },
-    /// Invalid section/definition structure.
+    /// Invalid configuration relationship.
     Structure {
         /// Section whose relationships are invalid.
         section: String,
@@ -134,13 +112,6 @@ pub enum ConfigError {
 }
 
 impl ConfigError {
-    pub(crate) fn syntax(line: usize, message: &str) -> Self {
-        Self::Syntax {
-            line,
-            message: message.to_owned(),
-        }
-    }
-
     pub(crate) fn structure(section: &str, message: &str) -> Self {
         Self::Structure {
             section: section.to_owned(),
@@ -152,7 +123,6 @@ impl ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Syntax { line, message } => write!(formatter, "line {line}: {message}"),
             Self::Structure { section, message } => write!(formatter, "{section}: {message}"),
         }
     }

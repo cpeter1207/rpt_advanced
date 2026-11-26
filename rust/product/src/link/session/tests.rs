@@ -16,6 +16,7 @@ pub(crate) enum Input {
 pub(crate) struct State {
     pub(crate) rate: u32,
     capabilities: u32,
+    protocol_local: Option<&'static str>,
     pub(crate) input: VecDeque<Input>,
     pub(crate) texts: Vec<Vec<u8>>,
     pub(crate) digits: Vec<u8>,
@@ -1417,26 +1418,34 @@ pub(crate) fn peer_with_egress(
     async_enabled: bool,
     egress: bool,
 ) -> (PeerIo, Shared) {
-    make_peer(rate_hz, async_enabled, egress, false, true, false)
+    make_peer(rate_hz, async_enabled, egress, None, true, false)
 }
 pub(crate) fn source_peer() -> (PeerIo, Shared) {
-    make_peer(8000, true, true, true, true, false)
+    source_peer_on("1000")
+}
+pub(crate) fn source_peer_on(local: &'static str) -> (PeerIo, Shared) {
+    make_peer(8000, true, true, Some(local), true, false)
 }
 pub(crate) fn phone_peer() -> (PeerIo, Shared) {
-    make_peer(8000, false, false, false, false, true)
+    phone_peer_on("1000")
+}
+pub(crate) fn phone_peer_on(local: &'static str) -> (PeerIo, Shared) {
+    make_peer(8000, false, false, Some(local), false, true)
 }
 pub(crate) fn peer_without_text(rate_hz: u32) -> (PeerIo, Shared) {
-    make_peer(rate_hz, false, false, false, false, false)
+    make_peer(rate_hz, false, false, None, false, false)
 }
 fn make_peer(
     rate_hz: u32,
     async_enabled: bool,
     egress: bool,
-    source: bool,
+    protocol_local: Option<&'static str>,
     forward_text: bool,
     phone: bool,
 ) -> (PeerIo, Shared) {
+    let source = !phone && protocol_local.is_some();
     let state = Arc::new(Mutex::new(State {
+        protocol_local,
         rate: rate_hz,
         capabilities: if phone {
             32
@@ -1448,6 +1457,20 @@ fn make_peer(
         fail_ready: source,
         ..State::default()
     }));
+    let mut table = peer_table(async_enabled, egress, source);
+    if source && protocol_local.is_some_and(|local| local.len() == 36) {
+        table.managed_echo_provider = &crate::fixture::echo::PROVIDER;
+    }
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let handle = Box::into_raw(Box::new(state.clone())).cast();
+    (unsafe { services.peer(handle) }.unwrap(), state)
+}
+
+pub(crate) fn peer_table(
+    async_enabled: bool,
+    egress: bool,
+    source: bool,
+) -> abi::rptadv_host_services_v11 {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_rate = Some(rate);
     table.peer_info = Some(peer_info);
@@ -1476,9 +1499,7 @@ fn make_peer(
     if source {
         table.peer_read_source = Some(read_source);
     }
-    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let handle = Box::into_raw(Box::new(state.clone())).cast();
-    (unsafe { services.peer(handle) }.unwrap(), state)
+    table
 }
 
 unsafe extern "C" fn peer_info(
@@ -1487,10 +1508,8 @@ unsafe extern "C" fn peer_info(
     output: *mut abi::rptadv_peer_info_v1,
 ) -> i32 {
     unsafe { crate::fixture::peer_info(context, peer, output) };
-    let capabilities = unsafe { state(peer.cast_mut()) }
-        .lock()
-        .unwrap()
-        .capabilities;
+    let guard = unsafe { state(peer.cast_mut()) }.lock().unwrap();
+    let capabilities = guard.capabilities;
     unsafe {
         (*output).capabilities = capabilities;
         if capabilities & 32 != 0 {
@@ -1504,6 +1523,12 @@ unsafe extern "C" fn peer_info(
             (*output).provider_account = abi::rptadv_peer_bytes_v1 {
                 data: b"provider".as_ptr(),
                 length: 8,
+            };
+        }
+        if let Some(local) = guard.protocol_local {
+            (*output).local = abi::rptadv_peer_bytes_v1 {
+                data: local.as_ptr(),
+                length: local.len(),
             };
         }
         if capabilities & 16 != 0 {
@@ -1937,19 +1962,12 @@ fn egress_host_contract_and_asterisk_pcm() {
     table.peer_step_detach = None;
     assert!(unsafe { HostServices::open(&table) }.is_err());
     table = unsafe { crate::fixture::host_descriptor().read() };
-    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v10, peer_prepare_audio);
-    // Each complete prefix is valid without its optional capability tails.
-    let complete_prefixes = [
-        std::mem::offset_of!(abi::rptadv_host_services_v10, peer_processing_prepare),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_control),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_update),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_service),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_ready),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, station_binding),
-        std::mem::size_of_val(&table),
-    ];
-    for length in boundary..=std::mem::size_of_val(&table) {
+    // Optional protocol groups may be absent in a complete Host11 table.
+    table.phone_provider = ptr::null();
+    table.asl_provider = ptr::null();
+    table.managed_echo_provider = ptr::null();
+    let full = std::mem::size_of_val(&table);
+    for length in std::mem::size_of::<u32>()..=full {
         table.struct_size = length as u32;
         let mut prefix = vec![0_u64; length.div_ceil(8)];
         unsafe {
@@ -1961,7 +1979,7 @@ fn egress_host_contract_and_asterisk_pcm() {
         };
         assert_eq!(
             unsafe { HostServices::open(prefix.as_ptr().cast()) }.err(),
-            (!complete_prefixes.contains(&length)).then_some(Error::Admission),
+            (length != full).then_some(Error::Admission),
             "host prefix length {length}"
         );
     }
@@ -2519,7 +2537,10 @@ fn disconnected_async_peer_is_reaped_before_the_worker_stops() {
     worker.reap();
     {
         let alive = healthy_state.lock().unwrap();
-        assert_eq!((alive.async_stops, alive.async_detaches, alive.drops), (0, 0, 0));
+        assert_eq!(
+            (alive.async_stops, alive.async_detaches, alive.drops),
+            (0, 0, 0)
+        );
     }
     {
         let state = state.lock().unwrap();
@@ -2531,7 +2552,10 @@ fn disconnected_async_peer_is_reaped_before_the_worker_stops() {
     worker.stop();
     assert_eq!(state.lock().unwrap().drops, 1);
     let other = healthy_state.lock().unwrap();
-    assert_eq!((other.async_stops, other.async_detaches, other.drops), (1, 1, 1));
+    assert_eq!(
+        (other.async_stops, other.async_detaches, other.drops),
+        (1, 1, 1)
+    );
 }
 
 #[test]
@@ -3327,7 +3351,7 @@ fn fatal_io_and_full_events_end_ingress_but_advisory_failure_does_not() {
             text: c"D 2000 1000 1 2".into(),
             advisory: false
         }),
-        Err(Command::Text { .. })
+        Err(command) if matches!(*command, Command::Text { .. })
     ));
     session.step(0).unwrap();
     assert!(!control.snapshot().unwrap().ended);
@@ -3365,7 +3389,7 @@ fn preparation_rejects_invalid_identity_rate_and_negotiation_without_leaking_pee
         assert!(PeerSession::prepare(io, outbound, local, remote, true).is_err());
         assert_eq!(state.lock().unwrap().drops, 1);
     }
-    let (io, state) = make_peer(16000, true, true, true, true, false);
+    let (io, state) = make_peer(16000, true, true, Some("1000"), true, false);
     let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
         .unwrap()
         .into_endpoints();

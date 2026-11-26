@@ -209,18 +209,18 @@ impl Completed<'_> {
         {
             return Err(ActionError::SourceOnly);
         }
-        // A real reverse caller selects its attachment or addressed destination via
-        // the port's resolved mappings. A macro or RF sender retains normal link semantics.
-        let action = match (&self.mapping.decoder, phone && !injected) {
-            (Decoder::Link(LinkAction::Transceive),true) => {
-                let target=(!self.parameter.is_empty()).then(||action::node(Some(self.parameter))).transpose()?;
-                Action::Host(super::HostAction::PhoneGrammar(std::sync::Arc::new(crate::phone_dtmf::PhoneDtmfAction::Attach(target))))
+        // Bare transceive reattaches the caller to the owning port. A supplied
+        // destination uses the same port's normal link operation.
+        let action = match (&self.mapping.decoder, phone, injected) {
+            (Decoder::Link(LinkAction::Transceive), true, false) if self.parameter.is_empty() => {
+                Action::Host(super::HostAction::PhoneGrammar(std::sync::Arc::new(
+                    crate::phone_dtmf::PhoneDtmfAction::Attach(None),
+                )))
             }
-            (Decoder::Link(LinkAction::Command),true) => {
-                let target=action::node(Some(self.parameter))?;
-                Action::Host(super::HostAction::PhoneGrammar(std::sync::Arc::new(crate::phone_dtmf::PhoneDtmfAction::SelectTarget(target))))
+            (Decoder::Link(LinkAction::Command) | Decoder::SendDigit(_), true, _) => {
+                return Err(ActionError::SourceOnly);
             }
-            _=>self.decode()?,
+            _ => self.decode()?,
         };
         action.check_scope(&context)?;
         if matches!(action, Action::Maintenance(_))

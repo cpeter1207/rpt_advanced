@@ -23,6 +23,17 @@ pub enum AlarmEvent {
     Repeat,
 }
 
+impl AlarmEvent {
+    /// Authoring field owning the composition for this transition.
+    pub(crate) fn message_field(self) -> &'static str {
+        match self {
+            Self::Trip => "trip_message",
+            Self::Clear => "clear_message",
+            Self::Repeat => "repeat_message",
+        }
+    }
+}
+
 /// Current alarm admission and recovery state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AlarmSnapshot {

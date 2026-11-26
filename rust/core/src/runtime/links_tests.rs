@@ -107,11 +107,8 @@ fn phone_pending_connect_and_initial_retry_end_with_the_actual_call() {
 }
 
 #[test]
-fn phone_grammar_macro_keeps_private_source_through_dispatch_and_retirement() {
-    use crate::{
-        link::{PhoneAccountId, PhoneSource},
-        phone_dtmf::{PhoneDtmfAction, PhoneDtmfGrammar, PhoneDtmfOptions},
-    };
+fn phone_macro_keeps_private_source_through_dispatch_and_retirement() {
+    use crate::link::{PhoneAccountId, PhoneSource};
     let mut links = links();
     let definition = crate::config::ResolvedDtmfMacroSettings {
         name: "private-status".into(),
@@ -152,23 +149,12 @@ fn phone_grammar_macro_keeps_private_source_through_dispatch_and_retirement() {
     assert!(links.advance_macros(1).is_empty());
     assert!(links.peer_commands.is_empty());
     assert!(signals.authenticate_phone());
-    let mut grammar =
-        PhoneDtmfGrammar::new(links.commands.command_map(), PhoneDtmfOptions::default()).unwrap();
-    for digit in "*41000#*95".chars() {
-        for action in grammar.digit(digit, 10) {
-            match action {
-                PhoneDtmfAction::SelectTarget(target) => assert_eq!(target, "1000"),
-                PhoneDtmfAction::NodeDigit { target, digit } => {
-                    assert_eq!(target, "1000");
-                    assert!(
-                        links
-                            .phone_digit(&source, digit, 10, reply.clone())
-                            .is_none()
-                    );
-                }
-                other => panic!("unexpected private-control action: {other:?}"),
-            }
-        }
+    for digit in "*95".chars() {
+        assert!(
+            links
+                .phone_digit(&source, digit, 10, reply.clone())
+                .is_none()
+        );
     }
     let outcomes = links.advance_macros(10);
     let [DigitOutcome::Operation(operation)] = outcomes.as_slice() else {

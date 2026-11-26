@@ -230,9 +230,16 @@ mod tests {
             );
         }
         let mut previous = original;
+        previous.abi_version = 10;
+        previous.capability = *b"rptadv.hst10\0\0\0\0";
         previous.struct_size = 400;
-        // SAFETY: the old complete v10 prefix is independently sufficient for ordinary operation.
-        let host = unsafe { HostServices::open(Box::leak(Box::new(previous))) }.unwrap();
+        assert!(matches!(
+            unsafe { HostServices::open(&previous) },
+            Err(Error::Admission)
+        ));
+        let mut absent_binding = original;
+        absent_binding.station_binding = ptr::null();
+        let host = unsafe { HostServices::open(&absent_binding) }.unwrap();
         assert!(host.station_ops().is_err());
     }
 }

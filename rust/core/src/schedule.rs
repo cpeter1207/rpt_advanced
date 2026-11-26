@@ -698,11 +698,13 @@ impl ScheduledWindow {
     }
 }
 
+#[cfg(test)]
 fn valid_selector(text: &str, operation: unsafe extern "C" fn(*const c_char) -> u32) -> bool {
     CString::new(text).is_ok_and(|text| unsafe { operation(text.as_ptr()) != 0 })
 }
 
 /// Check one inclusive start boundary.
+#[cfg(test)]
 pub(crate) fn start_time_valid(text: &str) -> bool {
     valid_selector(
         text,
@@ -714,6 +716,7 @@ pub(crate) fn start_time_valid(text: &str) -> bool {
 }
 
 /// Check one exclusive end boundary.
+#[cfg(test)]
 pub(crate) fn end_time_valid(text: &str) -> bool {
     valid_selector(
         text,
@@ -725,6 +728,7 @@ pub(crate) fn end_time_valid(text: &str) -> bool {
 }
 
 /// Check one optional weekday selector.
+#[cfg(test)]
 pub(crate) fn weekday_selector_valid(text: &str) -> bool {
     valid_selector(
         text,
@@ -736,6 +740,7 @@ pub(crate) fn weekday_selector_valid(text: &str) -> bool {
 }
 
 /// Check one optional bounded date selector.
+#[cfg(test)]
 pub(crate) fn date_selector_valid(text: &str) -> bool {
     valid_selector(
         text,

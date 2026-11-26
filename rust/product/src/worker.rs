@@ -372,10 +372,15 @@ impl RadioStatus {
         self.snapshot().0 && self.remote_controls.load(Ordering::Acquire) & 25 != 25
     }
     pub(crate) fn transmit_observation(&self, now_ms: u64) -> Option<bool> {
+        self.transmit_control_ms
+            .store(now_ms.min(u64::MAX >> 2), Ordering::Release);
+        self.recent_transmit_request(now_ms)
+    }
+    /// Callback-requested TX state. This is distinct from electrical PTT readback.
+    pub(crate) fn recent_transmit_request(&self, now_ms: u64) -> Option<bool> {
         // A 4096-frame callback covers about 85 ms at 48 kHz. Allow several buffers of jitter.
         const MAX_AGE_MS: u64 = 500;
         let now_ms = now_ms.min(u64::MAX >> 2);
-        self.transmit_control_ms.store(now_ms, Ordering::Release);
         let observation = self.transmit_keyed.load(Ordering::Acquire);
         if now_ms.saturating_sub(observation >> 2) > MAX_AGE_MS {
             return None;
@@ -698,9 +703,7 @@ fn receive(
     }
     ring.producer
         .local_epoch(generation.state().receive_epoch());
-    generation
-        .state()
-        .process(metadata.receiver_keyed != 0, samples, now_ms);
+    generation.state().process(raw, samples, now_ms);
     context
         .status
         .set_dtmf_muted(metadata.receiver_keyed != 0 && generation.state().suppressing());
@@ -1374,6 +1377,20 @@ impl RadioWorker {
         }
         text
     }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn meters(&self) -> [Option<crate::management::live::Meter>; 2] {
+        [self.latest_receive, self.latest_transmit].map(|snapshot| {
+            snapshot.map(|m| crate::management::live::Meter {
+                timestamp_ms: m.timestamp_ms,
+                samples: m.samples,
+                peak: m.peak,
+                rms: m.rms,
+                clipped_samples: m.clipped_samples,
+                dropped_snapshots: m.dropped_snapshots,
+            })
+        })
+    }
+
     /// Drain bounded callback snapshots and retain only each direction's latest window.
     pub(crate) fn collect_snapshots(&mut self) {
         while let Ok(snapshot) = self.receive_snapshots.pop() {

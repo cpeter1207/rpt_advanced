@@ -24,7 +24,9 @@ pub use identity::{EchoAlias, IdentityError, PeerAddress, PeerIdentity, Protocol
 pub use peer::{Peer, ReceivePolicy, ReceiveState};
 pub use phone::{MailboxId, PhoneAccountId, PhoneCallId, PhoneSource};
 pub use protocol::{Protocol, Route};
-pub use signals::{MediaIsolation, MediaIsolationClaim, PeerReply, PeerSignals, RegenerationOrigin};
+pub use signals::{
+    MediaIsolation, MediaIsolationClaim, PeerReply, PeerSignals, RegenerationOrigin,
+};
 pub use text::{ClassifiedText, HumanMessage, TextAudience, TextOrigin, classify_asl};
 pub use topology::TopologyManager;
 

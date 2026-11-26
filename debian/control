@@ -26,14 +26,15 @@ Rules-Requires-Root: no
 Package: rpt-advanced
 Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
+ rpt-advanced-cli (= ${binary:Version}),
  libsofia-sip-ua0 (>= 1.13.19),
  librate-adjusting-pcm-ring3 (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha3),
- librptadv-product2 (= ${binary:Version}),
+ librptadv-product3 (= ${binary:Version}),
  librptadvecholink1 (>= 0.1.0~alpha1),
  libusbradioplus-product1 (>= 0.1.0~alpha38-1),
- librptadv-file-adapter1 (= ${binary:Version}),
- librptadv-speech-adapter1 (= ${binary:Version}),
+ librptadv-file-adapter2 (= ${binary:Version}),
+ librptadv-speech-adapter2 (= ${binary:Version}),
  librptadv-control-standalone-adapter1 (= ${binary:Version}),
  librptadv-resolver-adapter1 (= ${binary:Version}),
  librptadv-jitter-adapter1 (= ${binary:Version}),
@@ -62,21 +63,22 @@ Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, ${asterisk:Depends},
  librate-adjusting-pcm-ring3 (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha3),
- librptadv-product2 (= ${binary:Version}),
+ librptadv-product3 (= ${binary:Version}),
  librptadvecholink1 (>= 0.1.0~alpha1),
- librptadv-file-adapter1 (= ${binary:Version}),
- librptadv-speech-adapter1 (= ${binary:Version}),
+ librptadv-file-adapter2 (= ${binary:Version}),
+ librptadv-speech-adapter2 (= ${binary:Version}),
  librptadv-control-asterisk-adapter1 (= ${binary:Version})
 Suggests: usbradioplus (>= 0.1.0~alpha38-1)
 Description: optional Asterisk adapter for the RPT Advanced controller
  Deprecated Asterisk module adapter for RadioPlusAdvanced channels. It may be
  installed independently of the standalone controller package.
 
-Package: librptadv-product2
+Package: librptadv-product3
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
  libusbradioplus-product1 (>= 0.1.0~alpha38-1),
+ librptadvradio5 (>= 0.1.0~alpha13),
  librate-adjusting-pcm-ring3 (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha3),
  librptadvtone1 (>= 0.1.0~alpha1),
@@ -91,12 +93,12 @@ Description: portable controller product for rpt_advanced
 Package: librptadv-product-dev
 Architecture: amd64 arm64
 Multi-Arch: same
-Depends: ${misc:Depends}, librptadv-product2 (= ${binary:Version}), librptadv-codec-dev,
+Depends: ${misc:Depends}, librptadv-product3 (= ${binary:Version}), librptadv-codec-dev,
  libusbradioplus-product-dev (>= 0.1.0~alpha38-1)
 Description: development files for the rpt_advanced product
  Public C header and unversioned linker name for the versioned product.
 
-Package: librptadv-file-adapter1
+Package: librptadv-file-adapter2
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends}, ffmpeg
@@ -107,11 +109,11 @@ Description: local-file preparation adapter for rpt_advanced
 Package: librptadv-file-adapter-dev
 Architecture: amd64 arm64
 Multi-Arch: same
-Depends: ${misc:Depends}, librptadv-file-adapter1 (= ${binary:Version})
+Depends: ${misc:Depends}, librptadv-file-adapter2 (= ${binary:Version})
 Description: development files for the rpt_advanced file adapter
  Public C headers and unversioned linker name for the versioned file adapter.
 
-Package: librptadv-speech-adapter1
+Package: librptadv-speech-adapter2
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends}
@@ -122,7 +124,7 @@ Description: offline speech preparation adapter for rpt_advanced
 Package: librptadv-speech-adapter-dev
 Architecture: amd64 arm64
 Multi-Arch: same
-Depends: ${misc:Depends}, librptadv-speech-adapter1 (= ${binary:Version})
+Depends: ${misc:Depends}, librptadv-speech-adapter2 (= ${binary:Version})
 Description: development files for the rpt_advanced speech adapter
  Public C headers and unversioned linker name for the versioned speech adapter.
 
@@ -215,3 +217,10 @@ Multi-Arch: same
 Depends: ${misc:Depends}, librptadv-hwmon-adapter1 (= ${binary:Version})
 Description: development files for the rpt_advanced Linux sensor adapter
  Public C header and unversioned linker name for the Linux sensor adapter.
+
+Package: rpt-advanced-cli
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
+Description: local operator client for RPT Advanced
+ Discover and edit controller resources, inspect status and submit operations
+ through the mutually authenticated loopback management API.

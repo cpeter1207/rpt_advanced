@@ -82,12 +82,7 @@ impl Worker {
                     .max_blocking_threads(1)
                     .build()
                     .map_err(|_| Error::Owner);
-                let _ = ready.send(
-                    runtime
-                        .as_ref()
-                        .map(|_| ())
-                        .map_err(|error| *error),
-                );
+                let _ = ready.send(runtime.as_ref().map(|_| ()).map_err(|error| *error));
                 let runtime = runtime?;
                 let result = runtime
                     .block_on(Reactor::new(owned, calls, incoming, owned_catalog).run(receiver));
@@ -139,10 +134,14 @@ impl Worker {
     }
     /// Request removal, service shutdown, then join before releasing the code lease.
     pub(crate) fn stop(&mut self) -> Result<(), Error> {
-        if self.stop_failed { return Err(Error::Shutdown); }
-        let Some(thread) = self.thread.take() else { return Ok(()); };
+        if self.stop_failed {
+            return Err(Error::Shutdown);
+        }
+        let Some(thread) = self.thread.take() else {
+            return Ok(());
+        };
         let _ = self.sender.blocking_send(Command::Stop);
-        let result = thread.join().map_err(|_| Error::Owner).and_then(|r|r);
+        let result = thread.join().map_err(|_| Error::Owner).and_then(|r| r);
         self.stop_failed = result.is_err();
         result
     }
@@ -172,6 +171,8 @@ struct Reactor {
     failed: bool,
     calls: calls::Client,
     incoming: mpsc::SyncSender<calls::Receipt>,
+    last_incoming_account: String,
+    continuing_calls: bool,
 }
 impl Reactor {
     fn new(
@@ -191,6 +192,8 @@ impl Reactor {
             failed: false,
             calls,
             incoming,
+            last_incoming_account: String::new(),
+            continuing_calls: false,
         }
     }
     fn prepare(&mut self, accounts: Vec<Arc<PreparedAccount>>) -> Result<(), Error> {
@@ -212,7 +215,11 @@ impl Reactor {
                 .get(&id)
                 .filter(|entry| entry.borrow().settings.generation() == account.generation());
             let entry = if let Some(entry) = retained {
-                candidate.retained.push((Rc::clone(entry), entry.borrow().delays_ms, account.account.jitter_ms()));
+                candidate.retained.push((
+                    Rc::clone(entry),
+                    entry.borrow().delays_ms,
+                    account.account.jitter_ms(),
+                ));
                 Rc::clone(entry)
             } else {
                 match Entry::new(&self.provider, account) {
@@ -278,22 +285,45 @@ impl Reactor {
     async fn service(&mut self) {
         let now = Instant::now();
         for entry in self.active.values().chain(self.retiring.iter()) {
-            entry.borrow_mut().service(now);
+            let mut entry = entry.borrow_mut();
+            if !entry.done {
+                entry.service(now);
+                if entry.done {
+                    // Every retained call gets its final service pass, including earlier batches.
+                    entry.batch_cursor = 0;
+                }
+            }
         }
         // A late withdrawal for the same registrar identity can remove a new
         // binding. Wait for the actual old account retirement before activation.
         if self.retiring.is_empty() && !self.failed {
             for entry in std::mem::take(&mut self.activating) {
-                if entry.borrow_mut().activate(now).is_err() { self.selection_failed = true; }
+                if entry.borrow_mut().activate(now).is_err() {
+                    self.selection_failed = true;
+                }
             }
+        }
+        let restart = !self.continuing_calls;
+        self.continuing_calls = false;
+        for owner in self.active.values().chain(&self.retiring) {
+            self.continuing_calls |= owner.borrow_mut().next_call_batch(restart);
         }
         self.service_outgoing().await;
         self.service_calls();
         self.retiring.retain(|entry| {
-            let entry = entry.borrow();
+            let mut entry = entry.borrow_mut();
             self.failed |= entry.abandoned;
-            !entry.done
+            let finished = entry.done && entry.batch_cursor >= entry.batch_through;
+            if finished {
+                // The last product callbacks have returned on this serial reactor.
+                entry.stop_callbacks();
+            }
+            !finished
         });
+        if self.continuing_calls {
+            // Return to the command/timer select before servicing the next group.
+            self.calls.wake.notify_one();
+        }
     }
     async fn run(mut self, mut receiver: mailbox::Receiver<Command>) -> Result<(), Error> {
         let mut ticker = tokio::time::interval(SERVICE_INTERVAL);
@@ -301,10 +331,19 @@ impl Reactor {
         let mut stopping = false;
         let wake = Arc::clone(&self.calls.wake);
         loop {
-            let deadline = self.earliest_call_deadline();
+            // A queued continuation already makes service runnable. The next batch checks
+            // its own deadlines; scan all calls for a sleep deadline only between sweeps.
+            let deadline = if self.continuing_calls {
+                None
+            } else {
+                self.earliest_call_deadline()
+            };
             let due = async {
-                if let Some(at) = deadline { tokio::time::sleep_until(at.into()).await; }
-                else { std::future::pending::<()>().await; }
+                if let Some(at) = deadline {
+                    tokio::time::sleep_until(at.into()).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
             };
             tokio::select! {
                 _ = due => self.service().await,
@@ -355,6 +394,9 @@ struct Entry {
     done: bool,
     abandoned: bool,
     calls: BTreeMap<u64, calls::Slot>,
+    call_batch: [u64; calls::SERVICE_BATCH],
+    batch_cursor: u64,
+    batch_through: u64,
 }
 impl Entry {
     fn new(provider: &Arc<Provider>, settings: Arc<PreparedAccount>) -> Result<Self, Error> {
@@ -372,6 +414,9 @@ impl Entry {
             done: false,
             abandoned: false,
             calls: calls::empty(),
+            call_batch: [0; calls::SERVICE_BATCH],
+            batch_cursor: 0,
+            batch_through: 0,
         })
     }
     fn set_delays(&mut self, delays_ms: [u32; 3]) -> Result<(), Error> {
@@ -459,7 +504,10 @@ impl Entry {
         let status = match observed {
             Ok(status) => status,
             Err(error) => {
-                eprintln!("phone account {}: {error}", self.settings.account.account_id());
+                eprintln!(
+                    "phone account {}: {error}",
+                    self.settings.account.account_id()
+                );
                 self.begin_shutdown(now);
                 return;
             }
@@ -486,7 +534,10 @@ impl Entry {
         }
         self.last = status;
         if let Err(error) = self.collect_calls() {
-            eprintln!("phone account {}: {error}", self.settings.account.account_id());
+            eprintln!(
+                "phone account {}: {error}",
+                self.settings.account.account_id()
+            );
             self.begin_shutdown(now);
         }
         match status.state {

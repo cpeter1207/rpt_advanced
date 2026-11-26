@@ -117,3 +117,95 @@ class EchoProxy:
         except (AssertionError, OSError, struct.error) as error:
             if not self.stopping.is_set():
                 self.error = error
+
+
+# GSM 06.10 frames from libgsm 1.0.22. At 8 kHz encode successive 160-sample sine
+# frames of amplitude 10000, retaining frame 3 for 950 Hz and 6 for 1450 Hz.
+DIRECT_TONES = {
+    950: bytes.fromhex(
+        "d43dcb655a5521359ac9d528a961439ae9e32977c0d6b39d4aa355409e972f1985"
+    ),
+    1450: bytes.fromhex(
+        "d63f73615a9bc1738d5238b07b61a9153ce197d3219c6b716386e9a1455c6e38a9"
+    ),
+}
+
+
+class EchoDirect:
+    """Loopback-only direct directory and registered UDP peer in the test network."""
+
+    def __init__(self):
+        import os
+
+        # Only the selected synthetic addresses receive traffic. Pick a private set
+        # for this PID instead of occupying wildcard or default station listeners.
+        self.host = f"127.78.{(os.getpid() >> 8) & 255}.{(os.getpid() & 127) + 2}"
+        self.peer = f"127.79.{(os.getpid() >> 8) & 255}.{(os.getpid() & 127) + 2}"
+        self.listener = socket.socket()
+        self.audio = socket.socket(type=socket.SOCK_DGRAM)
+        self.control = socket.socket(type=socket.SOCK_DGRAM)
+        self.requests = queue.Queue()
+        self.stopping = threading.Event()
+        self.error = None
+        self.thread = threading.Thread(target=self._directory)
+
+    def __enter__(self):
+        try:
+            self.listener.bind((self.host, 5200))
+            self.listener.listen()
+            self.listener.settimeout(0.1)
+            self.audio.bind((self.peer, 5198))
+            self.control.bind((self.peer, 5199))
+            self.thread.start()
+            return self
+        except BaseException:
+            for sock in (self.listener, self.audio, self.control):
+                sock.close()
+            raise
+
+    def __exit__(self, kind, _value, _traceback):
+        self.stopping.set()
+        self.thread.join(5)
+        for sock in (self.listener, self.audio, self.control):
+            sock.close()
+        assert not self.thread.is_alive()
+        if kind is None and self.error:
+            raise self.error
+
+    def _directory(self):
+        from managed_direct_echo import field
+
+        try:
+            while not self.stopping.is_set():
+                try:
+                    stream, _ = self.listener.accept()
+                except TimeoutError:
+                    continue
+                with stream:
+                    stream.settimeout(3)
+                    first = field(stream)
+                    if first in (b"F0", b"Fmanaged"):
+                        stream.sendall(
+                            f"@@@\n1:managed\nN0CALL\nFixture\n123456\n{self.peer}\n+++\n".encode()
+                        )
+                        continue
+                    assert first == b"lK1ABC-R\xac\xacfixture-value"
+                    status = field(stream)
+                    name = field(stream)
+                    if not status.startswith(b"OFF"):
+                        assert status.startswith(b"ONLINE")
+                        field(stream)
+                        self.requests.put(name)
+                    stream.sendall(b"OK")
+        except (OSError, ValueError, AssertionError) as error:
+            self.error = error
+
+    def connect(self, port):
+        self.control.sendto(EchoProxy.SDES, ("127.0.0.1", port + 1))
+
+    def voice(self, port, sequence, hz):
+        self.audio.sendto(
+            struct.pack("!BBHII", 0xC0, 3, sequence, sequence * 640, 0)
+            + DIRECT_TONES[hz] * 4,
+            ("127.0.0.1", port),
+        )

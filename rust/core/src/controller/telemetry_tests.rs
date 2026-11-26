@@ -276,7 +276,15 @@ fn parrot_queue_rejects_status_and_resets_busy_after_full_ring() {
     assert!(!control.queue_prepared_parrot(
         PreparedMedia::new(Some(vec![0.5]), "E", MorseSettings::default()).unwrap()
     ));
-    assert!(control.parrot_pending.push(super::QueuedParrot { media: parrot_media(&[0.6]), epoch: 0 }).is_ok());
+    assert!(
+        control
+            .parrot_pending
+            .push(super::QueuedParrot {
+                media: parrot_media(&[0.6]),
+                epoch: 0
+            })
+            .is_ok()
+    );
 
     assert!(!control.queue_prepared_parrot(parrot_media(&[0.7])));
     assert!(!control.parrot_busy.load(Ordering::Acquire));

@@ -15,7 +15,7 @@ mod peer_metadata;
 
 #[test]
 fn peer_metadata_writes_only_the_supported_caller_prefix_for_both_protocols() {
-    let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+    let owner = HostServicesOwner::new(None).unwrap();
     let fixture = support::Fixture::new("network");
     let handles = [
         owner.peer_handle(
@@ -72,14 +72,67 @@ fn peer_metadata_writes_only_the_supported_caller_prefix_for_both_protocols() {
 
 #[test]
 fn echo_accounts_prepare_before_activation_and_dial_from_the_stable_context() {
-    accounts::check(
-        HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap(),
+    const CHILD: &str = "RPTADV_TEST_STANDALONE_MANAGED_ECHO";
+    if std::env::var_os(CHILD).is_some() {
+        let mut owner = HostServicesOwner::new(None).unwrap();
+        unsafe extern "C" fn incoming(
+            _: *const abi::rptadv_incoming_peer_v1,
+            _: *mut c_void,
+        ) -> i32 {
+            1
+        }
+        let control = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
+        owner.context.managed_echo =
+            Some(managed_echo::Frontend::new(control.cast(), incoming, None));
+        owner.descriptor.managed_echo_provider = &managed_echo::OPERATIONS;
+        accounts::check(owner.descriptor(), 7);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let code =
+                unsafe { managed_echo::OPERATIONS.shutdown.unwrap()(owner.descriptor.context) };
+            if code == 0 {
+                break;
+            }
+            assert_eq!(code, 1);
+            assert!(std::time::Instant::now() < until);
+            std::thread::yield_now();
+        }
+        return;
+    }
+    let fixture = support::Fixture::new("managed");
+    let directory = fixture.0.parent().unwrap();
+    std::os::unix::fs::symlink(&fixture.0, directory.join("librptadv_echolink.so.1")).unwrap();
+    let mut search = vec![directory.to_owned()];
+    search.extend(std::env::split_paths(
+        &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+    ));
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            concat!(
+                module_path!(),
+                "::echo_accounts_prepare_before_activation_and_dial_from_the_stable_context"
+            )
+            .split_once("::")
+            .unwrap()
+            .1,
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("LD_LIBRARY_PATH", std::env::join_paths(search).unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success() && String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
     );
 }
 
 #[test]
 fn echo_media_and_registration_dispatch_preserves_the_provider_contract() {
-    let host = HostServicesOwner::new(Vec::new(), None, Default::default()).unwrap();
+    let host = HostServicesOwner::new(None).unwrap();
     unsafe { media::check(host.descriptor().context) };
 }
 
@@ -123,7 +176,7 @@ fn echo_handles_never_enter_iax_only_callbacks() {
     }
     .unwrap();
     let handle = Box::into_raw(Box::new(PeerHandle::Echo(peer))).cast();
-    let host = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+    let host = HostServicesOwner::new(None).unwrap();
     let context = host.descriptor().context;
     let mut info: abi::rptadv_peer_info_v1 = unsafe { std::mem::zeroed() };
     info.struct_size = size_of::<abi::rptadv_peer_info_v1>() as u32;

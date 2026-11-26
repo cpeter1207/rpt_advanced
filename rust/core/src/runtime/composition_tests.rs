@@ -1,88 +1,69 @@
 use super::*;
 use crate::{
     composition::{Composition, MorseRequirement},
-    config::{ConfigDocument, NodeId, ResolvedMessageSettings},
+    config::resources::candidate::ResourceKind,
     messages::{MessageArgument, MessageForms},
     schedule::Weekday,
     site::{Observation, ReadingQuality},
 };
 use std::sync::Arc;
 
-#[test]
-fn composition_site_bindings_warn_only_for_missing_source_kind() {
-    for kind in ["sensor", "input"] {
-        for declaration in ["", "sensor", "input"] {
-            let section = if declaration.is_empty() {
-                String::new()
-            } else {
-                // A disabled definition without a DTMF selector is still configured.
-                format!("[{declaration} 524950 reading]\nenabled=no\n")
-            };
-            let document = ConfigDocument::parse(&format!(
-                "[524950]\n[message root]\ncontent=Repeater. {{message_macro_value}}\n[message value]\nmessage_id=site-temperature\narg_temperature={kind}:reading\n{section}"
-            )).unwrap();
-            let recipes = MessageRecipes::new(
-                &document,
-                &NodeId::new("524950").unwrap(),
-                &MessageCatalog::load("en-US").unwrap(),
-            )
-            .unwrap();
-            assert!(recipes.names.contains_key("root"));
-            assert_eq!(
-                recipes
-                    .warnings
-                    .iter()
-                    .any(|warning| warning.value == "reading"),
-                kind != declaration,
-                "binding={kind} declaration={declaration}"
-            );
-        }
-    }
+use crate::station_fixture::projected_telemetry;
+use serde_json::{Value, json};
+
+fn recipe(content: &str) -> Composition {
+    registered_recipe(content, &[])
+}
+
+fn registered_recipe(content: &str, members: &[(&str, Value)]) -> Composition {
+    let rows = members
+        .iter()
+        .map(|(name, body)| (ResourceKind::Message, *name, body.clone()))
+        .collect::<Vec<_>>();
+    let (_, messages, _) = projected_telemetry(&rows).unwrap();
+    messages
+        .compile_inline(content, MorseRequirement::Required)
+        .unwrap()
 }
 
 #[test]
 fn composition_catalog_contract_is_checked_before_admission() {
-    for invalid in [
-        "message_id=not-a-shipped-or-admin-message\n",
-        "message_id=site-time\n",
-        "content=你好\n",
+    for fields in [
+        json!({"content":"{ unknown-message }"}),
+        json!({"content":"你好"}),
+        json!({"file":"id.wav"}),
     ] {
-        let document = ConfigDocument::parse(&format!(
-            "[524950]\n[message bad]\n{invalid}[message good]\ncontent=Good\ndtmf_id=2\n"
-        ))
-        .unwrap();
-        let recipes = MessageRecipes::new(
-            &document,
-            &NodeId::new("524950").unwrap(),
-            &MessageCatalog::load("en-US").unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            recipes.names.keys().collect::<Vec<_>>(),
-            ["good"],
-            "{invalid}"
-        );
-        assert!(!recipes.warnings.is_empty());
-        assert!(recipes.selectors.contains_key("2"));
+        assert!(projected_telemetry(&[(ResourceKind::Message, "bad", fields)]).is_err());
     }
+    assert!(
+        projected_telemetry(&[(
+            ResourceKind::Message,
+            "good",
+            json!({"content":"Good","dtmf_id":"2"})
+        )])
+        .is_ok()
+    );
 }
 
 #[test]
-fn literal_preparation_rejects_speech_beyond_the_telemetry_bound() {
-    // A valid, bounded literal expands when speech spells an alphanumeric
-    // identity, so admission succeeds but preparation must retain its bound.
-    let recipe = recipe(&format!("[message root]\ncontent={}\n", "A1".repeat(33)));
+fn runtime_preparation_rejects_speech_expansion_beyond_the_telemetry_bound() {
+    // The public callsign stays within 63 bytes, but spelling its characters
+    // and the literal prefix would exceed the independently bounded speech form.
+    let recipe = recipe("ID { $node-callsign }");
+    let mut values = snapshot();
+    values.callsign = format!("{}A", "A1".repeat(31));
+    assert_eq!(values.callsign.len(), 63);
     assert_eq!(
         recipe
-            .prepare(&MessageCatalog::load("en-US").unwrap(), &snapshot())
+            .prepare(&MessageCatalog::load("en-US").unwrap(), &values)
             .err(),
-        Some(CompositionError::TooLarge)
+        Some(CompositionError::Preparation)
     );
 }
 
 #[test]
 fn composition_catalog_contract_requires_a_usable_complete_morse_form() {
-    let recipe = recipe("[message root]\ncontent=ID\n");
+    let recipe = recipe("ID");
     for invalid in [String::new(), "你好".into(), "E".repeat(128), "E\0".into()] {
         let forms = MessageForms {
             text: "Valid".into(),
@@ -94,40 +75,20 @@ fn composition_catalog_contract_requires_a_usable_complete_morse_form() {
 }
 
 #[test]
-fn composition_admission_disables_missing_fallback_and_unreachable_selector() {
-    for invalid in [
-        "content={media}\nsound_file=id.wav\n".to_owned(),
-        "content={media}\nspeech_text=ID\n".to_owned(),
-        format!("content=Valid\ndtmf_id={}\n", "1".repeat(126)),
-        "message_id=site-time\narg_time=time_remaining\n".to_owned(),
-        "content={message_macro_missing}\n".to_owned(),
-    ] {
-        let document = ConfigDocument::parse(&format!(
-            "[524950]\n[message bad]\n{invalid}[message good]\ncontent=Good\ndtmf_id=2\n"
-        ))
-        .unwrap();
-        let recipes = MessageRecipes::new(
-            &document,
-            &NodeId::new("524950").unwrap(),
-            &MessageCatalog::load("en-US").unwrap(),
-        )
-        .unwrap();
-        assert!(!recipes.warnings.is_empty(), "{invalid}");
-        assert_eq!(recipes.selectors.len(), 1);
-        assert!(recipes.selectors.contains_key("2"));
-    }
-    let document = ConfigDocument::parse(
-        "[524950]\n[message a]\ncontent=A\ndtmf_id=1\n[message b]\ncontent=B\ndtmf_id=1\n",
-    )
-    .unwrap();
-    assert!(
-        MessageRecipes::new(
-            &document,
-            &NodeId::new("524950").unwrap(),
-            &MessageCatalog::load("en-US").unwrap()
-        )
-        .is_err()
-    );
+fn composition_admission_rejects_duplicate_selectors() {
+    let rows = [
+        (
+            ResourceKind::Message,
+            "a",
+            json!({"content":"First","dtmf_id":"1"}),
+        ),
+        (
+            ResourceKind::Message,
+            "b",
+            json!({"content":"Second","dtmf_id":"1"}),
+        ),
+    ];
+    assert!(projected_telemetry(&rows).is_err());
 }
 
 #[test]
@@ -183,84 +144,48 @@ fn composition_value_forms_and_invalid_observations() {
     }
 }
 
-fn recipe(text: &str) -> Composition {
-    recipe_with_morse(text, MorseRequirement::Required)
-}
-
-fn recipe_with_morse(text: &str, requirement: MorseRequirement) -> Composition {
-    let document = ConfigDocument::parse(&format!("[524950]\n{text}")).unwrap();
-    let node = NodeId::new("524950").unwrap();
-    let definitions = document
-        .named_sections("message", None)
-        .into_iter()
-        .map(|section| {
-            let name = section.rsplit(' ').next().unwrap();
-            (
-                name.to_owned(),
-                ResolvedMessageSettings::resolve(&document, &node, name)
-                    .unwrap()
-                    .value,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    Composition::compile(
-        definitions["root"].clone(),
-        Arc::new(definitions),
-        requirement,
-    )
-    .unwrap()
-}
-
 #[test]
 fn optional_compositions_never_emit_a_partial_morse_substitute() {
-    let catalog = MessageCatalog::load("en-US").unwrap();
-    for (content, source) in [
-        ("Before. {media} After.", "sound_file=message.wav"),
-        (
-            "Before. {message_macro_recorded} After.",
-            "sound_file=message.wav",
-        ),
-        ("{message_macro_recorded} Before.", "sound_file=message.wav"),
-        ("Before. {media} After.", "speech_text=Report"),
-        (
-            "Before. {message_macro_recorded} After.",
-            "speech_text=Report",
-        ),
-    ] {
-        let recipe = recipe_with_morse(
-            &format!(
-                "[message root]\ncontent={content}\n{source}\n\
-             [message recorded]\ncontent={{media}}\n{source}\n"
-            ),
+    use crate::composition::PublicMessageSource;
+    use crate::messages::patterns::NativePattern;
+    let (_, messages, _) = projected_telemetry(&[]).unwrap();
+    let mut file = messages.renderer_defaults().clone();
+    file.media.file = Some("message.wav".into());
+    let sources = BTreeMap::from([(
+        "recorded".into(),
+        PublicMessageSource::Media {
+            speech: None,
+            morse: None,
+        },
+    )]);
+    for content in ["Before. { recorded } After.", "{ recorded } Before."] {
+        let p = Composition::compile_public(
+            messages.renderer_defaults().clone(),
+            &PublicMessageSource::Content(NativePattern::parse(content).unwrap()),
+            Arc::new(BTreeMap::from([("recorded".into(), file.clone())])),
+            &sources,
+            &BTreeMap::new(),
+            &messages.catalog,
             MorseRequirement::Optional,
-        );
-        let program = recipe.prepare(&catalog, &snapshot()).unwrap();
-        assert!(program.primary.len() >= 2);
-        assert!(
-            program
-                .primary
-                .iter()
-                .any(|source| source.file.is_some() || source.speech.is_some())
-        );
-        assert!(program.morse.is_empty(), "{content} {source}");
+        )
+        .unwrap()
+        .prepare(&messages.catalog, &snapshot())
+        .unwrap();
+        assert!(p.primary.len() >= 2);
+        assert!(p.primary.iter().any(|s| s.file.is_some()));
+        assert!(p.morse.is_empty());
     }
-    for content in ["Before. {tone_sequence} After.", "Before. {media} After."] {
-        let recipe = recipe_with_morse(
-            &format!("[message root]\ncontent={content}\ntone_sequence=500/10\n"),
-            MorseRequirement::Optional,
-        );
-        let program = recipe.prepare(&catalog, &snapshot()).unwrap();
-        assert_eq!(program.primary.len(), 3);
-        assert!(program.primary[1].tone.is_some());
-        assert_eq!(
-            program
-                .morse
-                .iter()
-                .map(|source| source.text.as_str())
-                .collect::<Vec<_>>(),
-            ["Before.", "After."]
-        );
-    }
+    let recipe = registered_recipe(
+        "Before. { attention } After.",
+        &[("attention", json!({"tone":{"sequence":"500/10"}}))],
+    );
+    let p = recipe.prepare(&messages.catalog, &snapshot()).unwrap();
+    assert_eq!(p.primary.len(), 3);
+    assert!(p.primary[1].tone.is_some());
+    assert_eq!(
+        p.morse.iter().map(|m| m.text.trim()).collect::<Vec<_>>(),
+        ["Before.", "After."]
+    );
 }
 
 fn snapshot() -> MessageValueSnapshot {
@@ -285,8 +210,12 @@ fn snapshot() -> MessageValueSnapshot {
 
 #[test]
 fn composition_values_are_data_and_stale_reading_replaces_only_its_segment() {
-    let recipe = recipe(
-        "[message root]\ncontent=Before. {message_macro_temperature} After.\n[message temperature]\nmessage_id=site-temperature\narg_temperature=sensor:outdoor\n",
+    let recipe = registered_recipe(
+        "Before. { site-temperature } After.",
+        &[(
+            "site-temperature",
+            json!({"bindings":{"temperature":"sensor:outdoor"}}),
+        )],
     );
     let catalog = MessageCatalog::load("en-US").unwrap();
     let mut values = snapshot();
@@ -320,8 +249,9 @@ fn composition_values_are_data_and_stale_reading_replaces_only_its_segment() {
 
 #[test]
 fn composition_prepares_new_values_without_mutating_prior_attempt() {
-    let recipe = recipe(
-        "[message root]\ncontent={message_macro_time}\n[message time]\nmessage_id=site-time\narg_time=time\n",
+    let recipe = registered_recipe(
+        "{ site-time }",
+        &[("site-time", json!({"bindings":{"time":"time"}}))],
     );
     let catalog = MessageCatalog::load("en-US").unwrap();
     let mut values = snapshot();
@@ -341,8 +271,18 @@ fn composition_prepares_new_values_without_mutating_prior_attempt() {
 
 #[test]
 fn composition_literal_inherits_its_defining_macro_not_the_invoker() {
-    let recipe = recipe(
-        "[message root]\ncontent=Root {message_macro_quiet}\nspeech_level_db=-6\nmorse_level_db=-10\n[message quiet]\ncontent=Quiet\nspeech_level_db=-20\nmorse_level_db=-30\n",
+    let recipe = registered_recipe(
+        "{ root }",
+        &[
+            (
+                "root",
+                json!({"content":"Root { quiet }","speech":{"level_db":-6},"morse":{"level_db":-10}}),
+            ),
+            (
+                "quiet",
+                json!({"content":"Quiet","speech":{"level_db":-20},"morse":{"level_db":-30}}),
+            ),
+        ],
     );
     let program = recipe
         .prepare(&MessageCatalog::load("en-US").unwrap(), &snapshot())
@@ -355,8 +295,12 @@ fn composition_literal_inherits_its_defining_macro_not_the_invoker() {
 
 #[test]
 fn composition_numeric_values_do_not_become_node_numbers() {
-    let recipe = recipe(
-        "[message root]\ncontent={message_macro_temperature}\n[message temperature]\nmessage_id=site-temperature\narg_temperature=sensor:outdoor\n",
+    let recipe = registered_recipe(
+        "{ site-temperature }",
+        &[(
+            "site-temperature",
+            json!({"bindings":{"temperature":"sensor:outdoor"}}),
+        )],
     );
     let mut values = snapshot();
     values.sensors.insert(
@@ -430,9 +374,12 @@ fn composition_civil_and_deadline_bindings_keep_their_own_context() {
 
 #[test]
 fn composition_media_and_attention_preserve_order_and_fallback() {
-    let recipe = recipe(
-        "[message root]\ncontent={tone_sequence} {media} {tone_sequence}\n\
-         tone_sequence=1000Hz / 200ms / -20dB\nsound_file=id.wav\nmorse_text=E\n",
+    let recipe = registered_recipe(
+        "{ attention } { recording } { attention }",
+        &[
+            ("attention", json!({"tone":{"sequence":"1000/200"}})),
+            ("recording", json!({"file":"id.wav","morse":{"text":"E"}})),
+        ],
     );
     let program = recipe
         .prepare(&MessageCatalog::load("en-US").unwrap(), &snapshot())
@@ -469,22 +416,18 @@ fn composition_media_and_attention_preserve_order_and_fallback() {
 #[test]
 fn composition_site_selectors_respect_command_size_and_report_active_input() {
     let catalog = MessageCatalog::load("en-US").unwrap();
-    let document = ConfigDocument::parse(&format!(
-        "[524950]\n[input 524950 door]\ndtmf_id=1\n\
-         [sensor 524950 long]\ndtmf_id={}\n",
-        "2".repeat(126)
-    ))
-    .unwrap();
-    let recipes =
-        MessageRecipes::new(&document, &NodeId::new("524950").unwrap(), &catalog).unwrap();
-    assert!(recipes.site_selectors.contains_key("1"));
-    assert!(!recipes.site_selectors.contains_key(&"2".repeat(126)));
-    assert!(
-        recipes
-            .warnings
-            .iter()
-            .any(|warning| warning.message.contains("command length"))
+    use crate::config::resources::candidate::ResourceScope;
+    use crate::station_fixture::{PORT, configuration};
+    let domain = configuration(
+        &[(PORT, "radio")],
+        &[(PORT, ResourceKind::Input, "door", json!({"dtmf_id":"1"}))],
     );
+    let recipes = MessageRecipes::modular(
+        &domain.scopes[&ResourceScope::Port(PORT.parse().unwrap())],
+        PORT,
+    )
+    .unwrap();
+    assert!(recipes.site_selectors.contains_key("1"));
     let mut values = snapshot();
     values.inputs.insert(
         "door".into(),
@@ -555,7 +498,7 @@ fn flat_identity_arguments_use_the_immutable_peer_and_explicit_port() {
 fn public_fluent_media_parts_use_one_attempt_and_never_dispatch_formatted_input() {
     use crate::composition::PublicMessageSource;
     use crate::messages::patterns::NativePattern;
-    let base = recipe("[message root]\ncontent=Literal\n");
+    let base = recipe("Literal");
     let mut settings = base.settings_for(None).clone();
     settings
         .bindings
@@ -617,9 +560,7 @@ fn review35_explicit_media_requires_valid_static_morse() {
     .unwrap()
     .project_locales(&"en-US".parse().unwrap(), &Default::default())
     .unwrap();
-    let mut settings = recipe("[message root]\ncontent=Literal\n")
-        .settings_for(None)
-        .clone();
+    let mut settings = recipe("Literal").settings_for(None).clone();
     settings.media.file = Some("recording.wav".into());
     settings.media.morse = Some(MorseSource {
         text: "你好".into(),
@@ -667,9 +608,7 @@ fn review35_captured_typed_and_ordinary_values_share_the_actual_format_call() {
         &BTreeMap::from([("time-announcement".into(), projected)]),
     )
     .unwrap();
-    let mut settings = recipe("[message root]\ncontent=Literal\n")
-        .settings_for(None)
-        .clone();
+    let mut settings = recipe("Literal").settings_for(None).clone();
     settings.message_id = Some("time-announcement".into());
     settings.bindings = bindings["time-announcement"].clone();
     let mut values = snapshot();
@@ -705,9 +644,7 @@ fn real_argument_fallback_resolves_the_installed_forms_own_normal_binding() {
                 &BTreeMap::from([("no-links".into(), def)]),
             )
             .unwrap();
-    let mut settings = recipe("[message root]\ncontent=Literal\n")
-        .settings_for(None)
-        .clone();
+    let mut settings = recipe("Literal").settings_for(None).clone();
     settings.bindings = bindings["no-links"].clone();
     settings.message_id = Some("no-links".into());
     let mut at_playback = snapshot();
@@ -728,9 +665,7 @@ fn sparse_builtin_presentation_retains_its_captured_arguments() {
         &BTreeMap::from([("time-announcement".into(), Default::default())]),
     )
     .unwrap();
-    let mut settings = recipe("[message root]\ncontent=Literal\n")
-        .settings_for(None)
-        .clone();
+    let mut settings = recipe("Literal").settings_for(None).clone();
     settings.message_id = Some("time-announcement".into());
     settings.bindings = bindings["time-announcement"].clone();
     let mut values = snapshot();
@@ -769,9 +704,7 @@ fn round_two_media_native_reference_validates_english_and_uses_optional_morse_fa
         .unwrap()
         .project_locales(&"fr".parse().unwrap(), &localized)
         .unwrap();
-        let mut settings = recipe("[message root]\ncontent=Literal\n")
-            .settings_for(None)
-            .clone();
+        let mut settings = recipe("Literal").settings_for(None).clone();
         settings.media.file = Some("recording.wav".into());
         settings.media.morse = Some(MorseSource {
             text: "{ label.text }".into(),
@@ -852,9 +785,7 @@ fn round_two_site_fallback_keeps_its_alias_binding() {
         &previous,
     )
     .unwrap();
-    let mut settings = recipe("[message root]\ncontent=Literal\n")
-        .settings_for(None)
-        .clone();
+    let mut settings = recipe("Literal").settings_for(None).clone();
     settings.message_id = Some("notice".into());
     settings.bindings = bindings["notice"].clone();
     let mut values = snapshot();
@@ -897,9 +828,7 @@ fn round_three_site_candidate_localizes_unavailable_readings_only_when_selected(
         let current = BTreeMap::from([("notice".into(), port)]);
         let selected = "fr".parse().unwrap();
         let (catalog,bindings,_)=MessageCatalog::from_sources("fr",include_str!("../../../../messages/en-US.ftl"),Some("site-value-unavailable =\n    .text = { $label } indisponible\n    .tts = { $label } absent\n    .morse = { $label } ABSENT\n")).unwrap().project_message_sources(&selected,&current,&Default::default(),&previous).unwrap();
-        let mut settings = recipe("[message root]\ncontent=Literal\n")
-            .settings_for(None)
-            .clone();
+        let mut settings = recipe("Literal").settings_for(None).clone();
         settings.message_id = Some("notice".into());
         settings.bindings = bindings["notice"].clone();
         let mut values = snapshot();
@@ -935,5 +864,34 @@ fn round_three_site_candidate_localizes_unavailable_readings_only_when_selected(
             message_forms(&settings, &values, &catalog).unwrap().text,
             "TEMP 7"
         );
+    }
+}
+
+#[test]
+fn scheduled_greeting_and_day_bindings_use_the_captured_civil_time_and_catalog() {
+    let catalog = MessageCatalog::from_sources(
+        "fr-CA",
+        include_str!("../../../../messages/en-US.ftl"),
+        Some("day-of-week =\n    .text = Vendredi\n    .tts = Vendredi\n    .morse = VENDREDI\n"),
+    )
+    .unwrap();
+    let mut value = snapshot();
+    for (hour, expected) in [
+        (0, "Good Morning"),
+        (12, "Good Afternoon"),
+        (17, "Good Evening"),
+    ] {
+        value.civil = CivilTime::new(2026, 9, 18, Weekday::Friday, hour, 0).unwrap();
+        for (binding, wanted) in [
+            (BindingSource::Greeting, expected),
+            (BindingSource::DayOfWeek, "Vendredi"),
+        ] {
+            let BoundValue::Available(MessageArgument::Forms(forms)) =
+                value.binding(&binding, &catalog).unwrap()
+            else {
+                panic!("missing formatted binding")
+            };
+            assert_eq!(forms.text, wanted);
+        }
     }
 }

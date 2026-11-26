@@ -30,6 +30,7 @@ struct rptadv_audio_stream {
     _Atomic uint64_t playback_count;
     _Atomic uint64_t failure_count;
     FILE *phone_witness;
+    FILE *progress_pcm;
 };
 
 /** @brief The SIP fixture injects 500 Hz while this station captures 1 kHz. */
@@ -89,6 +90,18 @@ static void *run_audio(void *context)
             atomic_fetch_add(&stream->failure_count, 1);
             break;
         }
+        if (stream->progress_pcm) {
+            /* The opt-in test reads the left output channel at 8 kHz. */
+            float mono[FRAMES / 6];
+            for (size_t i = 0; i < FRAMES / 6; ++i) {
+                mono[i] = output[12 * i];
+            }
+            if (fwrite(mono, sizeof(mono), 1, stream->progress_pcm) != 1
+                || fflush(stream->progress_pcm) != 0) {
+                atomic_fetch_add(&stream->failure_count, 1);
+                break;
+            }
+        }
         if (stream->phone_witness && phone_blocks < 3) {
             phone_blocks = phone_programme(output) ? phone_blocks + 1 : 0;
             if (phone_blocks == 3) {
@@ -135,6 +148,14 @@ static enum rptadv_audio_result stream_create(const struct rptadv_audio_stream_c
             return RPTADV_AUDIO_INVALID_ARGUMENT;
         }
     }
+    const char *capture = getenv("RPTADV_TEST_SIP_PROGRESS_PCM");
+    if (capture && !(stream->progress_pcm = fopen(capture, "wb"))) {
+        if (stream->phone_witness) {
+            fclose(stream->phone_witness);
+        }
+        free(stream);
+        return RPTADV_AUDIO_INVALID_ARGUMENT;
+    }
     stream->config = *config;
     atomic_init(&stream->stop, false);
     atomic_init(&stream->capture_count, 0);
@@ -176,6 +197,9 @@ static void stream_destroy(struct rptadv_audio_stream *stream)
     }
     if (stream->phone_witness) {
         fclose(stream->phone_witness);
+    }
+    if (stream->progress_pcm) {
+        fclose(stream->progress_pcm);
     }
     free(stream);
 }

@@ -1,12 +1,14 @@
 //! Calendar reservations on the serialized EventScheduler owner.
 use super::{EventScheduler, SchedulerError};
 use crate::{
+    command_language::MacroOutcome,
     config::resources::{
         candidate::{ResourceId, ResourceScope},
         events::{Boundary, Event, MacroRef, ScopedEvents, Warning},
     },
     runtime::RuntimeClock,
 };
+use serde::Serialize;
 use std::sync::Arc;
 
 /// Existing qualified local receive or peer input activity, including nonselected active peers.
@@ -30,6 +32,70 @@ pub enum EventWork {
     StartWarning(usize),
     /// Warning attached to the end group.
     EndWarning(usize),
+}
+/// Latest accepted calendar sample and the latest gap spanning an unobserved minute.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct CalendarObservation {
+    current_wall_seconds: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_wall_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_abnormal_gap: Option<CalendarGap>,
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+struct CalendarGap {
+    previous_wall_seconds: i64,
+    current_wall_seconds: i64,
+}
+
+/// Terminal observations for the three kinds of work on one event.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct EventTerminals {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_start: Option<BoundaryResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_end: Option<BoundaryResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_warning: Option<WarningResult>,
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+struct BoundaryResult {
+    nominal_wall_seconds: i64,
+    observed_wall_seconds: i64,
+    outcome: &'static str,
+}
+#[derive(Clone, Copy, Debug, Serialize)]
+struct WarningResult {
+    boundary: &'static str,
+    result: BoundaryResult,
+}
+impl EventTerminals {
+    fn record(&mut self, ticket: &EventTicket, outcome: MacroOutcome) {
+        let result = BoundaryResult {
+            nominal_wall_seconds: ticket.nominal,
+            observed_wall_seconds: ticket.observed.wall_seconds,
+            outcome: match outcome {
+                MacroOutcome::Completed => "completed",
+                MacroOutcome::Rejected => "rejected",
+                MacroOutcome::Cancelled => "cancelled",
+                MacroOutcome::Limit => "limit",
+            },
+        };
+        match ticket.kind {
+            EventWork::Start => self.last_start = Some(result),
+            EventWork::End => self.last_end = Some(result),
+            EventWork::StartWarning(_) | EventWork::EndWarning(_) => {
+                self.last_warning = Some(WarningResult {
+                    boundary: if matches!(ticket.kind, EventWork::StartWarning(_)) {
+                        "start"
+                    } else {
+                        "end"
+                    },
+                    result,
+                });
+            }
+        }
+    }
 }
 /// Result of offering one macro to its normal bounded executor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +194,7 @@ struct Work {
     grace_ms: i128,
     last_opportunity: Option<i128>,
     eligible: bool,
+    carries_group_hold: bool,
     phase: Phase,
 }
 impl Work {
@@ -192,6 +259,7 @@ struct Entry {
     warning_seen: BTreeMap<EventWork, i64>,
     poll: Option<CalendarError>,
     issue: Option<CalendarError>,
+    terminals: EventTerminals,
     next_check: Option<i64>,
     window: Option<Window>,
     work: Vec<Work>,
@@ -303,6 +371,7 @@ impl Entry {
             warning_seen: BTreeMap::new(),
             poll: None,
             issue: None,
+            terminals: EventTerminals::default(),
             next_check: Some(i64::MIN),
             window: None,
             work: Vec::new(),
@@ -312,6 +381,7 @@ impl Entry {
         if old.spec == entry.spec {
             return Self {
                 spec: entry.spec,
+                terminals: EventTerminals::default(),
                 ..old.clone()
             };
         }
@@ -523,6 +593,7 @@ impl Entry {
             grace_ms: i128::from(minutes) * 60000,
             last_opportunity: None,
             eligible: false,
+            carries_group_hold: false,
             phase: Phase::Waiting,
         });
         self.work.last_mut()
@@ -604,10 +675,54 @@ pub(super) struct Calendar {
     owner: ResourceScope,
     started: Option<u64>,
     latest: Option<RuntimeClock>,
+    observation: Option<CalendarObservation>,
     events: Vec<Entry>,
     valid_clock: bool,
 }
 impl Calendar {
+    fn retain_progress(&mut self, previous: &Self) {
+        self.run = Arc::clone(&previous.run);
+        self.started = previous.started;
+        self.latest = previous.latest;
+        self.valid_clock = previous.valid_clock;
+        for entry in &mut self.events {
+            if let Some(prior) = previous
+                .events
+                .iter()
+                .find(|e| e.spec.binding == entry.spec.binding)
+            {
+                let retained = Entry::prepared(entry.spec.clone(), Some(prior));
+                *entry = Entry {
+                    start_route: entry.start_route.take(),
+                    end_route: entry.end_route.take(),
+                    ..retained
+                };
+            }
+        }
+    }
+
+    fn observe_wall(&mut self, wall_seconds: i64) {
+        if self
+            .observation
+            .is_some_and(|last| last.current_wall_seconds == wall_seconds)
+        {
+            return;
+        }
+        let previous = self.observation.map(|last| last.current_wall_seconds);
+        let last_abnormal_gap = previous
+            .filter(|last| wall_seconds.div_euclid(60) - last.div_euclid(60) >= 2)
+            .map(|previous_wall_seconds| CalendarGap {
+                previous_wall_seconds,
+                current_wall_seconds: wall_seconds,
+            })
+            .or_else(|| self.observation.and_then(|last| last.last_abnormal_gap));
+        self.observation = Some(CalendarObservation {
+            current_wall_seconds: wall_seconds,
+            previous_wall_seconds: previous,
+            last_abnormal_gap,
+        });
+    }
+
     fn current_window(&self, e: &Entry, w: &Work) -> bool {
         w.origin != EventOrigin::Recovery
             || self.latest.is_some_and(|t| {
@@ -689,6 +804,30 @@ impl Calendar {
             command: w.command.clone(),
         }
     }
+    fn remove_work(&mut self, ei: usize, wi: usize) {
+        let closing = &mut self.events[ei];
+        let work = closing.work.remove(wi);
+        if work.kind != EventWork::End || !closing.held.remove(&work.nominal) {
+            return;
+        }
+        let group = closing.spec.replace_permanent.clone();
+        // Bridge adjacent paired windows only while their exact start is eligible.
+        // A warning may run between them. Removing a rejected start drops its bridge.
+        for entry in &mut self.events {
+            if entry.spec.replace_permanent == group
+                && entry
+                    .window
+                    .is_some_and(|w| !w.begun && w.start == work.nominal)
+                && let Some(start) = entry
+                    .work
+                    .iter_mut()
+                    .find(|w| w.kind == EventWork::Start && w.nominal == work.nominal && w.eligible)
+            {
+                start.carries_group_hold = true;
+            }
+        }
+    }
+
     fn find(&self, t: &EventTicket) -> Option<(usize, usize)> {
         if !Arc::ptr_eq(&self.run, &t.run) || self.owner != t.owner {
             return None;
@@ -759,24 +898,33 @@ impl EventScheduler {
             return Err(SchedulerError::Invalid);
         }
         let mut scheduler = Self::new(generation, Vec::new(), previous)?;
-        let events = events
-            .into_iter()
-            .map(|spec| {
-                let previous =
-                    old.and_then(|c| c.events.iter().find(|e| e.spec.binding == spec.binding));
-                Entry::prepared(spec, previous)
-            })
-            .collect();
-        scheduler.calendar = Some(Calendar {
+        let mut calendar = Calendar {
             port_key: None,
-            run: old.map_or_else(|| Arc::new(()), |c| c.run.clone()),
+            run: Arc::new(()),
             owner,
-            started: old.and_then(|c| c.started),
-            latest: old.and_then(|c| c.latest),
-            valid_clock: old.is_some_and(|c| c.valid_clock),
-            events,
-        });
+            started: None,
+            latest: None,
+            observation: None,
+            valid_clock: false,
+            events: events
+                .into_iter()
+                .map(|spec| Entry::prepared(spec, None))
+                .collect(),
+        };
+        if let Some(previous) = old {
+            calendar.retain_progress(previous);
+        }
+        scheduler.calendar = Some(calendar);
         Ok(scheduler)
+    }
+
+    /// Carry the matching calendar forward from the incumbent at publication.
+    pub(in crate::runtime) fn retain_calendar_progress(&mut self, previous: &Self) {
+        if let (Some(next), Some(previous)) = (&mut self.calendar, &previous.calendar)
+            && next.owner == previous.owner
+        {
+            next.retain_progress(previous);
+        }
     }
     /// Start this run only after the host has safely activated the generation.
     pub fn activate(
@@ -824,12 +972,31 @@ impl EventScheduler {
             }
             for w in &mut e.work {
                 w.check(clock, rx, idle_origin);
+                w.carries_group_hold &= w.eligible;
             }
         }
+        c.observe_wall(clock.wall_seconds);
         c.latest = Some(clock);
         c.valid_clock = true;
         Ok(())
     }
+    /// Latest accepted wall samples and retained forward gap for this owner.
+    pub fn calendar_observation(&self) -> Option<CalendarObservation> {
+        self.calendar.as_ref()?.observation
+    }
+
+    /// Copied read-only health and terminal work for every event on this owner.
+    pub fn observed_events(
+        &self,
+    ) -> impl Iterator<Item = (ResourceId, Option<CalendarError>, EventTerminals)> + '_ {
+        self.calendar.iter().flat_map(|calendar| {
+            calendar
+                .events
+                .iter()
+                .map(|entry| (entry.spec.binding.id, entry.issue, entry.terminals))
+        })
+    }
+
     /// Current value-free provider issues by actual event member. An optional cache search
     /// limit retains current-time polling; a failed required query cannot authorize its work.
     pub fn calendar_issues(&self) -> impl Iterator<Item = (ResourceId, CalendarError)> + '_ {
@@ -866,7 +1033,7 @@ impl EventScheduler {
         let groups = c
             .events
             .iter()
-            .filter(|e| !e.held.is_empty())
+            .filter(|e| !e.held.is_empty() || e.work.iter().any(|w| w.carries_group_hold))
             .filter_map(|e| {
                 e.spec
                     .replace_permanent
@@ -894,11 +1061,8 @@ impl EventScheduler {
             MacroAdmission::Busy => {}
             MacroAdmission::Queued => c.events[ei].work[wi].phase = Phase::Queued,
             MacroAdmission::Rejected => {
-                let e = &mut c.events[ei];
-                if e.work[wi].kind == EventWork::End {
-                    e.held.remove(&e.work[wi].nominal);
-                }
-                e.work.remove(wi);
+                c.events[ei].terminals.record(t, MacroOutcome::Rejected);
+                c.remove_work(ei, wi);
             }
         }
         true
@@ -953,6 +1117,7 @@ impl EventScheduler {
             && let Some(open) = e.window.as_mut().filter(|open| open.start == w.nominal)
         {
             open.begun = true;
+            w.carries_group_hold = false;
             if e.spec.replace_permanent.is_some() {
                 e.held.insert(open.end);
             }
@@ -961,7 +1126,7 @@ impl EventScheduler {
     }
     /// Release the order barrier after the outer macro terminates, including nested calls.
     /// A terminal cancellation before execution never arms a paired end.
-    pub fn terminate(&mut self, t: &EventTicket) -> bool {
+    pub fn terminate(&mut self, t: &EventTicket, outcome: MacroOutcome) -> bool {
         let Some(c) = self.calendar.as_mut() else {
             return false;
         };
@@ -971,14 +1136,11 @@ impl EventScheduler {
         let Some((ei, wi)) = c.find(t) else {
             return false;
         };
-        let e = &mut c.events[ei];
-        if e.work[wi].phase == Phase::Waiting {
+        if c.events[ei].work[wi].phase == Phase::Waiting {
             return false;
         }
-        let w = e.work.remove(wi);
-        if w.kind == EventWork::End {
-            e.held.remove(&w.nominal);
-        }
+        c.events[ei].terminals.record(t, outcome);
+        c.remove_work(ei, wi);
         true
     }
     /// Replace a stale generation token only for the very same retained queued/running continuation.

@@ -108,7 +108,12 @@ impl LinkAudioProducer {
     }
 
     /// Publish PCM under the station epoch captured at mix time.
-    pub(crate) fn write_at_isolation_epoch(&mut self, span: AudioSpan, audio: &[f32], isolation_epoch: u64) -> usize {
+    pub(crate) fn write_at_isolation_epoch(
+        &mut self,
+        span: AudioSpan,
+        audio: &[f32],
+        isolation_epoch: u64,
+    ) -> usize {
         // Sole producer: a free descriptor cannot be taken by another writer.
         // Publish samples first; the consumer reads only after acquiring this span.
         let written = if self.spans.slots() == 0 {

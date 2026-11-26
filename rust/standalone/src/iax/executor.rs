@@ -82,9 +82,18 @@ impl Executor {
         // optional slot from Task 69's ABI-1 suffix when its complete extent exists.
         let offset = std::mem::offset_of!(Descriptor, peer_set_private_jitter)
             + std::mem::size_of_val(&api.peer_set_private_jitter);
-        let ordinary = if api.struct_size as usize >= offset + size_of::<Option<super::playout::Set>>() {
-            unsafe { pointer.cast::<u8>().add(offset).cast::<Option<super::playout::Set>>().read_unaligned() }
-        } else { None };
+        let ordinary =
+            if api.struct_size as usize >= offset + size_of::<Option<super::playout::Set>>() {
+                unsafe {
+                    pointer
+                        .cast::<u8>()
+                        .add(offset)
+                        .cast::<Option<super::playout::Set>>()
+                        .read_unaligned()
+                }
+            } else {
+                None
+            };
         let mut runtime = ptr::null_mut();
         if unsafe { api.runtime_create.unwrap()(&mut runtime) } != 0 {
             return Err(Error::Initialize);

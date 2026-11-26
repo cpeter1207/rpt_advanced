@@ -233,14 +233,22 @@ pub(super) fn resolve(
             warn(w, owner, "pin");
             continue;
         }
+        let inverted = object
+            .get("inverted")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| old.is_some_and(|b| b.inverted));
+        // The current radio ABI can invert external inputs but has no inverted DSP input.
+        let inverted = if source == SignalSource::Dsp && inverted {
+            warn(w, owner, "inverted");
+            false
+        } else {
+            inverted
+        };
         selected = Some(SignalBinding {
             source,
             pins,
             scancode,
-            inverted: object
-                .get("inverted")
-                .and_then(Value::as_bool)
-                .unwrap_or_else(|| old.is_some_and(|b| b.inverted)),
+            inverted,
         });
     }
     selected

@@ -108,22 +108,24 @@ pub(crate) struct StatusPostService {
 }
 
 impl StatusPostService {
-    pub(crate) fn configure(&mut self, config: Vec<PostConfig>) {
-        self.configure_bound(config.into_iter().map(|node| (node.node.clone(), node)));
-    }
-
     /// The observation key belongs to the station; each destination carries its wire number.
-    pub(crate) fn configure_bound(&mut self, config: impl IntoIterator<Item = (String, PostConfig)>) {
+    pub(crate) fn configure_bound(
+        &mut self,
+        config: impl IntoIterator<Item = (String, PostConfig)>,
+    ) {
         self.generation = self.generation.wrapping_add(1).max(1);
         self.schedules.clear();
         let mut selected = Vec::new();
         for (station, node) in config {
-            if node.url.is_empty() { continue; }
+            if node.url.is_empty() {
+                continue;
+            }
             let schedule = Schedule::with_sequence(
                 node.interval_seconds,
                 self.sequences.get(&station).copied().unwrap_or(0),
             );
-            self.schedules.insert(station, (node.node.clone(), schedule));
+            self.schedules
+                .insert(station, (node.node.clone(), schedule));
             selected.push(node);
         }
         let config = selected;
@@ -148,11 +150,9 @@ impl StatusPostService {
         keyed: bool,
         links: Vec<LinkStatus>,
     ) {
-        let Some(snapshot) = self
-            .schedules
-            .get_mut(node)
-            .and_then(|(wire, schedule)| schedule.snapshot(wire, now_ms, wall_seconds, keyed, links))
-        else {
+        let Some(snapshot) = self.schedules.get_mut(node).and_then(|(wire, schedule)| {
+            schedule.snapshot(wire, now_ms, wall_seconds, keyed, links)
+        }) else {
             return;
         };
         self.ensure_worker();

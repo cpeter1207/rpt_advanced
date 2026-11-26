@@ -84,15 +84,37 @@ Remove controller INI-specific examples, installed paths, tests and documentatio
 
 A held key on the selected keyboard supplies RX squelch carrier until release. A microphone switch may supply carrier through GPIO, including inverted wiring. Both use normal receive qualification, mute and routing. An ordinary exact ALSA PCM with no effective physical PTT actuator plays selected output on its speaker without keying or key-up delay. A sound-chip endpoint can select ptt.source = "none" for the same output while retaining GPIO microphone input. A configured radio actuator retains its keying and timing.
 
+The released radio provider supports input polarity on external signaling sources. A DSP squelch or DSP CTCSS decoder uses normal polarity with that provider. Resolve an unsupported inversion to normal polarity with the standard value-free warning, including when a source change inherits an inverted external input. Effective status and station preparation use that same resolved polarity.
+
 ## Protocol jitter and phone-patch keying
 
 Phone patch has no tx or keying_mode switch. Receive admission uses the shared VAD settings and runtime receiver mute. The removed local/remote lists, exposed attachment/reverse-call limits and check_deadline_ms remain absent; owning-port/admission context and runtime bounds still apply.
 
-Phone vad references shared $defs.vad: enabled, mode and timing.hang_ms retain their bounds. Phone defaults remain enabled=true, mode=continuous, hang_ms=1000; global radio enabled=false is unchanged. Apply context defaults before sparse overrides. Disabling VAD removes its speech qualification and uses other enabled keying signals. A live usable phone caller with VAD disabled receives continuously while unmuted. A healthy SSB USB/LSB receiver without another qualifier also receives continuously when VAD is disabled. Explicit COS/CTCSS/DCS or other enabled qualifiers, source availability and safety gates still apply. Kerchunk without a usable independent closing qualifier retains the shared continuous-VAD fallback/warning.
+Phone VAD shares the receiver fields `enabled`, `mode` and `timing.hang_ms`. Its only supported mode is `continuous`. A phone setting of `kerchunk` produces the ordinary invalid-value warning and is ignored even when VAD is disabled. Other valid fields still apply. Phone defaults remain enabled=true, mode=continuous, hang_ms=1000; global radio enabled=false is unchanged. Apply context defaults before sparse overrides. Disabling VAD removes its speech qualification and uses other enabled keying signals. A live usable phone caller with VAD disabled receives continuously while unmuted. A healthy SSB USB/LSB receiver without another qualifier also receives continuously when VAD is disabled. Explicit COS/CTCSS/DCS or other enabled qualifiers, source availability and safety gates still apply. Only local receiver VAD supports kerchunk. On that receiver, enabling kerchunk without a usable independent closing qualifier still warns and falls back to continuous. Station transmitter hang is independent of the telephone voice release.
 
 Use one $defs.jitter object in phonePatch, echolink and allstarlink, and their public response profiles. jitter.timing contains minimum_ms, initial_ms and maximum_ms (nonnegative integers, current defaults20/40/100). After inheritance validate minimum<=initial<=maximum plus each transport's capability and latency requirements. This is one shared configuration shape; adapters may have different native playout implementations and must apply supported explicit values rather than ignore them.
 
 Keep phone timing.target_latency_ms and timing.maximum_latency_ms as end-to-end phone playout budgets; they are distinct from the adaptive jitter maximum. Remove jitter_* prefixes after moving those fields into jitter.timing. Apply normal site/port inheritance and sparse PATCH semantics to all three protocol jitter objects. Shared jitter defaults/settings do not implicitly attach optional protocol accounts.
+
+Each phone-patch account belongs to one port. After mailbox authentication,
+all digits use that port's command mappings and the exact call's private reply
+and authorization context. Callers cannot select a different command or
+attachment port. A bare `*3#` preserves or retries attachment on the account's
+port. The historical phone `*4` selector and addressed digit mode are unavailable.
+RF and network remote command selection retain their existing authorization.
+
+When `isolate_peers` is enabled, each outgoing attempt holds its own isolation
+claim on the initiating port from before dialing until failure, cancellation or
+hangup. Ending one call releases only its claim. The REST phone-patch contract
+supersedes the older per-call DTMF isolation bypass.
+
+The phone-patch profile supports `allow_mailboxes` and `deny_mailboxes` lists.
+Entries are exact 1–32 digit mailbox strings and retain leading zeroes. Port
+lists independently override authored site defaults. Deny entries take priority,
+and an empty allow list leaves verified mailboxes unrestricted by that list.
+A denied mailbox receives the ordinary private failed-login response and has no
+station media or command grant. A newly denied mailbox loses its live call on
+activation. Outgoing calls retain their initiating station authorization.
 
 The existing command settings object contains the DTMF terminator/mappings and inactivity_timeout_ms. Phone-patch DTMF uses that invoking port's effective command.inactivity_timeout_ms (default3000); do not add a phone timeout copy or resurrect check_deadline_ms. A value change activates with the same prepared generation as other DTMF settings and cannot create competing call-local completion timers.
 
@@ -144,7 +166,7 @@ Add rx_mute_toggle to the shared action vocabulary, reusable by runtime requests
 }
 ```
 
-The owning port comes from the invocation context. target selects port, peer, peers or phone_patch. For peer, parameter identifies one current direct network peer. For peers, optional link_type filters allstarlink or echolink; omit it for all current network peers. These peers exclude phone callers, which retain private call identities. Routing mode/permanence and EchoLink proxy transport are not link types. No other default DTMF code is invented; operators can bind the same action with another target or call it from a macro.
+The owning port comes from the invocation context. target selects port, peer, peers or phone_patch. For peer, parameter identifies one current direct network peer. For peers, omit link_type to select all connected peers, including attached callers. A supplied link_type selects the exact allstarlink or echolink protocol. Callers without an active attachment retain their private audio and call identities. Routing mode/permanence and EchoLink proxy transport are not link types. No other default DTMF code is invented; operators can bind the same action with another target or call it from a macro.
 
 Editable [RX mute examples](../../../examples/rx-mute.example.json) show all target forms. A filtered action is:
 
@@ -158,7 +180,7 @@ Editable [RX mute examples](../../../examples/rx-mute.example.json) show all tar
 
 ### Target resolution and toggle state
 
-Use one runtime mute bit per ingress. The implementation proposals are: a port bit lives for that port/controller run; each peer/caller bit lives for its exact connection generation. New streams start unmuted, reconnects do not inherit old stream bits, unchanged live identities preserve state through reload, and process restart clears bits. These are runtime observations, not saved configuration toggles.
+Use one runtime mute bit per ingress. The implementation proposals are: a port bit lives for that port/controller run; each peer/caller bit lives for its exact connection generation. New streams start unmuted except for an incoming phone-patch call. Successful mailbox authentication automatically attaches that call to its account’s local port. The attached call hears its mix-minus immediately. Caller audio and keying start muted and stay muted until its own phone-patch toggle (`*99#` by default). Individual and group operations preserve that initial mute. Reconnects start from the source type’s default, unchanged live identities preserve state through reload, and process restart clears the old bits. These are runtime observations, not saved configuration toggles.
 
 For a group, snapshot connected matching peers at execution. If every selected ingress is muted, unmute all; otherwise mute all, including a mixed selection. An empty set is a no-op. Group and individual operations update those same ingress bits, with no extra group latch or future-peer policy. Never dial/attach a peer or set retained permanent retry intent as a side effect.
 
@@ -853,7 +875,7 @@ An event has a required effective `start` group and an optional `end` group. Eac
 
 Fold weekday selection into each at expression; old top-level event timing/macro/message payload fields and `timing.days` are retired and warn when supplied to the controller. Offline administrator-led conversion moves legacy window `timing.days`/`dates`, start/end clocks and warning leads into the new grouped form below. Unrelated millisecond timers retain their current contracts. Keep the JSON source as a bounded string (1–4096 characters), parse the entire expression, warn and ignore unsupported/invalid values and use inherited/default scheduling only when safe; an unusable new event cannot acquire an invented schedule. The schema documents the source shape; provider parsing is authoritative. An explicit zone can be written as `every weekday at 19:00 in America/Chicago`.
 
-Use an explicit string DTO for disk and HAL. Do not serialize `hron::Schedule` directly: version 2.2.1 serializes an object but deserializes an expression string. Preserve the authored string for GET/editing; cache compiled objects separately. Expose effective timezone and optional normalized/next-occurrence information only in read-only event metadata/effective/status views. All scheduled entries use the existing `schedule/events` collection and its methods. Event POST/PUT/disk projections contain start and optional end directly, without a configuration wrapper or type discriminator. Event JSON Patch paths are `/start/at`, `/start/politeness_minutes` or `/end/warnings/0/macro`. A client adds a complete end group when it is absent; PATCH does not manufacture missing parents. Removing a local end override follows normal inheritance; only an effective event without end is start-only.
+Use an explicit string DTO for disk and HAL. Do not serialize `hron::Schedule` directly: version 2.2.1 serializes an object but deserializes an expression string. Preserve the authored string for GET/editing; cache compiled objects separately. Expose effective IANA timezones in the read-only effective event's `meta.timezones` object, keyed by JSON pointers to calendar expressions such as `/start/at` and `/end/warnings/0/at`. Keep optional normalized/next-occurrence information in read-only event metadata, effective or status views. All scheduled entries use the existing `schedule/events` collection and its methods. Event POST/PUT/disk projections contain start and optional end directly, without a configuration wrapper or type discriminator. Event JSON Patch paths are `/start/at`, `/start/politeness_minutes` or `/end/warnings/0/macro`. A client adds a complete end group when it is absent; PATCH does not manufacture missing parents. Removing a local end override follows normal inheritance; only an effective event without end is start-only.
 
 ### Timezone and DST compatibility
 
@@ -1112,7 +1134,7 @@ On controller startup inside a paired window, restart_recovery=false ignores tha
 
 Skip calendar opportunities missed by delayed checks or a forward wall-clock jump. Do not replay intermediate boundaries or warnings. A boundary already pending retains its monotonic deadline: when the next check observes that its deadline elapsed, force its pending politeness attempt, subject to paired-occurrence cancellation at nominal end and the existing safety/admission gates. A backward clock jump does not rearm consumed UTC occurrence identities or extend a pending monotonic deadline. Continue to evaluate new opportunities against one captured clock observation per scheduling pass.
 
-Permanent-group replacement retains the existing route-owner/hold and stale-completion fences. Arbitrary macro link actions do not themselves acquire that ownership; the optional replace_permanent reference must use the same existing owner rather than an independent reconnect loop. Same-instant sequence ordering remains as specified above; differently timed work retains its own original deadline and cannot revive an occurrence cancelled at its end.
+Permanent-group replacement retains the existing route-owner/hold and stale-completion fences. When an adjacent start begins in the same serialized turn as route selection, publish its group hold to the route owner before that owner can offer a dial. A same-group handoff must produce zero intervening permanent reconnect offers, even if a later check would cancel a pending dial. When a replacement begins, withdraw direct connections already bound to the replaced group's members, including inbound connections. Keep the retiring identity reserved until the host acknowledges detachment. Admission of later incoming calls follows the existing access policy; the active hold suppresses automatic group connections. Arbitrary macro link actions do not themselves acquire that ownership; the optional replace_permanent reference must use the same existing owner rather than an independent reconnect loop. Same-instant sequence ordering remains as specified above; differently timed work retains its own original deadline and cannot revive an occurrence cancelled at its end.
 
 Required tests include P=0, P=1 and P=2; idle before B; activity that postpones admission; continuous activity and final forcing; independent start/end and warning state; suppressed checks after admission; failed queue admission without false completion; reload state retention; the repeated DST hour; forward/backward clock changes; and no duplicate macro dispatch.
 
@@ -1244,6 +1266,8 @@ Use one reusable $defs.controllerAction union. Runtime requests reference it thr
 | Compatibility | Provider RF channel/frequency controls, generic sound-chip GPIO/parallel writes, RX/TX CTCSS switches and Asterisk-only radio-channel echo |
 
 All 28 LinkAction variants have mappings, including the remote-radio family and collector-only branches. A message selector is resolved to its canonical message ID/template and audience; it does not become a new numeric message identity. Raw C function pointers, live peer/reply handles and trusted source identities remain server-owned context. Existing phone grammar foundations are recorded with explicit unavailable status; a grammar enum is not a working routing/PTT implementation. Mailboxes provide private-call authentication identities, not nonexistent stored-voicemail commands.
+
+The phone patch uses the shared command inactivity interval for mailbox-number and PIN entry. For each field, start its timer after the private prompt finishes playing. The first digit may interrupt the prompt and begins entry immediately. Discard the interrupted playback and its completion for that field. The overall login deadline still applies. For outgoing calls, the initiating radio receives provider early audio when available, standard call-progress tones otherwise, and a spoken indication on failure. These interaction rules are approved and await implementation and verification. [Phone patch design](2026-11-09-phone-patch-and-half-duplex-design.md#call-admission-and-routing)
 
 Preserve source, authorization, private reply, capability, generation and owner checks in each domain handler. Schema acceptance alone grants none of those. Credentials are request-only and writeOnly; exclude credential-bearing/interactive/actual-ingress/private-call/host-lifecycle variants from persisted public macro configuration. Bare lock can revoke its own originating grant. Do not echo credential action input in operation GET, receipts or logs, and do not store plaintext codes/PINs in drafts or resource files.
 

@@ -80,7 +80,10 @@ impl Action {
     }
 
     pub(crate) fn permits_outgoing_phone(source: &CommandSource) -> bool {
-        matches!(source, CommandSource::Receiver | CommandSource::Management(_))
+        matches!(
+            source,
+            CommandSource::Receiver | CommandSource::Management(_)
+        )
     }
 }
 impl PreparedAction {

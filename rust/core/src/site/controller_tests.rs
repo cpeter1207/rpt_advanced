@@ -1,10 +1,32 @@
 use super::*;
-use crate::config::{ConfigDocument, NodeId, ResolvedSiteSettings};
 use crate::site::{FanOutput, Observation, OutputRequest, ReadingQuality, SiteError};
+use crate::{
+    config::{ResolvedSiteSettings, resources::candidate::ResourceKind},
+    station_fixture::equipment,
+};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-fn settings(extra: &str) -> ResolvedSiteSettings {
-    ResolvedSiteSettings::resolve(&ConfigDocument::parse(&format!("[1000]\n[sensor 1000 supply]\nenabled=yes\nbackend=iio\ndevice=adc\nchannel=v\nprecision=1\n[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=chip\nline=door\non_active=output:relay:pulse\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=chip\nline=relay\n[message trip]\ncontent=Warning\n[message repeat]\ncontent=Still unsafe\n[message clear]\ncontent=Recovered\n{extra}")).unwrap(), &NodeId::new("1000").unwrap()).unwrap().value
+fn settings(extra: &[(ResourceKind, &str, Value)]) -> ResolvedSiteSettings {
+    let mut rows = vec![
+        (
+            ResourceKind::Sensor,
+            "supply",
+            json!({"enabled":true,"source":{"type":"iio","device":"adc","channel":"v"},"precision":1}),
+        ),
+        (
+            ResourceKind::Input,
+            "door",
+            json!({"enabled":true,"source":{"type":"gpiod","device":"chip","line":"0"},"on_active":["output:relay:pulse"]}),
+        ),
+        (
+            ResourceKind::Output,
+            "relay",
+            json!({"enabled":true,"source":{"type":"gpiod","device":"chip","line":"1"}}),
+        ),
+    ];
+    rows.extend_from_slice(extra);
+    equipment(&rows)
 }
 fn observation<T>(value: T, now: u64) -> Observation<T> {
     Observation {
@@ -29,7 +51,7 @@ fn observations(value: f64, now: u64) -> SiteObservations {
 
 #[test]
 fn site_output_pending_acquisition_preserves_startup_without_claiming_availability() {
-    let mut policy = settings("");
+    let mut policy = settings(&[]);
     policy.outputs[0].startup_on = true;
     let mut site = SiteController::new(policy);
     let pending = SiteObservations::default();
@@ -63,9 +85,23 @@ fn site_output_pending_acquisition_preserves_startup_without_claiming_availabili
 
 #[test]
 fn site_reload_preserves_pulse_fan_alarm_and_measurement_state() {
-    let policy = settings(
-        "[output 1000 cooling]\nenabled=yes\nbackend=gpiod\ndevice=chip\nline=fan\n[fan 1000 cooling]\nenabled=yes\noutput=cooling\nmode=ptt\nrun_on_ms=1000\n[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=14\nclear_value=13\nlatched=yes\non_trip=inhibit:on\n",
-    );
+    let policy = settings(&[
+        (
+            ResourceKind::Output,
+            "cooling",
+            json!({"enabled":true,"source":{"type":"gpiod","device":"chip","line":"2"}}),
+        ),
+        (
+            ResourceKind::Fan,
+            "cooling",
+            json!({"enabled":true,"output":"cooling","mode":"ptt","timing":{"run_on_ms":1000}}),
+        ),
+        (
+            ResourceKind::Alarm,
+            "high",
+            json!({"enabled":true,"source":"supply","condition":"above","trip_value":14,"clear_value":13,"latched":true,"on_trip":["inhibit:on"]}),
+        ),
+    ]);
     let mut site = SiteController::new(policy.clone());
     let node = crate::config::resources::PortKey::new("1000");
     let mut readings = observations(15.0, 1000);
@@ -106,7 +142,7 @@ fn site_reload_preserves_pulse_fan_alarm_and_measurement_state() {
 
 #[test]
 fn site_reload_resets_changed_endpoints_without_replaying_old_outputs() {
-    let policy = settings("");
+    let policy = settings(&[]);
     let mut site = SiteController::new(policy.clone());
     let mut readings = observations(14.0, 1000);
     readings
@@ -151,9 +187,11 @@ fn site_reload_resets_changed_endpoints_without_replaying_old_outputs() {
 
 #[test]
 fn site_controller_alarm_actions_are_transition_only_and_keep_protection() {
-    let policy = settings(
-        "[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=14\nclear_value=13\nlatched=yes\nrepeat_interval_ms=100\non_trip=output:relay:on,inhibit:on\non_clear=output:relay:off,inhibit:off\ntrip_message=trip\nrepeat_message=repeat\nclear_message=clear\n",
-    );
+    let policy = settings(&[(
+        ResourceKind::Alarm,
+        "high",
+        json!({"enabled":true,"source":"supply","condition":"above","trip_value":14,"clear_value":13,"latched":true,"timing":{"repeat_interval_ms":100},"on_trip":["output:relay:on","inhibit:on"],"on_clear":["output:relay:off","inhibit:off"],"trip_message":"trip","repeat_message":"repeat","clear_message":"clear"}),
+    )]);
     let mut site = SiteController::new(policy);
     site.advance(0, &observations(13.96, 0), &BTreeMap::new());
     assert!(!site.snapshot(0).alarms["high"].active);
@@ -166,12 +204,21 @@ fn site_controller_alarm_actions_are_transition_only_and_keep_protection() {
                 on: true
             },
             SiteEffect::TransmitInhibit(true),
-            SiteEffect::Message("trip".into())
+            SiteEffect::Message {
+                alarm: "high".into(),
+                event: crate::site::AlarmEvent::Trip
+            }
         ]
     );
     assert!(site.snapshot(100).transmit_inhibited);
     let repeat = site.advance(200, &observations(14.0, 200), &BTreeMap::new());
-    assert_eq!(repeat, vec![SiteEffect::Message("repeat".into())]);
+    assert_eq!(
+        repeat,
+        vec![SiteEffect::Message {
+            alarm: "high".into(),
+            event: crate::site::AlarmEvent::Repeat
+        }]
+    );
     assert_eq!(
         site.command(SiteCommand::AlarmReset("high".into()), 200),
         Err(SiteError::Unsafe)
@@ -194,14 +241,17 @@ fn site_controller_alarm_actions_are_transition_only_and_keep_protection() {
                 on: false
             },
             SiteEffect::TransmitInhibit(false),
-            SiteEffect::Message("clear".into())
+            SiteEffect::Message {
+                alarm: "high".into(),
+                event: crate::site::AlarmEvent::Clear
+            }
         ]
     );
 }
 
 #[test]
 fn site_controller_debounce_and_extrema_reset() {
-    let mut site = SiteController::new(settings(""));
+    let mut site = SiteController::new(settings(&[]));
     let mut readings = observations(13.0, 0);
     readings.inputs.insert("door".into(), observation(false, 0));
     site.advance(0, &readings, &BTreeMap::new());
@@ -248,9 +298,11 @@ fn site_controller_debounce_and_extrema_reset() {
 
 #[test]
 fn site_controller_alarm_uses_selected_unrounded_measurement() {
-    let mut policy = settings(
-        "[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=9\nclear_value=8\nreading=smoothed\n",
-    );
+    let mut policy = settings(&[(
+        ResourceKind::Alarm,
+        "high",
+        json!({"enabled":true,"source":"supply","condition":"above","trip_value":9,"clear_value":8,"reading":"smoothed"}),
+    )]);
     policy.sensors[0].smoothing_ms = 1000;
     let mut site = SiteController::new(policy);
     site.advance(0, &observations(0.0, 0), &BTreeMap::new());
@@ -262,9 +314,11 @@ fn site_controller_alarm_uses_selected_unrounded_measurement() {
 
 #[test]
 fn site_controller_lost_input_is_unknown_without_clearing_alarm() {
-    let mut site = SiteController::new(settings(
-        "[alarm 1000 door_open]\nenabled=yes\nsource=door\ncondition=active\nlatched=yes\non_trip=inhibit:on\non_clear=inhibit:off\n",
-    ));
+    let mut site = SiteController::new(settings(&[(
+        ResourceKind::Alarm,
+        "door_open",
+        json!({"enabled":true,"source":"door","condition":"active","latched":true,"on_trip":["inhibit:on"],"on_clear":["inhibit:off"]}),
+    )]));
     let mut readings = observations(12.0, 0);
     readings.inputs.insert("door".into(), observation(true, 0));
     site.advance(0, &readings, &BTreeMap::new());
@@ -288,9 +342,11 @@ fn site_controller_lost_input_is_unknown_without_clearing_alarm() {
 
 #[test]
 fn site_controller_failed_output_does_not_skip_protection_or_repeat_actions() {
-    let mut site = SiteController::new(settings(
-        "[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=14\nclear_value=13\non_trip=output:relay:on,inhibit:on\ntrip_message=trip\n",
-    ));
+    let mut site = SiteController::new(settings(&[(
+        ResourceKind::Alarm,
+        "high",
+        json!({"enabled":true,"source":"supply","condition":"above","trip_value":14,"clear_value":13,"on_trip":["output:relay:on","inhibit:on"],"trip_message":"trip"}),
+    )]));
     site.advance(0, &observations(12.0, 0), &BTreeMap::new());
     let mut readings = observations(15.0, 100);
     readings.outputs.clear();
@@ -302,7 +358,10 @@ fn site_controller_failed_output_does_not_skip_protection_or_repeat_actions() {
                 error: SiteError::Unavailable
             },
             SiteEffect::TransmitInhibit(true),
-            SiteEffect::Message("trip".into())
+            SiteEffect::Message {
+                alarm: "high".into(),
+                event: crate::site::AlarmEvent::Trip
+            }
         ]
     );
     assert!(site.advance(101, &readings, &BTreeMap::new()).is_empty());
@@ -310,17 +369,16 @@ fn site_controller_failed_output_does_not_skip_protection_or_repeat_actions() {
 
 #[test]
 fn site_controller_fan_owner_blocks_direct_output_override() {
-    let mut policy = settings("");
+    let mut policy = settings(&[]);
     policy.inputs[0].on_active.clear();
-    let extra = ResolvedSiteSettings::resolve(
-        &ConfigDocument::parse(
-            "[1000]\n[output 1000 relay]\n[fan 1000 cooling]\nenabled=yes\noutput=relay\n",
-        )
-        .unwrap(),
-        &NodeId::new("1000").unwrap(),
-    )
-    .unwrap()
-    .value;
+    let extra = equipment(&[
+        (ResourceKind::Output, "relay", json!({})),
+        (
+            ResourceKind::Fan,
+            "cooling",
+            json!({"enabled":true,"output":"relay"}),
+        ),
+    ]);
     policy.fans = extra.fans;
     let mut site = SiteController::new(policy);
     site.advance(0, &observations(12.0, 0), &BTreeMap::new());
@@ -366,7 +424,7 @@ fn site_controller_fan_owner_blocks_direct_output_override() {
 
 #[test]
 fn site_input_bounce_and_invalid_time_cannot_trigger_actions() {
-    let mut policy = settings("");
+    let mut policy = settings(&[]);
     policy.inputs[0].on_inactive = vec![crate::config::SiteAction::Output {
         name: "relay".into(),
         request: OutputRequest::Off,
@@ -413,7 +471,10 @@ fn site_input_bounce_and_invalid_time_cannot_trigger_actions() {
 
 #[test]
 fn site_reload_adds_and_disables_instances_without_retaining_old_demand() {
-    let mut policy = settings("[alarm 1000 unused]\n[fan 1000 unused]\n");
+    let mut policy = settings(&[
+        (ResourceKind::Alarm, "unused", json!({})),
+        (ResourceKind::Fan, "unused", json!({})),
+    ]);
     let mut site = SiteController::new(policy.clone());
     site.advance(0, &observations(12.0, 0), &BTreeMap::new());
     assert_eq!(
@@ -459,7 +520,7 @@ fn site_reload_adds_and_disables_instances_without_retaining_old_demand() {
     policy.sensors.push(added);
     let mut added = policy.outputs[0].clone();
     added.name = "new".into();
-    added.endpoint.as_mut().unwrap().channel = "new".into();
+    added.endpoint.as_mut().unwrap().channel = "3".into();
     policy.outputs.push(added);
     policy.outputs[0].active_high = false;
     policy.alarms[0].source = "supply".into();
@@ -487,9 +548,18 @@ fn site_reload_adds_and_disables_instances_without_retaining_old_demand() {
 
 #[test]
 fn site_thermal_fan_actions_and_reload_follow_current_ownership() {
-    let mut policy = settings(
-        "[output 1000 cooling]\nenabled=yes\nbackend=hwmon\ndevice=chip\nline=pwm1\n[fan 1000 cooling]\nenabled=yes\noutput=cooling\nmode=temperature\ntemperature_sensor=supply\non_temperature=14\noff_temperature=12\n",
-    );
+    let mut policy = settings(&[
+        (
+            ResourceKind::Output,
+            "cooling",
+            json!({"enabled":true,"source":{"type":"hwmon","device":"chip","channel":"pwm1"}}),
+        ),
+        (
+            ResourceKind::Fan,
+            "cooling",
+            json!({"enabled":true,"output":"cooling","mode":"temperature","temperature_sensor":"supply","on_temperature":14,"off_temperature":12}),
+        ),
+    ]);
     policy.inputs[0].on_active = vec![
         crate::config::SiteAction::Macro("resume".into()),
         crate::config::SiteAction::Fan {
@@ -530,7 +600,12 @@ fn site_thermal_fan_actions_and_reload_follow_current_ownership() {
     );
     site.reconfigure(policy.clone());
     assert_eq!(site.snapshot(200).fans["cooling"].duty, 0.5);
-    policy.outputs[1].active_high = false;
+    policy
+        .outputs
+        .iter_mut()
+        .find(|o| o.name == "cooling")
+        .unwrap()
+        .active_high = false;
     site.reconfigure(policy.clone());
     assert!(site.snapshot(200).fans.is_empty());
     site.advance(200, &readings, &BTreeMap::new());

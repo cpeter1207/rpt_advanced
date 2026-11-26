@@ -157,7 +157,13 @@ unsafe extern "C" fn destroy(_: *mut c_void) {
     probe.closed += 1;
     probe.closed_on_control |= acquisition::IN_CONTROL.load(std::sync::atomic::Ordering::Acquire);
 }
-fn backends() -> Arc<SiteBackends> {
+/// Serialize users of the simulated adapters and start with working physical I/O.
+pub(crate) fn physical_fixture() -> std::sync::MutexGuard<'static, ()> {
+    let serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    *PROBE.lock().unwrap() = Probe::default();
+    serial
+}
+pub(crate) fn backends() -> Arc<SiteBackends> {
     Arc::new(SiteBackends {
         gpiod: Some(Provider {
             table: abi::rptadv_gpiod_descriptor_v1 {

@@ -617,3 +617,39 @@ fn review_queued_request_cannot_outlive_short_certificate() {
     assert!(inbox.try_recv().is_none());
     assert_eq!(status(&mut client).unwrap(), 403);
 }
+
+#[test]
+fn admitted_requests_share_only_their_own_live_tls_connection() {
+    let pki = Pki::new();
+    let (listener, mut inbox) = pki.start(pki.trust("client", &[("cli", "cli")]));
+    let config = pki.client("backend", Some("cli"));
+    let mut first = connect(listener.local_addr(), Arc::clone(&config), "localhost");
+    let mut second = connect(listener.local_addr(), config, "localhost");
+    let mut issue = |client: &mut Client| {
+        send(client, GET).unwrap();
+        let request = claim(&mut inbox);
+        assert_eq!(request.actor.as_str(), "cli");
+        let connection = request.connection.clone();
+        request.respond(
+            hyper::Response::builder()
+                .status(204)
+                .body(Vec::new())
+                .unwrap(),
+        );
+        assert_eq!(status(client).unwrap(), 204);
+        connection
+    };
+    let initial = issue(&mut first);
+    let renewed = issue(&mut first);
+    let other = issue(&mut second);
+    assert!(initial.same_connection(&renewed));
+    assert!(!initial.same_connection(&other));
+    assert!(initial.is_alive() && other.is_alive());
+    drop(first);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while initial.is_alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!initial.is_alive() && !renewed.is_alive());
+    assert!(other.is_alive());
+}

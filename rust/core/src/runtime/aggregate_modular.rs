@@ -163,7 +163,10 @@ impl<A: Send, C: Send> Runtime<A, C> {
 
     /// Check the final native generation on the same exclusive control turn as
     /// related participant confirmation. This check leaves station TX gated.
-    pub fn check_station_confirmation(&self, configuration: &Arc<RuntimeConfiguration>) -> Result<(), RuntimeError> {
+    pub fn check_station_confirmation(
+        &self,
+        configuration: &Arc<RuntimeConfiguration>,
+    ) -> Result<(), RuntimeError> {
         if self.stopping
             || self.reload_pending()
             || !self
@@ -255,8 +258,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             controller.bind_configuration_gate(Arc::clone(&self.configuration_gate));
             let (prepared, station_changed) = adapter(port, &settings)?;
             let mut commands = super::super::dtmf::DtmfCommands::new(
-                settings
-                    .command_map()
+                crate::command::DtmfCommandMap::new(Vec::new())
                     .map_err(|_| RuntimeError::Preparation)?,
             );
             commands
@@ -333,24 +335,17 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 device,
             });
         }
-        let scheduler = EventScheduler::new(revision, Vec::new(), self.scheduler.as_ref())
-            .map_err(|_| RuntimeError::Preparation)?;
         let mut staged = PreparedConfigurationTransition {
             previous_revision: self.revision,
             previous_generation: self.generation,
             transaction: ReloadTransaction::new(
-                ConfigurationSource::Modular(
-                    Arc::clone(&configuration),
-                    Box::new(PreparedSite::new(&configuration)),
-                ),
-                Vec::new(),
+                Arc::clone(&configuration),
+                PreparedSite::new(&configuration),
                 candidates,
-                Vec::new(),
-                scheduler,
                 (revision, generation_id),
             ),
         };
-        staged.prepare_command_owners(self, clock)?;
+        staged.prepare_command_owners(self)?;
         Ok(staged)
     }
 
@@ -367,9 +362,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
             return Err(RuntimeError::Rejected);
         }
         self.next_configuration(clock)?;
-        // The old scheduler can advance between validation and the selector commit.
-        // Carry its latest admissions and activity into the generation that will run.
-        staged.prepare_command_owners(self, clock)?;
+        // Refresh the command generation fence against the selected incumbent.
+        staged.prepare_command_owners(self)?;
         self.pending_reload = Some(staged.transaction);
         self.poll_reload(clock).map(|_| ())
     }
@@ -400,14 +394,8 @@ impl<A: Send, C: Send> PreparedConfigurationTransition<A, C> {
         Ok(())
     }
 
-    fn prepare_command_owners(
-        &mut self,
-        runtime: &Runtime<A, C>,
-        clock: RuntimeClock,
-    ) -> Result<(), RuntimeError> {
-        let ConfigurationSource::Modular(domain, _) = &self.transaction.source else {
-            return Err(RuntimeError::Preparation);
-        };
+    fn prepare_command_owners(&mut self, runtime: &Runtime<A, C>) -> Result<(), RuntimeError> {
+        let domain = &self.transaction.configuration;
         for candidate in &mut self.transaction.candidates {
             let port = candidate.scope.ok_or(RuntimeError::MissingNode)?;
             let scope = domain
@@ -428,7 +416,6 @@ impl<A: Send, C: Send> PreparedConfigurationTransition<A, C> {
                 existing,
                 self.transaction.generation_id,
                 Some(candidate.links.generation()),
-                clock,
             )?);
         }
         Ok(())

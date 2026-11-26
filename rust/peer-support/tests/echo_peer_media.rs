@@ -115,7 +115,7 @@ fn shared_media_preserves_provider_status_and_original_pacing_arguments() {
         length: value.len(),
     };
     let echo = HostPeer::<()>::Echo(peer);
-    let iax = HostPeer::Iax(());
+    let iax = HostPeer::<()>::Iax(());
     assert_eq!(
         unsafe { iax.send_human_text(span(b"W1ABC"), span(b"hello")) },
         Err(Error::Contract)

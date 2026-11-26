@@ -568,7 +568,10 @@ impl InboundProducer {
             if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
                 let class = if spans.is_empty() {
                     "unmarked"
-                } else if spans.iter().any(|span| span.start < start.saturating_sub(self.0.capacity_samples)) {
+                } else if spans
+                    .iter()
+                    .any(|span| span.start < start.saturating_sub(self.0.capacity_samples))
+                {
                     "mark older than ring capacity"
                 } else {
                     "marked within ring capacity"

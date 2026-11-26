@@ -21,15 +21,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/queue.h>
 #include <time.h>
 #include <unistd.h>
 
-/** Fixed application ownership; native transaction retention is separately timed. */
-#define CALL_CAPACITY 8
+/** Immutable first outgoing answer envelope and its Sofia-parsed early-dialog tag. */
+struct early_answer {
+    rptadv_sip_call_v2 observed;
+    char tag[];
+};
+
 /** One owned call handle and its authoritative, coalesced observation. */
 struct call {
+    struct native *owner;        /**< Serial owner of both intrusive lists. */
+    TAILQ_ENTRY(call) pending;   /**< Coalesced observation ready for delivery. */
+    TAILQ_ENTRY(call) entries;   /**< Remains owned through terminal observation and release. */
     nua_handle_t *handle;        /**< Native dialog owner, NULL after termination. */
-    rptadv_sip_call_v1 observed; /**< Stable initial offer and current lifecycle. */
+    rptadv_sip_call_v2 observed; /**< Stable initial offer and current lifecycle. */
+    struct early_answer *first;  /**< Allocated only for an outgoing provisional answer. */
     int changed;                 /**< Host has not consumed the latest observation. */
     uint64_t diagnostic_token;   /**< Process-local opaque log identity, never a SIP Call-ID. */
     uint64_t admitted_ms;        /**< Monotonic origin; zero means unavailable. */
@@ -51,7 +60,9 @@ struct native {
     pthread_t owner;                  /**< Creation and service thread identity. */
     sip_native_sink sink;             /**< Rust observation callback. */
     void *context;                    /**< Stable Rust callback allocation. */
-    struct call calls[CALL_CAPACITY]; /**< Fixed application call slots. */
+    TAILQ_HEAD(, call) calls;          /**< Account-owned incoming and outgoing dialogs. */
+    TAILQ_HEAD(, call) changed;        /**< FIFO, at most one pending observation per call. */
+    struct call *last_observed;  /**< Cached current FIFO result; cleared before release. */
     uint64_t next_call;               /**< Last issued call token; exhaustion refuses admission. */
     int admission;                    /**< Explicit host permission to accept a new offer. */
 };
@@ -163,12 +174,45 @@ static const char *challenge_realm(const sip_t *sip, int status) {
  * @return Owned slot or NULL.
  */
 static struct call *find_call(struct native *state, uint64_t token) {
-    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
-        if (token && state->calls[i].observed.call == token) {
-            return &state->calls[i];
+    struct call *call;
+    TAILQ_FOREACH(call, &state->calls, entries) {
+        if (call->observed.call == token) {
+            return call;
         }
     }
     return NULL;
+}
+
+/** Publish one complete dialog record on its serial account owner. */
+static void retain_call(struct native *state, struct call *call, nua_handle_t *handle) {
+    call->owner = state;
+    call->handle = handle;
+    call->diagnostic_token = diagnostic_token();
+    call->admitted_ms = monotonic_ms();
+    call->observed.struct_size = sizeof(call->observed);
+    call->observed.call = ++state->next_call;
+    TAILQ_INSERT_TAIL(&state->calls, call, entries);
+}
+
+/** Queue each owned record once. Later changes update its current observation in place. */
+static void mark_changed(struct call *call) {
+    if (!call->changed) {
+        TAILQ_INSERT_TAIL(&call->owner->changed, call, pending);
+        call->changed = 1;
+    }
+}
+
+/** Drop a terminal or quiescent record from both account-owned lists. */
+static void free_call(struct call *call) {
+    if (call->changed) {
+        TAILQ_REMOVE(&call->owner->changed, call, pending);
+    }
+    TAILQ_REMOVE(&call->owner->calls, call, entries);
+    if (call->owner->last_observed == call) {
+        call->owner->last_observed = NULL;
+    }
+    free(call->first);
+    free(call);
 }
 
 /** Coalesce state without discarding the terminal observation.
@@ -184,8 +228,18 @@ static void call_state(struct call *call, uint32_t value, int status) {
         if (status) {
             call->observed.sip_status = (uint32_t)status;
         }
-        call->changed = 1;
+        mark_changed(call);
     }
+}
+
+/** Retain one received final refusal independently of later lifecycle status. */
+static void refuse_invite(struct call *call, const sip_t *sip, int status) {
+    if (call->observed.state == 1 && !call->observed.invite_failure_status &&
+        status >= 300 && status <= 699 && sip && sip->sip_status &&
+        sip->sip_status->st_status == status) {
+        call->observed.invite_failure_status = (uint32_t)status;
+    }
+    call_state(call, 4, status);
 }
 
 /** Copy one bounded remote SDP and its actual message source, never header routing.
@@ -219,13 +273,32 @@ static int remote_media(struct native *state, struct call *call, const sip_t *si
         bytes = (const uint8_t *)&source->su_sin6.sin6_addr;
         length = 16;
     }
-    for (size_t i = 0; i < length; ++i) {
-        call->observed.source[i] = bytes[i];
-    }
+    memset(call->observed.source, 0, sizeof(call->observed.source));
+    memcpy(call->observed.source, bytes, length);
     call->observed.offer_length = (uint32_t)sip->sip_payload->pl_len;
     for (size_t i = 0; i < call->observed.offer_length; ++i) {
         call->observed.offer[i] = (uint8_t)sip->sip_payload->pl_data[i];
     }
+    return 1;
+}
+
+/** Save the first bounded provisional envelope on the exact early dialog. */
+static int retain_early_answer(struct call *call, const char *tag, int status) {
+    if (call->first) {
+        return 1;
+    }
+    size_t length = strlen(tag);
+    if (length > SIZE_MAX - sizeof(struct early_answer) - 1) {
+        return 0;
+    }
+    struct early_answer *first = malloc(sizeof(*first) + length + 1);
+    if (!first) {
+        return 0;
+    }
+    first->observed = call->observed;
+    first->observed.sip_status = (uint32_t)status;
+    memcpy(first->tag, tag, length + 1);
+    call->first = first;
     return 1;
 }
 
@@ -243,9 +316,8 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
     if (!handle || handle == state->account) {
         return;
     }
-    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
-        if (state->calls[i].handle == handle) {
-            call = &state->calls[i];
+    TAILQ_FOREACH(call, &state->calls, entries) {
+        if (call->handle == handle) {
             break;
         }
     }
@@ -257,15 +329,11 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
         }
         int refusal = 480;
         if (state->admission && state->next_call != UINT64_MAX) {
-            refusal = 486;
-            for (size_t i = 0; i < CALL_CAPACITY; ++i) {
-                if (!state->calls[i].observed.call) {
-                    call = &state->calls[i];
-                    break;
-                }
-            }
+            refusal = 503;
+            call = calloc(1, sizeof(*call));
         }
         if (call && !remote_media(state, call, sip)) {
+            free(call);
             call = NULL;
             refusal = 488;
         }
@@ -274,11 +342,7 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
             nua_handle_destroy(handle);
             return;
         }
-        call->handle = handle;
-        call->diagnostic_token = diagnostic_token();
-        call->admitted_ms = monotonic_ms();
-        call->observed.struct_size = sizeof(call->observed);
-        call->observed.call = ++state->next_call;
+        retain_call(state, call, handle);
         call_state(call, 1, status);
     }
     if (!call) {
@@ -298,13 +362,15 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
                 ++call->challenges;
                 call_state(call, 1, status);
             } else {
-                call_state(call, 4, status);
+                refuse_invite(call, sip, status);
                 call->cancel_pending = 1;
                 nua_cancel(handle, TAG_END());
             }
         } else if (status >= 200 && status < 300) {
             if (call->observed.state == 1) {
-                if (remote_media(state, call, sip)) {
+                const char *tag = sip && sip->sip_to ? sip->sip_to->a_tag : NULL;
+                if ((!call->first || (tag && strcmp(call->first->tag, tag) == 0)) &&
+                    remote_media(state, call, sip)) {
                     call_state(call, 2, status);
                 } else {
                     /* A final success still requires ACK before rejecting its media. */
@@ -320,8 +386,26 @@ static void call_event(struct native *state, nua_event_t kind, int status, nua_h
                 }
             }
         } else if (status >= 300) {
-            call_state(call, 4, status);
-        } else {
+            refuse_invite(call, sip, status);
+        } else if (call->observed.state == 1) {
+            if (status > 100 && status < 200 && sip && sip->sip_status &&
+                sip->sip_status->st_status == status) {
+                if (status == 180 && !call->observed.alerting_seen) {
+                    call->observed.alerting_seen = 1;
+                    mark_changed(call);
+                }
+                const char *tag = sip->sip_to ? sip->sip_to->a_tag : NULL;
+                if (tag && *tag && (!call->first || strcmp(call->first->tag, tag) == 0) &&
+                    remote_media(state, call, sip)) {
+                    if (!retain_early_answer(call, tag, status)) {
+                        call_state(call, 4, 500);
+                        call->cancel_pending = 1;
+                        nua_cancel(handle, TAG_END());
+                    } else {
+                        mark_changed(call);
+                    }
+                }
+            }
             call_state(call, 1, status);
         }
     }
@@ -367,8 +451,8 @@ static void event(nua_event_t kind, int status, const char *phrase, nua_t *nua, 
     if (kind == nua_r_shutdown && status == 200) {
         /* NUA may remove a pending session without a call-state event.
          * Final shutdown proves every remaining handle quiescent. */
-        for (size_t i = 0; i < CALL_CAPACITY; ++i) {
-            struct call *call = &state->calls[i];
+        struct call *call;
+        TAILQ_FOREACH(call, &state->calls, entries) {
             if (call->handle) {
                 call_notice(call, NATIVE_TERMINAL, 0);
                 call_state(call, 5, 0);
@@ -443,6 +527,8 @@ void *sip_native_create(const char *bind, sip_native_sink sink, void *context) {
     if (!state) {
         return NULL;
     }
+    TAILQ_INIT(&state->calls);
+    TAILQ_INIT(&state->changed);
     su_home_init(state->home);
     state->owner = pthread_self();
     state->sink = sink;
@@ -467,7 +553,7 @@ void *sip_native_create(const char *bind, sip_native_sink sink, void *context) {
                                 NUTAG_SIPS_URL(NULL), NUTAG_MEDIA_ENABLE(0), NUTAG_AUTOANSWER(0),
                                 NUTAG_AUTOACK(0), NUTAG_RETRY_COUNT(2), NUTAG_M_USERNAME("rptadv"),
                                 NUTAG_OUTBOUND("natify use-rport no-validate options-keepalive"),
-                                NUTAG_KEEPALIVE(15000), NTATAG_MAX_PROCEEDING(CALL_CAPACITY),
+                                NUTAG_KEEPALIVE(15000),
                                 NTATAG_MAXSIZE(8192), NTATAG_SIP_T1X64(32000), NTATAG_SIP_T4(5000),
                                 NTATAG_SRV_503(0), TPTAG_QUEUESIZE(4), TPTAG_LOG(0),
                                 TPTAG_DUMP(NULL), NUTAG_USER_AGENT("rpt_advanced"), TAG_END());
@@ -531,9 +617,10 @@ void sip_native_cancel(void *context) {
 
 void sip_native_shutdown(void *context) {
     struct native *state = context;
-    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
-        if (state->calls[i].handle) {
-            call_notice(&state->calls[i], ACCOUNT_SHUTDOWN, 0);
+    struct call *call;
+    TAILQ_FOREACH(call, &state->calls, entries) {
+        if (call->handle) {
+            call_notice(call, ACCOUNT_SHUTDOWN, 0);
         }
     }
     nua_shutdown(state->nua);
@@ -543,6 +630,10 @@ void sip_native_destroy(void *context) {
     struct native *state = context;
     sip_native_cancel(state);
     nua_destroy(state->nua);
+    struct call *call;
+    while ((call = TAILQ_FIRST(&state->calls)) != NULL) {
+        free_call(call);
+    }
     su_root_destroy(state->root);
     su_deinit();
     su_home_deinit(state->home);
@@ -554,17 +645,33 @@ void sip_native_admission(void *context, int enabled) {
     state->admission = enabled;
 }
 
-int sip_native_next_call(void *context, rptadv_sip_call_v1 *output) {
+int sip_native_next_call(void *context, rptadv_sip_call_v2 *output) {
     struct native *state = context;
-    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
-        struct call *call = &state->calls[i];
-        if (call->changed) {
-            *output = call->observed;
-            call->changed = 0;
-            return 0;
-        }
+    struct call *call = TAILQ_FIRST(&state->changed);
+    if (!call) {
+        return 1;
     }
-    return 1;
+    *output = call->observed;
+    state->last_observed = call;
+    TAILQ_REMOVE(&state->changed, call, pending);
+    call->changed = 0;
+    return 0;
+}
+
+int sip_native_first_provisional(void *context, uint64_t token, rptadv_sip_call_v2 *output) {
+    struct native *state = context;
+    struct call *call = state->last_observed;
+    if (!call || call->observed.call != token) {
+        call = find_call(state, token);
+    }
+    if (!call) {
+        return -2;
+    }
+    if (!call->first) {
+        return 1;
+    }
+    *output = call->first->observed;
+    return 0;
 }
 
 int sip_native_respond(void *context, uint64_t token, uint32_t status, const char *answer) {
@@ -613,14 +720,15 @@ int sip_native_hangup(void *context, uint64_t token) {
 }
 
 int sip_native_release(void *context, uint64_t token) {
-    struct call *call = find_call(context, token);
+    struct native *state = context;
+    struct call *call = find_call(state, token);
     if (!call) {
         return -2;
     }
     if (call->observed.state != 5) {
         return 1;
     }
-    *call = (struct call){0};
+    free_call(call);
     return 0;
 }
 
@@ -630,26 +738,17 @@ int sip_native_originate(void *context, const char *aor, const char *hop, const 
     if (!state->admission || state->next_call == UINT64_MAX) {
         return -3;
     }
-    struct call *call = NULL;
-    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
-        if (!state->calls[i].observed.call) {
-            call = &state->calls[i];
-            break;
-        }
-    }
+    struct call *call = calloc(1, sizeof(*call));
     if (!call) {
-        return 1;
+        return -4;
     }
     nua_handle_t *handle =
         nua_handle(state->nua, NULL, SIPTAG_FROM_STR(aor), SIPTAG_TO_STR(destination), TAG_END());
     if (!handle) {
+        free(call);
         return -4;
     }
-    call->handle = handle;
-    call->diagnostic_token = diagnostic_token();
-    call->admitted_ms = monotonic_ms();
-    call->observed.struct_size = sizeof(call->observed);
-    call->observed.call = ++state->next_call;
+    retain_call(state, call, handle);
     call->observed.direction = 1;
     call_state(call, 1, 0);
     *token = call->observed.call;
@@ -675,8 +774,8 @@ int sip_native_acknowledge(void *context, uint64_t token) {
 
 size_t sip_native_next_authentication(void *context, uint64_t *token, char realm[256]) {
     struct native *state = context;
-    for (size_t i = 0; i < CALL_CAPACITY; ++i) {
-        struct call *call = &state->calls[i];
+    struct call *call;
+    TAILQ_FOREACH(call, &state->calls, entries) {
         if (call->observed.state == 1 && call->realm_length) {
             size_t length = call->realm_length;
             for (size_t j = 0; j < length; ++j) {
@@ -698,6 +797,13 @@ int sip_native_authenticate_call(void *context, uint64_t token, const char *cred
     if (call->observed.state != 1 || call->observed.direction != 1) {
         return -3;
     }
+    /* A Digest retry starts a fresh INVITE transaction after its challenged early dialog. */
+    free(call->first);
+    call->first = NULL;
+    call->observed.offer_length = 0;
+    call->observed.source_family = 0;
+    call->observed.source_port = 0;
+    memset(call->observed.source, 0, sizeof(call->observed.source));
     nua_authenticate(call->handle, NUTAG_AUTH(credentials), TAG_END());
     return 0;
 }

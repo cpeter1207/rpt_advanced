@@ -41,13 +41,19 @@ impl Mode {
         transmit: false,
         forward: false,
     };
-    /// Receive the attached station's program while controlling caller-to-link forwarding.
-    pub fn phone(forward:bool)->Self { Self{transmit:true,forward} }
+    /// Receive the attached station's per-call mix-minus.
+    /// Forwarding permits the caller's contribution on eligible ordinary network links.
+    pub fn phone(forward: bool) -> Self {
+        Self {
+            transmit: true,
+            forward,
+        }
+    }
     /// Whether this destination receives program audio.
     pub fn transmits(self) -> bool {
         self.transmit
     }
-    /// Whether this source contributes to other peers.
+    /// Whether this source contributes to ordinary linked-peer programme.
     pub fn forwards(self) -> bool {
         self.forward
     }
@@ -63,6 +69,11 @@ pub(super) struct Attached {
     pub group_member: Option<GroupMemberSelection>,
 }
 impl Attached {
+    fn bound_to_group(&self, label: &str) -> bool {
+        self.group_member
+            .as_ref()
+            .is_some_and(|member| member.label() == label)
+    }
     pub(super) fn reporting_state(&self) -> (Mode, bool) {
         if self
             .group_member
@@ -80,6 +91,8 @@ struct Retry {
     mode: Mode,
     automatic: bool,
     paused: bool,
+    /// The last dial failed or the transport was lost since the last operator pause.
+    outage_observed: bool,
     due: u64,
     delay: u64,
     attempt: Option<u64>,
@@ -414,6 +427,7 @@ impl LinkManager {
                     mode: peer.mode,
                     automatic: true,
                     paused: false,
+                    outage_observed: true,
                     due: now_ms,
                     delay: 0,
                     attempt: None,
@@ -449,6 +463,7 @@ impl LinkManager {
             mode,
             automatic: true,
             paused: false,
+            outage_observed: true,
             due: now_ms,
             delay: 0,
             attempt: None,
@@ -472,6 +487,7 @@ impl LinkManager {
             mode,
             automatic: true,
             paused: false,
+            outage_observed: true,
             due: now_ms,
             delay: 0,
             attempt: None,
@@ -496,6 +512,7 @@ impl LinkManager {
             retry.automatic = true;
             retry.paused = false;
             retry.attempt = None;
+            retry.outage_observed = true;
             retry.blocked_topology = Some(evidence);
             retry.group = group.map(str::to_owned);
             retry.group_member = group_member;
@@ -506,6 +523,7 @@ impl LinkManager {
             mode,
             automatic: true,
             paused: false,
+            outage_observed: true,
             due: 0,
             delay: 0,
             attempt: None,
@@ -555,6 +573,7 @@ impl LinkManager {
         {
             // Retained retry identities are already validated; only topology can
             // change admission while this serial control owner holds the token.
+            self.retries[index].outage_observed = true;
             self.retries[index].blocked_topology =
                 Some(self.topology_evidence(&attempt.name, self.retries[index].group.as_deref()));
             return Err(error);
@@ -589,6 +608,7 @@ impl LinkManager {
         let retry = &mut self.retries[index];
         retry.attempt = None;
         if !retry.paused {
+            retry.outage_observed = true;
             retry.delay = retry.delay.saturating_mul(2).clamp(1000, 300000);
             retry.due = now_ms.saturating_add(retry.delay);
         }
@@ -597,10 +617,20 @@ impl LinkManager {
     pub fn cancel_retry(&mut self, name: &str) {
         self.retries.retain(|retry| retry.name != name);
     }
+    /// Group outage telemetry requires an ended transport or an observed failed attempt.
+    pub(crate) fn member_unavailable(&self, remote: &str) -> bool {
+        if let Some(peer) = self.peers.iter().find(|peer| peer.name == remote) {
+            return peer.ended;
+        }
+        self.retries
+            .iter()
+            .any(|retry| retry.name == remote && retry.outage_observed)
+    }
     /// Pause retained intent without cancelling it.
     pub fn pause_retries(&mut self) {
         for retry in &mut self.retries {
             retry.paused = true;
+            retry.outage_observed = false;
         }
     }
     /// Resume retained intent with immediate first attempts.
@@ -678,6 +708,30 @@ impl LinkManager {
                 .retries
                 .iter()
                 .any(|retry| retry.name == name && retry.automatic)
+    }
+
+    pub(crate) fn attached_group_member(&self, name: &str, label: &str) -> bool {
+        self.peers
+            .iter()
+            .any(|peer| peer.name == name && !peer.ended && peer.bound_to_group(label))
+    }
+
+    /// Keep the retiring identity reserved until the host acknowledges reader detachment.
+    pub(crate) fn withdraw_held_member(&mut self, name: &str, label: &str) -> bool {
+        let mut detach = false;
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.name == name && (peer.permanent || peer.bound_to_group(label)))
+        {
+            detach = !peer.ended;
+            peer.permanent = false;
+            if detach {
+                self.end(name);
+            }
+        }
+        self.disconnect_permanent(name);
+        detach
     }
 
     /// Unpublish one temporary peer. The adapter must then stop and drain its reader.
@@ -769,6 +823,7 @@ impl LinkManager {
     pub fn disconnect_permanent_all(&mut self) -> Vec<String> {
         for retry in self.retries.iter_mut().filter(|retry| retry.automatic) {
             retry.paused = true;
+            retry.outage_observed = false;
             retry.attempt = None;
         }
         let mut removed = Vec::new();
@@ -784,6 +839,7 @@ impl LinkManager {
                 mode: peer.mode,
                 automatic: true,
                 paused: true,
+                outage_observed: false,
                 due: 0,
                 delay: 0,
                 attempt: None,
@@ -809,6 +865,7 @@ impl LinkManager {
                 mode: peer.mode,
                 automatic: peer.permanent,
                 paused: true,
+                outage_observed: false,
                 due: 0,
                 delay: 0,
                 attempt: None,

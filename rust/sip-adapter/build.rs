@@ -18,7 +18,7 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=sofia-sip-ua");
     println!("cargo:rustc-cdylib-link-arg=-Wl,-z,defs");
     println!("cargo:rustc-cdylib-link-arg=-Wl,--no-allow-shlib-undefined");
-    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_sip_adapter.so.1");
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_sip_adapter.so.2");
     println!("cargo:rerun-if-changed=include/rptadv_sip_adapter.h");
     bindgen::Builder::default()
         .header("include/rptadv_sip_adapter.h")

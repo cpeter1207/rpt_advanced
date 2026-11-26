@@ -19,7 +19,9 @@ mod phone;
 pub mod public_messages;
 pub mod radio;
 
-pub use allstarlink::{AllStarLinkAccountIdentity, AllStarLinkProfileSettings};
+pub use allstarlink::{
+    AllStarLinkAccountIdentity, AllStarLinkProfileSettings, AllStarLinkStaticNode,
+};
 pub use echolink::{EchoLinkDirectoryIdentity, EchoLinkProxyIdentity};
 pub use jitter::{JitterField, JitterProfile, JitterTiming};
 pub use normalize::TimingSource;

@@ -517,9 +517,13 @@ unsafe impl Send for Peer {}
 unsafe impl Sync for Peer {}
 impl Peer {
     /// Product station identity remains backed by the originating account owner.
-    pub fn station(&self) -> &str { self.account.station.get().unwrap_or(&self.identity.local) }
+    pub fn station(&self) -> &str {
+        self.account.station.get().unwrap_or(&self.identity.local)
+    }
     /// Require the actual account, including after an account generation counter restarts.
-    pub fn belongs_to(&self, account: &Arc<Account>) -> bool { Arc::ptr_eq(&self.account, account) }
+    pub fn belongs_to(&self, account: &Arc<Account>) -> bool {
+        Arc::ptr_eq(&self.account, account)
+    }
 
     /// Copy this exact QSO's metadata, including its first closing cause.
     /// # Safety
@@ -810,7 +814,7 @@ pub enum HostPeer<Iax, Phone = std::convert::Infallible> {
     /// Verified EchoLink QSO retained through its serial registration.
     Echo(Arc<Peer>),
 }
-impl<Iax,Phone> HostPeer<Iax,Phone> {
+impl<Iax, Phone> HostPeer<Iax, Phone> {
     /// Validate literal host spans once for both adapters, then use the provider's
     /// existing human-text operation. An IAX handle is never cast to an Echo QSO.
     ///

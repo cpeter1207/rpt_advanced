@@ -170,9 +170,7 @@ impl Egress {
     /// Subsequent real input starts a fresh burst; no shared adapter ABI change.
     pub fn finish(&mut self) -> Result<(&[f32], bool), EgressError> {
         self.finishing = true;
-        let budget = (u128::from(self.input_frames) * u128::from(self.rate)).div_ceil(48000);
-        let remaining = usize::try_from(budget.saturating_sub(u128::from(self.output_frames)))
-            .map_err(|_| EgressError)?;
+        let remaining = usize::try_from(self.remaining_frames()).map_err(|_| EgressError)?;
         if remaining == 0 {
             return Ok((&self.output[..0], true));
         }
@@ -182,6 +180,16 @@ impl Egress {
         let count = self.convert(remaining)?.len();
         Ok((&self.output[..count], count == remaining))
     }
+    /// Whether a bounded finite drain has already begun.
+    pub(super) fn finishing(&self) -> bool {
+        self.finishing
+    }
+    /// Real codec-rate samples still owed by the finite native stream.
+    pub(super) fn remaining_frames(&self) -> u128 {
+        let budget = (u128::from(self.input_frames) * u128::from(self.rate)).div_ceil(48000);
+        budget.saturating_sub(u128::from(self.output_frames))
+    }
+
     /// Borrow the previous process result until its encoder has consumed it.
     /// `frames` is exactly the length returned by that process call.
     pub(super) fn retained_output(&self, frames: usize) -> &[f32] {

@@ -18,7 +18,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
     println!("cargo:rerun-if-env-changed=RPTADV_CODEC_INCLUDE");
     println!("cargo:rerun-if-env-changed=URP_PRODUCT_INCLUDE");
-    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_asterisk_adapter.so.1");
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_asterisk_adapter.so.2");
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_arg(format!("-I{}", env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned())))

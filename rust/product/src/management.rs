@@ -1,6 +1,8 @@
 //! Authenticated HAL management of the durable desired state, outside the media plane.
 mod authoring;
 mod graph;
+pub(crate) mod live;
+pub mod maintenance;
 pub(crate) mod native;
 mod operations;
 mod recovery;
@@ -122,6 +124,7 @@ impl From<TransactionError> for Fault {
 /// Active state supplied exclusively by the running lifecycle owner.
 #[derive(Clone, Default)]
 pub struct Observed {
+    pub(crate) domain: Arc<live::Domain>,
     /// Actually adopted revision, absent in management-only recovery.
     pub active_revision: Option<String>,
     /// Generation observed for each actual resource owner.
@@ -141,6 +144,8 @@ pub struct OperationOwner {
 pub enum Effect {
     /// The domain accepted the operation.
     Admitted,
+    /// A successful bounded typed radio query.
+    Query(maintenance::QueryResult),
     /// No effect was admitted.
     Rejected,
     /// Effect status could not be established.
@@ -149,7 +154,7 @@ pub enum Effect {
 impl Effect {
     fn label(&self) -> &'static str {
         match self {
-            Self::Admitted => "admitted",
+            Self::Admitted | Self::Query(_) => "admitted",
             Self::Rejected => "rejected",
             Self::Indeterminate => "indeterminate",
         }
@@ -215,6 +220,18 @@ pub trait Runtime: Send + Sync + 'static {
     /// Whether this process can authorize an ordinary save against this selected revision.
     /// Recovery operations retain their own explicit authorization and preconditions.
     fn permits_save(&self, revision: &str) -> bool;
+    /// Dispatch one radio operation through the exact, still-live physical grant.
+    fn maintenance(
+        &self,
+        _grant: Arc<maintenance::Grant>,
+        _intent: rpt_advanced_core::command_language::Invocation,
+    ) -> Effect {
+        Effect::Rejected
+    }
+    /// Return after any outstanding manual overrides on this exact owner are cleared.
+    fn clear_maintenance(&self, _grant: Arc<maintenance::Grant>) -> Result<(), Fault> {
+        Ok(())
+    }
     /// Validate all remaining domain relationships and prepare runtime adoption.
     fn prepare(
         &self,
@@ -481,9 +498,9 @@ struct Backend<R> {
     stopping: std::sync::atomic::AtomicBool,
     boot: Id,
     ledger: RwLock<Option<Arc<operations::Ledger>>>,
+    maintenance: std::sync::Mutex<maintenance::Book>,
     store: Arc<ManagedStore>,
     key: KeyId,
-    zone: Option<String>,
     inputs: Arc<ProfileInputs>,
     runtime: Arc<R>,
     api: Arc<Api>,
@@ -527,11 +544,8 @@ impl<R: Runtime> Backend<R> {
                     .collect();
                 let result = prepared.map_or_else(
                     || {
-                        PreparedConfiguration::prepare(
-                            &candidate,
-                            self.zone.as_deref(),
-                            &self.inputs,
-                        )
+                        let zone = crate::schedule_zone::capture();
+                        PreparedConfiguration::prepare(&candidate, zone.as_deref(), &self.inputs)
                     },
                     Ok,
                 );
@@ -818,11 +832,12 @@ impl<R: Runtime> Backend<R> {
             }
         }
         let revision = fresh()?;
+        let zone = crate::schedule_zone::capture();
         let mut manifest = graph.manifest(revision)?;
         if let Some(binding) = written {
             let candidate = graph.assemble(&manifest)?;
             let projections =
-                PreparedConfiguration::prepare(&candidate, self.zone.as_deref(), &self.inputs)?;
+                PreparedConfiguration::prepare(&candidate, zone.as_deref(), &self.inputs)?;
             for warning in &projections.public.warnings {
                 self.runtime.diagnostic(*warning);
             }
@@ -830,8 +845,7 @@ impl<R: Runtime> Backend<R> {
             manifest = graph.manifest(revision)?;
         }
         let candidate = graph.assemble(&manifest)?;
-        let compiled =
-            PreparedConfiguration::prepare(&candidate, self.zone.as_deref(), &self.inputs)?;
+        let compiled = PreparedConfiguration::prepare(&candidate, zone.as_deref(), &self.inputs)?;
         let mut prepared = self
             .runtime
             .prepare(&compiled, manifest.revision().as_str())?;
@@ -1141,9 +1155,9 @@ impl<R: Runtime> Coordinator<R> {
             stopping: std::sync::atomic::AtomicBool::new(false),
             boot,
             ledger: RwLock::new(initial),
+            maintenance: Default::default(),
             store,
             key,
-            zone: crate::schedule_zone::capture(),
             inputs,
             api: Arc::clone(&api),
             runtime: Arc::clone(&runtime),
@@ -1242,6 +1256,9 @@ impl<R: Runtime> Coordinator<R> {
             let page = pagination(req.target.query(), route, &req.method)?;
             if !accepts(&req.headers, media) {
                 return Err(Fault::Accept);
+            }
+            if matches!(route.target, Target::Maintenance | Target::MaintenanceLease) {
+                return self.backend.lease_request(&req, route, params).map(Some);
             }
             if req.method != Method::GET {
                 return Ok(None);
@@ -1445,7 +1462,12 @@ fn pagination(
     method: &Method,
 ) -> Result<Option<(usize, usize)>, Fault> {
     let Some(query) = query else { return Ok(None) };
-    if method != Method::GET || !matches!(r.target, Target::Collection(_)) {
+    if method != Method::GET
+        || !matches!(
+            r.target,
+            Target::Collection(_) | Target::Peers | Target::Calls
+        )
+    {
         return Err(Fault::Malformed);
     }
     let mut offset = None;

@@ -1,9 +1,9 @@
 //! Owned product1 prepared stations, with synchronous visits and semantic equality.
+use super::resolved::ResolvedRadio;
 use super::{
     PreparationError, PreparedPeer, Product, RadioPreparationApi, Result, abi, diagnostic,
     equivalent, owned, template,
 };
-use crate::configuration::radio::ResolvedRadio;
 use rpt_advanced_core::{
     config::resources::{candidate::ResourceId, profiles::radio::RadioPortProfile},
     remote_base_command::RemoteCommandConfiguration,

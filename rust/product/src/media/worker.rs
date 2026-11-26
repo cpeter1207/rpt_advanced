@@ -1,9 +1,8 @@
-//! One serialized, non-audio media producer per station generation.
+//! One station thread advances each active media source by a bounded turn.
 
 use super::{
-    Context,
-    finite::{FiniteWriter, SegmentConsumer, SegmentProgress, valid_stream},
-    status,
+    Context, ProviderStream, StreamStep,
+    finite::{FiniteWriter, SegmentConsumer, SegmentProgress},
 };
 use crate::{
     abi as ffi,
@@ -15,16 +14,23 @@ use rpt_advanced_core::{
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
+    collections::VecDeque,
     ffi::{CString, c_void},
-    path::Path,
+    future::{Future, poll_fn},
+    pin::Pin,
     ptr,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
+    task::{Poll, Waker},
     thread::{self, JoinHandle},
     time::Duration,
 };
+
+#[path = "lifecycle.rs"]
+mod lifecycle;
+pub(super) use lifecycle::Lifecycle;
 
 const STREAM_CHUNK: usize = 4096;
 
@@ -37,6 +43,7 @@ struct JobControl {
     fallback_morse: AtomicU64,
     consumer_outstanding: AtomicUsize,
     abandoned: AtomicBool,
+    registration_failed: AtomicBool,
 }
 
 impl JobControl {
@@ -160,6 +167,9 @@ impl PcmStreamReader for StreamReader {
     }
 
     fn render(&mut self, output: &mut [f32]) -> PcmRead {
+        if self.control.registration_failed.load(Ordering::Acquire) {
+            return PcmRead::Failed;
+        }
         if output.is_empty() || self.generation == 0 {
             return PcmRead::Pending;
         }
@@ -298,31 +308,41 @@ pub(super) struct StationSession {
     file: Arc<Context>,
     speech: Arc<Context>,
     jobs: Vec<WorkerJob>,
-    pending: Producer<WorkerJob>,
-    requests: Option<Consumer<WorkerJob>>,
+    requests: Inbox,
+    lifecycle: Arc<Lifecycle>,
     stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl StationSession {
+    #[cfg(test)]
     pub(super) fn new(
         node: String,
         generation: u64,
         file: Arc<Context>,
         speech: Arc<Context>,
     ) -> Result<Self, MediaError> {
+        Self::with_lifecycle(node, generation, file, speech, Arc::new(Lifecycle::new()?))
+    }
+
+    pub(super) fn with_lifecycle(
+        node: String,
+        generation: u64,
+        file: Arc<Context>,
+        speech: Arc<Context>,
+        lifecycle: Arc<Lifecycle>,
+    ) -> Result<Self, MediaError> {
         if node.is_empty() || generation == 0 {
             return Err(MediaError::InvalidRequest);
         }
-        let (pending, requests) = RingBuffer::new(4);
         Ok(Self {
             node,
             generation,
             file,
             speech,
             jobs: Vec::new(),
-            pending,
-            requests: Some(requests),
+            requests: Inbox::default(),
+            lifecycle,
             stopping: Arc::new(AtomicBool::new(false)),
             worker: None,
         })
@@ -351,16 +371,14 @@ impl StationMediaSession for StationSession {
         let (ready, reader_ready) = RingBuffer::new(1);
         let (reader_retired, retired) = RingBuffer::new(1);
         let control = Arc::new(JobControl::default());
-        self.pending
-            .push(WorkerJob {
-                source: WorkerSource::Prepared(audio),
-                control: Arc::clone(&control),
-                ready,
-                retired,
-                handled: 0,
-                one_shot: true,
-            })
-            .map_err(|_| MediaError::QueueFull)?;
+        self.requests.push(WorkerJob {
+            source: WorkerSource::Prepared(audio),
+            control: Arc::clone(&control),
+            ready,
+            retired,
+            handled: 0,
+            one_shot: true,
+        })?;
         Ok(Box::new(StreamReader {
             control,
             ready: reader_ready,
@@ -377,17 +395,17 @@ impl StationMediaSession for StationSession {
         if self.worker.is_some() {
             return Err(MediaError::InvalidRequest);
         }
-        let requests = self.requests.take().ok_or(MediaError::InvalidRequest)?;
+        let requests = self.requests.clone();
+        let lifecycle = Arc::clone(&self.lifecycle);
         let file = Arc::clone(&self.file);
         let speech = Arc::clone(&self.speech);
         let stopping = Arc::clone(&self.stopping);
-        let mut jobs = std::mem::take(&mut self.jobs);
-        jobs.reserve(4);
+        let jobs = std::mem::take(&mut self.jobs);
         let name = format!("rptadv-media-{}-{}", self.node, self.generation);
         self.worker = Some(
             thread::Builder::new()
                 .name(name)
-                .spawn(move || worker_loop(jobs, requests, file, speech, stopping))
+                .spawn(move || schedule(jobs, requests, file, speech, stopping, lifecycle))
                 .map_err(|_| MediaError::Io)?,
         );
         Ok(())
@@ -428,10 +446,11 @@ impl StationSession {
             one_shot,
         };
         if one_shot {
-            self.pending.push(job).map_err(|_| MediaError::QueueFull)?;
+            self.requests.push(job)?;
         } else if self.worker.is_some() {
             return Err(MediaError::InvalidRequest);
         } else {
+            self.jobs.try_reserve(1).map_err(|_| MediaError::Io)?;
             self.jobs.push(job);
         }
         Ok(Box::new(StreamReader {
@@ -456,58 +475,114 @@ impl Drop for StationSession {
     }
 }
 
-fn worker_loop(
-    mut jobs: Vec<WorkerJob>,
-    mut requests: Consumer<WorkerJob>,
+#[derive(Clone, Default)]
+struct Inbox(Arc<Mutex<VecDeque<WorkerJob>>>);
+impl Inbox {
+    fn push(&self, job: WorkerJob) -> Result<(), MediaError> {
+        let mut q = self.0.lock().unwrap();
+        q.try_reserve(1).map_err(|_| MediaError::Io)?;
+        q.push_back(job);
+        Ok(())
+    }
+    fn pop(&self) -> Option<WorkerJob> {
+        self.0.lock().unwrap().pop_front()
+    }
+}
+
+type Running = Pin<Box<dyn Future<Output = WorkerJob>>>;
+enum Slot {
+    Idle(WorkerJob),
+    Running(Running),
+}
+
+async fn yield_visit() {
+    let mut yielded = false;
+    poll_fn(|_| {
+        if std::mem::replace(&mut yielded, true) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
+}
+
+fn schedule(
+    initial: Vec<WorkerJob>,
+    requests: Inbox,
     file: Arc<Context>,
     speech: Arc<Context>,
     stopping: Arc<AtomicBool>,
+    lifecycle: Arc<Lifecycle>,
 ) {
+    let mut jobs: Vec<Option<Slot>> = initial
+        .into_iter()
+        .map(|job| Some(Slot::Idle(job)))
+        .collect();
+    let mut cx = std::task::Context::from_waker(Waker::noop());
     while !stopping.load(Ordering::Acquire) {
-        let mut worked = false;
-        while let Ok(job) = requests.pop() {
-            jobs.push(job);
-            worked = true;
-        }
-        let mut index = 0;
-        while index < jobs.len() {
-            let job = &mut jobs[index];
-            while let Ok((_, consumer)) = job.retired.pop() {
-                drop(consumer);
-                job.control
-                    .consumer_outstanding
-                    .fetch_sub(1, Ordering::AcqRel);
-                worked = true;
-            }
-            let requested = job.control.requested.load(Ordering::Acquire);
-            // A cancelled producer can publish late. Retire its endpoint before
-            // starting the replacement so the bounded ready queue cannot overflow.
-            if requested != 0
-                && requested != job.handled
-                && job.control.consumer_outstanding.load(Ordering::Acquire) == 0
-            {
-                job.handled = requested;
-                run_job(job, requested, &file, &speech, &stopping, InboundRing::open);
-                worked = true;
-            }
-            if one_shot_done(job) {
-                jobs.swap_remove(index);
+        if let Some(incoming) = requests.pop() {
+            if jobs.try_reserve(1).is_ok() {
+                jobs.push(Some(Slot::Idle(incoming)));
             } else {
-                index += 1;
+                incoming
+                    .control
+                    .registration_failed
+                    .store(true, Ordering::Release);
+                let generation = incoming.control.requested.load(Ordering::Acquire);
+                if generation != 0 {
+                    fail(&incoming.control, generation);
+                }
             }
         }
-        if !worked {
-            thread::sleep(Duration::from_millis(1));
-        }
+        jobs.retain_mut(|slot| {
+            let next = match slot.take().unwrap() {
+                Slot::Idle(mut job) => {
+                    reclaim(&job.control, &mut job.retired);
+                    if one_shot_done(&job) {
+                        return false;
+                    }
+                    let generation = job.control.requested.load(Ordering::Acquire);
+                    if generation != 0
+                        && generation != job.handled
+                        && job.control.consumer_outstanding.load(Ordering::Acquire) == 0
+                    {
+                        job.handled = generation;
+                        let (file, speech, stop, life) = (
+                            file.clone(),
+                            speech.clone(),
+                            stopping.clone(),
+                            lifecycle.clone(),
+                        );
+                        Slot::Running(Box::pin(async move {
+                            produce(
+                                &mut job,
+                                generation,
+                                &file,
+                                &speech,
+                                &stop,
+                                &life,
+                                InboundRing::open,
+                            )
+                            .await;
+                            job
+                        }))
+                    } else {
+                        Slot::Idle(job)
+                    }
+                }
+                Slot::Running(mut run) => match run.as_mut().poll(&mut cx) {
+                    Poll::Pending => Slot::Running(run),
+                    Poll::Ready(job) => Slot::Idle(job),
+                },
+            };
+            *slot = Some(next);
+            true
+        });
+        thread::sleep(Duration::from_millis(1));
     }
-    for job in &mut jobs {
-        while let Ok((_, consumer)) = job.retired.pop() {
-            drop(consumer);
-            job.control
-                .consumer_outstanding
-                .fetch_sub(1, Ordering::AcqRel);
-        }
-    }
+    drop(jobs);
+    lifecycle.drain_station(&stopping);
 }
 
 struct Cancellation<'a> {
@@ -533,132 +608,68 @@ fn raw_cancellation(cancellation: &Cancellation<'_>) -> ffi::rptadv_media_cancel
     }
 }
 
-struct OpenStream<'a> {
-    context: &'a Context,
-    handle: *mut c_void,
-    rate: u32,
-}
-
-impl Drop for OpenStream<'_> {
-    fn drop(&mut self) {
-        if !self.handle.is_null() {
-            // SAFETY: this worker owns the opened provider stream and closes it exactly once.
-            unsafe { (self.context.close_stream)(self.handle) };
-        }
-    }
-}
-
-impl OpenStream<'_> {
-    fn read(
-        &mut self,
-        output: &mut [f32],
-        cancellation: &Cancellation<'_>,
-    ) -> Result<usize, MediaError> {
-        let raw = raw_cancellation(cancellation);
-        super::finite::read_stream(self.context, self.handle, output, &raw)
-    }
-}
-
-enum WorkerStream<'a> {
-    Provider(OpenStream<'a>, f32),
+enum WorkerStream {
+    Provider(lifecycle::Ticket, f32),
     Prepared(PreparedAudio, usize),
     Tone(ToneSequence),
     Morse(MorseRenderer),
 }
-
-impl WorkerStream<'_> {
+impl WorkerStream {
     fn rate(&self) -> u32 {
         match self {
-            Self::Provider(stream, _) => stream.rate,
-            Self::Prepared(audio, _) => audio.sample_rate_hz(),
-            Self::Tone(_) | Self::Morse(_) => 48_000,
+            Self::Provider(ticket, _) => ticket
+                .stream
+                .as_ref()
+                .unwrap()
+                .rate
+                .expect("real samples follow format"),
+            Self::Prepared(clip, _) => clip.sample_rate_hz(),
+            _ => 48000,
         }
     }
-
-    fn read(
+    async fn read(
         &mut self,
-        output: &mut [f32],
-        cancellation: &Cancellation<'_>,
+        out: &mut [f32],
+        cancel: &Cancellation<'_>,
     ) -> Result<usize, MediaError> {
         match self {
-            Self::Provider(stream, gain) => {
-                let count = stream.read(output, cancellation)?;
-                for sample in &mut output[..count] {
-                    *sample *= *gain;
+            Self::Provider(ticket, gain) => loop {
+                if cancel
+                    .control
+                    .is_cancelled(cancel.stopping, cancel.generation)
+                {
+                    return Err(MediaError::Cancelled);
                 }
-                Ok(count)
+                if ticket.stream.is_none() && !ticket.take_ready()? {
+                    yield_visit().await;
+                    continue;
+                }
+                let event = ticket
+                    .stream
+                    .as_mut()
+                    .unwrap()
+                    .step(out, &raw_cancellation(cancel))?;
+                match event {
+                    StreamStep::Format | StreamStep::Pending => yield_visit().await,
+                    StreamStep::Eof => return Ok(0),
+                    StreamStep::Samples(n) => {
+                        for sample in &mut out[..n] {
+                            *sample *= *gain;
+                        }
+                        return Ok(n);
+                    }
+                }
+            },
+            Self::Prepared(clip, pos) => {
+                let n = out.len().min(clip.samples().len().saturating_sub(*pos));
+                out[..n].copy_from_slice(&clip.samples()[*pos..*pos + n]);
+                *pos += n;
+                Ok(n)
             }
-            Self::Prepared(audio, offset) => {
-                let count = output
-                    .len()
-                    .min(audio.samples().len().saturating_sub(*offset));
-                output[..count].copy_from_slice(&audio.samples()[*offset..*offset + count]);
-                *offset += count;
-                Ok(count)
-            }
-            Self::Tone(source) => Ok(source.render(output)),
-            Self::Morse(source) => Ok(source.render(output)),
+            Self::Tone(tone) => Ok(tone.render(out)),
+            Self::Morse(morse) => Ok(morse.render(out)),
         }
     }
-}
-
-fn open_file<'a>(
-    context: &'a Context,
-    path: &Path,
-    cancellation: &Cancellation<'_>,
-) -> Result<OpenStream<'a>, MediaError> {
-    let open = context.open_file.ok_or(MediaError::IncompatibleAdapter)?;
-    let path = super::path_string(path)?;
-    let raw = raw_cancellation(cancellation);
-    let mut stream = ffi::rptadv_media_stream {
-        handle: ptr::null_mut(),
-        sample_rate_hz: 0,
-    };
-    // SAFETY: all borrowed request data remains live through the synchronous open call.
-    let result = status(unsafe { open(context.handle.as_ptr(), path.as_ptr(), &raw, &mut stream) });
-    let opened = OpenStream {
-        context,
-        handle: stream.handle,
-        rate: stream.sample_rate_hz,
-    };
-    result?;
-    if !valid_stream(opened.handle, opened.rate) {
-        return Err(MediaError::InvalidOutput);
-    }
-    Ok(opened)
-}
-
-fn open_speech<'a>(
-    context: &'a Context,
-    source: &rpt_advanced_core::media::SpeechSource,
-    cancellation: &Cancellation<'_>,
-) -> Result<OpenStream<'a>, MediaError> {
-    let open = context.open_speech.ok_or(MediaError::IncompatibleAdapter)?;
-    let text = CString::new(source.text.as_bytes()).map_err(|_| MediaError::InvalidRequest)?;
-    let model = super::path_string(&source.model)?;
-    let request = ffi::rptadv_media_speech_request {
-        text: text.as_ptr(),
-        model: model.as_ptr(),
-        speed_percent: source.speed_percent,
-        level_db: source.level_db,
-    };
-    let raw = raw_cancellation(cancellation);
-    let mut stream = ffi::rptadv_media_stream {
-        handle: ptr::null_mut(),
-        sample_rate_hz: 0,
-    };
-    // SAFETY: request strings, cancellation context and output remain live through open.
-    let result = status(unsafe { open(context.handle.as_ptr(), &request, &raw, &mut stream) });
-    let opened = OpenStream {
-        context,
-        handle: stream.handle,
-        rate: stream.sample_rate_hz,
-    };
-    result?;
-    if !valid_stream(opened.handle, opened.rate) {
-        return Err(MediaError::InvalidOutput);
-    }
-    Ok(opened)
 }
 
 /// Check every alternative on control, before audio can request the program.
@@ -701,40 +712,51 @@ fn validate_source(source: &MediaSource) -> Result<(), MediaError> {
 }
 
 /// Select a segment's first playable source. Fallback is allowed only before PCM.
-fn open_source<'a>(
+async fn open_source(
     source: &MediaSource,
-    file: &'a Context,
-    speech: &'a Context,
-    cancellation: &Cancellation<'_>,
+    (file, speech): (&Arc<Context>, &Arc<Context>),
+    control: &Arc<JobControl>,
+    stopping: &Arc<AtomicBool>,
+    generation: u64,
+    life: &Lifecycle,
     first: &mut [f32],
-) -> Option<(WorkerStream<'a>, usize)> {
+) -> Option<(WorkerStream, usize)> {
+    let cancellation = Cancellation {
+        control,
+        stopping,
+        generation,
+    };
     let gain = 10_f32.powf(f32::from(source.provider_gain_db) / 20.0);
     for provider in 0..2 {
-        if cancellation
-            .control
-            .is_cancelled(cancellation.stopping, cancellation.generation)
-        {
+        if control.is_cancelled(stopping, generation) {
             return None;
         }
-        let stream = if provider == 0 {
-            source
-                .file
-                .as_deref()
-                .map(|path| open_file(file, path, cancellation))
-        } else {
-            source
-                .speech
-                .as_ref()
-                .map(|request| open_speech(speech, request, cancellation))
+        let (context, input) = match provider {
+            0 => match &source.file {
+                Some(p) => (file, lifecycle::Input::File(p.clone())),
+                None => continue,
+            },
+            _ => match &source.speech {
+                Some(s) => (speech, lifecycle::Input::Speech(s.clone())),
+                None => continue,
+            },
         };
-        if let Some(Ok(stream)) = stream {
-            let mut stream = WorkerStream::Provider(stream, gain);
-            if let Ok(count) = stream.read(first, cancellation) {
-                if count != 0 {
-                    return Some((stream, count));
+        let request = lifecycle::Request {
+            context: context.clone(),
+            input,
+            control: control.clone(),
+            station: stopping.clone(),
+            generation,
+        };
+        if let Ok(ticket) = life.submit(request) {
+            let mut stream = WorkerStream::Provider(ticket, gain);
+            if let Ok(n) = stream.read(first, &cancellation).await {
+                if n != 0 {
+                    return Some((stream, n));
                 }
             }
         }
+        yield_visit().await;
     }
     let mut stream = if let Some(tone) = &source.tone {
         WorkerStream::Tone(
@@ -745,11 +767,11 @@ fn open_source<'a>(
     } else {
         return None;
     };
-    let count = stream.read(first, cancellation).ok()?;
+    let count = stream.read(first, &cancellation).await.ok()?;
     (count != 0).then_some((stream, count))
 }
 
-fn morse_stream(source: &rpt_advanced_core::media::MorseSource) -> WorkerStream<'static> {
+fn morse_stream(source: &rpt_advanced_core::media::MorseSource) -> WorkerStream {
     WorkerStream::Morse(
         MorseRenderer::new(
             &source.text,
@@ -769,12 +791,31 @@ fn reclaim(control: &JobControl, retired: &mut Consumer<(u64, SegmentConsumer)>)
     }
 }
 
-fn run_job(
+async fn write_chunk(
+    writer: &mut FiniteWriter,
+    mut samples: &[f32],
+    cancelled: &impl Fn() -> bool,
+) -> Result<(), MediaError> {
+    while !samples.is_empty() {
+        if cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        let count = writer.offer(samples)?;
+        samples = &samples[count..];
+        if !samples.is_empty() {
+            yield_visit().await;
+        }
+    }
+    Ok(())
+}
+
+async fn produce(
     job: &mut WorkerJob,
     generation: u64,
-    file: &Context,
-    speech: &Context,
-    stopping: &AtomicBool,
+    file: &Arc<Context>,
+    speech: &Arc<Context>,
+    stopping: &Arc<AtomicBool>,
+    lifecycle: &Lifecycle,
     open_ring: fn(
         u32,
         InboundPolicy,
@@ -812,14 +853,16 @@ fn run_job(
             {
                 break;
             }
-            thread::sleep(Duration::from_millis(1));
+            yield_visit().await;
         }
+        yield_visit().await;
         let mut first = [0.0; STREAM_CHUNK];
         let selected = match &job.source {
             WorkerSource::Prepared(audio) => {
                 let mut stream = WorkerStream::Prepared(audio.clone(), 0);
                 stream
                     .read(&mut first, &cancellation)
+                    .await
                     .ok()
                     .filter(|count| *count != 0)
                     .map(|count| (stream, count))
@@ -828,17 +871,23 @@ fn run_job(
                 let mut stream = morse_stream(&program.morse[index]);
                 stream
                     .read(&mut first, &cancellation)
+                    .await
                     .ok()
                     .filter(|count| *count != 0)
                     .map(|count| (stream, count))
             }
-            WorkerSource::Program(program) => open_source(
-                &program.primary[index],
-                file,
-                speech,
-                &cancellation,
-                &mut first,
-            ),
+            WorkerSource::Program(program) => {
+                open_source(
+                    &program.primary[index],
+                    (file, speech),
+                    control,
+                    stopping,
+                    generation,
+                    lifecycle,
+                    &mut first,
+                )
+                .await
+            }
         };
         let Some((mut stream, count)) = selected else {
             if !control.is_cancelled(stopping, generation) {
@@ -858,7 +907,10 @@ fn run_job(
         };
         let delay = writer.delay();
         let cancelled = || control.is_cancelled(stopping, generation);
-        if writer.write(&first[..count], &cancelled).is_err() {
+        if write_chunk(&mut writer, &first[..count], &cancelled)
+            .await
+            .is_err()
+        {
             if !control.is_cancelled(stopping, generation) {
                 fail(control, generation);
             }
@@ -884,9 +936,13 @@ fn run_job(
             if control.is_cancelled(stopping, generation) {
                 return;
             }
-            match stream.read(&mut chunk, &cancellation) {
+            yield_visit().await;
+            match stream.read(&mut chunk, &cancellation).await {
                 Ok(0) => break,
-                Ok(count) if writer.write(&chunk[..count], &cancelled).is_ok() => {}
+                Ok(count)
+                    if write_chunk(&mut writer, &chunk[..count], &cancelled)
+                        .await
+                        .is_ok() => {}
                 _ => {
                     failed = true;
                     break;
@@ -896,9 +952,20 @@ fn run_job(
         if control.is_cancelled(stopping, generation) {
             return;
         }
+        // EOF or error ends the provider lease even if the reader cannot accept padding.
+        drop(stream);
         // Publish segment end only after duration and padding; readers drain the
         // finite budget even if the converter temporarily reports no output.
-        failed |= writer.finish(&cancelled).is_err();
+        let mut tail = writer.start_tail();
+        while tail != 0 && !cancelled() {
+            yield_visit().await;
+            if writer.offer_tail(&mut tail).is_err() {
+                failed = true;
+                break;
+            }
+        }
+        drop(writer);
+        yield_visit().await;
         if control.is_cancelled(stopping, generation) {
             return;
         }
@@ -916,25 +983,50 @@ fn run_job(
         if control.consumer_outstanding.load(Ordering::Acquire) == 0 {
             break;
         }
-        thread::sleep(Duration::from_millis(1));
+        yield_visit().await;
     }
 }
 
 fn one_shot_done(job: &WorkerJob) -> bool {
     job.one_shot
-        && if job.handled == 0 {
-            job.control.abandoned.load(Ordering::Acquire)
-        } else {
-            job.control.requested.load(Ordering::Acquire) == job.handled
-                // Producer EOF is not reader completion: a Morse switch may follow.
-                && job.control.cancelled.load(Ordering::Acquire) == job.handled
-                && job.control.consumer_outstanding.load(Ordering::Acquire) == 0
-        }
+        && (job.ready.is_abandoned()
+            || if job.handled == 0 {
+                job.control.abandoned.load(Ordering::Acquire)
+            } else {
+                job.control.requested.load(Ordering::Acquire) == job.handled
+                    // A live reader may still request a Morse switch after producer EOF.
+                    && job.control.cancelled.load(Ordering::Acquire) == job.handled
+                    && job.control.consumer_outstanding.load(Ordering::Acquire) == 0
+            })
 }
 
 fn fail(control: &JobControl, generation: u64) {
     control.failed.store(generation, Ordering::Release);
     control.completed.store(generation, Ordering::Release);
+}
+
+#[cfg(test)]
+fn run_job(
+    job: &mut WorkerJob,
+    generation: u64,
+    file: &Arc<Context>,
+    speech: &Arc<Context>,
+    stop: &Arc<AtomicBool>,
+    open: fn(
+        u32,
+        InboundPolicy,
+    ) -> Result<(InboundProducer, InboundConsumer), crate::link::ring::RingError>,
+) {
+    let life = Lifecycle::new().unwrap();
+    let mut run = std::pin::pin!(produce(job, generation, file, speech, stop, &life, open));
+    while run
+        .as_mut()
+        .poll(&mut std::task::Context::from_waker(Waker::noop()))
+        .is_pending()
+    {
+        thread::sleep(Duration::from_millis(1));
+    }
+    life.drain_station(stop);
 }
 
 #[cfg(test)]

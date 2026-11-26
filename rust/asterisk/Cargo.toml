@@ -10,6 +10,11 @@ version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+rptadv-json = { path = "../json" }
+crossbeam-queue = "0.3.12"
+serde_json = "1"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+webpki-roots = "=0.26.11"
 libloading = "0.8"
 rptadv-private-phone-host = { path = "../private-phone-host" }
 rptadv-peer-support = { path = "../peer-support" }

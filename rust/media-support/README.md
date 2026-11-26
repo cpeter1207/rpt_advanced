@@ -1,13 +1,13 @@
-# Independent file and speech providers (streaming ABI 2)
+# Independent file and speech providers (streaming ABI 3)
 
 This private Rust source set builds two independently replaceable shared objects:
 
 | Capability | SONAME | C descriptor/header |
 | --- | --- | --- |
-| Local file decode | `librptadv_file_adapter.so.1` | `rptadv_file_adapter_descriptor`, `rptadv_file_adapter.h` |
-| Speech synthesis | `librptadv_speech_adapter.so.1` | `rptadv_speech_adapter_descriptor`, `rptadv_speech_adapter.h` |
+| Local file decode | `librptadv_file_adapter.so.2` | `rptadv_file_adapter_descriptor`, `rptadv_file_adapter.h` |
+| Speech synthesis | `librptadv_speech_adapter.so.2` | `rptadv_speech_adapter_descriptor`, `rptadv_speech_adapter.h` |
 
-Each descriptor exposes its own open operation and shared bounded read/close
+Each descriptor exposes its own open operation and shared incremental step/close
 operations. Common ownership layouts are in `include/rptadv_media_types.h`;
 there is no common runtime DSO or provider dependency on the controller core.
 The `rlib` targets support tests only. The initial-alpha split replaces the
@@ -15,8 +15,9 @@ combined media descriptor rather than retaining compatibility slots (ADR 0040).
 
 The file provider opens one regular local input nonblocking and gives that open
 file to FFmpeg on stdin. FFmpeg emits mono normalized F32 WAV at the source
-rate; the adapter parses its header and returns samples incrementally from the
-child's stdout. It performs no sample-rate conversion and does not invoke
+rate. Open returns the handle before the WAV header is available. Subsequent
+steps parse its header and return samples incrementally from stdout. The
+provider performs no sample-rate conversion and does not invoke
 Piper.
 
 The speech provider invokes only Piper with literal arguments and text on
@@ -27,11 +28,14 @@ as reciprocal length scale truncated to six fractional digits. It never
 invokes FFmpeg. Malformed PCM reports `INVALID_OUTPUT`; an unsuccessful or
 empty Piper process reports `PROCESS_FAILED`.
 
-Both providers expose source-rate PCM in bounded reads. They do not decode to a
-temporary WAV or retain the complete decoded recording in provider-owned
-memory. A stream owns its child until end, cancellation, timeout, or close;
-each child has its own monotonic timeout, normally 30 seconds. Cancellation
-kills and reaps the owned child before releasing host reaper exclusion. Hosts
+Each step offers at most one stdin block and reads at most one stdout block.
+It reports pending, the source format once, a bounded nonempty sample block,
+or successful EOF. The provider holds incomplete headers and samples between
+steps and does not keep the complete recording. Open and close belong on
+lifecycle workers. The host transfers each handle with exclusive sequential
+ownership and closes it exactly once, including after cancellation, timeout or
+EOF. Close kills and reaps if needed before releasing host reaper exclusion.
+Each child has a monotonic timeout, normally 30 seconds. Hosts
 with a competing SIGCHLD reaper supply paired concurrency-safe acquire/release
 callbacks; the exclusion spans spawn through final reap, including spawn
 failure. Standalone hosts without a competing reaper may omit both callbacks.
@@ -46,7 +50,7 @@ fallback policy. Runtime packaging installs both versioned providers; their
 separate development packages install the corresponding headers.
 
 Run `cargo test -p rptadv-file-adapter -p rptadv-speech-adapter`, Clippy, and
-Rustdoc with warnings denied under Rust 1.85. Tests use installed FFmpeg and a
+Rustdoc with warnings denied under Rust 1.88. Tests use installed FFmpeg and a
 locally compiled Piper fixture, without model downloads or network access.
 Compile `tests/fixtures/descriptor.c` twice: with `-DFILE_ADAPTER` and the file
 header path, and without that define and with the speech header path; both need

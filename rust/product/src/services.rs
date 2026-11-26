@@ -96,44 +96,14 @@ pub struct SourceRead {
 
 /// Validated copy of the process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(abi::rptadv_host_services_v10);
+pub struct HostServices(abi::rptadv_host_services_v11);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
 // SAFETY: the immutable table and context may be copied; object operations remain serialized.
 unsafe impl Sync for HostServices {}
 
-/// Uniquely owned native-rate peer processor prepared by the selected host.
-pub struct PcmProcessor {
-    api: abi::rptadv_pcm_processor_v1,
-    maximum: usize,
-}
-// SAFETY: the host transfers one owner; its process calls remain serial on the
-// transmit worker, and destruction waits for that generation's quiescence.
-unsafe impl Send for PcmProcessor {}
-
-impl PcmProcessor {
-    fn process(&mut self, samples: &mut [f32]) -> bool {
-        if samples.len() > self.maximum {
-            return false;
-        }
-        // SAFETY: preparation validates the function and retains its unique
-        // context. The selected provider promises bounded native in-place work.
-        unsafe {
-            self.api.process.unwrap()(self.api.context, samples.as_mut_ptr(), samples.len()) == 0
-        }
-    }
-}
-impl Drop for PcmProcessor {
-    fn drop(&mut self) {
-        if let Some(destroy) = self.api.destroy.filter(|_| !self.api.context.is_null()) {
-            // SAFETY: the unique transferred owner is destroyed once, including
-            // rejected complete records, after all audio borrows are quiescent.
-            unsafe { destroy(self.api.context) };
-        }
-    }
-}
-
+#[cfg(target_os = "linux")]
 #[path = "peer_processor.rs"]
 mod peer_processor;
 
@@ -143,14 +113,16 @@ mod peer_processor;
 /// Idle native blocks advance only the graph with silence, retaining its gain history.
 pub struct ProcessedPeer<P> {
     input: P,
+    #[cfg(target_os = "linux")]
     processor: Option<peer_processor::Processor>,
 }
 impl<P> ProcessedPeer<P> {
-    /// Retain preallocated processing alongside this unique ring consumer.
-    pub fn new(input: P, processor: Option<PcmProcessor>) -> Self {
+    /// Wrap a unique ring consumer with final DTMF muting and no selected graph.
+    pub fn new(input: P) -> Self {
         Self {
             input,
-            processor: processor.map(peer_processor::Processor::Host),
+            #[cfg(target_os = "linux")]
+            processor: None,
         }
     }
     #[cfg(target_os = "linux")]
@@ -161,10 +133,34 @@ impl<P> ProcessedPeer<P> {
     ) -> Self {
         Self {
             input,
-            processor: Some(peer_processor::Processor::Prepared {
+            processor: Some(peer_processor::Processor {
                 graph,
                 samples: vec![0; maximum].into_boxed_slice(),
             }),
+        }
+    }
+
+    fn process(&mut self, _pcm: &mut [f32]) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.processor
+                .as_mut()
+                .is_none_or(|graph| graph.process(_pcm))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    }
+
+    fn has_graph(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.processor.is_some()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
         }
     }
 }
@@ -184,12 +180,12 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         self.input.native_real_count(audible)
     }
     fn source_timing_available(&self) -> bool {
-        self.processor.is_none() && self.input.source_timing_available()
+        !self.has_graph() && self.input.source_timing_available()
     }
     fn render_timed_sample(&mut self) -> Option<rpt_advanced_core::link::TimedPeerSample> {
         let mut sample = self.input.render_timed_sample()?;
-        if let Some(processor) = self.processor.as_mut() {
-            if !processor.process(std::slice::from_mut(&mut sample.sample)) {
+        if self.has_graph() {
+            if !self.process(std::slice::from_mut(&mut sample.sample)) {
                 return None;
             }
             // The existing graph contract does not locate retained output on
@@ -215,12 +211,7 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     }
     fn render(&mut self, output: &mut [f32]) -> Option<usize> {
         match self.input.render(output) {
-            Some(real)
-                if self
-                    .processor
-                    .as_mut()
-                    .is_none_or(|processor| processor.process(output)) =>
-            {
+            Some(real) if self.process(output) => {
                 if self.input.signals().dtmf_muted() {
                     output.fill(0.0);
                 }
@@ -234,18 +225,12 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     }
     fn silence(&mut self, scratch: &mut [f32]) {
         scratch.fill(0.0);
-        if let Some(processor) = self.processor.as_mut() {
-            let _ = processor.process(scratch);
-        }
+        self.process(scratch);
         scratch.fill(0.0);
     }
     fn render_sample(&mut self) -> Option<f32> {
         let mut sample = self.input.render_sample()?;
-        if self
-            .processor
-            .as_mut()
-            .is_none_or(|processor| processor.process(std::slice::from_mut(&mut sample)))
-        {
+        if self.process(std::slice::from_mut(&mut sample)) {
             Some(if self.input.signals().dtmf_muted() {
                 0.0
             } else {
@@ -371,7 +356,7 @@ impl Backend for HostServices {
     }
 }
 
-fn complete(api: &abi::rptadv_host_services_v10) -> bool {
+fn complete(api: &abi::rptadv_host_services_v11) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
@@ -382,7 +367,6 @@ fn complete(api: &abi::rptadv_host_services_v10) -> bool {
         api.directory_srv.is_some(),
         api.directory_addresses.is_some(),
         api.directory_notice.is_some(),
-        api.radio_open.is_some(),
         api.radio_activate.is_some(),
         api.radio_destroy.is_some(),
         api.radio_site_bind.is_some(),
@@ -420,46 +404,16 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v10) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v11) -> Result<Self, Error> {
         if pointer.is_null() {
             return Err(Error::Admission);
         }
         let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
-        let required = offset_of!(abi::rptadv_host_services_v10, peer_processing_prepare);
-        let table_size = size_of::<abi::rptadv_host_services_v10>();
-        let processor_tail = offset_of!(abi::rptadv_host_services_v10, radio_control);
-        let maintenance_tail = offset_of!(abi::rptadv_host_services_v10, radio_update);
-        let metadata_tail = offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind);
-        let remote_tail = offset_of!(abi::rptadv_host_services_v10, radio_service);
-        let ready_tail = offset_of!(abi::rptadv_host_services_v10, radio_ready);
-        let station_tail = offset_of!(abi::rptadv_host_services_v10, station_binding);
-        if size < table_size
-            && ![
-                required,
-                processor_tail,
-                maintenance_tail,
-                metadata_tail,
-                remote_tail,
-                ready_tail,
-                station_tail,
-                offset_of!(abi::rptadv_host_services_v10, phone_provider),
-                offset_of!(abi::rptadv_host_services_v10, asl_provider),
-                offset_of!(abi::rptadv_host_services_v10, managed_echo_provider),
-            ]
-            .contains(&size)
-        {
+        if size != size_of::<abi::rptadv_host_services_v11>() {
             return Err(Error::Admission);
         }
-        // ABI 10's required prefix is complete; its optional processor tail is
-        // copied only when fully readable. Missing tails remain nullable.
-        let mut api: abi::rptadv_host_services_v10 = unsafe { std::mem::zeroed() };
-        unsafe {
-            ptr::copy_nonoverlapping(
-                pointer.cast::<u8>(),
-                ptr::from_mut(&mut api).cast::<u8>(),
-                size.min(table_size),
-            )
-        };
+        // SAFETY: exact ABI-11 storage is readable and retained by the process owner.
+        let api = unsafe { pointer.read() };
         let async_count = [
             api.peer_step_attach.is_some(),
             api.peer_step_stop.is_some(),
@@ -479,8 +433,8 @@ impl HostServices {
         .into_iter()
         .filter(|present| *present)
         .count();
-        if api.abi_version != 10
-            || api.capability != *b"rptadv.hst10\0\0\0\0"
+        if api.abi_version != 11
+            || api.capability != *b"rptadv.hst11\0\0\0\0"
             || !complete(&api)
             || !matches!(async_count, 0 | 3)
             || !matches!(egress_count, 0 | 6)
@@ -491,49 +445,6 @@ impl HostServices {
             return Err(Error::Admission);
         }
         Ok(Self(api))
-    }
-    /// Prepare one native-rate peer processor on control; absent hosts supply upstream DSP.
-    pub fn prepare_peer_processing(
-        &self,
-        configuration: &str,
-        local: &str,
-        maximum: usize,
-    ) -> Result<Option<PcmProcessor>, Error> {
-        let Some(prepare) = self.0.peer_processing_prepare else {
-            return Ok(None);
-        };
-        let mut api = abi::rptadv_pcm_processor_v1 {
-            struct_size: size_of::<abi::rptadv_pcm_processor_v1>() as u32,
-            abi_version: 1,
-            context: ptr::null_mut(),
-            process: None,
-            destroy: None,
-        };
-        let code = unsafe {
-            prepare(
-                self.0.context,
-                configuration.as_ptr().cast(),
-                configuration.len(),
-                local.as_ptr().cast(),
-                local.len(),
-                maximum,
-                &mut api,
-            )
-        };
-        match code {
-            1 => Ok(None),
-            0 => {
-                let processor = PcmProcessor { api, maximum };
-                (processor.api.struct_size as usize >= size_of::<abi::rptadv_pcm_processor_v1>()
-                    && processor.api.abi_version == 1
-                    && !processor.api.context.is_null()
-                    && processor.api.process.is_some()
-                    && processor.api.destroy.is_some())
-                .then_some(Some(processor))
-                .ok_or(Error::Operation)
-            }
-            _ => Err(Error::Operation),
-        }
     }
     /// Whether all retained peer-owner operations were supplied by this host.
     pub fn peer_step_available(&self) -> bool {
@@ -695,29 +606,6 @@ impl HostServices {
             }
         }
     }
-    /// Reserve one uniquely owned radio without starting callbacks. The host receives the node
-    /// identity and adapter-selected channel separated by a NUL byte in the length-delimited name.
-    pub fn radio(&self, node: &str, channel: &str, maximum_frames: usize) -> Result<Radio, Error> {
-        let name = format!("{node}\0{channel}");
-        let mut handle = ptr::null_mut();
-        let code = unsafe {
-            self.0.radio_open.unwrap()(
-                self.0.context,
-                name.as_ptr().cast(),
-                name.len(),
-                maximum_frames,
-                &mut handle,
-            )
-        };
-        if code != 0 {
-            return Err(Error::Operation);
-        }
-        Ok(Radio {
-            services: *self,
-            maximum_frames,
-            handle: NonNull::new(handle).ok_or(Error::Operation)?,
-        })
-    }
     /// Validate copied metadata, then adopt one peer from the host callback.
     /// On error ownership stays with the caller; outbound dial destroys its own rejected handle.
     ///
@@ -726,9 +614,13 @@ impl HostServices {
     pub unsafe fn peer(&self, handle: *mut c_void) -> Result<PeerIo, Error> {
         let handle = NonNull::new(handle).ok_or(Error::Admission)?;
         let metadata = unsafe { self.inspect_peer(handle.as_ptr()) }?;
-        let private_clock = if metadata.identity.protocol() == ProtocolId::Phone && private_digits(metadata.capabilities).is_some() {
+        let private_clock = if metadata.identity.protocol() == ProtocolId::Phone
+            && private_digits(metadata.capabilities).is_some()
+        {
             Some(phone_media::PhoneClock::prepare(*self)?)
-        } else { None };
+        } else {
+            None
+        };
         Ok(PeerIo {
             private_clock,
             services: *self,
@@ -790,9 +682,14 @@ impl HostServices {
         let local_valid = if protocol == ProtocolId::Phone {
             rpt_advanced_core::config::NodeId::new(local.as_str()).is_ok()
         } else {
-            let legacy = local.len() <= 32 && !local.is_empty() && local.bytes().all(|byte| byte.is_ascii_digit());
-            legacy || (managed_echo && local.parse::<rpt_advanced_core::config::resources::candidate::ResourceId>()
-                .is_ok_and(|id| id.to_string() == local))
+            let legacy = local.len() <= 32
+                && !local.is_empty()
+                && local.bytes().all(|byte| byte.is_ascii_digit());
+            legacy
+                || (managed_echo
+                    && local
+                        .parse::<rpt_advanced_core::config::resources::candidate::ResourceId>()
+                        .is_ok_and(|id| id.to_string() == local))
         };
         let callsign = bytes(raw.callsign, 64)?;
         let capabilities = raw.capabilities;
@@ -881,34 +778,64 @@ impl HostServices {
 
     /// Originate the selected ordinary IAX call using the single verified literal endpoint.
     #[cfg(target_os = "linux")]
-    pub(crate) fn originate_asl<F: FnMut() -> bool>(&self, id: &abi::rptadv_asl_identity_v1,
-        remote: &str, endpoint: std::net::SocketAddr, mut current: F) -> Result<PeerIo, Error> {
+    pub(crate) fn originate_asl<F: FnMut() -> bool>(
+        &self,
+        id: &abi::rptadv_asl_identity_v1,
+        remote: &str,
+        endpoint: std::net::SocketAddr,
+        mut current: F,
+    ) -> Result<PeerIo, Error> {
         let originate = self.asl_provider()?.originate.unwrap();
         let endpoint = endpoint.to_string();
         let mut handle = ptr::null_mut();
-        let code = unsafe { originate(self.0.context, id, crate::host::asl::span(remote.as_bytes()),
-            crate::host::asl::span(endpoint.as_bytes()), crate::host::MAXIMUM_FRAMES,
-            Some(dial_current::<F>), ptr::from_mut(&mut current).cast(), &mut handle) };
+        let code = unsafe {
+            originate(
+                self.0.context,
+                id,
+                crate::host::asl::span(remote.as_bytes()),
+                crate::host::asl::span(endpoint.as_bytes()),
+                crate::host::MAXIMUM_FRAMES,
+                Some(dial_current::<F>),
+                ptr::from_mut(&mut current).cast(),
+                &mut handle,
+            )
+        };
         self.dial_result(code, handle)
     }
 
-    /// Start one private call on its selected bound port and account generation.
-    pub(crate) fn originate_phone<F: FnMut() -> bool>(
-        &self, account: &crate::phone::accounts::DialAccount, number: &str, mut current: F,
-    ) -> Result<PeerIo, Error> {
-        let originate = self.phone_provider()?.originate.ok_or(Error::Admission)?;
+    /// Reserve one unique frontend dial handle for the selected account.
+    pub(crate) fn begin_phone(
+        &self,
+        account: &crate::phone::accounts::DialAccount,
+        number: &str,
+    ) -> Result<PhoneDial, Error> {
+        let ops = self.phone_provider()?;
         let port = account.port.uuid();
         let binding = account.binding.uuid();
-        let number = abi::rptadv_peer_bytes_v1 { data: number.as_ptr(), length: number.len() };
+        let target = abi::rptadv_peer_bytes_v1 {
+            data: number.as_ptr(),
+            length: number.len(),
+        };
         let mut handle = ptr::null_mut();
-        let code = unsafe { originate(self.context(), port.as_bytes().as_ptr(), binding.as_bytes().as_ptr(),
-            account.generation, number, crate::host::MAXIMUM_FRAMES, Some(dial_current::<F>),
-            ptr::from_mut(&mut current).cast(), &mut handle) };
-        if code != 0 && !handle.is_null() {
-            unsafe { self.0.peer_destroy.unwrap()(self.context(), handle) };
+        let code = unsafe {
+            ops.begin.unwrap()(
+                self.context(),
+                port.as_bytes().as_ptr(),
+                binding.as_bytes().as_ptr(),
+                account.generation,
+                target,
+                crate::host::MAXIMUM_FRAMES,
+                &mut handle,
+            )
+        };
+        let dial = PhoneDial {
+            services: *self,
+            raw: NonNull::new(handle).ok_or(Error::Operation)?,
+        };
+        if code != 0 {
             return Err(Error::Operation);
         }
-        self.dial_result(code, handle)
+        Ok(dial)
     }
 
     fn dial_result(&self, code: i32, handle: *mut c_void) -> Result<PeerIo, Error> {
@@ -927,8 +854,56 @@ impl HostServices {
     }
 }
 
+/// Exactly one frontend pending handle, serialized on Product's control executor.
+pub(crate) struct PhoneDial {
+    services: HostServices,
+    raw: NonNull<c_void>,
+}
+
+// SAFETY: this unique pending handle is movable and every operation needs exclusive access.
+unsafe impl Send for PhoneDial {}
+
+impl PhoneDial {
+    pub(crate) fn poll(
+        &mut self,
+        progress: &mut abi::rptadv_phone_progress_v1,
+    ) -> Result<Option<PeerIo>, Error> {
+        let ops = self.services.phone_provider()?;
+        let mut peer = ptr::null_mut();
+        let status = unsafe {
+            ops.poll.unwrap()(
+                self.services.context(),
+                self.raw.as_ptr(),
+                progress,
+                &mut peer,
+            )
+        };
+        if status == 1 && peer.is_null() {
+            return Ok(None);
+        }
+        if status != 0 && !peer.is_null() {
+            unsafe { self.services.0.peer_destroy.unwrap()(self.services.context(), peer) };
+            return Err(Error::Operation);
+        }
+        self.services.dial_result(status, peer).map(Some)
+    }
+}
+
+impl Drop for PhoneDial {
+    fn drop(&mut self) {
+        // The validated group and its code stay live until the Host drains its pending handles.
+        let ops = self
+            .services
+            .phone_provider()
+            .expect("retained phone provider");
+        unsafe { ops.cancel.unwrap()(self.services.context(), self.raw.as_ptr()) };
+    }
+}
+
 unsafe extern "C" fn dial_current<F: FnMut() -> bool>(context: *mut c_void) -> u32 {
-    u32::from(catch_unwind(AssertUnwindSafe(|| unsafe { &mut *context.cast::<F>() }())).unwrap_or(false))
+    u32::from(
+        catch_unwind(AssertUnwindSafe(|| unsafe { &mut *context.cast::<F>() }())).unwrap_or(false),
+    )
 }
 
 /// Resolved speech admission and reserve required by the existing local receive ring.
@@ -1174,7 +1149,11 @@ pub struct PeerMetadata {
 }
 /// Receive mode is fixed by the actual negotiated call, independently of RF attachment.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PhoneDigits { Events, ReceiveOnly, InBand }
+pub(crate) enum PhoneDigits {
+    Events,
+    ReceiveOnly,
+    InBand,
+}
 
 fn private_digits(capabilities: u32) -> Option<PhoneDigits> {
     const PRIVATE_SOURCE: u32 = 1 | 2 | 16 | 32;
@@ -1249,7 +1228,9 @@ impl PeerIo {
         (self.capabilities & 1 != 0).then_some((self.services, self.handle.as_ptr()))
     }
     pub(crate) fn phone_digits(&self) -> Option<PhoneDigits> {
-        (self.identity.protocol() == ProtocolId::Phone).then(|| private_digits(self.capabilities)).flatten()
+        (self.identity.protocol() == ProtocolId::Phone)
+            .then(|| private_digits(self.capabilities))
+            .flatten()
     }
     /// Observe on the same exclusive owner that performs peer I/O.
     pub fn observe(&self) -> Option<abi::rptadv_peer_observation_v1> {
@@ -1576,7 +1557,10 @@ impl PeerIo {
     }
     /// Send one conventional completed digit.
     pub fn send_digit(&mut self, digit: char) -> Result<(), Error> {
-        if matches!(self.phone_digits(), Some(PhoneDigits::InBand | PhoneDigits::ReceiveOnly)) {
+        if matches!(
+            self.phone_digits(),
+            Some(PhoneDigits::InBand | PhoneDigits::ReceiveOnly)
+        ) {
             return Err(Error::Operation);
         }
         let code = unsafe {

@@ -1,9 +1,7 @@
 //! Shared finite-media consumer: real duration/EOF and endpoint retirement stay explicit.
-use super::{Context, ffi, status};
 use crate::link::ring::{InboundConsumer, InboundProducer, RingError};
 use rpt_advanced_core::link::PeerInput;
 use rpt_advanced_core::media::MediaError;
-use std::ffi::c_void;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -70,41 +68,20 @@ impl FiniteWriter {
     pub(super) fn delay(&self) -> u64 {
         self.delay
     }
-    pub(super) fn write(
-        &mut self,
-        samples: &[f32],
-        cancelled: &impl Fn() -> bool,
-    ) -> Result<(), MediaError> {
-        self.push(samples, cancelled, true)
+    /// Offer source PCM once and publish only the duration actually accepted.
+    pub(super) fn offer(&mut self, samples: &[f32]) -> Result<usize, MediaError> {
+        let accepted = self.producer.write(samples).map_err(|_| MediaError::Io)?;
+        self.source_samples = self.source_samples.saturating_add(accepted as u64);
+        self.progress.budget.store(
+            self.delay
+                .saturating_add(self.source_samples.saturating_mul(48000) / u64::from(self.rate)),
+            Ordering::Release,
+        );
+        Ok(accepted)
     }
-    fn push(
-        &mut self,
-        mut samples: &[f32],
-        cancelled: &impl Fn() -> bool,
-        real: bool,
-    ) -> Result<(), MediaError> {
-        while !samples.is_empty() {
-            if cancelled() {
-                return Err(MediaError::Cancelled);
-            }
-            let accepted = self.producer.write(samples).map_err(|_| MediaError::Io)?;
-            if accepted == 0 {
-                thread::sleep(Duration::from_millis(1));
-            }
-            if real {
-                self.source_samples = self.source_samples.saturating_add(accepted as u64);
-                self.progress.budget.store(
-                    self.delay.saturating_add(
-                        self.source_samples.saturating_mul(48000) / u64::from(self.rate),
-                    ),
-                    Ordering::Release,
-                );
-            }
-            samples = &samples[accepted..];
-        }
-        Ok(())
-    }
-    pub(super) fn finish(mut self, cancelled: &impl Fn() -> bool) -> Result<(), MediaError> {
+
+    /// Fix the final duration once. Padding supplies filter context, never programme frames.
+    pub(super) fn start_tail(&self) -> u64 {
         self.progress.budget.store(
             self.delay.saturating_add(
                 self.source_samples
@@ -113,58 +90,59 @@ impl FiniteWriter {
             ),
             Ordering::Release,
         );
-        let mut remaining = self
-            .delay
+        self.delay
             .saturating_add(1)
             .saturating_mul(u64::from(self.rate))
-            .div_ceil(48000);
+            .div_ceil(48000)
+    }
+
+    pub(super) fn offer_tail(&mut self, remaining: &mut u64) -> Result<(), MediaError> {
         let zeros = [0.0; 256];
-        while remaining != 0 {
-            let count = remaining.min(zeros.len() as u64) as usize;
-            if let Err(error) = self.push(&zeros[..count], cancelled, false) {
+        let count = (*remaining).min(zeros.len() as u64) as usize;
+        if count != 0 {
+            let accepted = self.producer.write(&zeros[..count]).map_err(|_| {
                 self.progress.undrainable.store(true, Ordering::Release);
-                return Err(error);
-            }
-            remaining -= count as u64;
+                MediaError::Io
+            })?;
+            *remaining -= accepted as u64;
         }
         Ok(())
     }
-}
 
-/// Validate one complete streaming-provider result before any PCM is published.
-pub(super) fn read_stream(
-    context: &Context,
-    handle: *mut c_void,
-    output: &mut [f32],
-    cancellation: &ffi::rptadv_media_cancellation,
-) -> Result<usize, MediaError> {
-    if output.is_empty() {
-        return Err(MediaError::InvalidRequest);
+    /// The separate text preparation executor may wait for the reader to free capacity.
+    pub(super) fn write(
+        &mut self,
+        mut samples: &[f32],
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<(), MediaError> {
+        while !samples.is_empty() {
+            if cancelled() {
+                return Err(MediaError::Cancelled);
+            }
+            let n = self.offer(samples)?;
+            if n == 0 {
+                thread::sleep(Duration::from_millis(1));
+            }
+            samples = &samples[n..];
+        }
+        Ok(())
     }
-    let mut count = 0;
-    // All storage and the exclusively owned handle outlive this synchronous call.
-    status(unsafe {
-        (context.read_stream)(
-            handle,
-            cancellation,
-            output.as_mut_ptr(),
-            output.len(),
-            &mut count,
-        )
-    })?;
-    if count > output.len()
-        || output[..count]
-            .iter()
-            .any(|sample| !sample.is_finite() || sample.abs() > 1.0)
-    {
-        return Err(MediaError::InvalidOutput);
-    }
-    Ok(count)
-}
 
-/// Shared handle and inclusive source-rate bounds for file/speech providers.
-pub(super) fn valid_stream(handle: *mut c_void, rate: u32) -> bool {
-    !handle.is_null() && (8000..=192000).contains(&rate)
+    pub(super) fn finish(mut self, cancelled: &impl Fn() -> bool) -> Result<(), MediaError> {
+        let mut remaining = self.start_tail();
+        while remaining != 0 {
+            if cancelled() {
+                self.progress.undrainable.store(true, Ordering::Release);
+                return Err(MediaError::Cancelled);
+            }
+            let before = remaining;
+            self.offer_tail(&mut remaining)?;
+            if remaining == before {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

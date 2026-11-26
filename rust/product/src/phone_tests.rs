@@ -1,10 +1,15 @@
 //! Private calls own bounded media replies before any radio attachment exists.
 use super::*;
-use crate::{abi, services::HostServices};
+use crate::{abi, fixture::station, services::HostServices};
 use rpt_advanced_core::{
     audio::{PcmRead, PcmStreamReader, PlaybackOutcome},
-    config::{ConfigDocument, PhoneMailbox, resolve_phone_mailboxes},
+    config::resources::{
+        candidate::{ResourceKind, ResourceScope},
+        profiles::mailbox::ScopedMailboxes,
+    },
 };
+use rptadv_peer_support::sealed_records::SecretBytes;
+use serde_json::json;
 use std::{ffi::c_void, mem::size_of, ptr};
 
 thread_local! {
@@ -47,7 +52,7 @@ fn concurrent_owner_retirement_wins_between_admission_and_authentication_publish
     });
     assert!(!reply.ended());
     assert_eq!(
-        calls.authenticate(&source, &reply, &records(), "100", "1234", 0),
+        authenticate(&mut calls, &source, &reply, &records(), "100", "1234", 0),
         Err(Error::Admission)
     );
     owner.join().unwrap();
@@ -59,11 +64,46 @@ fn concurrent_owner_retirement_wins_between_admission_and_authentication_publish
     assert!(calls.is_empty());
 }
 
-fn records() -> Vec<PhoneMailbox> {
-    resolve_phone_mailboxes(
-        &ConfigDocument::parse(include_str!("tests/fixtures/phone_mailbox.conf")).unwrap(),
+pub(crate) const FIXTURE_PIN_PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2l4dGVlbi1ieXRlLXNhbHQ$JJvcFomwgumB44bmQdOCEbN00saqrIis8c6S0WG6Kzw";
+
+fn records() -> ScopedMailboxes {
+    let configuration = station::prepare(
+        &[(station::LOCAL, "1000", json!({}))],
+        &[(
+            station::LOCAL,
+            ResourceKind::Mailbox,
+            "100",
+            json!({
+                "first_name":"Chris", "callsign":"KG0BP"
+            }),
+        )],
+    );
+    let scope = ResourceScope::Port(station::LOCAL.parse().unwrap());
+    let profile = &configuration.runtime().scopes[&scope].mailboxes;
+    ScopedMailboxes {
+        effective: profile.effective.clone(),
+        warnings: Vec::new(),
+    }
+}
+
+fn authenticate(
+    calls: &mut PhoneCalls,
+    source: &PhoneSource,
+    reply: &PeerReply,
+    records: &ScopedMailboxes,
+    mailbox: &str,
+    pin: &str,
+    now_ms: u64,
+) -> Result<PhoneLogin, Error> {
+    let selected = SecretBytes::new(FIXTURE_PIN_PHC.as_bytes().to_vec());
+    calls.authenticate_scoped(
+        source,
+        reply,
+        records,
+        |_| Some(&selected),
+        (mailbox, pin),
+        now_ms,
     )
-    .value
 }
 
 fn peer(second: bool) -> PeerIo {
@@ -81,14 +121,16 @@ fn peer_with_generation(mode: usize) -> PeerIo {
         output.protocol = 3;
         output.capabilities = 32;
         output.account_generation = 7;
-        output.qso_generation = if context.addr() == 1 { 10 } else { 9 };
+        let (call_id, generation) = match context.addr() {
+            0 => (b"aabbccddeeff00112233445566778899", 9),
+            1 => (b"112233445566778899aabbccddeeff00", 10),
+            3 => (b"00112233445566778899aabbccddeeff", 11),
+            _ => (b"112233445566778899aabbccddeeff00", 9),
+        };
+        output.qso_generation = generation;
         output.remote = abi::rptadv_peer_bytes_v1 {
-            data: if context.is_null() {
-                b"aabbccddeeff00112233445566778899".as_ptr()
-            } else {
-                b"112233445566778899aabbccddeeff00".as_ptr()
-            },
-            length: 32,
+            data: call_id.as_ptr(),
+            length: call_id.len(),
         };
         output.provider_account = abi::rptadv_peer_bytes_v1 {
             data: b"provider".as_ptr(),
@@ -121,7 +163,12 @@ fn unconfigured_mailbox_cannot_authenticate_a_provider_admitted_call() {
     let mut calls = PhoneCalls::new(1, 1).unwrap();
     let source = calls.admit(peer(false), 0).unwrap();
     let reply = calls.reply(&source).unwrap();
-    let result = calls.authenticate(&source, &reply, &[], "999", "1234", 0);
+    let profiles = ScopedMailboxes {
+        effective: Default::default(),
+        warnings: Vec::new(),
+    };
+    let result =
+        calls.authenticate_scoped(&source, &reply, &profiles, |_| None, ("999", "1234"), 0);
     assert_eq!(
         result.unwrap(),
         PhoneLogin::Retry,
@@ -164,8 +211,7 @@ fn authenticated_call_retains_only_the_public_identity_selected_for_its_scope() 
             callsign: "KG0BP".into(),
         },
     );
-    let pin = "$argon2id$v=19$m=19456,t=2,p=1$c2l4dGVlbi1ieXRlLXNhbHQ$JJvcFomwgumB44bmQdOCEbN00saqrIis8c6S0WG6Kzw";
-    let selected = Arc::new(SecretBytes::new(pin.as_bytes().to_vec()));
+    let selected = Arc::new(SecretBytes::new(FIXTURE_PIN_PHC.as_bytes().to_vec()));
     let retained = Arc::downgrade(&selected);
     let mut calls = PhoneCalls::new(1, 1).unwrap();
     let source = calls.admit(peer(false), 0).unwrap();
@@ -176,7 +222,7 @@ fn authenticated_call_retains_only_the_public_identity_selected_for_its_scope() 
                 &source,
                 &reply,
                 &profiles,
-                |id| (id == owner).then_some(selected.as_ref()),
+                |record| (record.binding.id == owner).then_some(selected.as_ref()),
                 (mailbox, "1234"),
                 now,
             )
@@ -215,34 +261,22 @@ fn mailbox_login_bounds_attempts_and_does_not_transfer_profiles_to_other_calls()
     let other = calls.reply(&second).unwrap();
     assert_eq!(calls.local(&first, &reply), Some("1000"));
     assert!(calls.local(&first, &other).is_none());
-    assert!(
-        calls
-            .authenticate(&first, &other, &records, "100", "1234", 100)
-            .is_err()
-    );
+    assert!(authenticate(&mut calls, &first, &other, &records, "100", "1234", 100).is_err());
     for (mailbox, pin, expected) in [
         ("100", "9999", PhoneLogin::Retry),
         ("unknown", "1234", PhoneLogin::Retry),
         ("100", "1234#", PhoneLogin::Closed),
     ] {
         assert_eq!(
-            calls
-                .authenticate(&first, &reply, &records, mailbox, pin, 101)
-                .unwrap(),
+            authenticate(&mut calls, &first, &reply, &records, mailbox, pin, 101).unwrap(),
             expected
         );
     }
     assert!(reply.ended());
-    assert!(
-        calls
-            .authenticate(&first, &reply, &records, "100", "1234", 102)
-            .is_err()
-    );
+    assert!(authenticate(&mut calls, &first, &reply, &records, "100", "1234", 102).is_err());
     assert!(!other.phone_authenticated());
     assert_eq!(
-        calls
-            .authenticate(&second, &other, &records, "100", "1234", 59_999)
-            .unwrap(),
+        authenticate(&mut calls, &second, &other, &records, "100", "1234", 59_999).unwrap(),
         PhoneLogin::Authenticated
     );
     let profile = calls.mailbox(&second, &other).unwrap();
@@ -268,24 +302,19 @@ fn mailbox_login_deadline_is_inclusive_and_replacement_never_inherits_attempts_o
     let source = calls.admit(peer(false), 100).unwrap();
     let reply = calls.reply(&source).unwrap();
     assert_eq!(
-        calls
-            .authenticate(&source, &reply, &records, "100", "1234", 60_100)
-            .unwrap(),
+        authenticate(&mut calls, &source, &reply, &records, "100", "1234", 60_100).unwrap(),
         PhoneLogin::Closed
     );
     calls.retire(&source).unwrap();
     let fresh = calls.admit(peer(false), 60_100).unwrap();
     assert_ne!(source.ingress(), fresh.ingress());
     let new_reply = calls.reply(&fresh).unwrap();
-    assert!(
-        calls
-            .authenticate(&fresh, &reply, &records, "100", "1234", 60_101)
-            .is_err()
-    );
+    assert!(authenticate(&mut calls, &fresh, &reply, &records, "100", "1234", 60_101).is_err());
     assert_eq!(
-        calls
-            .authenticate(&fresh, &new_reply, &records, "100", "1234", 60_101)
-            .unwrap(),
+        authenticate(
+            &mut calls, &fresh, &new_reply, &records, "100", "1234", 60_101
+        )
+        .unwrap(),
         PhoneLogin::Authenticated
     );
     assert!(calls.expire_authentication(u64::MAX).is_empty());
@@ -318,24 +347,16 @@ fn private_call_reply_queue_is_exact_bounded_and_revoked_on_retirement() {
     let second = calls.admit(peer(true), 0).unwrap();
     assert!(
         calls.admit(peer(true), 0).is_err(),
-        "transport capacity is bounded"
+        "a duplicate provider call must be rejected"
     );
     let reply = calls.reply(&first).unwrap();
     let other = calls.reply(&second).unwrap();
     assert!(!reply.phone_authenticated());
-    assert!(
-        calls
-            .authenticate(&first, &other, &records(), "100", "1234", 0)
-            .is_err()
-    );
-    calls
-        .authenticate(&first, &reply, &records(), "100", "1234", 0)
-        .unwrap();
+    assert!(authenticate(&mut calls, &first, &other, &records(), "100", "1234", 0).is_err());
+    authenticate(&mut calls, &first, &reply, &records(), "100", "1234", 0).unwrap();
     assert!(reply.phone_authenticated());
     assert!(
-        calls
-            .authenticate(&first, &reply, &records(), "101", "1234", 0)
-            .is_err(),
+        authenticate(&mut calls, &first, &reply, &records(), "101", "1234", 0).is_err(),
         "mailbox changes cannot inherit a live source grant"
     );
     assert!(!other.phone_authenticated());
@@ -353,11 +374,7 @@ fn private_call_reply_queue_is_exact_bounded_and_revoked_on_retirement() {
     assert_eq!(prepared.render(false, &mut [0.0; 16]), 0);
     assert_eq!(prepared.outcome(), PlaybackOutcome::Cancelled);
     assert!(calls.queue_reply(&first, &reply, media()).is_err());
-    assert!(
-        calls
-            .authenticate(&first, &reply, &records(), "100", "1234", 0)
-            .is_err()
-    );
+    assert!(authenticate(&mut calls, &first, &reply, &records(), "100", "1234", 0).is_err());
     assert!(calls.retire(&first).is_none());
     let replaced = calls.admit(peer(false), 0).unwrap();
     assert_ne!(replaced.ingress(), first.ingress());
@@ -374,6 +391,87 @@ fn private_call_reply_queue_is_exact_bounded_and_revoked_on_retirement() {
         size_of::<abi::rptadv_peer_info_v1>(),
         std::mem::offset_of!(abi::rptadv_peer_info_v1, provider_account)
             + size_of::<abi::rptadv_peer_bytes_v1>()
+    );
+}
+
+#[test]
+fn private_call_reservation_can_grow_while_preserving_per_call_reply_limits() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut calls = PhoneCalls::new(2, 1).unwrap();
+    let first = calls.admit(peer(false), 0).unwrap();
+    let second = calls.admit(peer(true), 1).unwrap();
+    let first_reply = calls.reply(&first).unwrap();
+    let second_reply = calls.reply(&second).unwrap();
+    assert_eq!(
+        authenticate(
+            &mut calls,
+            &first,
+            &first_reply,
+            &records(),
+            "100",
+            "1234",
+            2
+        ),
+        Ok(PhoneLogin::Authenticated)
+    );
+    for (source, reply) in [(&first, &first_reply), (&second, &second_reply)] {
+        calls.queue_reply(source, reply, media()).unwrap();
+        assert_eq!(
+            calls.queue_reply(source, reply, media()),
+            Err(Error::Allocation)
+        );
+    }
+
+    let candidate = peer_with_generation(3);
+    let new_call = candidate.identity().call_id().unwrap();
+    for existing in [&first, &second] {
+        assert_ne!(new_call, existing.call_id());
+        assert_eq!(candidate.phone_account(), Some(existing.account()));
+        let (account_generation, call_generation) = candidate.generations();
+        assert_eq!(account_generation, existing.account_generation());
+        assert_ne!(call_generation, existing.call_generation());
+    }
+    let third = calls.admit(candidate, 3).ok();
+    assert_eq!(calls.reply(&first), Some(first_reply.clone()));
+    assert_eq!(calls.reply(&second), Some(second_reply.clone()));
+    assert!(first_reply.phone_authenticated());
+    assert!(!second_reply.phone_authenticated());
+    assert!(calls.take_reply(&first, &second_reply).is_err());
+
+    if let Some(third) = &third {
+        let reply = calls.reply(third).unwrap();
+        assert_eq!(reply.phone_source(), Some(third));
+        assert!(!reply.phone_authenticated());
+        assert!(calls.queue_reply(third, &first_reply, media()).is_err());
+        calls.queue_reply(third, &reply, media()).unwrap();
+        assert_eq!(
+            calls.queue_reply(third, &reply, media()),
+            Err(Error::Allocation)
+        );
+        let prepared = calls.take_reply(third, &reply).unwrap().unwrap();
+        assert_eq!(prepared.source(), third);
+        assert!(prepared.current());
+        assert_eq!(calls.retire(third), Some(reply.clone()));
+        assert!(reply.ended() && !prepared.current());
+    }
+
+    let first_prompt = calls.take_reply(&first, &first_reply).unwrap().unwrap();
+    let second_prompt = calls.take_reply(&second, &second_reply).unwrap().unwrap();
+    assert_eq!(first_prompt.source(), &first);
+    assert_eq!(second_prompt.source(), &second);
+    assert!(first_prompt.current() && second_prompt.current());
+    assert_eq!(calls.retire_all().len(), 2);
+    assert!(calls.is_empty() && first_reply.ended() && second_reply.ended());
+    assert!(!first_prompt.current() && !second_prompt.current());
+    let third_admitted = third.is_some();
+    eprintln!(
+        "PRIVATE_CALL_CAPACITY third_admitted={third_admitted} existing_owned=true reply_isolation=true all_retired=true"
+    );
+    assert!(
+        third_admitted,
+        "private call admission must grow beyond its initial reservation"
     );
 }
 
@@ -429,7 +527,9 @@ fn retirement_during_private_render_revokes_the_copied_pcm_before_delivery() {
 
 #[test]
 fn an_existing_native_call_cannot_be_reoffered_under_another_display_id() {
-    let _serial = crate::fixture::LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let mut calls = PhoneCalls::new(3, 1).unwrap();
     let incumbent = calls.admit(peer_with_generation(0), 5).unwrap();
     let reply = calls.reply(&incumbent).unwrap();
@@ -439,22 +539,201 @@ fn an_existing_native_call_cannot_be_reoffered_under_another_display_id() {
 }
 
 #[test]
-fn half_entered_private_pin_expires_without_a_later_digit_and_cannot_complete_the_next_login() {
-    let mut calls=PhoneCalls::new(1,2).unwrap();
-    let source=calls.admit(peer(false),0).unwrap();
-    let reply=calls.reply(&source).unwrap();
-    assert!(calls.login_digit(&source,&reply,'4',10,100).unwrap().is_none());
-    assert!(matches!(calls.login_digit(&source,&reply,'#',15,100).unwrap(),Some(LoginField::Password)));
-    assert!(calls.expired_login_fields(114,|_|Some(100)).is_empty());
-    assert_eq!(calls.expired_login_fields(115,|_|Some(100)),vec![(source.clone(),reply.clone())]);
-    assert!(calls.expired_login_fields(116,|_|Some(100)).is_empty());
-    for (i,digit) in "8#12".chars().enumerate() {
-        let field=calls.login_digit(&source,&reply,digit,120+i as u64,100).unwrap();
-        if digit=='#'{assert!(matches!(field,Some(LoginField::Password)));}else{assert!(field.is_none());}
+fn a_new_digit_retires_queued_authentication_success_without_retiring_generic_replies() {
+    use rpt_advanced_core::messages::PhoneAuthenticationPrompt::Authenticated;
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut calls = PhoneCalls::new(1, 2).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    assert_eq!(
+        authenticate(&mut calls, &source, &reply, &records(), "100", "1234", 1),
+        Ok(PhoneLogin::Authenticated)
+    );
+    calls
+        .queue_login_prompt(&source, &reply, media(), Authenticated)
+        .unwrap();
+    calls.queue_reply(&source, &reply, media()).unwrap();
+    let confirmation = calls.take_reply(&source, &reply).unwrap().unwrap();
+    let generic = calls.take_reply(&source, &reply).unwrap().unwrap();
+    assert!(!confirmation.obsolete_before_output(Some(0)));
+    assert!(confirmation.obsolete_before_output(Some(1)));
+    assert!(!generic.obsolete_before_output(Some(1)));
+    assert!(reply.phone_authenticated());
+    assert_eq!(calls.retire(&source), Some(reply));
+    assert!(!confirmation.current() && !generic.current());
+}
+
+#[test]
+fn login_prompt_queue_failure_and_stale_completion_leave_the_current_field_clock_intact() {
+    use rpt_advanced_core::messages::PhoneAuthenticationPrompt::{Password, Retry};
+
+    struct Sample;
+    impl PcmStreamReader for Sample {
+        fn render(&mut self, output: &mut [f32]) -> PcmRead {
+            output[0] = 0.25;
+            PcmRead::FinalSamples(1)
+        }
     }
-    let Some(LoginField::Submitted(number,pin))=calls.login_digit(&source,&reply,'#',125,100).unwrap() else{
+
+    let mut calls = PhoneCalls::new(1, 1).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let digit = |symbol, received, revision| Digit {
+        symbol,
+        received,
+        revision,
+    };
+    let timeout = 100;
+    calls
+        .login_digit(&source, &reply, digit('4', 10, 1), timeout)
+        .unwrap();
+    assert!(matches!(
+        calls.login_digit(&source, &reply, digit('#', 15, 2), timeout),
+        Ok(Some(LoginField::Password))
+    ));
+    calls.queue_reply(&source, &reply, media()).unwrap();
+    assert_eq!(
+        calls.queue_login_prompt(&source, &reply, Box::new(Sample), Password),
+        Err(Error::Allocation)
+    );
+    calls.take_reply(&source, &reply).unwrap().unwrap();
+    assert!(
+        calls
+            .expired_login_fields(114, |_| Some(timeout))
+            .is_empty()
+    );
+    assert_eq!(calls.expired_login_fields(115, |_| Some(timeout)).len(), 1);
+
+    // An untouched retry cannot overtake the subsequent mailbox terminator.
+    calls
+        .queue_login_prompt(&source, &reply, Box::new(Sample), Retry)
+        .unwrap();
+    let stale = calls.take_reply(&source, &reply).unwrap().unwrap();
+    calls
+        .login_digit(&source, &reply, digit('4', 124, 3), timeout)
+        .unwrap();
+    assert!(matches!(
+        calls.login_digit(&source, &reply, digit('#', 129, 4), timeout),
+        Ok(Some(LoginField::Password))
+    ));
+    assert!(stale.obsolete_before_output(Some(4)));
+
+    calls
+        .queue_login_prompt(&source, &reply, Box::new(Sample), Password)
+        .unwrap();
+    let mut password = calls.take_reply(&source, &reply).unwrap().unwrap();
+    assert_eq!(password.render(false, &mut [0.0]), 1);
+    assert_eq!(password.outcome(), PlaybackOutcome::Succeeded);
+    // The next native digit arrived but its control turn has not happened.
+    password.played_login_prompt(170, Some(5));
+    assert!(
+        calls
+            .expired_login_fields(270, |_| Some(timeout))
+            .is_empty()
+    );
+    calls
+        .login_digit(&source, &reply, digit('1', 160, 5), timeout)
+        .unwrap();
+    assert!(
+        calls
+            .expired_login_fields(259, |_| Some(timeout))
+            .is_empty()
+    );
+    assert_eq!(calls.expired_login_fields(260, |_| Some(timeout)).len(), 1);
+
+    calls
+        .queue_login_prompt(&source, &reply, Box::new(Sample), Retry)
+        .unwrap();
+    let mut retry = calls.take_reply(&source, &reply).unwrap().unwrap();
+    assert_eq!(retry.render(false, &mut [0.0]), 1);
+    retry.played_login_prompt(280, Some(5));
+    assert!(
+        calls
+            .expired_login_fields(379, |_| Some(timeout))
+            .is_empty()
+    );
+    assert_eq!(calls.expired_login_fields(380, |_| Some(timeout)).len(), 1);
+}
+
+#[test]
+fn half_entered_private_pin_expires_without_a_later_digit_and_cannot_complete_the_next_login() {
+    let mut calls = PhoneCalls::new(1, 2).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    assert!(
+        calls
+            .login_digit(
+                &source,
+                &reply,
+                Digit {
+                    symbol: '4',
+                    received: 10,
+                    revision: 10
+                },
+                100
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        calls
+            .login_digit(
+                &source,
+                &reply,
+                Digit {
+                    symbol: '#',
+                    received: 15,
+                    revision: 15
+                },
+                100
+            )
+            .unwrap(),
+        Some(LoginField::Password)
+    ));
+    assert!(calls.expired_login_fields(114, |_| Some(100)).is_empty());
+    assert_eq!(
+        calls.expired_login_fields(115, |_| Some(100)),
+        vec![(source.clone(), reply.clone())]
+    );
+    assert!(calls.expired_login_fields(116, |_| Some(100)).is_empty());
+    for (i, digit) in "8#12".chars().enumerate() {
+        let field = calls
+            .login_digit(
+                &source,
+                &reply,
+                Digit {
+                    symbol: digit,
+                    received: 120 + i as u64,
+                    revision: 120 + i as u64,
+                },
+                100,
+            )
+            .unwrap();
+        if digit == '#' {
+            assert!(matches!(field, Some(LoginField::Password)));
+        } else {
+            assert!(field.is_none());
+        }
+    }
+    let Some(LoginField::Submitted(number, pin)) = calls
+        .login_digit(
+            &source,
+            &reply,
+            Digit {
+                symbol: '#',
+                received: 125,
+                revision: 125,
+            },
+            100,
+        )
+        .unwrap()
+    else {
         panic!("a fresh mailbox and PIN must complete on their own terminators")
     };
-    assert_eq!(number,"8");assert_eq!(pin.as_str(),"12");
-    assert!(calls.expired_login_fields(400,|_|Some(100)).is_empty());
+    assert_eq!(number, "8");
+    assert_eq!(pin.as_str(), "12");
+    assert!(calls.expired_login_fields(400, |_| Some(100)).is_empty());
 }

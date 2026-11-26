@@ -43,6 +43,14 @@ pub enum Target {
     Credentials(Kind),
     /// Request identified by service boot and client request UUIDs.
     Operation,
+    /// Paged live protocol peers on the port.
+    Peers,
+    /// Paged private call lifecycles on the port.
+    Calls,
+    /// Port maintenance lease inventory for this boot.
+    Maintenance,
+    /// Conditional, connection-bound tuning lease.
+    MaintenanceLease,
     /// Read-only operation inventory.
     Operations,
     /// Read-only change inventory.
@@ -96,7 +104,7 @@ impl Route {
         let methods = match (view, target) {
             (Some(View::Effective | View::Status), _) => READ,
             (_, Target::Collection(_)) => COLLECTION,
-            (_, Target::Member(_)) => MEMBER,
+            (_, Target::Member(_) | Target::MaintenanceLease) => MEMBER,
             (_, Target::Metadata) if path.contains("{port}") => MEMBER,
             (
                 _,
@@ -138,7 +146,7 @@ impl Route {
                 "{port}" => params.port = Some(canonical_id(segment)?),
                 "{member}" => params.member = Some(canonical_id(segment)?),
                 "{boot}" => params.boot = Some(canonical_id(segment)?),
-                "{request}" => params.request = Some(canonical_id(segment)?),
+                "{request}" | "{lease}" => params.request = Some(canonical_id(segment)?),
                 "{name}"
                     if !segment.is_empty()
                         && segment
@@ -202,7 +210,7 @@ impl Parameters<'_> {
             Target::Credentials(kind) => kind,
             _ => return false,
         };
-        if route.view == Some(View::Effective) && kind.is_named() {
+        if inherits_members(route.view, kind) && kind.is_named() {
             members(registry, scope, kind, route.view).contains(&member)
         } else {
             registry
@@ -210,6 +218,15 @@ impl Parameters<'_> {
                 .is_some_and(|binding| binding.scope == scope && binding.kind == kind)
         }
     }
+}
+
+fn inherits_members(view: Option<View>, kind: Kind) -> bool {
+    view == Some(View::Effective)
+        || (view == Some(View::Status)
+            && matches!(
+                kind,
+                Kind::Event | Kind::Sensor | Kind::Input | Kind::Alarm | Kind::Output | Kind::Fan
+            ))
 }
 
 /// Return a complete ordered inventory. A port's effective named collection exposes
@@ -234,7 +251,7 @@ pub fn members(
         .members()
         .iter()
         .filter(|(b, _)| b.kind == kind && b.scope == scope);
-    if view != Some(View::Effective) || matches!(scope, ResourceScope::Site(_)) {
+    if !inherits_members(view, kind) || matches!(scope, ResourceScope::Site(_)) {
         return local.map(|(b, _)| b.id).collect();
     }
     let replacements: BTreeMap<_, _> = local.clone().map(|(b, k)| (k, b.id)).collect();
@@ -265,6 +282,16 @@ pub fn inventory() -> BTreeMap<String, Route> {
     for (path, target, profile) in [
         ("/", Target::Navigation, "api"),
         ("/operations/", Target::Operations, "operations"),
+        (
+            "/maintenance/ports/{port}/",
+            Target::Maintenance,
+            "maintenance",
+        ),
+        (
+            "/maintenance/ports/{port}/{boot}/{lease}/",
+            Target::MaintenanceLease,
+            "maintenance-lease",
+        ),
         (
             "/operations/{boot}/{request}/",
             Target::Operation,
@@ -300,6 +327,10 @@ pub fn inventory() -> BTreeMap<String, Route> {
         );
         for (owner, site) in [("site/", true), ("ports/{port}/", false)] {
             let base = format!("{root}{owner}");
+            if !site && view == View::Status {
+                add(&format!("{base}peers/"), Some(view), Target::Peers, "peers");
+                add(&format!("{base}calls/"), Some(view), Target::Calls, "calls");
+            }
             let protocol = if site {
                 "protocol-defaults"
             } else {

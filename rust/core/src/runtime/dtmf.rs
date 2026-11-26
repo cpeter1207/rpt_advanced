@@ -339,8 +339,28 @@ impl AdminCodes {
     }
 }
 
+/// A symbol received while its collector awaits directory verification.
+pub struct HeldDigit {
+    /// Original symbol or unkey with the transport's monotonic receipt time.
+    pub event: DigitEvent,
+    /// Original mute epoch for an idle digit that remains eligible for regeneration.
+    pub regeneration: Option<crate::link::RegenerationOrigin>,
+}
+impl Drop for HeldDigit {
+    fn drop(&mut self) {
+        if let DigitEvent::Digit { digit, .. } = &mut self.event {
+            zeroize::Zeroize::zeroize(digit);
+        }
+    }
+}
+struct SelectionInput {
+    owner: std::sync::Weak<()>,
+    buffered: Vec<HeldDigit>,
+}
+
 /// Serialized command collection; authorization/peer availability stays with link control.
 pub struct DtmfCommands {
+    selection: Option<SelectionInput>,
     mapped: Option<MappedCollector>,
     map: DtmfCommandMap,
     collector: CommandCollector,
@@ -361,6 +381,58 @@ pub struct DtmfCommands {
     macro_stopped: bool,
 }
 impl DtmfCommands {
+    pub(super) fn begin_selection(&mut self) -> Option<Arc<()>> {
+        if self.waiting_selection() {
+            return None;
+        }
+        let ticket = Arc::new(());
+        self.selection = Some(SelectionInput {
+            owner: Arc::downgrade(&ticket),
+            buffered: Vec::new(),
+        });
+        Some(ticket)
+    }
+    fn waiting_selection(&self) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|s| s.owner.strong_count() != 0)
+    }
+    pub(super) fn owns_selection(&self, ticket: &Arc<()>) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|s| std::ptr::eq(s.owner.as_ptr(), Arc::as_ptr(ticket)))
+    }
+    pub(super) fn finish_selection(&mut self, ticket: &Arc<()>) -> Option<Vec<HeldDigit>> {
+        self.owns_selection(ticket)
+            .then(|| self.selection.take().unwrap().buffered)
+    }
+    pub(super) fn hold_selection_input(
+        &mut self,
+        event: DigitEvent,
+        regeneration: Option<crate::link::RegenerationOrigin>,
+    ) -> bool {
+        if !self.waiting_selection() {
+            self.selection = None;
+            return false;
+        }
+        let pending = self.selection.as_mut().unwrap();
+        // Reserve once before storing any digit so reallocations cannot leave old symbols behind.
+        const MAX_HELD: usize = 256;
+        if event == DigitEvent::Lost
+            || pending.buffered.len() >= MAX_HELD
+            || (pending.buffered.capacity() == 0
+                && pending.buffered.try_reserve_exact(MAX_HELD).is_err())
+        {
+            self.selection = None;
+            self.feed(DigitEvent::Lost);
+        } else {
+            pending.buffered.push(HeldDigit {
+                event,
+                regeneration,
+            });
+        }
+        true
+    }
     /// Create independent collection and authorization state with the same resolved policy.
     pub(super) fn for_source(&self) -> Self {
         let mut commands = Self::new(self.map.clone());
@@ -381,6 +453,7 @@ impl DtmfCommands {
     pub fn new(map: DtmfCommandMap) -> Self {
         let collector = map.collector();
         Self {
+            selection: None,
             mapped: None,
             map,
             collector,
@@ -403,6 +476,7 @@ impl DtmfCommands {
     }
     pub(super) fn install_profile(&mut self, profile: Arc<CommandProfile>, generation: u64) {
         self.cancel_macro();
+        self.selection = None;
         self.mapped = Some(MappedCollector::new(profile, generation));
     }
     pub(super) fn profile(&self) -> Option<&Arc<CommandProfile>> {
@@ -449,6 +523,7 @@ impl DtmfCommands {
         self.radio_present
     }
     /// Borrow the final remapped command namespace during candidate preparation.
+    #[cfg(test)]
     pub(crate) fn command_map(&self) -> &DtmfCommandMap {
         &self.map
     }
@@ -633,6 +708,9 @@ impl DtmfCommands {
     }
     /// Interpret copied events on control. Call `Lost` also after control submission rejection.
     pub fn feed(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
+        if event == DigitEvent::Lost {
+            self.selection = None;
+        }
         if self.mapped.is_some() && self.pad.is_none() && self.remote.is_empty() {
             let grant = self.admin_unlocked(match event {
                 DigitEvent::Digit { now_ms, .. } | DigitEvent::Unkey { now_ms } => now_ms,
@@ -841,7 +919,8 @@ impl DtmfCommands {
 
     /// Preserve commands, selected/remembered destinations, and live administrative grants.
     pub(super) fn retains_state(&self, now_ms: u64) -> bool {
-        self.mapped.as_ref().is_some_and(MappedCollector::pending)
+        self.waiting_selection()
+            || self.mapped.as_ref().is_some_and(MappedCollector::pending)
             || self.collector.active()
             || self.active_macro.is_some()
             || self
@@ -854,7 +933,9 @@ impl DtmfCommands {
             || now_ms < self.admin_until_ms.load(Ordering::Acquire)
     }
     pub(super) fn collecting_input(&self) -> bool {
-        self.mapped.as_ref().map_or_else(||self.collector.active(), MappedCollector::active)
+        self.mapped
+            .as_ref()
+            .map_or_else(|| self.collector.active(), MappedCollector::active)
     }
     pub(super) fn remote_collecting(&self) -> bool {
         self.mapped
@@ -864,6 +945,9 @@ impl DtmfCommands {
     }
     /// Expire only this origin's pending command, without ending remote selection.
     pub(super) fn expire(&mut self, now_ms: u64) -> Option<DigitOutcome> {
+        if self.waiting_selection() {
+            return None;
+        }
         if self.mapped.as_ref().is_some_and(MappedCollector::active) {
             return self.feed(DigitEvent::Digit {
                 digit: '\0',

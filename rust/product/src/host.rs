@@ -12,23 +12,22 @@ use crate::{
     },
     phone::{PhoneCalls, PrivatePhoneReply},
     services::{HostServices, PeerIo, ProcessedPeer},
-    status_post::{PostConfig, StatusPostService},
+    status_post::StatusPostService,
     worker::{Audio, AudioOwners, LocalRingUpdate, PrepareFailure, RadioWorker},
 };
 use rpt_advanced_core::{
     audio::LinkAudioQueue,
-    config::{
-        ConfigDocument, LinkLookupMethod, NodeId, ResolvedNodeSettings, ResolvedSpeechSettings,
-    },
+    config::ResolvedNodeSettings,
     link::{
         AudioPeer, GroupMemberSelection, HumanMessage, LinkAudio, LinkAudioStatus, LocalTextInput,
         Mode, PeerIdentity, PeerReply, PhoneCallId, PhoneSource, ProtocolId, TextAudience,
         TextOrigin,
     },
     media::SpeechSource,
+    messages::OperationResult,
     runtime::{
-        DeviceHandoff, GenerationSettings, PreparedAdapter, Runtime, RuntimeClock, RuntimeError,
-        dtmf::DigitOutcome, links::LinkEffect,
+        DeviceHandoff, GenerationSettings, GenerationWork, PreparedAdapter, Runtime, RuntimeClock,
+        RuntimeError, dtmf::DigitOutcome, links::LinkEffect,
     },
 };
 use std::{
@@ -41,17 +40,20 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-#[path = "host_modular.rs"]
-mod modular;
-#[cfg(target_os = "linux")]
 #[path = "host_asl.rs"]
 pub(crate) mod asl;
 #[cfg(target_os = "linux")]
 #[path = "host_echo.rs"]
 mod echo;
 #[cfg(target_os = "linux")]
+#[path = "host_modular.rs"]
+mod modular;
+#[cfg(target_os = "linux")]
 #[path = "host_native.rs"]
 mod native;
+#[cfg(target_os = "linux")]
+#[path = "host_status.rs"]
+pub(crate) mod status;
 #[cfg(target_os = "linux")]
 pub(crate) use native::RadioTicket;
 pub(crate) use site::SiteBasis;
@@ -62,9 +64,15 @@ mod phone_auth;
 #[path = "host_phone_dial.rs"]
 mod phone_dial;
 #[cfg(target_os = "linux")]
-pub(crate) use phone_dial::OutboundPhone;
+#[path = "host_phone_progress.rs"]
+mod phone_progress;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use phone_progress::fixture_cut_progress;
 #[path = "host_remote.rs"]
 mod remote;
+#[cfg(target_os = "linux")]
+#[path = "host_selection.rs"]
+pub(crate) mod selection;
 
 /// Maximum supported hardware voice frame, prepared before worker entry.
 pub const MAXIMUM_FRAMES: usize = 4096;
@@ -72,7 +80,11 @@ pub const MAXIMUM_FRAMES: usize = 4096;
 #[path = "host_site.rs"]
 mod site;
 
+#[path = "host_maintenance.rs"]
+mod maintenance;
+
 struct Lease {
+    maintenance: Option<Arc<crate::management::maintenance::Grant>>,
     #[cfg(target_os = "linux")]
     binding: native::LeaseBindings,
     quiesced: bool,
@@ -85,6 +97,12 @@ struct Lease {
 impl Lease {
     fn quiesce(&mut self) -> bool {
         self.quiescing = true;
+        if let Some(grant) = &self.maintenance {
+            grant.revoke();
+        }
+        if self.clear_manual().is_err() {
+            return false;
+        }
         if self
             .worker
             .as_mut()
@@ -240,16 +258,13 @@ impl Device {
         #[cfg(target_os = "linux")]
         let radio = match (previous, &lease.binding.active, &lease.binding.next) {
             (true, Some(plan), _) | (false, _, Some(plan)) => plan.open_radio(maximum),
-            (_, None, None) => self
-                .services
-                .radio(&settings.node, &settings.device, maximum),
+            (_, None, None) => return false,
             _ => return false,
         };
         #[cfg(not(target_os = "linux"))]
         let radio = {
             let _ = previous;
-            self.services
-                .radio(&settings.node, &settings.device, maximum)
+            Err::<crate::services::Radio, _>(crate::Error::Reservation)
         };
         let Ok(radio) = radio else {
             return false;
@@ -281,11 +296,13 @@ impl Device {
 
 /// Dispatcher lifetime and endpoint-redirection acknowledgments for one audio generation.
 pub struct GenerationControl {
+    #[cfg(target_os = "linux")]
+    progress: Vec<phone_progress::Redirect>,
     text_origins: Vec<(String, TextOrigin)>,
     dispatcher: PreparedDispatch,
     status: LinkAudioStatus,
     redirects: Vec<(u64, PeerCommand)>,
-    phones:Vec<crate::link::private_radio::Redirect>,
+    phones: Vec<crate::link::private_radio::Redirect>,
     awaiting: Vec<(u64, crate::link::ring::InboundObserver)>,
     local_update: Option<LocalRingUpdate>,
     awaiting_local: bool,
@@ -312,6 +329,20 @@ struct PeerOwner {
     control: PeerControl,
 }
 
+/// Own one dial's outcomes until its exact peer ingress is acknowledged or torn down.
+#[derive(Default)]
+pub(crate) struct PendingLinkDial {
+    #[cfg(target_os = "linux")]
+    pub(crate) asl: Option<status::PendingAslDial>,
+    pub(crate) phone: Option<PhoneLinkReply>,
+}
+
+pub(crate) struct PhoneLinkReply {
+    pub(crate) reply: PeerReply,
+    pub(crate) generation: Arc<GenerationWork>,
+    pub(crate) report_failure: bool,
+}
+
 /// Product runtime; every method is invoked by the selected serialized control executor.
 pub struct Host {
     reload_text: Option<TextExecutor>,
@@ -319,6 +350,8 @@ pub struct Host {
     activated_revision: u64,
     #[cfg(target_os = "linux")]
     radio_preparation: native::RadioPreparation,
+    #[cfg(target_os = "linux")]
+    target_selections: Vec<selection::Pending>,
     remote_pending: Vec<remote::Pending>,
     text: TextExecutor,
     text_notice_after_ms: u64,
@@ -334,13 +367,21 @@ pub struct Host {
     phone_calls: PhoneCalls,
     phone_accounts: crate::phone::accounts::Participant,
     #[cfg(target_os = "linux")]
-    phone_dials: Vec<phone_dial::Pending>,
+    phone_dials: std::collections::VecDeque<phone_dial::Pending>,
+    #[cfg(target_os = "linux")]
+    phone_failures: std::collections::VecDeque<phone_dial::Failure>,
     #[cfg(target_os = "linux")]
     asl: asl::Participant,
     #[cfg(target_os = "linux")]
     echo: echo::Participant,
     operations: Vec<(String, DigitOutcome)>,
     status_post: StatusPostService,
+    #[cfg(target_os = "linux")]
+    handoff_status: std::collections::BTreeMap<
+        rpt_advanced_core::config::resources::candidate::ResourceId,
+        status::Handoff,
+    >,
+    pending_link_dials: std::collections::BTreeMap<u64, PendingLinkDial>,
     site_acquisition: crate::site::acquisition::Acquisition,
     site_radio: crate::site::radio::RadioSite,
     site_transition: Option<site::Transition>,
@@ -351,7 +392,6 @@ pub struct Host {
 
 #[derive(Clone, Copy)]
 enum StationAudio<'a> {
-    Document(&'a str),
     #[cfg(target_os = "linux")]
     Modular(&'a native::RadioPlan),
 }
@@ -366,14 +406,6 @@ fn prepared(
     source: StationAudio<'_>,
 ) -> Result<PreparedAdapter<Audio, GenerationControl>, RuntimeError> {
     let remote_commands = match source {
-        StationAudio::Document(text) => crate::configuration::radio::ResolvedRadio::resolve(
-            text,
-            local,
-            None,
-            std::ptr::null_mut(),
-        )
-        .and_then(|configuration| configuration.remote_commands())
-        .map_err(|_| RuntimeError::Preparation)?,
         #[cfg(target_os = "linux")]
         StationAudio::Modular(plan) => plan
             .station
@@ -391,7 +423,7 @@ fn prepared(
     let mut redirects = Vec::new();
     let mut awaiting = Vec::new();
     let mut wakes = Vec::new();
-    let (peers,phone_calls)=connections;
+    let (peers, phone_calls) = connections;
     for peer in peers.iter().filter(|peer| peer.local == local) {
         let snapshot = peer
             .control
@@ -414,12 +446,6 @@ fn prepared(
         )
         .map_err(|_| RuntimeError::Preparation)?;
         let input = match source {
-            StationAudio::Document(text) => ProcessedPeer::new(
-                input,
-                services
-                    .prepare_peer_processing(text, local, MAXIMUM_FRAMES)
-                    .map_err(|_| RuntimeError::Preparation)?,
-            ),
             #[cfg(target_os = "linux")]
             StationAudio::Modular(plan) if plan.process_incoming => {
                 let graph = plan
@@ -429,7 +455,7 @@ fn prepared(
                 ProcessedPeer::modular(input, graph, MAXIMUM_FRAMES)
             }
             #[cfg(target_os = "linux")]
-            StationAudio::Modular(_) => ProcessedPeer::new(input, None),
+            StationAudio::Modular(_) => ProcessedPeer::new(input),
         };
         let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
@@ -458,41 +484,88 @@ fn prepared(
             },
         ));
     }
-    let mut phones=Vec::new();
+    let mut phones = Vec::new();
     #[cfg(target_os = "linux")]
-    for (caller,activity,control) in phone_calls.into_iter().flat_map(|calls|calls.audio_routes(local)){
-        let StationAudio::Modular(plan)=source else {continue;};
-        let Some(policy)=plan.phone.as_ref().filter(|p| p.account.to_string()==caller.account().as_str()) else {continue;};
-        let settings=&policy.settings;
+    for (caller, activity, control) in phone_calls
+        .into_iter()
+        .flat_map(|calls| calls.audio_routes(local))
+    {
+        let StationAudio::Modular(plan) = source;
+        let Some(policy) = plan
+            .phone
+            .as_ref()
+            .filter(|p| p.account.to_string() == caller.account().as_str())
+        else {
+            continue;
+        };
+        let settings = &policy.settings;
+        use crate::link::{
+            private_radio::{Radio, Redirect},
+            ring::InboundPolicy,
+        };
         use rpt_advanced_core::config::resources::profiles::PhonePlayoutDestination;
-        use crate::link::{ring::InboundPolicy,private_radio::{Radio,Redirect}};
-        let reply=activity.reply_target();
-        let (inbound,input)=InboundRing::redirected(control.rate,InboundPolicy::Phone,&reply)
-            .map_err(|_|RuntimeError::Preparation)?;
-        let bound=u64::from(settings.timing.maximum_latency_ms).checked_mul(48)
-            .and_then(|samples|usize::try_from(samples).ok()).ok_or(RuntimeError::Preparation)?;
-        let (output,outbound)=LinkAudioQueue::new(bound,64).map_err(|_|RuntimeError::Preparation)?.into_endpoints();
-        let mode=Mode::phone(settings.playout_destination==PhonePlayoutDestination::LocalAndLinks);
-        audio.push(AudioPeer::for_phone(caller,&reply,mode,ProcessedPeer::new(input,None),output,MAXIMUM_FRAMES)
-            .map_err(|_|RuntimeError::Preparation)?.with_phone_policy(settings.isolate_peers,policy.hold_isolation,Arc::clone(&policy.confirmed)));
-        let radio=Radio::new(inbound,outbound,Arc::clone(activity),settings.vad,settings.timing,Arc::clone(&policy.confirmed))
-            .map_err(|_|RuntimeError::Preparation)?;
+        let reply = activity.reply_target();
+        let (inbound, input) = InboundRing::redirected(control.rate, InboundPolicy::Phone, &reply)
+            .map_err(|_| RuntimeError::Preparation)?;
+        let bound = u64::from(settings.timing.maximum_latency_ms)
+            .checked_mul(48)
+            .and_then(|samples| usize::try_from(samples).ok())
+            .ok_or(RuntimeError::Preparation)?;
+        let (output, outbound) = LinkAudioQueue::new(bound, 64)
+            .map_err(|_| RuntimeError::Preparation)?
+            .into_endpoints();
+        let mode =
+            Mode::phone(settings.playout_destination == PhonePlayoutDestination::LocalAndLinks);
+        audio.push(
+            AudioPeer::for_phone(
+                caller,
+                &reply,
+                mode,
+                ProcessedPeer::new(input),
+                output,
+                MAXIMUM_FRAMES,
+            )
+            .map_err(|_| RuntimeError::Preparation)?
+            .with_phone_policy(
+                settings.isolate_peers,
+                policy.hold_isolation,
+                Arc::clone(&policy.confirmed),
+            ),
+        );
+        let radio = Radio::new(
+            inbound,
+            outbound,
+            Arc::clone(activity),
+            settings.vad,
+            settings.timing,
+            Arc::clone(&policy.confirmed),
+        )
+        .map_err(|_| RuntimeError::Preparation)?;
         wakes.push(control.wake.clone());
-        phones.push(Redirect::new(reply,control,radio));
+        phones.push(Redirect::new(reply, control, radio));
     }
     let (mut audio, dispatcher) =
         LinkAudio::new(audio, MAXIMUM_FRAMES).map_err(|_| RuntimeError::Preparation)?;
     #[cfg(target_os = "linux")]
     let mut dispatcher = dispatcher;
     #[cfg(target_os = "linux")]
-    if let StationAudio::Modular(plan) = source {
+    {
+        let StationAudio::Modular(plan) = source;
         audio = audio.with_media_isolation(&mut dispatcher, Arc::clone(&plan.media_isolation));
     }
-    audio = audio.with_text(Box::new(TextMix(text_readers)));
+    #[cfg(target_os = "linux")]
+    let (progress_readers, progress) = match source {
+        StationAudio::Modular(plan) => plan.progress.prepare()?,
+    };
+    audio = audio.with_text(Box::new(TextMix {
+        text: text_readers,
+        #[cfg(target_os = "linux")]
+        progress: progress_readers,
+    }));
     let regeneration = if settings.dtmf_regeneration.enabled {
         let (writer, reader) =
             InboundRing::regeneration().map_err(|_| RuntimeError::Preparation)?;
-        audio = audio.with_regeneration(ProcessedPeer::new(reader, None));
+        audio = audio.with_regeneration(ProcessedPeer::new(reader));
         Some((settings.dtmf_regeneration, writer, MAXIMUM_FRAMES))
     } else {
         None
@@ -505,6 +578,8 @@ fn prepared(
         remote_commands,
         state: audio,
         control: GenerationControl {
+            #[cfg(target_os = "linux")]
+            progress,
             text_origins,
             dispatcher,
             status,
@@ -519,11 +594,19 @@ fn prepared(
     })
 }
 
-struct TextMix(Vec<TextReader>);
+struct TextMix {
+    text: Vec<TextReader>,
+    #[cfg(target_os = "linux")]
+    progress: Vec<phone_progress::Reader>,
+}
 impl LocalTextInput for TextMix {
     fn render(&mut self, pcm: &mut [f32]) -> bool {
         let mut active = false;
-        for reader in &mut self.0 {
+        #[cfg(target_os = "linux")]
+        for reader in &mut self.progress {
+            active |= reader.render(pcm);
+        }
+        for reader in &mut self.text {
             active |= reader.render(pcm);
         }
         active
@@ -568,79 +651,10 @@ fn media_worker<'a>(
 }
 
 impl Host {
-    /// Resolve the live generation on control, never exposing a handle to the caller.
-    pub(crate) fn radio_control(
-        &mut self,
-        local: &str,
-        mut request: crate::abi::rptadv_radio_control_v1,
-    ) -> Result<crate::radio_control::Reply, i32> {
-        if self.runtime.node(local).is_none() {
-            return Err(-4);
-        }
-        let (_, lease) = self
-            .leases
-            .iter()
-            .rev()
-            .find(|(name, _)| name == local)
-            .ok_or(-7)?;
-        let mut lease = lease.lock().unwrap_or_else(|error| error.into_inner());
-        if lease.quiesced {
-            return Err(-7);
-        }
-        let text = lease.worker.as_mut().ok_or(-7)?.maintenance(&mut request)?;
-        Ok(crate::radio_control::Reply { request, text })
-    }
-
     fn prune_leases(&mut self) {
         prune_leases(&mut self.leases);
         self.media_workers
             .retain(|(local, _)| self.runtime.node(local).is_some());
-    }
-    /// Prepare and activate inactive callback contexts before publishing fixed registrations.
-    pub fn start(
-        document: ConfigDocument,
-        media: NativeMediaPreparer,
-        services: HostServices,
-        epoch: Instant,
-        clock: RuntimeClock,
-    ) -> Result<Self, RuntimeError> {
-        let mut host = Self::with_capacity(media, services, epoch, document.nodes().len().max(1))?;
-        host.runtime.reload(
-            document,
-            &host.media,
-            |name, settings| {
-                prepared(
-                    name,
-                    settings,
-                    (&[],None),
-                    media_worker(&mut host.media_workers, name)?,
-                    &mut host.text,
-                    services,
-                    StationAudio::Document(&settings.radio.processing_configuration),
-                )
-            },
-            |name, _| {
-                let lease = Arc::new(Mutex::new(Lease {
-                    #[cfg(target_os = "linux")]
-                    binding: Default::default(),
-                    quiesced: false,
-                    quiescing: false,
-                    owners: None,
-                    worker: None,
-                    epoch,
-                    status: crate::worker::RadioStatus::with_epoch(epoch),
-                }));
-                host.leases.push((name.to_owned(), Arc::clone(&lease)));
-                Ok(Box::new(Device {
-                    name: name.to_owned(),
-                    lease,
-                    services,
-                }))
-            },
-            clock,
-        )?;
-        host.advance_reload(clock)?;
-        Ok(host)
     }
     /// Start control, private-call and media owners with no selected station generation.
     #[cfg(target_os = "linux")]
@@ -668,6 +682,8 @@ impl Host {
             activated_revision: 0,
             #[cfg(target_os = "linux")]
             radio_preparation: Default::default(),
+            #[cfg(target_os = "linux")]
+            target_selections: Vec::new(),
             remote_pending: Vec::new(),
             text,
             text_notice_after_ms: 0,
@@ -681,13 +697,18 @@ impl Host {
             phone_calls,
             phone_accounts: Default::default(),
             #[cfg(target_os = "linux")]
-            phone_dials: Vec::new(),
+            phone_dials: std::collections::VecDeque::new(),
+            #[cfg(target_os = "linux")]
+            phone_failures: std::collections::VecDeque::new(),
             #[cfg(target_os = "linux")]
             asl: Default::default(),
             #[cfg(target_os = "linux")]
             echo: Default::default(),
             operations: Vec::new(),
             status_post: StatusPostService::default(),
+            #[cfg(target_os = "linux")]
+            handoff_status: Default::default(),
+            pending_link_dials: Default::default(),
             site_acquisition: Default::default(),
             site_delivery: Default::default(),
             site_radio: Default::default(),
@@ -719,6 +740,10 @@ impl Host {
                     .runtime
                     .adapter_control_mut(&local, generation)
                     .expect("active generation retains its adapter control");
+                #[cfg(target_os = "linux")]
+                for redirect in control.progress.drain(..) {
+                    redirect.activate();
+                }
                 control.dispatcher.bind_clock(clock);
                 control.dispatcher.activate();
                 bind_text_origins(&local, control, &self.peers, &self.text);
@@ -773,95 +798,9 @@ impl Host {
     }
     /// Admission/queue loss invalidates every partial collector before subsequent queued digits.
     pub fn lost_digits(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.cancel_target_selections();
         self.runtime.discard_digits();
-    }
-    /// Resolve and atomically replace configuration; failed preparation retains live leases.
-    pub fn reload(
-        &mut self,
-        document: ConfigDocument,
-        clock: RuntimeClock,
-    ) -> Result<(), RuntimeError> {
-        if self.runtime.reload_pending() {
-            return Err(RuntimeError::Busy);
-        }
-        self.reload_failure = None;
-        let mut text = TextExecutor::prepare(document.nodes().len().max(1), self.media.clone())
-            .map_err(|_| RuntimeError::Preparation)?;
-        let local_delays: Vec<_> = self
-            .leases
-            .iter()
-            .filter_map(|(name, lease)| {
-                let lease = lease.lock().unwrap_or_else(|error| error.into_inner());
-                lease.worker.as_ref().map(|worker| {
-                    (
-                        name.clone(),
-                        worker.squelch_delay_ms(),
-                        worker.minimum_delay_ms(),
-                    )
-                })
-            })
-            .collect();
-        let peers = &self.peers;
-        let media_workers = &mut self.media_workers;
-        let leases = &mut self.leases;
-        let epoch = self.epoch;
-        let services = self.services;
-        let result = self.runtime.reload(
-            document,
-            &self.media,
-            |name, settings| {
-                let mut candidate = prepared(
-                    name,
-                    settings,
-                    (peers,Some(&self.phone_calls)),
-                    media_worker(media_workers, name)?,
-                    &mut text,
-                    services,
-                    StationAudio::Document(&settings.radio.processing_configuration),
-                )?;
-                if let Some((_, delay, minimum)) = local_delays
-                    .iter()
-                    .rev()
-                    .find(|(local, _, _)| local == name)
-                {
-                    let target = settings.squelch_delay_ms.max(*minimum);
-                    if *delay != target {
-                        candidate.control.local_update = Some(
-                            LocalRingUpdate::prepare(target)
-                                .map_err(|_| RuntimeError::Preparation)?,
-                        );
-                        candidate.control.awaiting_local = true;
-                    }
-                }
-                Ok(candidate)
-            },
-            |name, _| {
-                let lease = Arc::new(Mutex::new(Lease {
-                    #[cfg(target_os = "linux")]
-                    binding: Default::default(),
-                    quiesced: false,
-                    quiescing: false,
-                    owners: None,
-                    worker: None,
-                    epoch,
-                    status: crate::worker::RadioStatus::with_epoch(epoch),
-                }));
-                leases.push((name.to_owned(), Arc::clone(&lease)));
-                Ok(Box::new(Device {
-                    name: name.to_owned(),
-                    lease,
-                    services,
-                }))
-            },
-            clock,
-        );
-        if let Err(error) = result {
-            self.prune_leases();
-            return Err(error);
-        }
-        self.reload_text = Some(text);
-        self.advance_reload(clock)?;
-        self.pump(clock)
     }
     fn advance_reload(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
         #[cfg(target_os = "linux")]
@@ -894,13 +833,7 @@ impl Host {
         #[cfg(target_os = "linux")]
         self.publish_physical_plans();
         self.activated_revision = self.runtime.revision();
-        if self.runtime.modular_configuration().is_none() {
-            self.retire_phones();
-        }
         self.activate_dispatchers(clock.now_ms);
-        if self.runtime.modular_configuration().is_none() {
-            self.configure_status_posts(clock.now_ms);
-        }
         self.attach_workers();
         let effects = self.runtime.take_effects();
         for (local, effect) in effects {
@@ -941,14 +874,15 @@ impl Host {
         remote: &str,
         source: Option<&str>,
     ) -> Result<String, RuntimeError> {
-        let settings = self
-            .runtime
+        self.runtime
             .settings(local)
             .ok_or(RuntimeError::MissingNode)?;
         let identity = PeerIdentity::from_operator(remote).map_err(|_| RuntimeError::Rejected)?;
         if identity.protocol() == ProtocolId::EchoLink {
             #[cfg(target_os = "linux")]
-            if self.runtime.modular_configuration().is_some() && !self.echo.accepts(local) { return Err(RuntimeError::Rejected); }
+            if self.runtime.modular_configuration().is_some() && !self.echo.accepts(local) {
+                return Err(RuntimeError::Rejected);
+            }
             return if source.is_none() {
                 Ok(format!(
                     "EchoLink/{}",
@@ -958,30 +892,14 @@ impl Host {
                 Err(RuntimeError::Rejected)
             };
         }
-        // The compatibility transport accepts a destination string and has no
-        // managed authority proof. Managed numeric callers use the ASL participant.
-        if self.runtime.modular_configuration().is_some() { return Err(RuntimeError::Rejected); }
-        let method = match settings.link_lookup_method {
-            LinkLookupMethod::Both => 0,
-            LinkLookupMethod::Dns => 1,
-            LinkLookupMethod::File => 2,
-        };
-        self.services
-            .lookup(
-                method,
-                &settings.link_static_directory_file,
-                &settings.link_directory_file,
-                remote,
-                source,
-            )
-            .map_err(|_| RuntimeError::Rejected)
+        Err(RuntimeError::Rejected)
     }
     /// Admit an inspected peer through common policy. Echo's fresh provider QSO
     /// supplies authentication; only IAX uses an ASL directory/source lookup.
     pub fn incoming_peer(
         &mut self,
         io: PeerIo,
-        source: &str,
+        _source: &str,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
         let local = if io.identity().protocol() == ProtocolId::AllStarLink {
@@ -993,11 +911,21 @@ impl Host {
         }
         .to_owned();
         #[cfg(target_os = "linux")]
-        if io.identity().protocol() == ProtocolId::EchoLink && self.runtime.modular_configuration().is_some()
-            && !self.echo.accepts(&local) { return Err(RuntimeError::Rejected); }
+        if io.identity().protocol() == ProtocolId::EchoLink
+            && self.runtime.modular_configuration().is_some()
+            && !self.echo.accepts(&local)
+        {
+            return Err(RuntimeError::Rejected);
+        }
         if io.identity().protocol() == ProtocolId::Phone {
-            if !io.source_media() || io.async_owner().is_none() { return Err(RuntimeError::Rejected); }
-            self.authorize_phone_owner(&local, io.phone_account().ok_or(RuntimeError::Rejected)?, io.generations().0)?;
+            if !io.source_media() || io.async_owner().is_none() {
+                return Err(RuntimeError::Rejected);
+            }
+            self.authorize_phone_owner(
+                &local,
+                io.phone_account().ok_or(RuntimeError::Rejected)?,
+                io.generations().0,
+            )?;
             let source = self
                 .phone_calls
                 .admit(io, clock.now_ms)
@@ -1006,7 +934,11 @@ impl Host {
                 .phone_calls
                 .reply(&source)
                 .ok_or(RuntimeError::Rejected)?;
-            if self.phone_calls.start_transport(&source, &reply, &mut self.peer_io).is_err() {
+            if self
+                .phone_calls
+                .start_transport(&source, &reply, &mut self.peer_io)
+                .is_err()
+            {
                 self.retire_phone(&source);
                 return Err(RuntimeError::Rejected);
             }
@@ -1025,15 +957,20 @@ impl Host {
             .operator_alias()
             .ok_or(RuntimeError::Rejected)?;
         if io.identity().protocol() == ProtocolId::AllStarLink {
-            if self.runtime.modular_configuration().is_some() { return Err(RuntimeError::Rejected); }
-            self.lookup(&local, &remote, Some(source))?;
+            // ASL channels use their account-bound source/admission proof.
+            return Err(RuntimeError::Rejected);
         }
         self.accept_verified_peer(&local, &remote, io, clock)
     }
 
     /// Finish ordinary peer admission on control after source and metadata validation.
-    pub(crate) fn accept_verified_peer(&mut self, local: &str, remote: &str, io: PeerIo,
-        clock: RuntimeClock) -> Result<(), RuntimeError> {
+    pub(crate) fn accept_verified_peer(
+        &mut self,
+        local: &str,
+        remote: &str,
+        io: PeerIo,
+        clock: RuntimeClock,
+    ) -> Result<(), RuntimeError> {
         self.runtime.incoming(local, remote, true)?;
         let result = self.attach_peer(local, remote, Mode::TRANSCEIVE, io, clock);
         if result.is_err() {
@@ -1047,12 +984,41 @@ impl Host {
         local: &str,
         remote: &str,
         mode: Mode,
-        mut io: PeerIo,
+        io: PeerIo,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        self.attach_peer_observed(
+            local,
+            remote,
+            mode,
+            io,
+            clock,
+            &mut PendingLinkDial::default(),
+        )
+    }
+
+    /// Bind an outgoing peer; transfer its outcomes only once the session owns the attempt.
+    pub(crate) fn attach_peer_observed(
+        &mut self,
+        local: &str,
+        remote: &str,
+        mode: Mode,
+        mut io: PeerIo,
+        clock: RuntimeClock,
+        dial: &mut PendingLinkDial,
+    ) -> Result<(), RuntimeError> {
+        if let Some(phone) = &dial.phone {
+            self.current_phone_reply(local, &phone.reply)?;
+        }
+        let private = dial.phone.is_some();
+        let protocol = io.identity().protocol();
         #[cfg(target_os = "linux")]
-        if io.identity().protocol() == ProtocolId::EchoLink && self.runtime.modular_configuration().is_some()
-            && (io.local() != local || !self.echo.accepts(local)) { return Err(RuntimeError::Rejected); }
+        if protocol == ProtocolId::EchoLink
+            && self.runtime.modular_configuration().is_some()
+            && (io.local() != local || !self.echo.accepts(local))
+        {
+            return Err(RuntimeError::Rejected);
+        }
         // Telephone media needs explicit authenticated *3 policy and per-node rings.
         // Pending private calls must never enter this numeric-node/ASL path.
         if io.identity().protocol() == ProtocolId::Phone {
@@ -1103,7 +1069,9 @@ impl Host {
         session.bind_clock(source_clock);
         #[cfg(target_os = "linux")]
         if self.runtime.modular_configuration().is_some() {
-            session.bind_media_isolation(Arc::clone(&self.radio_preparation.active_plan(local)?.media_isolation));
+            session.bind_media_isolation(Arc::clone(
+                &self.radio_preparation.active_plan(local)?.media_isolation,
+            ));
         }
         if let Err(session) = self.peer_io.attach(session) {
             session.stop();
@@ -1131,6 +1099,21 @@ impl Host {
             announced: false,
             control,
         });
+        // The first refresh can already dispatch the acknowledged redirect.
+        let has_status = {
+            #[cfg(target_os = "linux")]
+            {
+                dial.asl.is_some()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                false
+            }
+        };
+        if private || has_status {
+            self.pending_link_dials
+                .insert(connection, std::mem::take(dial));
+        }
         if let Err(error) = self.refresh(local, clock) {
             self.detach_connection(local, remote, Some(connection), clock.now_ms);
             return Err(error);
@@ -1141,60 +1124,64 @@ impl Host {
             .find(|peer| peer.control.connection_generation() == connection)
         {
             peer.announced = true;
-            let _ = if peer.control.text_origin().protocol == ProtocolId::EchoLink as u32 {
+            if private {
                 self.runtime
-                    .queue_echo_link_event(local, remote, peer.control.callsign(), true)
+                    .cancel_link_disconnect_notice(local, remote, protocol);
             } else {
-                self.runtime.queue_link_event(local, remote, true)
-            };
+                let _ = if protocol == ProtocolId::EchoLink {
+                    self.runtime
+                        .queue_echo_link_event(local, remote, peer.control.callsign(), true)
+                } else {
+                    self.runtime.queue_link_event(local, remote, true)
+                };
+            }
         }
         Ok(())
     }
     fn refresh(&mut self, local: &str, clock: RuntimeClock) -> Result<(), RuntimeError> {
         for _ in 0..100 {
-            // A preceding publication may still await dispatcher/redirect quiescence.
-            // This control owner must collect it before another replacement can succeed.
             self.pump(clock)?;
-            let settings = self
-                .runtime
-                .settings(local)
-                .ok_or(RuntimeError::MissingNode)?;
-            #[cfg(target_os = "linux")]
-            let source = if self.runtime.modular_configuration().is_some() {
-                StationAudio::Modular(self.radio_preparation.active_plan(local)?)
-            } else {
-                StationAudio::Document(&settings.radio.processing_configuration)
-            };
-            #[cfg(not(target_os = "linux"))]
-            let source = StationAudio::Document(&settings.radio.processing_configuration);
-            let candidate = prepared(
-                local,
-                settings,
-                (&self.peers,Some(&self.phone_calls)),
-                media_worker(&mut self.media_workers, local)?,
-                &mut self.text,
-                self.services,
-                source,
-            );
-            let candidate = match candidate {
-                Ok(candidate) => candidate,
-                Err(RuntimeError::Busy) => {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            if replacement_completed(self.runtime.replace_adapter(local, candidate, clock.now_ms))?
-            {
-                self.activate_dispatchers(clock.now_ms);
+            if self.try_refresh(local, clock)? {
                 return self.pump(clock);
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         Err(RuntimeError::Busy)
     }
+
+    /// Attempt one route publication after the existing control pump serviced quiescence.
+    fn try_refresh(&mut self, local: &str, clock: RuntimeClock) -> Result<bool, RuntimeError> {
+        let settings = self
+            .runtime
+            .settings(local)
+            .ok_or(RuntimeError::MissingNode)?;
+        #[cfg(target_os = "linux")]
+        let source = StationAudio::Modular(self.radio_preparation.active_plan(local)?);
+        #[cfg(not(target_os = "linux"))]
+        return Err(RuntimeError::Preparation);
+        let candidate = prepared(
+            local,
+            settings,
+            (&self.peers, Some(&self.phone_calls)),
+            media_worker(&mut self.media_workers, local)?,
+            &mut self.text,
+            self.services,
+            source,
+        );
+        let candidate = match candidate {
+            Ok(candidate) => candidate,
+            Err(RuntimeError::Busy) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let published =
+            replacement_completed(self.runtime.replace_adapter(local, candidate, clock.now_ms))?;
+        if published {
+            self.activate_dispatchers(clock.now_ms);
+        }
+        Ok(published)
+    }
     fn detach(&mut self, local: &str, remote: &str, now_ms: u64) {
-        self.detach_connection(local, remote, None, now_ms)
+        self.detach_connection(local, remote, None, now_ms);
     }
     fn detach_connection(
         &mut self,
@@ -1202,17 +1189,30 @@ impl Host {
         remote: &str,
         connection: Option<u64>,
         now_ms: u64,
-    ) {
-        let announced = if let Some(index) = self.peers.iter().position(|peer| {
+    ) -> bool {
+        self.detach_peer(local, remote, connection, now_ms, true)
+    }
+
+    fn detach_peer(
+        &mut self,
+        local: &str,
+        remote: &str,
+        connection: Option<u64>,
+        now_ms: u64,
+        notify: bool,
+    ) -> bool {
+        let match_at = self.peers.iter().position(|peer| {
             peer.local == local
                 && peer.remote == remote
                 && connection.map_or(!peer.superseded, |id| {
                     id == peer.control.connection_generation()
                 })
-        }) {
+        });
+        let announced = if let Some(index) = match_at {
             let peer = self.peers.remove(index);
+            self.finish_link_dial(peer.control.connection_generation(), local, remote, false);
             self.text.cancel(&peer.control.text_origin());
-            let announced = peer.announced.then(|| {
+            let announced = (notify && peer.announced).then(|| {
                 (
                     peer.control.text_origin().protocol,
                     peer.control.callsign().to_owned(),
@@ -1221,11 +1221,11 @@ impl Host {
             peer.control.stop();
             self.peer_io.reap();
             if peer.superseded {
-                return;
+                return true;
             }
             announced
         } else if connection.is_some() {
-            return;
+            return false;
         } else {
             None
         };
@@ -1241,7 +1241,39 @@ impl Host {
                 self.runtime.queue_link_event(local, remote, false)
             };
         }
+        match_at.is_some()
     }
+    fn finish_link_dial(&mut self, connection: u64, local: &str, remote: &str, attached: bool) {
+        if let Some(dial) = self.pending_link_dials.remove(&connection) {
+            self.settle_link_dial(dial, local, remote, attached);
+        }
+    }
+
+    /// Deliver the exact outcomes of an acknowledged link or an unpublished attempt.
+    pub(crate) fn settle_link_dial(
+        &mut self,
+        dial: PendingLinkDial,
+        local: &str,
+        _remote: &str,
+        attached: bool,
+    ) {
+        #[cfg(target_os = "linux")]
+        if let Some(asl) = dial.asl {
+            self.record_asl_dial(asl, local, _remote, attached);
+        }
+        if let Some(phone) = dial.phone
+            && phone.generation.is_current()
+            && (attached || phone.report_failure)
+        {
+            let result = if attached {
+                OperationResult::Completed
+            } else {
+                OperationResult::Unavailable
+            };
+            let _ = self.phone_operation_result(local, &phone.reply, result);
+        }
+    }
+
     pub(crate) fn reject_peer(&mut self, local: &str, remote: &str, now_ms: u64) {
         self.detach(local, remote, now_ms);
     }
@@ -1467,6 +1499,63 @@ impl Host {
         self.write_site_status(local, &mut result)?;
         Ok(result)
     }
+    /// Apply a command against the station's current registered ASL authority.
+    pub(crate) fn command(
+        &mut self,
+        local: &str,
+        operation: rpt_advanced_core::runtime::dtmf::DigitOperation,
+        clock: RuntimeClock,
+    ) -> Result<LinkEffect, RuntimeError> {
+        self.command_with_receipt(local, operation, clock, None)
+    }
+    pub(crate) fn command_with_receipt(
+        &mut self,
+        local: &str,
+        operation: rpt_advanced_core::runtime::dtmf::DigitOperation,
+        clock: RuntimeClock,
+        receipt: Option<rpt_advanced_core::runtime::CommandReceipt>,
+    ) -> Result<LinkEffect, RuntimeError> {
+        let remote = &operation.command.node;
+        let verified = operation.command.action == rpt_advanced_core::command::LinkAction::Command
+            && operation.digit.is_none()
+            && match PeerIdentity::from_operator(remote).map(|id| id.protocol()) {
+                Ok(ProtocolId::EchoLink) => self.lookup(local, remote, None).is_ok(),
+                #[cfg(target_os = "linux")]
+                Ok(ProtocolId::AllStarLink) => {
+                    let Some(account) = local
+                        .parse()
+                        .ok()
+                        .and_then(|id| self.asl_account(id).ok())
+                        .filter(|account| account.permits(remote))
+                    else {
+                        return self.runtime.command(local, operation, clock, false);
+                    };
+                    if !account.directory.registered.contains_key(remote) {
+                        return self.begin_target_selection(
+                            local,
+                            operation,
+                            account,
+                            clock.now_ms,
+                            receipt,
+                        );
+                    }
+                    account
+                        .directory
+                        .resolve(self.services, remote, None)
+                        .is_ok_and(|proof| {
+                            proof
+                                .destination(&account.directory, remote, None)
+                                .is_some()
+                        })
+                }
+                _ => false,
+            };
+        let result = self.runtime.command(local, operation, clock, verified);
+        if let Some(receipt) = receipt {
+            receipt.settle(result.is_ok());
+        }
+        result
+    }
     /// Execute consequences which never require a blocking outbound dial.
     pub fn immediate(
         &mut self,
@@ -1518,13 +1607,14 @@ impl Host {
                 self.queue_phone_reply(caller, &reply, stream)
             }
             LinkEffect::VerifyCommandTarget(operation) => {
-                let verified = self.lookup(local, &operation.command.node, None).is_ok();
-                let effect = self.runtime.command(local, operation, clock, verified)?;
+                let effect = self.command(local, operation, clock)?;
                 self.immediate(local, effect, clock)
             }
-            LinkEffect::PrivatePhoneControl(reply,action,permit)=>{
-                if !permit.current(Some(clock.now_ms)){return Err(RuntimeError::Rejected);}
-                self.private_action(local,reply,action,clock)
+            LinkEffect::PrivatePhoneControl(reply, action, permit) => {
+                if !permit.current(Some(clock.now_ms)) {
+                    return Err(RuntimeError::Rejected);
+                }
+                self.private_action(local, reply, action, clock)
             }
             LinkEffect::SiteCommand(command, permit) => {
                 if !permit.current(Some(clock.now_ms)) {
@@ -1537,10 +1627,16 @@ impl Host {
                 Err(RuntimeError::Rejected)
             }
             LinkEffect::Detach(remotes) => {
-                for remote in remotes {
-                    self.detach(local, &remote, clock.now_ms);
-                }
+                self.detach_command_links(local, remotes, clock.now_ms, true);
                 Ok(())
+            }
+            LinkEffect::PrivateDetach { remotes, reply } => {
+                // Runtime already committed the removal. Only the reply is revocable.
+                self.detach_command_links(local, remotes, clock.now_ms, false);
+                self.phone_operation_result(local, &reply, OperationResult::Completed)
+            }
+            LinkEffect::PrivatePhoneResult(reply, result) => {
+                self.phone_operation_result(local, &reply, result)
             }
             LinkEffect::Text(messages) => {
                 for (remote, text) in messages {
@@ -1556,22 +1652,47 @@ impl Host {
             }
             LinkEffect::Digit(outcome) => {
                 if let DigitOutcome::Mapped(input) = outcome {
-                    if let Ok(effect) = self.runtime.dispatch_mapping(local, input, clock) {
-                        if matches!(
-                            effect,
-                            LinkEffect::Connect(_)
-                                | LinkEffect::PhoneDial(..)
-                                | LinkEffect::PhoneHangup(_)
-                        ) {
-                            self.defer_link(local, effect);
-                        } else {
-                            let _ = self.immediate(local, effect, clock);
-                        }
+                    let phone = input.phone_reply().cloned();
+                    let done =
+                        self.runtime
+                            .dispatch_mapping(local, input, clock)
+                            .and_then(|effect| {
+                                if matches!(
+                                    effect,
+                                    LinkEffect::Connect(_)
+                                        | LinkEffect::PhoneDial(..)
+                                        | LinkEffect::PhoneHangup(_)
+                                ) {
+                                    self.defer_link(local, effect);
+                                    return Ok(false);
+                                }
+                                let generic = !matches!(
+                                    effect,
+                                    LinkEffect::Telemetry(..)
+                                        | LinkEffect::PrivatePhoneMedia(..)
+                                        | LinkEffect::PrivatePhoneResult(..)
+                                        | LinkEffect::PrivatePhoneControl(..)
+                                        | LinkEffect::PrivateDetach { .. }
+                                        | LinkEffect::CommandQueued(_)
+                                );
+                                self.immediate(local, effect, clock).map(|()| generic)
+                            });
+                    if let Some(reply) = phone {
+                        let result = match done {
+                            Ok(false) => return Ok(()),
+                            Ok(true) => OperationResult::Completed,
+                            Err(
+                                RuntimeError::Rejected
+                                | RuntimeError::Unavailable
+                                | RuntimeError::Link(_),
+                            ) => OperationResult::Unavailable,
+                            Err(_) => OperationResult::Failed,
+                        };
+                        let _ = self.phone_operation_result(local, &reply, result);
                     }
                 } else if let DigitOutcome::RemoteCandidate(operation) = outcome {
                     // Selection changes collection of the very next queued digit.
-                    let verified = self.lookup(local, &operation.command.node, None).is_ok();
-                    let _ = self.runtime.command(local, operation, clock, verified);
+                    let _ = self.command(local, operation, clock);
                 } else {
                     self.operations.push((local.to_owned(), outcome));
                 }
@@ -1602,6 +1723,39 @@ impl Host {
             | LinkEffect::None => Ok(()),
         }
     }
+    fn detach_command_links(
+        &mut self,
+        local: &str,
+        remotes: Vec<String>,
+        now_ms: u64,
+        notify: bool,
+    ) {
+        #[cfg(target_os = "linux")]
+        let mut receipt = crate::management::live::Disconnect {
+            selected_count: remotes.len(),
+            removed_count: 0,
+            peer_nodes: Vec::new(),
+        };
+        for remote in remotes {
+            let removed = self.detach_peer(local, &remote, None, now_ms, notify);
+            #[cfg(target_os = "linux")]
+            {
+                receipt.removed_count += usize::from(removed);
+                if receipt.peer_nodes.len() < crate::management::live::DISCONNECT_PEERS_LIMIT
+                    && let Some(node) = PeerIdentity::from_operator(&remote)
+                        .ok()
+                        .and_then(|id| id.operator_alias())
+                {
+                    receipt.peer_nodes.push(node);
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = removed;
+        }
+        #[cfg(target_os = "linux")]
+        self.record_disconnect(local, receipt);
+    }
+
     fn text(
         &mut self,
         local: &str,
@@ -1657,20 +1811,34 @@ impl Host {
             return;
         }
         let mut locals = Vec::new();
-        for local in self.runtime.node_names() {
-            locals.push(local.to_owned());
-            let node = NodeId::new(local).expect("admitted station");
-            let account = rpt_advanced_core::config::EchoLinkSettings::resolve(
-                self.runtime.document(),
-                &node,
-            )
-            .expect("validated account settings")
-            .value;
-            if account.enabled {
-                locals.push(rpt_advanced_core::link::EchoAlias::format(
-                    account.node_number,
-                ));
-                locals.push(account.callsign);
+        let mut addressed_here = matches!(message.audience, TextAudience::Broadcast);
+        for station in self.runtime.node_names() {
+            let first = locals.len();
+            locals.push(station.to_owned());
+            if let Some(profile) = self.runtime.modular_configuration().and_then(|domain| {
+                station
+                    .parse()
+                    .ok()
+                    .and_then(|port| domain.protocols.port(port))
+            }) {
+                if let Some(number) = profile
+                    .allstarlink
+                    .as_ref()
+                    .and_then(|p| p.settings.node_number)
+                {
+                    locals.push(number.to_string());
+                }
+                if let Some(account) = profile.echolink.as_ref().filter(|p| p.settings.enabled) {
+                    locals.push(rpt_advanced_core::link::EchoAlias::format(
+                        account.settings.node_number,
+                    ));
+                    locals.push(account.settings.callsign.clone());
+                }
+            }
+            if station == local
+                && let TextAudience::Node(target) = &message.audience
+            {
+                addressed_here = locals[first..].contains(target);
             }
         }
         let router = TextRouter::new(locals);
@@ -1714,14 +1882,20 @@ impl Host {
         );
         // Each node is an independent station, not an implicit local patch.
         // ASL consumes other configured local addresses without rendering here.
-        if disposition.locally_eligible
-            && !matches!(&message.audience, TextAudience::Node(node) if node != local)
-        {
-            // The local identity and immutable document were validated at station admission.
-            let node = NodeId::new(local).expect("admitted local station");
-            let settings = ResolvedSpeechSettings::resolve(self.runtime.document(), &node)
-                .expect("validated station speech settings")
-                .value;
+        if disposition.locally_eligible && addressed_here {
+            let Some(settings) =
+                self.runtime
+                    .modular_configuration()
+                    .and_then(|domain| {
+                        local.parse().ok().and_then(|port| {
+                            domain.scopes.get(
+                    &rpt_advanced_core::config::resources::candidate::ResourceScope::Port(port))
+                        })
+                    })
+                    .map(|scope| scope.telemetry.speech.clone())
+            else {
+                return;
+            };
             let spoken = self
                 .runtime
                 .node(local)
@@ -1742,6 +1916,7 @@ impl Host {
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
         // An ended call may be the last peer. Join stopped registrations on
         // this control turn without waiting for an unrelated peer admission.
+        self.expire_maintenance();
         self.peer_io.reap();
         self.reap_abandoned_accounts()?;
         #[cfg(target_os = "linux")]
@@ -1755,6 +1930,9 @@ impl Host {
             self.reload_text = None;
             self.prune_leases();
         }
+        self.poll_phone_attachments(clock);
+        #[cfg(target_os = "linux")]
+        self.poll_target_selections(clock)?;
         self.pump_remote(clock);
         self.report_text_failures(clock.now_ms);
         self.advance_sites(clock);
@@ -1852,12 +2030,17 @@ impl Host {
                     let target = observer.signals().reply_target();
                     if superseded {
                         target.retire();
-                    } else if expected && !target.ended() {
-                        let id = rpt_advanced_core::link::PeerIdentity::from_operator(&remote)
+                        self.finish_link_dial(connection, &local, &remote, false);
+                    } else if expected {
+                        if target.ended() {
+                            self.finish_link_dial(connection, &local, &remote, false);
+                            continue;
+                        }
+                        let id = PeerIdentity::from_operator(&remote)
                             .map_err(|_| RuntimeError::Rejected)?;
-                        node.links()
-                            .attach_ingress(id, target)
-                            .map_err(RuntimeError::Link)?;
+                        let attached = node.links().attach_ingress(id, target);
+                        self.finish_link_dial(connection, &local, &remote, attached.is_ok());
+                        attached.map_err(RuntimeError::Link)?;
                     }
                 }
                 _ if superseded => continue,
@@ -1865,10 +2048,10 @@ impl Host {
                     unreachable!()
                 }
                 Event::Text(text) => {
-                    if let Ok(effect) = node.links().peer_text(
+                    if let Ok(effect) = node.links().peer_text_received(
                         &remote,
                         &text,
-                        reply,
+                        (reply, regeneration.clone()),
                         receiving,
                         transitioned,
                         received_at,
@@ -1877,9 +2060,13 @@ impl Host {
                     }
                 }
                 Event::Digit(digit) => {
-                    if let Some(operation) =
-                        node.links().peer_digit(&remote, digit, received_at, reply)
-                    {
+                    if let Some(operation) = node.links().peer_digit_received(
+                        &remote,
+                        digit,
+                        received_at,
+                        reply,
+                        regeneration.clone(),
+                    ) {
                         self.immediate(
                             &local,
                             received_effect(LinkEffect::Digit(operation), regeneration),
@@ -1956,7 +2143,7 @@ impl Host {
             let Some(generation) = status.active.or(status.retiring) else {
                 continue;
             };
-            let mut confirmed_phone=Vec::new();
+            let mut confirmed_phone = Vec::new();
             let configured_delay = self
                 .runtime
                 .settings(&local)
@@ -1979,10 +2166,14 @@ impl Host {
                     .find(|(name, _)| name == &local)
                     .expect("runtime node retains its device lease");
                 let mut lease = lease.lock().unwrap_or_else(|error| error.into_inner());
-                if status.active==Some(generation){
-                    control.phones.retain_mut(|route|{
-                        if !route.submit(&lease.status.source_clock){return true;}
-                        if route.grant().phone_authenticated(){confirmed_phone.push(route.grant().clone());}
+                if status.active == Some(generation) {
+                    control.phones.retain_mut(|route| {
+                        if !route.submit(&lease.status.source_clock) {
+                            return true;
+                        }
+                        if route.grant().phone_media_allowed() {
+                            confirmed_phone.push(route.grant().clone());
+                        }
                         false
                     });
                 }
@@ -2010,7 +2201,7 @@ impl Host {
                     peer.local == local && peer.control.connection_generation() == connection
                 }) {
                     if let Err(command) = peer.control.send(command) {
-                        pending.push((connection, command));
+                        pending.push((connection, *command));
                     }
                 } else {
                     control.awaiting.retain(|(name, _)| *name != connection);
@@ -2022,12 +2213,22 @@ impl Host {
                     peer.local == local && peer.control.connection_generation() == *connection
                 })
             });
-            let redirects_done = control.awaiting.is_empty() && control.phones.is_empty() && !control.awaiting_local;
+            let redirects_done =
+                control.awaiting.is_empty() && control.phones.is_empty() && !control.awaiting_local;
             for reply in confirmed_phone {
-                let call=reply.phone_source().ok_or(RuntimeError::Rejected)?.call_id();
-                let id=PeerIdentity::parse(ProtocolId::Phone,&call.to_string()).map_err(|_|RuntimeError::Rejected)?;
-                self.runtime.node(&local).ok_or(RuntimeError::MissingNode)?.links()
-                    .attach_ingress(id,reply).map_err(RuntimeError::Link)?;
+                let call = reply
+                    .phone_source()
+                    .ok_or(RuntimeError::Rejected)?
+                    .call_id();
+                let id = PeerIdentity::parse(ProtocolId::Phone, &call.to_string())
+                    .map_err(|_| RuntimeError::Rejected)?;
+                self.runtime
+                    .node(&local)
+                    .ok_or(RuntimeError::MissingNode)?
+                    .links()
+                    .attach_ingress(id, reply.clone())
+                    .map_err(RuntimeError::Link)?;
+                self.phone_calls.confirm_radio_attachment(&reply);
             }
             if let Some(old) = status.retiring {
                 let retired = self
@@ -2045,25 +2246,30 @@ impl Host {
         self.prune_leases();
         Ok(())
     }
-    fn configure_status_posts(&mut self, now_ms: u64) {
-        let config = self
-            .runtime
-            .status(now_ms)
-            .into_iter()
-            .filter_map(|(node, _)| {
-                self.runtime.settings(&node).map(|settings| PostConfig {
-                    node,
-                    url: settings.statpost_url.clone(),
-                    interval_seconds: settings.statpost_time,
-                })
-            })
-            .collect();
-        self.status_post.configure(config);
-    }
     /// Gate audio, stop media distribution, quiesce peers, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
+        #[cfg(target_os = "linux")]
+        self.cancel_target_selections();
+        let mut cleared = true;
+        for (_, lease) in &self.leases {
+            let mut lease = lease.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(grant) = &lease.maintenance {
+                grant.revoke();
+            }
+            cleared &= lease.clear_manual().is_ok();
+        }
+        if !cleared {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.phone_dials.clear();
+            self.phone_failures.clear();
+        }
         self.retire_phones();
-        if self.phone_accounts.stop(self.services) != Ok(true) { return false; }
+        if self.phone_accounts.stop(self.services) != Ok(true) {
+            return false;
+        }
 
         self.remote_pending.clear();
         if self.site_shutdown(now_ms) != Ok(true) {
@@ -2079,6 +2285,7 @@ impl Host {
         for (_, worker) in &mut self.media_workers {
             worker.stop();
         }
+        self.pending_link_dials.clear();
         for peer in self.peers.drain(..) {
             self.runtime
                 .peer_detached(&peer.local, &peer.remote, now_ms);
@@ -2096,9 +2303,13 @@ impl Host {
         }
         let radio_stopped = self.runtime.stop(now_ms);
         #[cfg(target_os = "linux")]
-        if self.asl.stop(self.services) != Ok(true) { return false; }
+        if self.asl.stop(self.services) != Ok(true) {
+            return false;
+        }
         #[cfg(target_os = "linux")]
-        if !self.echo.stop(self.services) { return false; }
+        if !self.echo.stop(self.services) {
+            return false;
+        }
         radio_stopped
     }
 
@@ -2174,6 +2385,10 @@ impl Drop for Host {
         self.stop(self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "host_fixture_tests.rs"]
+mod fixture;
 
 #[cfg(test)]
 #[path = "host_tests.rs"]

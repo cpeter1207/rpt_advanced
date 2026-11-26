@@ -28,6 +28,14 @@ pub struct MappedInput {
     pub(crate) generation: u64,
 }
 impl MappedInput {
+    /// Borrow the exact private recipient without exposing the collected command symbols.
+    pub fn phone_reply(&self) -> Option<&PeerReply> {
+        self.connection
+            .as_ref()
+            .map(|(_, reply)| reply)
+            .filter(|reply| reply.phone_source().is_some())
+    }
+
     pub(crate) fn claim(&self) -> bool {
         !self
             .consumed

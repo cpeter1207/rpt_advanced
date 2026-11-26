@@ -268,7 +268,7 @@ fn timed_consumer_does_not_consume_an_untimed_prefix_or_relabel_untagged_pcm() {
         assert!(!consumer.timing_available());
         assert_eq!(consumer.render_timed_sample(), Err(RingError));
         assert_eq!(consumer.observe().unwrap().available_samples, before);
-        let mut processed = crate::services::ProcessedPeer::new(consumer, None);
+        let mut processed = crate::services::ProcessedPeer::new(consumer);
         assert!(!processed.source_timing_available());
         assert_eq!(PeerInput::render_timed_sample(&mut processed), None);
         assert_eq!(processed.available(), before);
@@ -536,7 +536,7 @@ fn phone_policy_survives_processing_into_the_common_link_audio_gate() {
     let peer = AudioPeer::new(
         "200",
         Mode::TRANSCEIVE,
-        ProcessedPeer::new(consumer, None),
+        ProcessedPeer::new(consumer),
         outbound,
         960,
         0,
@@ -576,44 +576,75 @@ fn private_phone_audio_needs_its_live_call_and_keeps_public_link_identity_privat
     use rpt_advanced_core::{
         audio::LinkAudioQueue,
         controller::{ControllerSettings, CourtesySettings, NodeController},
-        link::{AudioPeer, LinkAudio, Mode, PeerSignals, PhoneAccountId, PhoneCallId,
-               PhoneSource, SourcePosition},
+        link::{
+            AudioPeer, LinkAudio, Mode, PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource,
+            SourcePosition,
+        },
     };
 
     let source = PhoneSource::new(
-        PhoneAccountId::new("private-account").unwrap(), 1,
-        PhoneCallId::new([4; 16]).unwrap(), 2, 3,
-    ).unwrap();
+        PhoneAccountId::new("private-account").unwrap(),
+        1,
+        PhoneCallId::new([4; 16]).unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
     let call = PeerSignals::for_phone(source.clone());
     let reply = call.reply_target();
     let prepare = || {
         let (inbound, input) = InboundRing::redirected(8000, InboundPolicy::Phone, &reply).unwrap();
         let (output, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
         let slot = AudioPeer::for_phone(
-            &source, &reply, Mode::TRANSCEIVE, ProcessedPeer::new(input, None), output, 960,
+            &source,
+            &reply,
+            Mode::TRANSCEIVE,
+            ProcessedPeer::new(input),
+            output,
+            960,
         );
         (inbound, slot)
     };
-    assert!(prepare().1.is_err(), "an authenticated provider call still needs mailbox admission");
+    assert!(
+        prepare().1.is_err(),
+        "an authenticated provider call still needs mailbox admission"
+    );
     assert!(call.authenticate_phone());
     let (mut input, slot) = prepare();
     input.signals().set_radio_keyed(true);
     let (mut graph, _dispatcher) = LinkAudio::new(vec![slot.unwrap()], 960).unwrap();
     let (mut node, _control) = NodeController::new(
-        ControllerSettings { hang_ms: 0, ..ControllerSettings::default() },
-        vec![], vec![], CourtesySettings::default(),
-    ).unwrap();
+        ControllerSettings {
+            hang_ms: 0,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
     for _ in 0..8 {
         assert_eq!(input.write(&[0.25; 160]), Ok(160));
     }
     let mut rf = [0.0; 960];
-    assert!(graph.process(&mut node, false, &mut rf, SourcePosition::default()).unwrap());
+    assert!(
+        graph
+            .process(&mut node, false, &mut rf, SourcePosition::default())
+            .unwrap()
+    );
     assert!(rf.iter().any(|sample| sample.abs() > 0.1));
     assert_eq!(graph.status().last_keyed(), None);
     reply.retire();
     rf.fill(0.0);
-    assert!(!graph.process(&mut node, false, &mut rf, SourcePosition::default()).unwrap());
-    assert_eq!(rf, [0.0; 960], "revocation fences speech still primed in the native ring");
+    assert!(
+        !graph
+            .process(&mut node, false, &mut rf, SourcePosition::default())
+            .unwrap()
+    );
+    assert_eq!(
+        rf, [0.0; 960],
+        "revocation fences speech still primed in the native ring"
+    );
     assert_eq!(graph.active_count(), 0);
     assert_eq!(graph.status().last_keyed(), None);
 }

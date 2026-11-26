@@ -15,5 +15,7 @@ fn main() {
         .allowlist_type("rptadv_(incoming_peer_v1|peer_info_v1|phone_.*|media_clock_reader_v1|jitter_descriptor_v1|peer_(source_.*|bytes_v1)|source_birth_v1|codec_encode_result_v1)")
         .layout_tests(false).generate_comments(false).parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate().expect("generate the native private call records");
-    bindings.write_to_file(PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("abi.rs")).unwrap();
+    bindings
+        .write_to_file(PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("abi.rs"))
+        .unwrap();
 }

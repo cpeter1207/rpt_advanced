@@ -1,6 +1,5 @@
 //! Own the exact provider preparation while the standalone control owner stages or opens it.
-use crate::{abi, native_configuration::NativeRadioConfiguration, providers::PhysicalProviders};
-use std::fmt::Write as _;
+use crate::{abi, providers::PhysicalProviders};
 use std::{
     ffi::{CStr, c_void},
     ptr::{self, NonNull},
@@ -10,8 +9,7 @@ use std::{
 pub(crate) struct StationPlan {
     pub(crate) port: [u8; 16],
     pub(crate) candidate: u64,
-    pub(crate) label: String,
-    pub(crate) inspection: NativeRadioConfiguration,
+    pub(crate) receive_policy: (u32, u32),
     pub(crate) prepared: NonNull<c_void>,
     pub(crate) physical: abi::UrpPreparationDescriptor,
     pub(crate) providers: PhysicalProviders,
@@ -77,19 +75,19 @@ impl StationPlan {
         let copy = ownership.copy_prepared.ok_or(-2)?;
         let destroy = product.native_configuration_destroy.ok_or(-2)?;
         let visit = product.native_configuration_visit.ok_or(-2)?;
-        let mut inspection: Option<NativeRadioConfiguration> = None;
+        let mut receive_policy: Option<(u32, u32)> = None;
         // SAFETY: the diagnostic projection is copied synchronously and never replaces the opaque physical plan.
         let status = unsafe {
             visit(
                 request.prepared.cast_mut(),
                 Some(inspect),
-                ptr::from_mut(&mut inspection).cast(),
+                ptr::from_mut(&mut receive_policy).cast(),
             )
         };
         if status != 0 {
             return Err(status);
         }
-        let inspection = inspection.ok_or(-1)?;
+        let receive_policy = receive_policy.ok_or(-1)?;
         let mut owned = ptr::null_mut();
         // SAFETY: this matched product retains the original until return and success transfers a fresh copy.
         let status = unsafe { copy(product, request.prepared, &mut owned) };
@@ -97,15 +95,10 @@ impl StationPlan {
             return Err(status);
         }
         let prepared = NonNull::new(owned).ok_or(-1)?;
-        let mut label = String::with_capacity(32);
-        for byte in request.port_uuid {
-            write!(label, "{byte:02x}").expect("writing to a String cannot fail");
-        }
         Ok(Self {
             port: request.port_uuid,
             candidate: request.candidate_identity,
-            label,
-            inspection,
+            receive_policy,
             prepared,
             physical,
             providers,
@@ -130,11 +123,36 @@ unsafe extern "C" fn inspect(
     context: *mut c_void,
     config: *const abi::UrpNativeStationConfig,
 ) -> i32 {
-    // SAFETY: the synchronous visitor receives a borrowed complete request and caller-owned output slot.
-    let Ok(view) = (unsafe { NativeRadioConfiguration::copy_from(config) }) else {
+    // SAFETY: the synchronous visitor lends the native request and its radio prefix.
+    let Some(config) = (unsafe { visit_record(config) }) else {
         return -1;
     };
-    // SAFETY: the unique output slot remains valid for this call.
-    unsafe { *context.cast::<Option<NativeRadioConfiguration>>() = Some(view) };
+    if config.abi_version != abi::URP_NATIVE_CONFIG_ABI_VERSION {
+        return -1;
+    }
+    // SAFETY: the native request lends its nested radio template through this visit.
+    let Some(radio) = (unsafe { visit_record(config.radio) }) else {
+        return -1;
+    };
+    if radio.abi_version != 5 {
+        return -1;
+    }
+    let mode = radio.receive.vad_mode;
+    // SAFETY: the closure retains a unique receive-policy output slot through this call.
+    unsafe {
+        *context.cast::<Option<(u32, u32)>>() = Some((mode, if mode == 0 { 0 } else { 7_680 }))
+    };
     0
+}
+
+unsafe fn visit_record<T: Copy>(record: *const T) -> Option<T> {
+    if record.is_null() {
+        return None;
+    }
+    // SAFETY: the non-null visitor record starts with its readable size prefix.
+    if (unsafe { record.cast::<u32>().read_unaligned() } as usize) < size_of::<T>() {
+        return None;
+    }
+    // SAFETY: the visitor lends the complete sized record for this call.
+    Some(unsafe { record.read_unaligned() })
 }

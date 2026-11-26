@@ -265,13 +265,6 @@ impl CommandPrograms {
         self.queue.push_back(p);
         Ok(response)
     }
-    pub(super) fn retire_profile(&mut self) {
-        self.generation = None;
-        while let Some(program) = self.queue.pop_front() {
-            self.finish(program, MacroOutcome::Cancelled);
-        }
-        self.activation_pending = false;
-    }
     pub(super) fn activate_scheduler(&mut self, mut next: EventScheduler, pending: bool) {
         // A replaced generation cannot execute any old continuation. Release retained
         // reservations using the scheduler's matching token before installing it.
@@ -281,7 +274,7 @@ impl CommandPrograms {
                 .as_ref()
                 .and_then(|ticket| next.rebind(ticket))
             {
-                next.terminate(&ticket);
+                next.terminate(&ticket, MacroOutcome::Cancelled);
             }
             self.finish(program, MacroOutcome::Cancelled);
         }
@@ -293,7 +286,7 @@ impl CommandPrograms {
         if let Some(ticket) = &p.ticket
             && let Some(s) = &mut self.scheduler
         {
-            s.terminate(ticket);
+            s.terminate(ticket, outcome);
         }
         self.completed = Some(CommandCompletion {
             source: p.budget.context().source.clone(),
@@ -435,12 +428,11 @@ impl<A: Send, C: Send> Runtime<A, C> {
             && !p.begun
         {
             let activity = node.event_activity();
-            match node
-                .programs
-                .scheduler
-                .as_mut()
-                .and_then(|s| s.begin_at(ticket, clock, activity).ok())
-            {
+            match node.programs.scheduler.as_mut().and_then(|s| {
+                let decision = s.begin_at(ticket, clock, activity).ok()?;
+                node.links.apply_event_groups(&node.name, s);
+                Some(decision)
+            }) {
                 Some(BeginDecision::Begin) => p.begun = true,
                 Some(BeginDecision::Retired) => {
                     node.programs.finish(p, MacroOutcome::Cancelled);

@@ -257,10 +257,10 @@ Rust's private ABI.
 | `librptadv_portaudio_alsa_adapter.so.2` | Native 48 kHz PortAudio audio callbacks over ALSA |
 | `librptadv_gpio_adapter.so.1` | CM119 HID signaling and GPIO I/O |
 | `librptadviax2.so.1` | Asterisk-independent IAX2 packet protocol used by the standalone network client |
-| `librptadv_asterisk_adapter.so.1` | Public Asterisk application/CLI, channel, codec, directory I/O, and frame services |
+| `librptadv_asterisk_adapter.so.2` | Public Asterisk application/CLI, channel, codec, directory I/O, and frame services |
 | `librptadv_control_asterisk_adapter.so.1` | Replaceable serialized control executor backed by Asterisk's taskprocessor |
-| `librptadv_file_adapter.so.1` | Offline local-file decoding through FFmpeg |
-| `librptadv_speech_adapter.so.1` | Offline Piper synthesis, direct WAV reading, and speech-only level adjustment |
+| `librptadv_file_adapter.so.2` | Offline local-file decoding through FFmpeg |
+| `librptadv_speech_adapter.so.2` | Offline Piper synthesis and speech-only level adjustment |
 | `librptadv_resolver_adapter.so.1` | Standalone system DNS/SRV resolution; no directory policy or Asterisk dependency |
 | `librptadv_gpiod_adapter.so.1` | Optional site digital lines through libgpiod; serialized non-audio ownership, no software PWM |
 
@@ -573,7 +573,10 @@ defines the full reload, hardware-handoff, and failure policy.
   them; disconnected retries remain `C`. This is reporting-only and does not
   change media routing. A winner change is atomically committed only while
   local and linked inputs are idle; transmitter PTT alone does not block it. Only initial
-  selection and total group unavailability are announced; retries, standby
+  selection and total group unavailability are announced automatically. A resumed
+  member's pending dial does not establish an outage. Queued outage speech is
+  cancelled when a member connects or the group is withdrawn. An operator
+  pause announces each connected member it disconnects. Retries, standby
   changes, and subsequent winner handoffs are silent. Scheduled warnings use
   the expected start/end or inactivity deadline, skip active input, and remain
   serialized with other telemetry. The same peer may appear in multiple

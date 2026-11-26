@@ -1,9 +1,23 @@
 use super::*;
-use crate::config::{ConfigDocument, NodeId, ResolvedSiteSettings};
+use crate::{config::resources::candidate::ResourceKind, station_fixture::equipment};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-fn settings(extra: &str) -> crate::config::FanSettings {
-    ResolvedSiteSettings::resolve(&ConfigDocument::parse(&format!("[1000]\n[sensor 1000 heat]\n[sensor 1000 tach]\n[output 1000 relay]\nenabled=yes\nbackend=hwmon\ndevice=chip\nline=pwm1\n[fan 1000 cooling]\nenabled=yes\noutput=relay\nmode=ptt\n{extra}")).unwrap(), &NodeId::new("1000").unwrap()).unwrap().value.fans.remove(0)
+fn settings(extra: Value) -> crate::config::FanSettings {
+    let mut fields = json!({"enabled":true,"output":"relay","mode":"ptt"});
+    json_patch::merge(&mut fields, &extra);
+    equipment(&[
+        (ResourceKind::Sensor, "heat", json!({})),
+        (ResourceKind::Sensor, "tach", json!({})),
+        (
+            ResourceKind::Output,
+            "relay",
+            json!({"enabled":true,"source":{"type":"hwmon","device":"chip","channel":"pwm1"}}),
+        ),
+        (ResourceKind::Fan, "cooling", fields),
+    ])
+    .fans
+    .remove(0)
 }
 fn ptt(on: bool) -> BTreeMap<crate::config::resources::PortKey, bool> {
     BTreeMap::from([(crate::config::resources::PortKey::new("1000"), on)])
@@ -17,7 +31,7 @@ fn available(pwm: bool) -> FanOutput {
 
 #[test]
 fn site_fan_demand_and_failure() {
-    let mut fan = FanState::new(settings(""));
+    let mut fan = FanState::new(settings(json!({})));
     assert_eq!(
         fan.advance(0, &ptt(true), None, None, available(false))
             .duty,
@@ -39,7 +53,7 @@ fn site_fan_demand_and_failure() {
         0.0
     );
     let mut fan = FanState::new(settings(
-        "mode=temperature\ntemperature_sensor=heat\non_temperature=40\noff_temperature=35\n",
+        json!({"mode":"temperature","temperature_sensor":"heat","on_temperature":40,"off_temperature":35}),
     ));
     for (temperature, duty) in [(39.0, 0.0), (40.0, 1.0), (36.0, 1.0), (35.0, 0.0)] {
         assert_eq!(
@@ -75,7 +89,7 @@ fn site_fan_demand_and_failure() {
 #[test]
 fn site_fan_curve_combined_and_rpm_capability() {
     let mut fan = FanState::new(settings(
-        "mode=combined\ntemperature_sensor=heat\ntemperature_curve=20:0.2,40:0.8\nrun_on_ms=0\nrpm_sensor=tach\nminimum_rpm=500\nspinup_ms=1000\n",
+        json!({"mode":"combined","temperature_sensor":"heat","temperature_curve":[{"temperature":20.0,"duty":0.2},{"temperature":40.0,"duty":0.8}],"timing":{"run_on_ms":0,"spinup_ms":1000},"rpm_sensor":"tach","minimum_rpm":500}),
     ));
     assert_eq!(
         fan.advance(0, &ptt(false), Some(30.0), Some(0.0), available(true))
@@ -109,7 +123,7 @@ fn site_fan_curve_combined_and_rpm_capability() {
 
 #[test]
 fn site_fan_disabled_stable_ptt_and_invalid_tach() {
-    let mut disabled = FanState::new(settings("enabled=no\n"));
+    let mut disabled = FanState::new(settings(json!({"enabled":false})));
     assert_eq!(
         disabled.advance(100, &ptt(true), None, None, available(false)),
         FanSnapshot {
@@ -118,7 +132,9 @@ fn site_fan_disabled_stable_ptt_and_invalid_tach() {
             run_on_until_ms: None,
         }
     );
-    let mut fan = FanState::new(settings("rpm_sensor=tach\nminimum_rpm=500\nspinup_ms=0\n"));
+    let mut fan = FanState::new(settings(
+        json!({"rpm_sensor":"tach","minimum_rpm":500,"timing":{"spinup_ms":0}}),
+    ));
     assert!(
         !fan.advance(0, &ptt(true), None, Some(600.0), available(false))
             .fault
@@ -131,7 +147,7 @@ fn site_fan_disabled_stable_ptt_and_invalid_tach() {
 
 #[test]
 fn missing_selector_is_not_a_confirmed_transmitter_release() {
-    let mut fan = FanState::new(settings("run_on_ms=0"));
+    let mut fan = FanState::new(settings(json!({"timing":{"run_on_ms":0}})));
     let initial = fan.advance(0, &BTreeMap::new(), None, None, available(false));
     assert!(initial.fault);
     assert_eq!(initial.duty, 0.0);

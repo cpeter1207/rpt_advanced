@@ -1,4 +1,8 @@
-use std::{io::Write, path::PathBuf, process::{Command, Stdio}};
+use std::{
+    io::Write,
+    path::PathBuf,
+    process::{Command, Stdio},
+};
 
 pub(crate) fn check(authorization: &str) {
     // Use the independent UDP registrar's digest verifier before sending 200.
@@ -9,8 +13,14 @@ pub(crate) fn check(authorization: &str) {
         .stdin(Stdio::piped())
         .spawn()
         .unwrap();
-    verifier.stdin.take().unwrap()
+    verifier
+        .stdin
+        .take()
+        .unwrap()
         .write_all(authorization.as_bytes())
         .unwrap();
-    assert!(verifier.wait().unwrap().success(), "native registrar rejected digest");
+    assert!(
+        verifier.wait().unwrap().success(),
+        "native registrar rejected digest"
+    );
 }

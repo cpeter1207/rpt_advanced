@@ -3,19 +3,41 @@
 //! the other endpoints on ordinary product control.
 use super::{dispatcher::PeerWake, outbound::Outbound, private_radio::Radio};
 use crate::{Error, phone::PrivatePhoneReply, services::PeerIo};
-use rpt_advanced_core::{audio::{AudioSpan, LinkAudioProducer, LinkAudioQueue, PlaybackOutcome}, link::PeerReply};
+use rpt_advanced_core::{
+    audio::{AudioSpan, LinkAudioProducer, LinkAudioQueue, PlaybackOutcome},
+    link::PeerReply,
+};
 use rtrb::{Consumer, Producer, RingBuffer};
-use std::{ffi::c_void, panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::Instant};
+use std::{
+    ffi::c_void,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
+};
 
 #[path = "private_receive.rs"]
 mod receive;
-use receive::{Digit, Receive};
+pub(crate) use receive::Digit;
+use receive::Receive;
 use std::sync::atomic::AtomicU64;
 
+const GENERATED_FRAMES: usize = 960;
+const GENERATED_NS: u64 = 20_000_000;
+
+/// Map the immutable station source time from the engine epoch to the call clock.
+fn station_birth(born: Option<u64>, host_now: u64, call_now: u64) -> Option<u64> {
+    // A predicted callback time or queued suffix can be ahead of this owner.
+    // Preserve that time so Outbound can wait without losing the span.
+    let translated = i128::from(born?) + i128::from(call_now) - i128::from(host_now);
+    u64::try_from(translated).ok()
+}
+
 pub(crate) struct Control {
-    pub(crate) rate:u32,
-    pub(crate) redirect:Arc<Mutex<Option<Radio>>>,
+    pub(crate) rate: u32,
+    pub(crate) redirect: Arc<Mutex<Option<Radio>>>,
     replies: Producer<PrivatePhoneReply>,
     digits: Consumer<Digit>,
     last_processed: u64,
@@ -34,11 +56,13 @@ impl Control {
             self.wake.notify();
         }
     }
-    pub(crate) fn pending_digits(&self) -> usize { self.digits.slots() }
-    pub(crate) fn digit(&mut self) -> Option<(char, u64)> {
+    pub(crate) fn pending_digits(&self) -> usize {
+        self.digits.slots()
+    }
+    pub(crate) fn digit(&mut self) -> Option<Digit> {
         let digit = self.digits.pop().ok()?;
         self.last_processed = digit.revision;
-        Some((digit.symbol, digit.received))
+        Some(digit)
     }
 }
 impl Drop for Control {
@@ -58,50 +82,134 @@ pub(super) struct Session {
     pub(crate) wake: PeerWake,
     pub(super) stop: Arc<AtomicBool>,
     pub(super) epoch: Instant,
-    redirect:Arc<Mutex<Option<Radio>>>,
-    radio:Option<Radio>,
+    redirect: Arc<Mutex<Option<Radio>>>,
+    radio: Option<Radio>,
     incoming: Consumer<PrivatePhoneReply>,
     current: Option<PrivatePhoneReply>,
+    playing_revision: Option<u64>,
+    prompt_losses: Option<u64>,
     receive: Receive,
     output: LinkAudioProducer,
     outbound: Outbound,
-    samples: [f32; 960],
+    samples: [f32; GENERATED_FRAMES],
     next_position: u64,
     next_ns: u64,
 }
 impl Session {
-    pub(super) fn new(io: PeerIo, reply: PeerReply, epoch: Instant, capacity: usize) -> Result<(Self, Control), Error> {
-        if io.async_owner().is_none() || !io.source_media() || reply.phone_source().is_none() || capacity == 0 {
+    pub(super) fn new(
+        io: PeerIo,
+        reply: PeerReply,
+        epoch: Instant,
+        capacity: usize,
+    ) -> Result<(Self, Control), Error> {
+        if io.async_owner().is_none()
+            || !io.source_media()
+            || reply.phone_source().is_none()
+            || capacity == 0
+        {
             return Err(Error::Admission);
         }
-        let (output, input) = LinkAudioQueue::new(960, 1).map_err(|_| Error::Allocation)?.into_endpoints();
+        let (output, input) = LinkAudioQueue::new(GENERATED_FRAMES, 1)
+            .map_err(|_| Error::Allocation)?
+            .into_endpoints();
         let outbound = Outbound::private(io.rate(), input, reply.clone())?;
         let (replies, incoming) = RingBuffer::new(capacity);
         let (digits, received) = RingBuffer::new(64);
         let settled = Arc::new(AtomicU64::new(0));
-        let receive = Receive::new(io.rate(), io.phone_digits().ok_or(Error::Admission)?, digits, Arc::clone(&settled))?;
+        let receive = Receive::new(
+            io.rate(),
+            io.phone_digits().ok_or(Error::Admission)?,
+            digits,
+            Arc::clone(&settled),
+        )?;
         let stop = Arc::new(AtomicBool::new(false));
         let wake = PeerWake::default();
-        let redirect=Arc::new(Mutex::new(None));
-        let control = Control { rate:io.rate(), redirect:Arc::clone(&redirect),replies, digits: received, last_processed: 0, settled, wake: wake.clone(), stop: Arc::clone(&stop) };
-        Ok((Self { io, reply, wake, stop, epoch, incoming, redirect, radio:None, current: None, receive, output, outbound,
-            samples: [0.; 960], next_position: 0, next_ns: 0 }, control))
+        let redirect = Arc::new(Mutex::new(None));
+        let control = Control {
+            rate: io.rate(),
+            redirect: Arc::clone(&redirect),
+            replies,
+            digits: received,
+            last_processed: 0,
+            settled,
+            wake: wake.clone(),
+            stop: Arc::clone(&stop),
+        };
+        Ok((
+            Self {
+                io,
+                reply,
+                wake,
+                stop,
+                epoch,
+                incoming,
+                redirect,
+                radio: None,
+                current: None,
+                playing_revision: None,
+                prompt_losses: None,
+                receive,
+                output,
+                outbound,
+                samples: [0.; GENERATED_FRAMES],
+                next_position: 0,
+                next_ns: 0,
+            },
+            control,
+        ))
     }
+    fn queue_generated(&mut self, now: u64, count: usize) -> Result<(), Error> {
+        let start = if self.next_ns == 0 { now } else { self.next_ns };
+        // Advance on the same native timeline, including intervals without
+        // PCM. Skip missed slots without trying to send a burst to catch up.
+        let skipped = now.saturating_sub(start) / GENERATED_NS;
+        let slot = start + skipped * GENERATED_NS;
+        let position = self
+            .next_position
+            .checked_add(skipped * GENERATED_FRAMES as u64)
+            .ok_or(Error::Write)?;
+        let frames = if count == 0 { GENERATED_FRAMES } else { count } as u64;
+        self.next_position = position.checked_add(frames).ok_or(Error::Write)?;
+        self.next_ns = slot.saturating_add(frames * 1_000_000_000 / 48_000);
+        if count != 0 {
+            let source = self.reply.phone_source().ok_or(Error::Admission)?;
+            let span = AudioSpan {
+                generation: source.call_generation(),
+                burst: 0,
+                source_start: position,
+                stream: source.ingress(),
+                born_ns: Some(slot),
+            };
+            if self.output.write(span, &self.samples[..count]) != 0 {
+                #[cfg(test)]
+                if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
+                    eprintln!("private PHONE write rejected: generated audio queue");
+                }
+                return Err(Error::Write);
+            }
+        }
+        Ok(())
+    }
+
     fn step(&mut self) -> Result<(), Error> {
-        if self.stop.load(Ordering::Acquire) || self.reply.ended() { return Err(Error::Hangup); }
+        if self.stop.load(Ordering::Acquire) || self.reply.ended() {
+            return Err(Error::Hangup);
+        }
         let now_ms = self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        if let Some(new)=self.redirect.lock().map_err(|_|Error::Operation)?.take(){
+        if let Some(new) = self.redirect.lock().map_err(|_| Error::Operation)?.take() {
             new.activate();
-            self.radio=Some(new);
+            self.radio = Some(new);
         }
         self.receive.settle(self.radio.as_mut());
-        let now=self.io.private_now()?;
-        let radio=&mut self.radio;
-        let receipt=radio.as_mut().map_or(0,|route|route.begin(now));
-        let mut failure=None;
+        let now = self.io.private_now()?;
+        let radio = &mut self.radio;
+        let receipt = radio.as_mut().map_or(0, |route| route.begin(now));
+        let mut failure = None;
         let outgoing = self.reply.outgoing_phone();
         let closed = self.io.read_private(&mut |input| {
-            if failure.is_some(){return 0;}
+            if failure.is_some() {
+                return 0;
+            }
             use crate::services::phone_media::Input;
             let accepted = if outgoing {
                 match (radio.as_mut(), input) {
@@ -112,73 +220,150 @@ impl Session {
                     (None, _) => Ok(1),
                 }
             } else {
-                self.receive.input(input, radio.as_mut(), now, receipt, now_ms)
+                self.receive
+                    .input(input, radio.as_mut(), now, receipt, now_ms)
             };
             match accepted {
                 Ok(credit) => credit,
-                Err(error) => { failure = Some(error); 0 }
+                Err(error) => {
+                    failure = Some(error);
+                    0
+                }
             }
         })?;
-        if let Some(error)=failure{return Err(error);}
-        if closed || self.reply.ended() { return Err(Error::Hangup); }
-        if self.current.is_none() { self.current = self.incoming.pop().ok(); }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if closed || self.reply.ended() {
+            return Err(Error::Hangup);
+        }
+        let revision = self.receive.revision();
+        if self
+            .playing_revision
+            .is_some_and(|started| Some(started) != revision)
+        {
+            self.outbound.cancel_private_prompt(&mut self.io)?;
+            self.current = None;
+            self.playing_revision = None;
+            self.prompt_losses = None;
+        }
+        if self.current.is_none() {
+            self.current = self.incoming.pop().ok();
+        }
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|item| item.obsolete_before_output(revision))
+        {
+            self.current = None;
+            self.prompt_losses = None;
+        }
         let now = self.io.private_now()?;
-        if now >= self.next_ns && self.outbound.ready_for_private_input() {
-            if let Some(item) = &mut self.current {
-                self.outbound.private_stream(None)?;
-                let count = item.render(false, &mut self.samples);
-                if count != 0 {
-                    let source = self.reply.phone_source().ok_or(Error::Admission)?;
-                    let span = AudioSpan { generation: source.call_generation(), burst: 0, source_start: self.next_position,
-                        stream: source.ingress(), born_ns: Some(self.io.private_now()?) };
-                    if self.output.write(span, &self.samples[..count]) != 0 {
-                        #[cfg(test)]
-                        if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
-                            eprintln!("private PHONE write rejected: private prompt queue");
-                        }
-                        return Err(Error::Write);
-                    }
-                    self.next_position = self.next_position.checked_add(count as u64).ok_or(Error::Write)?;
-                    self.next_ns = now.saturating_add((count as u64) * 1_000_000_000 / 48_000);
-                } else if item.outcome() == PlaybackOutcome::Active {
-                    self.next_ns = now.saturating_add(20_000_000);
-                }
-                if item.outcome() != PlaybackOutcome::Active { self.current = None; }
+        if now >= self.next_ns
+            && self.outbound.ready_for_private_input()
+            && let Some(item) = &mut self.current
+            && item.outcome() == PlaybackOutcome::Active
+        {
+            self.outbound.private_stream(None)?;
+            if item.tracks_login_prompt() {
+                self.prompt_losses
+                    .get_or_insert_with(|| self.outbound.private_losses());
+            }
+            let count = item.render(false, &mut self.samples);
+            let active = item.outcome() == PlaybackOutcome::Active;
+            if count != 0 {
+                self.playing_revision = revision;
+            }
+            if count != 0 || active {
+                self.queue_generated(now, count)?;
             }
         }
         if self.current.is_none() && self.outbound.ready_for_private_input() {
-            if let Some(radio)=&mut self.radio {
-                if let Some(mut item)=radio.outgoing.read_span(&mut self.samples) {
-                    let host_now=u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                    // RF birth is measured from the Engine's Instant. Convert its actual age
-                    // to this call's checked native clock without renewing a buffered frame.
-                    let age=item.span.born_ns.and_then(|born|host_now.checked_sub(born));
-                    item.span.born_ns=age.and_then(|age|now.checked_sub(age));
-                    if let Some(clock) = radio.clock.as_ref().filter(|clock| clock.stream() == item.span.stream) {
+            let mut station_queued = false;
+            if let Some(radio) = &mut self.radio {
+                if let Some(mut item) = radio.outgoing.read_span(&mut self.samples) {
+                    let host_now =
+                        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    item.span.born_ns = station_birth(item.span.born_ns, host_now, now);
+                    if let Some(clock) = radio
+                        .clock
+                        .as_ref()
+                        .filter(|clock| clock.stream() == item.span.stream)
+                    {
                         if self.reply.phone_media_allowed() && item.span.born_ns.is_some() {
                             self.outbound.private_stream(Some(clock))?;
                             if self.output.write(item.span, &self.samples[..item.frames]) != 0 {
                                 #[cfg(test)]
                                 if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
-                                    eprintln!("private PHONE write rejected: attached programme queue");
+                                    eprintln!(
+                                        "private PHONE write rejected: attached programme queue"
+                                    );
                                 }
                                 return Err(Error::Write);
                             }
+                            station_queued = true;
                         }
                     }
                 }
             }
+            if outgoing && !station_queued && now >= self.next_ns && self.outbound.private_idle() {
+                self.outbound.private_stream(None)?;
+                self.samples.fill(0.0);
+                self.queue_generated(now, GENERATED_FRAMES)?;
+            }
         }
         let send = self.outbound.step(&mut self.io, now_ms)?;
-        let render = self.current.as_ref().map(|_| self.next_ns);
+        // Keep every prompt's ownership through its last native packet interval.
+        if send.is_none()
+            && let Some(item) = self
+                .current
+                .take_if(|item| item.outcome() != PlaybackOutcome::Active)
+        {
+            self.playing_revision = None;
+            if self.prompt_losses.take() == Some(self.outbound.private_losses())
+                && item.outcome() == PlaybackOutcome::Succeeded
+            {
+                let played = self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                item.played_login_prompt(played, revision);
+            }
+        }
+        let ready = self.outbound.ready_for_private_input();
+        let render = (ready
+            && (self
+                .current
+                .as_ref()
+                .is_some_and(|item| item.outcome() == PlaybackOutcome::Active)
+                || (self.current.is_none() && !self.incoming.is_empty())
+                || (outgoing && self.outbound.private_idle())))
+        .then_some(self.next_ns);
         let now = self.io.private_now()?;
-        self.io.set_deadline(send.into_iter().chain(render).chain(self.radio.as_ref().and_then(|r|r.deadline(now))).min().map_or(u64::MAX, |at| at.saturating_sub(now)))
+        // Revisit queued station PCM one span at a time after a prompt or an
+        // expired send. Every span keeps the existing birth and permit checks.
+        let station = (ready
+            && self.current.is_none()
+            && self
+                .radio
+                .as_mut()
+                .is_some_and(|radio| radio.outgoing.peek_span().is_some()))
+        .then_some(now);
+        self.io.set_deadline(
+            send.into_iter()
+                .chain(render)
+                .chain(station)
+                .chain(self.radio.as_ref().and_then(|radio| radio.deadline(now)))
+                .min()
+                .map_or(u64::MAX, |at| at.saturating_sub(now)),
+        )
     }
 }
 pub(super) unsafe extern "C" fn step(context: *mut c_void) -> i32 {
-    let Some(owner) = (unsafe { context.cast::<Session>().as_mut() }) else { return -1 };
+    let Some(owner) = (unsafe { context.cast::<Session>().as_mut() }) else {
+        return -1;
+    };
     let result = catch_unwind(AssertUnwindSafe(|| owner.step()));
-    if matches!(result, Ok(Ok(()))) { return 0; }
+    if matches!(result, Ok(Ok(()))) {
+        return 0;
+    }
     #[cfg(test)]
     if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
         match result {
@@ -190,4 +375,71 @@ pub(super) unsafe extern "C" fn step(context: *mut c_void) -> i32 {
     owner.reply.retire();
     owner.stop.store(true, Ordering::Release);
     -1
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::*;
+    use crate::link::source_clock::SourceClock;
+
+    #[test]
+    fn retains_the_birth_of_station_audio_read_ahead_of_its_clock() {
+        let clock = SourceClock::new(Instant::now());
+        clock.restart();
+        // Install a real mapping for a previous 10 ms output callback.
+        assert!(clock.advance(480).born_ns.is_none());
+        clock.observe();
+
+        let (mut producer, mut consumer) = LinkAudioQueue::new(1920, 2).unwrap().into_endpoints();
+        let mut buffer = [0.0; GENERATED_FRAMES];
+        let stamp = clock.advance(480);
+        let first_birth = stamp.born_ns.unwrap();
+        let span = AudioSpan {
+            stream: stamp.stream,
+            source_start: stamp.sample,
+            born_ns: stamp.born_ns,
+            ..AudioSpan::default()
+        };
+        assert_eq!(producer.write(span, &[0.25; 480]), 0);
+        let first = consumer.read_span(&mut buffer).unwrap();
+        let first_call_birth =
+            station_birth(first.span.born_ns, first_birth - 1_000_000, 10_000_000_000);
+
+        // A variable-size 40 ms callback is consumed in two 20 ms pieces.
+        let stamp = clock.advance(1920);
+        let second_birth = stamp.born_ns.unwrap();
+        let span = AudioSpan {
+            stream: stamp.stream,
+            source_start: stamp.sample,
+            born_ns: stamp.born_ns,
+            ..AudioSpan::default()
+        };
+        assert_eq!(producer.write(span, &[0.5; 1920]), 0);
+        let prefix = consumer.read_span(&mut buffer).unwrap();
+        let suffix = consumer.read_span(&mut buffer).unwrap();
+        assert_eq!(
+            prefix.span.source_start,
+            first.span.source_start + first.frames as u64
+        );
+        assert_eq!(
+            suffix.span.source_start,
+            prefix.span.source_start + prefix.frames as u64
+        );
+        let host_now = second_birth + 1_000_000;
+        let call_now = 10_011_000_000;
+        let prefix_call_birth = station_birth(prefix.span.born_ns, host_now, call_now);
+        let suffix_call_birth = station_birth(suffix.span.born_ns, host_now, call_now);
+        assert_eq!(
+            (first_call_birth, prefix_call_birth, suffix_call_birth),
+            (
+                Some(10_001_000_000),
+                Some(10_010_000_000),
+                Some(10_030_000_000)
+            ),
+            "the call owner needs original births for both elapsed and upcoming station audio"
+        );
+        assert_eq!(station_birth(None, host_now, call_now), None);
+        assert_eq!(station_birth(Some(1), 3, 1), None);
+        assert_eq!(station_birth(Some(3), 1, u64::MAX), None);
+    }
 }

@@ -1,13 +1,14 @@
 //! Call admission and retained product steps on the existing SIP reactor.
 use super::{Command as OwnerCommand, Entry, Error, Reactor, Reply};
-use crate::{
-    sip::call_media::{Media, Offer},
-    accounts::Route as PreparedAccount,
-};
 use crate::sip_provider::Call as Observation;
+use crate::{
+    accounts::Route as PreparedAccount,
+    sip::call_media::{Media, Offer},
+};
 use std::{
     collections::BTreeMap,
     ffi::c_void,
+    ops::Bound::{Excluded, Included, Unbounded},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -25,6 +26,8 @@ pub(crate) struct Key {
 
 #[derive(Clone)]
 pub(crate) struct Client {
+    #[cfg(test)]
+    pub(crate) handoff_full: Arc<AtomicBool>,
     sender: mpsc::Sender<OwnerCommand>,
     pub(super) wake: Arc<Notify>,
     pub(super) owner: Arc<OnceLock<ThreadId>>,
@@ -33,6 +36,8 @@ impl Client {
     pub(super) fn new(sender: mpsc::Sender<OwnerCommand>) -> Self {
         Self {
             sender,
+            #[cfg(test)]
+            handoff_full: Arc::new(AtomicBool::new(false)),
             wake: Arc::new(Notify::new()),
             owner: Arc::new(OnceLock::new()),
         }
@@ -44,6 +49,7 @@ impl Client {
         local: &str,
         destination: String,
         jitter: Arc<crate::JitterProvider>,
+        progress: Arc<crate::progress::Progress>,
     ) -> Result<Dial, Error> {
         if self
             .owner
@@ -62,6 +68,7 @@ impl Client {
                 local.to_owned(),
                 destination,
                 jitter,
+                progress,
                 Arc::clone(&close),
                 reply,
             ))),
@@ -151,10 +158,7 @@ pub(crate) struct Receipt {
     consumed: bool,
 }
 impl Receipt {
-    pub(crate) fn prepare(
-        mut self,
-        jitter: Arc<crate::JitterProvider>,
-    ) -> Result<Handle, Error> {
+    pub(crate) fn prepare(mut self, jitter: Arc<crate::JitterProvider>) -> Result<Handle, Error> {
         let remote = format!("{:016x}{:016x}", self.key.generation, self.key.call);
         let result = self
             .client
@@ -202,12 +206,20 @@ impl Shared {
     pub(crate) fn wake(&self) {
         self.client.wake.notify_one();
     }
-    pub(crate) fn set_deadline(&self, after:u64) -> Result<(),Error> {
-        let next=if after==u64::MAX {None} else {
-            Some(std::time::Instant::now().checked_add(std::time::Duration::from_nanos(after)).ok_or(Error::Call)?)
+    pub(crate) fn set_deadline(&self, after: u64) -> Result<(), Error> {
+        let next = if after == u64::MAX {
+            None
+        } else {
+            Some(
+                std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_nanos(after))
+                    .ok_or(Error::Call)?,
+            )
         };
-        *self.deadline.lock().map_err(|_|Error::Owner)?=next;
-        if self.client.owner.get()!=Some(&std::thread::current().id()){self.wake();}
+        *self.deadline.lock().map_err(|_| Error::Owner)? = next;
+        if self.client.owner.get() != Some(&std::thread::current().id()) {
+            self.wake();
+        }
         Ok(())
     }
     pub(crate) fn answer(&self) -> Result<(), Error> {
@@ -279,22 +291,21 @@ pub(super) enum Command {
         String,
         String,
         Arc<crate::JitterProvider>,
+        Arc<crate::progress::Progress>,
         Arc<AtomicBool>,
         Reply<Handle>,
     ),
-    Prepare(
-        Key,
-        Arc<crate::JitterProvider>,
-        String,
-        Reply<Handle>,
-    ),
+    Prepare(Key, Arc<crate::JitterProvider>, String, Reply<Handle>),
     Answer(Key, Reply<()>),
     Attach(Key, Step, Reply<()>),
     Detach(Key, Reply<()>),
 }
 struct Outgoing {
     local: String,
-    offer: Offer,
+    offer: Option<Offer>,
+    early: Option<Media>,
+    progress: Arc<crate::progress::Progress>,
+    first_answer: Option<crate::sip::media::MediaDescription>,
     jitter: Arc<crate::JitterProvider>,
     reply: Reply<Handle>,
 }
@@ -309,8 +320,12 @@ pub(super) struct Slot {
 impl Slot {
     pub(super) fn set_delays(&self, delays_ms: [u32; 3]) -> Result<(), Error> {
         if let Some(shared) = &self.shared {
-            shared.media.lock().map_err(|_| Error::Owner)?
-                .set_delays(delays_ms).map_err(|_| Error::Call)?;
+            shared
+                .media
+                .lock()
+                .map_err(|_| Error::Owner)?
+                .set_delays(delays_ms)
+                .map_err(|_| Error::Call)?;
         }
         Ok(())
     }
@@ -327,12 +342,76 @@ impl Slot {
         }
     }
 }
+// A service turn bounds reactor work per account. It never limits admission.
+pub(super) const SERVICE_BATCH: usize = 8;
+
 impl Entry {
+    pub(super) fn next_call_batch(&mut self, restart: bool) -> bool {
+        if restart {
+            self.batch_cursor = 0;
+        }
+        if restart || self.done {
+            self.batch_through = self.calls.last_key_value().map_or(0, |(token, _)| *token);
+        }
+        self.call_batch.fill(0);
+        if self.batch_cursor >= self.batch_through {
+            return false;
+        }
+        let pending = self
+            .calls
+            .range((Excluded(self.batch_cursor), Included(self.batch_through)));
+        let mut pending = pending.map(|(token, _)| *token);
+        for token in &mut self.call_batch {
+            let Some(next) = pending.next() else { break };
+            *token = next;
+            self.batch_cursor = next;
+        }
+        if pending.next().is_some() {
+            return true;
+        }
+        self.batch_cursor = self.batch_through;
+        false
+    }
+
     pub(super) fn collect_calls(&mut self) -> Result<(), Error> {
         while let Some(call) = self.account.next_call()? {
             let token = call.call;
             let terminal = call.state == 5;
             if let Some(slot) = self.calls.get_mut(&token) {
+                if let Some(dial) = &mut slot.outgoing
+                    && !call.offer().is_empty()
+                {
+                    // Read while this exact native FIFO record is current. A bad envelope
+                    // retires only this attempt, even if its final answer already coalesced.
+                    let first = self
+                        .account
+                        .first_provisional(token)
+                        .map_err(|_| Error::Call)
+                        .and_then(|early| {
+                            early
+                                .map(|early| {
+                                    if early.source()? != self.settings.remote() {
+                                        return Err(Error::Call);
+                                    }
+                                    crate::sip::media::MediaDescription::parse_answer(early.offer())
+                                        .map_err(|_| Error::Call)
+                                })
+                                .transpose()
+                        });
+                    match first {
+                        Ok(description) => dial.first_answer = description,
+                        Err(_) => slot.close.store(true, Ordering::Release),
+                    }
+                }
+                if let Some(dial) = &slot.outgoing {
+                    let final_status = if call.state == 2 && (200..300).contains(&call.sip_status) {
+                        call.sip_status
+                    } else {
+                        call.invite_failure_status
+                    };
+                    dial.progress
+                        .observe(call.alerting_seen != 0, call.state != 1, final_status);
+                }
                 slot.state(call);
             } else if !terminal {
                 self.calls.insert(
@@ -350,7 +429,6 @@ impl Entry {
                 self.account.release_call(token)?;
             }
             // Keep tracked terminal leases until their product callback is quiescent.
-            // Native capacity therefore also bounds retained host call owners.
         }
         Ok(())
     }
@@ -372,24 +450,44 @@ impl Entry {
     }
 }
 impl Reactor {
-    pub(super) fn earliest_call_deadline(&self)->Option<std::time::Instant>{
-        self.active.values().chain(&self.retiring).filter_map(|owner| {
-            let entry=owner.borrow();
-            entry.calls.values().filter_map(|slot| {
-                slot.step.as_ref()?;
-                let shared=slot.shared.as_ref()?;
-                *shared.deadline.lock().ok()?
-            }).min()
-        }).min()
+    pub(super) fn earliest_call_deadline(&self) -> Option<std::time::Instant> {
+        self.active
+            .values()
+            .chain(&self.retiring)
+            .filter_map(|owner| {
+                let entry = owner.borrow();
+                entry
+                    .calls
+                    .values()
+                    .filter_map(|slot| {
+                        slot.step.as_ref()?;
+                        let shared = slot.shared.as_ref()?;
+                        *shared.deadline.lock().ok()?
+                    })
+                    .min()
+            })
+            .min()
     }
     pub(super) fn service_calls(&mut self) {
-        for owner in self.active.values().chain(&self.retiring) {
-            let mut callbacks: [_; 8] = std::array::from_fn(|_| None);
+        // Start after the last accepted account so a full handoff cannot starve another account.
+        let after = self.last_incoming_account.clone();
+        let active = self
+            .active
+            .range::<String, _>((Excluded(&after), Unbounded))
+            .chain(
+                self.active
+                    .range::<String, _>((Unbounded, Included(&after))),
+            )
+            .map(|(_, owner)| owner);
+        let mut handoff_full = false;
+        for owner in active.chain(&self.retiring) {
+            let account = Arc::clone(&owner.borrow().settings);
+            let generation = account.generation();
+            let id = account.account.account_id().to_string();
+            let batch = owner.borrow().call_batch;
+            let mut callbacks: [_; SERVICE_BATCH] = std::array::from_fn(|_| None);
             {
                 let mut entry = owner.borrow_mut();
-                let account = Arc::clone(&entry.settings);
-                let generation = account.generation();
-                let id = account.account.account_id().to_string();
                 let done = entry.done;
                 let registered = entry.last.state == 2 && entry.last.generation == generation;
                 let retiring = entry.retiring || done;
@@ -398,11 +496,17 @@ impl Reactor {
                     calls,
                     ..
                 } = &mut *entry;
-                for (index, (token, slot)) in calls.iter_mut().enumerate() {
-                    if slot.close.load(Ordering::Acquire) && slot.observation.state < 4 {
+                for (index, token) in batch
+                    .iter()
+                    .enumerate()
+                    .take_while(|(_, token)| **token != 0)
+                {
+                    let slot = calls.get_mut(token).expect("current service batch");
+                    if !done && slot.close.load(Ordering::Acquire) && slot.observation.state < 4 {
                         let _ = native.hangup_call(*token);
                     }
                     if !slot.dispatched
+                        && !slot.close.load(Ordering::Acquire)
                         && !retiring
                         && slot.observation.state == 1
                         && slot.observation.direction == 0
@@ -413,7 +517,9 @@ impl Reactor {
                             let _ = native.respond_call(*token, 403, &[]);
                             continue;
                         }
-                        slot.dispatched = true;
+                        if handoff_full {
+                            continue;
+                        }
                         let receipt = Receipt {
                             account: Arc::clone(&account),
                             key: Key {
@@ -425,13 +531,29 @@ impl Reactor {
                             client: self.calls.clone(),
                             consumed: false,
                         };
-                        if self.incoming.try_send(receipt).is_err() {
-                            slot.close.store(true, Ordering::Release);
+                        match self.incoming.try_send(receipt) {
+                            Ok(()) => {
+                                slot.dispatched = true;
+                                self.last_incoming_account.clone_from(&id);
+                            }
+                            Err(std::sync::mpsc::TrySendError::Full(mut receipt)) => {
+                                // Keep the exact offer in its slot for the next handoff.
+                                #[cfg(test)]
+                                self.calls.handoff_full.store(true, Ordering::Release);
+                                receipt.consumed = true;
+                                handoff_full = true;
+                            }
+                            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                slot.dispatched = true; // Dropping the receipt requests close.
+                            }
                         }
                     }
                     if let (Some(shared), Some(step)) = (&slot.shared, &slot.step) {
-                        if let Ok(mut deadline)=shared.deadline.lock()
-                            && deadline.is_some_and(|t|t<=std::time::Instant::now()) { *deadline=None; }
+                        if let Ok(mut deadline) = shared.deadline.lock()
+                            && deadline.is_some_and(|t| t <= std::time::Instant::now())
+                        {
+                            *deadline = None;
+                        }
                         if shared.stopped.load(Ordering::Acquire) {
                             slot.step = None;
                         } else if slot.observation.state >= 3
@@ -444,28 +566,6 @@ impl Reactor {
                         }
                     }
                 }
-                calls.retain(|token, slot| {
-                    if slot.observation.state != 5 || slot.step.is_some() {
-                        return true;
-                    }
-                    if !done && native.release_call(*token).is_err() {
-                        return true;
-                    }
-                    if let Some(shared) = &slot.shared {
-                        match shared.media.lock() {
-                            Ok(media) => match media.observe() {
-                                Ok(observation) => eprintln!(
-                                    "phone SIP playout: jitter={:?} decode_recovery_frames={} native_plc_frames={} fallback_frames={}",
-                                    observation.jitter, observation.decode_recovery_frames,
-                                    observation.native_plc_frames, observation.fallback_frames
-                                ),
-                                Err(_) => eprintln!("phone SIP: playout observation unavailable"),
-                            },
-                            Err(_) => eprintln!("phone SIP: media owner unavailable for observation"),
-                        }
-                    }
-                    false
-                });
             }
             // No account, peer or media borrow/lock survives into the product callback.
             for (shared, callback, context) in callbacks.into_iter().flatten() {
@@ -476,36 +576,74 @@ impl Reactor {
                     shared.end();
                 }
             }
+            {
+                let mut entry = owner.borrow_mut();
+                let done = entry.done;
+                let Entry {
+                    calls,
+                    account: native,
+                    ..
+                } = &mut *entry;
+                for token in batch.into_iter().take_while(|token| *token != 0) {
+                    let slot = calls.get(&token).expect("current service batch");
+                    if slot.observation.state != 5 || slot.step.is_some() {
+                        continue;
+                    }
+                    if !done && native.release_call(token).is_err() {
+                        continue;
+                    }
+                    if let Some(shared) = &slot.shared {
+                        match shared.media.lock() {
+                            Ok(media) => match media.observe() {
+                                Ok(observation) => eprintln!(
+                                    "phone SIP playout: jitter={:?} decode_recovery_frames={} native_plc_frames={} fallback_frames={}",
+                                    observation.jitter,
+                                    observation.decode_recovery_frames,
+                                    observation.native_plc_frames,
+                                    observation.fallback_frames
+                                ),
+                                Err(_) => eprintln!("phone SIP: playout observation unavailable"),
+                            },
+                            Err(_) => {
+                                eprintln!("phone SIP: media owner unavailable for observation")
+                            }
+                        }
+                    }
+                    calls.remove(&token);
+                }
+            }
         }
     }
-    /// Complete at most the existing native slot count, on the same serial reactor.
+    /// Complete ready calls on the same serial reactor, keeping each native owner independent.
     /// No RefCell or media borrow is retained across endpoint preparation.
     pub(super) async fn service_outgoing(&mut self) {
         for owner in self.active.values().chain(&self.retiring) {
-            let tokens: [Option<u64>; 8] = {
-                let entry = owner.borrow();
-                let mut tokens = [None; 8];
-                for (index, (token, slot)) in entry.calls.iter().enumerate() {
-                    if slot.outgoing.is_some()
-                        && (slot.observation.state != 1
-                            || slot.close.load(Ordering::Acquire)
-                            || entry.retiring
-                            || entry.done)
-                    {
-                        tokens[index] = Some(*token);
-                    }
-                }
-                tokens
-            };
-            for token in tokens.into_iter().flatten() {
+            let batch = owner.borrow().call_batch;
+            for token in batch.into_iter().take_while(|token| *token != 0) {
                 let (outgoing, observation, closed, retiring, account, delays_ms) = {
                     let mut entry = owner.borrow_mut();
-                    let retiring = entry.retiring || entry.done;
+                    let retiring = entry.retiring
+                        || entry.done
+                        || entry.last.state != 2
+                        || entry.last.generation != entry.settings.generation();
                     let account = Arc::clone(&entry.settings);
                     let delays_ms = entry.delays_ms;
                     let slot = entry.calls.get_mut(&token).expect("retained outgoing slot");
+                    if slot.observation.state == 1
+                        && !slot.close.load(Ordering::Acquire)
+                        && !retiring
+                        && slot
+                            .outgoing
+                            .as_ref()
+                            .is_none_or(|dial| dial.first_answer.is_none())
+                    {
+                        continue;
+                    }
+                    let Some(outgoing) = slot.outgoing.take() else {
+                        continue;
+                    };
                     (
-                        slot.outgoing.take().expect("pending outgoing owner"),
+                        outgoing,
                         slot.observation.clone(),
                         Arc::clone(&slot.close),
                         retiring,
@@ -513,9 +651,50 @@ impl Reactor {
                         delays_ms,
                     )
                 };
+                let mut outgoing = outgoing;
+                if observation.state == 1 && !retiring && !closed.load(Ordering::Acquire) {
+                    let prepared = async {
+                        if outgoing.early.is_none() {
+                            let first = outgoing.first_answer.clone().ok_or(Error::Call)?;
+                            let offer = outgoing.offer.take().ok_or(Error::Call)?;
+                            outgoing.early = Some(
+                                offer
+                                    .accept_description(
+                                        first,
+                                        Arc::clone(&outgoing.jitter),
+                                        delays_ms,
+                                    )
+                                    .await
+                                    .map_err(|_| Error::Call)?,
+                            );
+                        }
+                        let early = outgoing.early.as_mut().ok_or(Error::Call)?;
+                        early.set_delays(delays_ms).map_err(|_| Error::Call)?;
+                        early
+                            .read_progress(&outgoing.progress)
+                            .map_err(|_| Error::Call)
+                    }
+                    .await;
+                    if prepared.is_ok() {
+                        owner
+                            .borrow_mut()
+                            .calls
+                            .get_mut(&token)
+                            .expect("current provisional call")
+                            .outgoing = Some(outgoing);
+                        continue;
+                    }
+                    closed.store(true, Ordering::Release);
+                }
+                outgoing
+                    .progress
+                    .observe(false, true, observation.invite_failure_status);
                 let Outgoing {
                     local,
                     offer,
+                    first_answer,
+                    early,
+                    progress: _,
                     jitter,
                     reply,
                 } = outgoing;
@@ -527,18 +706,38 @@ impl Reactor {
                     {
                         return Err(Error::Call);
                     }
-                    let media = offer
-                        .accept(observation.offer(), jitter, delays_ms)
-                        .await
-                        .map_err(|_| Error::Call)?;
+                    let media = if let Some(mut media) = early {
+                        let answer =
+                            crate::sip::media::MediaDescription::parse_answer(observation.offer())
+                                .map_err(|_| Error::Call)?;
+                        if Some(&answer) != first_answer.as_ref() {
+                            return Err(Error::Call);
+                        }
+                        media.finish_provisional().map_err(|_| Error::Call)?;
+                        media
+                    } else {
+                        offer
+                            .ok_or(Error::Call)?
+                            .accept(
+                                observation.offer(),
+                                first_answer.as_ref(),
+                                jitter,
+                                delays_ms,
+                            )
+                            .await
+                            .map_err(|_| Error::Call)?
+                    };
                     if closed.load(Ordering::Acquire) {
                         return Err(Error::Call);
                     }
                     let source = observation.source()?;
                     let mut entry = owner.borrow_mut();
-                    if entry.retiring || entry.done || entry.last.state != 2
+                    if entry.retiring
+                        || entry.done
+                        || entry.last.state != 2
                         || entry.last.generation != account.generation()
-                        || source != account.remote() {
+                        || source != account.remote()
+                    {
                         return Err(Error::Call);
                     }
                     entry.account.acknowledge_call(token)?;
@@ -558,7 +757,8 @@ impl Reactor {
                         direction: Direction::Outgoing,
                         media: Mutex::new(media),
                         // ACK was submitted. The next native observation alone confirms ready.
-                        state: AtomicU32::new(observation.state), deadline: Mutex::new(None),
+                        state: AtomicU32::new(observation.state),
+                        deadline: Mutex::new(None),
                         close: Arc::clone(&closed),
                         stopped: AtomicBool::new(false),
                         client: self.calls.clone(),
@@ -573,7 +773,7 @@ impl Reactor {
                 .await;
                 if result.is_err() {
                     closed.store(true, Ordering::Release);
-                    if observation.state < 4 {
+                    if observation.state < 4 && !owner.borrow().done {
                         let _ = owner.borrow().account.hangup_call(token);
                     }
                 }
@@ -601,6 +801,7 @@ impl Reactor {
                 local,
                 destination,
                 jitter,
+                progress,
                 close,
                 reply,
             ) => {
@@ -614,7 +815,8 @@ impl Reactor {
                         if entry.retiring
                             || entry.done
                             || entry.settings.generation() != generation
-                            || entry.last.state != 2 || entry.last.generation != generation
+                            || entry.last.state != 2
+                            || entry.last.generation != generation
                         {
                             return Err(Error::Call);
                         }
@@ -645,7 +847,10 @@ impl Reactor {
                             Slot {
                                 outgoing: Some(Outgoing {
                                     local,
-                                    offer,
+                                    offer: Some(offer),
+                                    early: None,
+                                    progress,
+                                    first_answer: None,
                                     jitter,
                                     reply,
                                 }),
@@ -669,7 +874,8 @@ impl Reactor {
                         let entry = owner.borrow();
                         let slot = entry.calls.get(&key.call).ok_or(Error::Call)?;
                         if entry.retiring
-                            || entry.last.state != 2 || entry.last.generation != key.generation
+                            || entry.last.state != 2
+                            || entry.last.generation != key.generation
                             || slot.observation.source().ok() != Some(entry.settings.remote())
                             || slot.observation.direction != 0
                             || slot.observation.state != 1
@@ -696,7 +902,8 @@ impl Reactor {
                         pcm_rate: media.pcm_rate(),
                         direction: Direction::Incoming,
                         media: Mutex::new(media),
-                        state: AtomicU32::new(slot.observation.state), deadline: Mutex::new(None),
+                        state: AtomicU32::new(slot.observation.state),
+                        deadline: Mutex::new(None),
                         close: Arc::clone(&slot.close),
                         stopped: AtomicBool::new(false),
                         client: self.calls.clone(),

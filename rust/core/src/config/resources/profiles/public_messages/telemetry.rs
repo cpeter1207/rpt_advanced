@@ -79,7 +79,7 @@ const TAIL: Fields = &[
     ),
 ];
 const COURTESY: Fields = &[
-    ("input", Rule::Choice(&["receiver", "link"])),
+    ("input", Rule::Choice(&["receiver", "link", "phone"])),
     ("level_db", Rule::Value(level)),
     (
         "remote_node",
@@ -225,7 +225,6 @@ fn requires_deadline(recipe: &Composition) -> bool {
             .chain(morse)
             .any(|text| required(&text.bindings)),
         Segment::Message(owner) => required(&recipe.settings_for(owner.as_deref()).bindings),
-        _ => false,
     })
 }
 
@@ -559,7 +558,7 @@ impl ScopedTelemetry {
                     let raw = assigned("remote_node");
                     let remote_node =
                         crate::link::PeerIdentity::canonical_operator(&raw).unwrap_or(raw);
-                    if (input == "receiver" && !remote_node.is_empty())
+                    if (input != "link" && !remote_node.is_empty())
                         || !courtesy_routes.insert((input.clone(), remote_node.clone()))
                     {
                         return Err(error);

@@ -20,7 +20,9 @@ fn collect_mute_start(
     let to = start.saturating_add_signed(range.end).min(end);
     if from < to {
         *first = Some(first.map_or(from, |old| old.min(from)));
-        if let Some(signals) = signals { signals.set_dtmf_muted(true); }
+        if let Some(signals) = signals {
+            signals.set_dtmf_muted(true);
+        }
     }
 }
 
@@ -84,7 +86,9 @@ impl SourceIngress {
     }
 
     fn at_rate(muting: bool, rate: u32, private: bool) -> Result<Self, Error> {
-        if !matches!(rate, 8000 | 48000) { return Err(Error::UnsupportedFormat); }
+        if !matches!(rate, 8000 | 48000) {
+            return Err(Error::UnsupportedFormat);
+        }
         Ok(Self {
             detector: DtmfDetector::at_rate(muting, rate).map_err(|_| Error::UnsupportedFormat)?,
             partition: rate as usize / 125,
@@ -136,7 +140,10 @@ impl SourceIngress {
 
     // Loss is not contiguous fresh tone. Complete only an already qualified
     // real digit; never let analysis windows straddle unknown or codec-PLC PCM.
-    pub(in crate::link) fn discontinuity(&mut self, mut emit: impl FnMut(char)) -> Result<(), Error> {
+    pub(in crate::link) fn discontinuity(
+        &mut self,
+        mut emit: impl FnMut(char),
+    ) -> Result<(), Error> {
         let command_muted = &mut self.command_muted;
         let muting = self.muting;
         let private = self.private;
@@ -156,11 +163,18 @@ impl SourceIngress {
 
     /// Detection takes place once, including when the provider retries a suffix on a later read.
     pub(in crate::link) fn prepare(
-        &mut self, signals: Option<&PeerSignals>, scratch: &mut [f32], block: &Decoded<'_>,
-        mut emit: impl FnMut(char), mut onset: impl FnMut(),
+        &mut self,
+        signals: Option<&PeerSignals>,
+        scratch: &mut [f32],
+        block: &Decoded<'_>,
+        mut emit: impl FnMut(char),
+        mut onset: impl FnMut(),
     ) -> Result<(), Error> {
-        if block.pcm.is_empty() || block.pcm.len() > scratch.len() || block.pcm.len() > 4096
-            || block.start.checked_add(block.pcm.len() as u64).is_none() {
+        if block.pcm.is_empty()
+            || block.pcm.len() > scratch.len()
+            || block.pcm.len() > 4096
+            || block.start.checked_add(block.pcm.len() as u64).is_none()
+        {
             return Err(Error::InvalidFrame);
         }
         if self.cached.is_none() {
@@ -176,7 +190,10 @@ impl SourceIngress {
             self.span_count = 0;
             // Eight-ms partitions bound the end-of-command mute granularity.
             // Each offered source block is detected once, never again on retry.
-            for (part, pcm) in scratch[..block.pcm.len()].chunks_mut(self.partition).enumerate() {
+            for (part, pcm) in scratch[..block.pcm.len()]
+                .chunks_mut(self.partition)
+                .enumerate()
+            {
                 let start = block.start + (part * self.partition) as u64;
                 let end = start + pcm.len() as u64;
                 let was_muted = self.command_muted;
@@ -205,9 +222,14 @@ impl SourceIngress {
                         .map_err(|_| Error::InvalidFrame)?;
                 }
                 if self.private && !block.concealed {
-                    let pending = if digit.is_some() { self.detector.suppressing() }
-                        else { self.pending_tone || first.is_some() };
-                    if pending && (!self.pending_tone || digit.is_some()) { onset(); }
+                    let pending = if digit.is_some() {
+                        self.detector.suppressing()
+                    } else {
+                        self.pending_tone || first.is_some()
+                    };
+                    if pending && (!self.pending_tone || digit.is_some()) {
+                        onset();
+                    }
                     self.pending_tone = pending;
                 }
                 let muted = self.muting
@@ -244,7 +266,11 @@ impl SourceIngress {
         Ok(())
     }
     pub(in crate::link) fn digit_capacity(&self, len: usize) -> usize {
-        if self.cached.is_some() { 0 } else { len.div_ceil(self.partition) }
+        if self.cached.is_some() {
+            0
+        } else {
+            len.div_ceil(self.partition)
+        }
     }
     pub(in crate::link) fn limit(&self, offered: usize) -> usize {
         offered.min(self.cached.map_or(4096, |c| c.count - c.next))
@@ -252,9 +278,13 @@ impl SourceIngress {
     pub(in crate::link) fn muted(&self) -> bool {
         self.command_muted || self.detector.suppressing()
     }
-    pub(in crate::link) fn hold(&mut self) { self.command_muted = true; }
+    pub(in crate::link) fn hold(&mut self) {
+        self.command_muted = true;
+    }
     pub(in crate::link) fn release(&mut self) -> bool {
-        if self.pending_tone || self.cached.is_some() { return false; }
+        if self.pending_tone || self.cached.is_some() {
+            return false;
+        }
         self.command_muted = false;
         true
     }
@@ -263,9 +293,13 @@ impl SourceIngress {
     }
     pub(in crate::link) fn accepted(&mut self, len: usize) -> Result<(), Error> {
         let cached = self.cached.as_mut().ok_or(Error::InvalidFrame)?;
-        if len > cached.count - cached.next { return Err(Error::InvalidFrame); }
+        if len > cached.count - cached.next {
+            return Err(Error::InvalidFrame);
+        }
         cached.next += len;
-        if cached.next == cached.count { self.cached = None; }
+        if cached.next == cached.count {
+            self.cached = None;
+        }
         Ok(())
     }
     pub(in crate::link) fn abandon(&mut self, emit: impl FnMut(char)) -> Result<(), Error> {

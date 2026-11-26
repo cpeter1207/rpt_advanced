@@ -1792,9 +1792,15 @@ fn queued_parrot() -> PreparedMedia {
 #[test]
 fn parrot_epoch_rejects_delayed_preparation_and_rearms_after_unkey() {
     let (mut node, mut control) = NodeController::new(
-        ControllerSettings { parrot_enabled: true, ..ControllerSettings::default() },
-        vec![], vec![], CourtesySettings::default(),
-    ).unwrap();
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
     node.observe_parrot_at_epoch(true, &[0.25], 0);
     node.observe_parrot_at_epoch(false, &[], 0);
     let prior = control.take_parrot_capture().unwrap();
@@ -2995,6 +3001,68 @@ fn kerchunk_does_not_interrupt_other_traffic_or_its_normal_release() {
         1,
         "the normal local release must retain its announcement"
     );
+}
+
+#[test]
+fn due_receiver_courtesy_plays_while_polite_status_awaits_first_pcm() {
+    for already_audible in [true, false] {
+        let mut preparation = MessagePreparation::new(1);
+        let status = preparation
+            .register(0)
+            .unwrap()
+            .with_delivery(samples(5_000), PoliteDelivery::default());
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                courtesy_delay_ms: 500,
+                hang_ms: 1_000,
+                telemetry_duck_db: 0,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings {
+                receiver: Some(media(0.25, 1)),
+                ..CourtesySettings::default()
+            },
+        )
+        .unwrap();
+        assert!(node.process_audio(true, false, &[], &mut [0.0; 96]));
+        assert!(control.queue_prepared_status(status));
+        for _ in 0..23_999 {
+            let mut sample = [0.0];
+            assert!(node.process_audio(false, false, &[], &mut sample));
+            assert_eq!(sample, [0.0]);
+        }
+        let request = preparation.take_request().expect("status awaiting PCM");
+        if already_audible {
+            assert!(
+                preparation
+                    .complete(request.attempt, Ok(media(0.75, 2)))
+                    .is_ok()
+            );
+        }
+        let mut before_due = [0.0];
+        node.process_audio(false, false, &[], &mut before_due);
+        assert_eq!(before_due, [if already_audible { 0.75 } else { 0.0 }]);
+        let mut due = [0.0; 2];
+        assert!(node.process_audio(false, false, &[], &mut due));
+        if already_audible {
+            assert_eq!(due, [0.75, 0.25], "finish audible status before courtesy");
+        } else {
+            assert_eq!(due, [0.25, 0.0], "silent status must yield to due courtesy");
+            assert!(
+                preparation
+                    .complete(request.attempt, Ok(media(0.75, 2)))
+                    .is_ok()
+            );
+            let mut resumed = [0.0; 3];
+            node.process_audio(false, false, &[], &mut resumed);
+            assert_eq!(resumed, [0.75, 0.75, 0.0]);
+        }
+        assert_eq!(control.reclaim().count(), 1);
+        assert!(preparation.take_request().is_none());
+    }
 }
 
 #[test]

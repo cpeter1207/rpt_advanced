@@ -173,7 +173,7 @@ fn queued_received_digit_cannot_rekey_after_its_source_is_muted_then_unmuted() {
         for symbol in ['6', '#'] {
             assert!(
                 host.runtime
-                    .node("1000")
+                    .node(&port.to_string())
                     .unwrap()
                     .links()
                     .peer_digit("2000", symbol, clock.now_ms, signals.reply_target())

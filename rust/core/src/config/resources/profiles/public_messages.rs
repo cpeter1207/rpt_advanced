@@ -688,14 +688,11 @@ impl ScopedMessages {
     /// Prepare a protocol status or sensor label for a text-only consumer.
     pub fn compile_text_only(&self, content: &str) -> Result<Composition, PublicMessageError> {
         let recipe = self.compile_inline(content, MorseRequirement::TextOnly)?;
-        if recipe.segments().iter().any(|s| {
-            matches!(
-                s,
-                crate::composition::Segment::Media(_)
-                    | crate::composition::Segment::Tone(_)
-                    | crate::composition::Segment::FluentMedia { .. }
-            )
-        }) {
+        if recipe
+            .segments()
+            .iter()
+            .any(|s| matches!(s, crate::composition::Segment::FluentMedia { .. }))
+        {
             return Err(PublicMessageError::Composition);
         }
         Ok(recipe)

@@ -1,8 +1,8 @@
 //! Common ABI layouts with one capability-specific operation per provider build.
 use std::ffi::{c_char, c_void};
 
-/// Initial media capability ABI; incompatible tables are rejected before creation.
-pub const ABI_VERSION: u32 = 2;
+/// Incremental media capability ABI; incompatible tables are rejected before creation.
+pub const ABI_VERSION: u32 = 3;
 /// Fixed-width capability identity, including NUL padding.
 #[cfg(file_adapter)]
 pub const CAPABILITY: [u8; 16] = *b"rptadv.file\0\0\0\0\0";
@@ -82,25 +82,38 @@ pub struct RawSpeechRequest {
     pub level_db: i32,
 }
 
-/// Open stream handle and immutable source-rate metadata.
+/// No samples or format are available on this visit.
+pub const STEP_PENDING: u32 = 0;
+/// The source rate is ready. Exactly one such result precedes samples.
+pub const STEP_FORMAT_READY: u32 = 1;
+/// The output contains a nonzero number of samples.
+pub const STEP_SAMPLES: u32 = 2;
+/// The child exited successfully and all valid samples were returned.
+pub const STEP_EOF: u32 = 3;
+
+/// One result of a bounded stream visit; unused fields are zero.
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct RawStream {
-    /// Opaque stream handle passed to close_stream exactly once.
-    pub handle: *mut c_void,
-    /// Original decoded source rate; no native-rate conversion occurs here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RawStep {
+    /// One of the STEP_* event constants.
+    pub kind: u32,
+    /// Decoded source rate, used only for STEP_FORMAT_READY.
     pub sample_rate_hz: u32,
+    /// Output count, used only for STEP_SAMPLES.
+    pub samples: usize,
 }
 
-/// Versioned stream functions. Open/read/close are off the audio callback.
+/// Versioned stream functions, used off the audio callback.
 ///
 /// Status values: 0 success; -1 invalid request; -2 unavailable local resource;
 /// -3 I/O/internal failure; -4 failed subprocess; -5 timeout; -6 cancelled;
-/// -7 invalid output. A context supports concurrent independent streams. Open
-/// creates a stream, read returns samples written (zero means EOF), and close
-/// releases that stream. Read may wait for media and is only for its worker.
-/// Destroy requires all streams and calls to have ended. Cancellation and host
-/// reaper callbacks must remain loaded and valid until their calls end.
+/// -7 invalid output. Contexts allow concurrent independent streams. Open and
+/// close may block on local I/O or process lifecycle. Step never waits for media.
+/// Each handle may move between workers with exclusive, sequential ownership.
+/// Successful setup always transfers the handle, even if cancellation races it.
+/// The caller checks cancellation before use and closes every returned handle.
+/// Only successful Samples results make output consumable. Destroy requires all
+/// streams and calls to have ended; the host retains the provider and callbacks.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Descriptor {
@@ -114,34 +127,34 @@ pub struct Descriptor {
     pub create: Option<unsafe extern "C" fn(*const RawConfig, *mut *mut c_void) -> i32>,
     /// Destroy a context after its users stop; null is harmless.
     pub destroy: Option<unsafe extern "C" fn(*mut c_void)>,
-    /// Open one local file stream and report its decoded source rate.
+    /// Open one local file stream and initialize the handle to null on failure.
     #[cfg(file_adapter)]
     pub open_file: Option<
         unsafe extern "C" fn(
             *const c_void,
             *const c_char,
             *const RawCancellation,
-            *mut RawStream,
+            *mut *mut c_void,
         ) -> i32,
     >,
-    /// Open one synthesized speech stream and report its source rate.
+    /// Open one synthesized speech stream and initialize the handle to null on failure.
     #[cfg(speech_adapter)]
     pub open_speech: Option<
         unsafe extern "C" fn(
             *const c_void,
             *const RawSpeechRequest,
             *const RawCancellation,
-            *mut RawStream,
+            *mut *mut c_void,
         ) -> i32,
     >,
-    /// Read a bounded chunk; return sample count or zero at EOF.
-    pub read_stream: Option<
+    /// Advance a stream once, returning its event separately from the status.
+    pub step_stream: Option<
         unsafe extern "C" fn(
             *mut c_void,
             *const RawCancellation,
             *mut f32,
             usize,
-            *mut usize,
+            *mut RawStep,
         ) -> i32,
     >,
     /// Release a stream exactly once; null is harmless.
@@ -169,7 +182,7 @@ impl Descriptor {
             || self.create.is_none()
             || self.destroy.is_none()
             || self.operation_missing()
-            || self.read_stream.is_none()
+            || self.step_stream.is_none()
             || self.close_stream.is_none()
         {
             return Err(crate::MediaError::IncompatibleAdapter);

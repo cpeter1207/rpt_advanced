@@ -166,12 +166,33 @@ impl Offer {
     pub(crate) async fn accept(
         self,
         answer: &[u8],
+        first_answer: Option<&MediaDescription>,
         jitter_provider: Arc<crate::JitterProvider>,
         delays_ms: [u32; 3],
     ) -> Result<Media, MediaError> {
         let description = MediaDescription::parse_answer(answer)?;
+        if first_answer.is_some_and(|first| first != &description) {
+            return Err(MediaError::UnsupportedDescription);
+        }
+        self.accept_description(description, jitter_provider, delays_ms)
+            .await
+    }
+
+    pub(crate) async fn accept_description(
+        self,
+        description: MediaDescription,
+        jitter_provider: Arc<crate::JitterProvider>,
+        delays_ms: [u32; 3],
+    ) -> Result<Media, MediaError> {
         let endpoint = self.endpoint.select_answer(description.clone()).await?;
-        Media::from_endpoint(endpoint, description, Vec::new(), jitter_provider, delays_ms, &self.catalog)
+        Media::from_endpoint(
+            endpoint,
+            description,
+            Vec::new(),
+            jitter_provider,
+            delays_ms,
+            &self.catalog,
+        )
     }
 }
 
@@ -262,7 +283,14 @@ impl Media {
         .expect("literal endpoint");
         let endpoint = RtpEndpoint::bind(local, description.clone(), call as u32, 0).await?;
         let answer = description.answer(endpoint.local_addr()?, call)?;
-        Self::from_endpoint(endpoint, description, answer, jitter_provider, delays_ms, catalog)
+        Self::from_endpoint(
+            endpoint,
+            description,
+            answer,
+            jitter_provider,
+            delays_ms,
+            catalog,
+        )
     }
     fn from_endpoint(
         endpoint: RtpEndpoint,
@@ -275,8 +303,14 @@ impl Media {
         let digit_capabilities = description.digit_capabilities();
         let profile = description.codec.parameters();
         let codec = AudioCodec::from_catalog(catalog, description.codec)?;
-        let jitter = jitter_provider.create(profile.pcm_rate_hz, profile.packet_frames,
-            codec.receive_bytes(), delays_ms).map_err(|_| MediaError::Jitter)?;
+        let jitter = jitter_provider
+            .create(
+                profile.pcm_rate_hz,
+                profile.packet_frames,
+                codec.receive_bytes(),
+                delays_ms,
+            )
+            .map_err(|_| MediaError::Jitter)?;
         let pcm = vec![0.0; codec.receive_frames() as usize].into_boxed_slice();
         let packet = vec![0; codec.receive_bytes()].into_boxed_slice();
         Ok(Self {
@@ -316,7 +350,9 @@ impl Media {
     }
     pub(crate) fn set_delays(&mut self, delays_ms: [u32; 3]) -> Result<(), MediaError> {
         if self.delays_ms != delays_ms {
-            self.jitter.set_delays(delays_ms).map_err(|_| MediaError::Jitter)?;
+            self.jitter
+                .set_delays(delays_ms)
+                .map_err(|_| MediaError::Jitter)?;
             self.delays_ms = delays_ms;
         }
         Ok(())
@@ -330,6 +366,55 @@ impl Media {
             fallback_frames: self.fallback_frames,
         })
     }
+    pub(crate) fn read_progress(
+        &mut self,
+        progress: &crate::progress::Progress,
+    ) -> Result<(), MediaError> {
+        let now = crate::frontend::monotonic_ns();
+        if now == 0 {
+            return Err(MediaError::SourceContract);
+        }
+        let sink = progress.sink(self.pcm_rate(), now);
+        let mut result = unsafe { std::mem::zeroed() };
+        // Synchronous callbacks borrow progress only for this reactor turn.
+        match unsafe { self.read_checked(0, &sink, &mut result) } {
+            // A provisional peer may not yet listen or socket delivery may be interrupted.
+            // These observations say nothing terminal about this INVITE.
+            Err(MediaError::Socket(
+                libc::EINTR
+                | libc::EAGAIN
+                | libc::ECONNREFUSED
+                | libc::ENETUNREACH
+                | libc::EHOSTUNREACH
+                | libc::ENOBUFS,
+            )) => Ok(()),
+            result => result,
+        }
+    }
+
+    /// Keep the negotiated socket and native instances, starting established credit after a real empty cut.
+    pub(crate) fn finish_provisional(&mut self) -> Result<(), MediaError> {
+        self.endpoint.discard_incoming()?;
+        self.jitter.reset().map_err(|_| MediaError::Jitter)?;
+        self.codec.reset_decoder()?;
+        self.births.fill(None);
+        self.clock = None;
+        self.last_birth = None;
+        self.wire_end = None;
+        self.emitted_end = None;
+        self.completed_packet_end = None;
+        self.pending = None;
+        self.loss = None;
+        self.offset = 0;
+        self.decision_pending = false;
+        self.adaptation_witness = None;
+        self.adaptation_cut = None;
+        self.adaptation_offered = false;
+        self.host_epoch = None;
+        self.discontinuity = true;
+        Ok(())
+    }
+
     pub(crate) fn pcm_rate(&self) -> u32 {
         self.profile.pcm_rate_hz
     }
@@ -1002,5 +1087,115 @@ impl Media {
             self.pending = None;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use std::{
+        net::UdpSocket,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn genuine_provisional_pcm_survives_240_ms_jitter_and_the_answer_cuts_pending_audio() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let remote = peer.local_addr().unwrap();
+            let catalog = Arc::new(super::super::codec::load_catalog().unwrap());
+            let path = std::env::var_os("RPTADV_JITTER_TEST_PROVIDER")
+                .unwrap_or_else(|| "librptadv_jitter_adapter.so.1".into());
+            let jitter =
+                unsafe { crate::JitterProvider::load(std::path::Path::new(&path)) }.unwrap();
+            let offer = Offer::new(remote, 74, catalog).await.unwrap();
+            let local = offer.endpoint.local_addr().unwrap();
+            let answer = MediaDescription {
+                remote,
+                codec: super::super::media::AudioProfile::Mulaw,
+                receive_payload: 0,
+                send_payload: 0,
+                telephone_events: [None, None],
+            };
+            let mut media = offer
+                .accept_description(answer, jitter, [240, 240, 300])
+                .await
+                .unwrap();
+            let progress = crate::progress::Progress::default();
+            progress.observe(true, false, 0);
+            let mut input = [0x99u8; 172];
+            input[..2].copy_from_slice(&[0x80, 0]);
+            input[8..12].copy_from_slice(&74u32.to_be_bytes());
+            let mut heard = false;
+            let mut samples = [0.0; 160];
+            let start = Instant::now();
+            for n in 0..45u16 {
+                input[2..4].copy_from_slice(&n.to_be_bytes());
+                input[4..8].copy_from_slice(&(u32::from(n) * 160).to_be_bytes());
+                peer.send_to(&input, local).unwrap();
+                media.read_progress(&progress).unwrap();
+                let (ring, status, frames, rate) =
+                    unsafe { progress.copy(samples.as_mut_ptr(), 160) };
+                if frames != 0 {
+                    heard |= (ring, status, rate) == (0, 0, 8000)
+                        && samples[..frames].iter().any(|sample| sample.abs() > 0.01);
+                }
+                tokio::time::sleep_until(
+                    (start + Duration::from_millis(20 * u64::from(n + 1))).into(),
+                )
+                .await;
+            }
+            progress.observe(false, true, 200);
+            media.finish_provisional().unwrap();
+            let final_result = unsafe { progress.copy(samples.as_mut_ptr(), 160) };
+            assert_eq!(final_result, (0, 200, 0, 0));
+            assert!(
+                media.host_epoch.is_none() && media.discontinuity && media.last_birth.is_none()
+            );
+            assert!(
+                heard,
+                "configured 240 ms jitter must deliver genuine early PCMU"
+            );
+            // The offer socket remains receive-only throughout provisional playout.
+            peer.set_nonblocking(true).unwrap();
+            let mut received = [0u8; 2048];
+            let preanswer_quiet = matches!(peer.recv_from(&mut received),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock);
+            assert_eq!(media.endpoint.local_addr().unwrap(), local);
+            // Drive the established descriptor's source path with a different host epoch
+            // and opposite PCMU polarity on that same socket. A carried-over original
+            // or decoder history would expose the positive pre-answer marker here.
+            let established = crate::progress::Progress::default();
+            input[12..].fill(0x19);
+            let mut fresh = false;
+            let mut stale = false;
+            let start = Instant::now();
+            for n in 45..90u16 {
+                input[2..4].copy_from_slice(&n.to_be_bytes());
+                input[4..8].copy_from_slice(&(u32::from(n) * 160).to_be_bytes());
+                peer.send_to(&input, local).unwrap();
+                let now = crate::frontend::monotonic_ns();
+                let mut sink = established.sink(8000, now);
+                sink.host_clock_epoch = 7;
+                let mut result = unsafe { std::mem::zeroed() };
+                unsafe { media.read(0, &sink, &mut result) }.unwrap();
+                let (_, _, count, _) = unsafe { established.copy(samples.as_mut_ptr(), 160) };
+                stale |= samples[..count].iter().any(|&sample| sample > 0.01);
+                fresh |= samples[..count].iter().any(|&sample| sample < -0.01);
+                tokio::time::sleep_until(
+                    (start + Duration::from_millis(20 * u64::from(n - 44))).into(),
+                )
+                .await;
+            }
+            assert_eq!(media.host_epoch, Some(7));
+            assert!(
+                preanswer_quiet && fresh && !stale,
+                "same socket must send no early uplink and yield fresh established originals"
+            );
+        });
     }
 }

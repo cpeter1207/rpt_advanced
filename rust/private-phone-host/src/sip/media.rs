@@ -754,19 +754,23 @@ impl RtpEndpoint {
             .connect(media.remote)
             .await
             .map_err(|_| MediaError::Network)?;
+        self.discard_incoming()?;
+        self.egress.header.payload_type = media.send_payload;
+        self.egress.wire = vec![0; 12 + media.codec.parameters().packet_bytes].into_boxed_slice();
+        self.media = media;
+        Ok(self)
+    }
+    /// Drop datagrams from the previous phase. A real empty observation advances the receipt floor.
+    pub(super) fn discard_incoming(&mut self) -> Result<(), MediaError> {
         let mut wire = [0; 2048];
         for _ in 0..64 {
             match receive_datagram(&self.socket, &mut wire, 0, &mut self.receipt_floor) {
                 Ok(_) => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    self.egress.header.payload_type = media.send_payload;
-                    self.egress.wire =
-                        vec![0; 12 + media.codec.parameters().packet_bytes].into_boxed_slice();
-                    self.media = media;
                     self.source = None;
                     self.events = [None; 16];
                     self.next_event = 0;
-                    return Ok(self);
+                    return Ok(());
                 }
                 Err(error) => return Err(MediaError::Socket(error.raw_os_error().unwrap_or(0))),
             }

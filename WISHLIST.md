@@ -708,14 +708,14 @@ real-provider and physical-radio acceptance remain separate.
   is optional when supported. Provider destination/cost policies, incoming-call
   account limits and emergency-service setup remain with the provider.
 - Every incoming caller authenticates with a configured mailbox number and PIN,
-  associated with first name and callsign. Calls start with private control;
-  `*3` explicitly attaches transceive media to permitted local/remote nodes.
-- Public commands remain available to all authenticated callers; protected
-  commands retain node unlock. `*4` selects local/remote command destinations;
-  ordinary call digits go to the telephone.
-- Default outgoing autopatch isolates initiating-node peer audio in both
-  directions for the call. Per-call bypass always requires the node unlock
-  code. Configure local/all-peer playout and discontinuous Earshot-VAD audio.
+  associated with first name and callsign. Successful authentication attaches
+  the call to the account's local port. The caller hears its eligible mix-minus
+  and uses `*99#` to unmute its own audio and keying.
+- Authenticated callers issue commands to the called account's owning port.
+  Protected commands retain that call's unlock requirement on the port.
+- Default outgoing autopatch isolates initiating-port peer audio in both
+  directions for the call. Each call retains its own claim under the port's
+  isolation policy. Configure local/all-peer playout and Earshot-VAD audio.
 - Manual PTT is a configured alternative to VAD, never a temporary override.
   Both obey a configurable five-second forced receive-check deadline, preferring
   natural pauses, with warning tone, STE and measured radio switching allowances.

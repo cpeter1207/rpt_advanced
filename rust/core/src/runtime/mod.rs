@@ -8,8 +8,8 @@ mod prepare;
 mod render;
 pub use aggregate::{
     CommandCompletion, CommandReceipt, CommandRenderers, CommandResponse, PreparedAdapter,
-    PreparedConfigurationTransition, Runtime, RuntimeAudioOwners, RuntimeClock, RuntimeDispatch,
-    RuntimeNode, RuntimeTransmit,
+    PreparedConfigurationTransition, Runtime, RuntimeAudioOwners, RuntimeClock, RuntimeNode,
+    RuntimeTransmit,
 };
 pub use prepare::{NativeFilePreparer, NativeMediaPreparer, NativeSpeechPreparer, RuntimeError};
 pub(crate) use render::morse as morse_text;

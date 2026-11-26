@@ -295,6 +295,11 @@ impl AudioCodec {
         self.finishing = true;
         Ok(encoded)
     }
+    pub(super) fn reset_decoder(&mut self) -> Result<(), MediaError> {
+        self.decoder.reset().map_err(|_| MediaError::Codec)?;
+        self.decode_span_count = 0;
+        Ok(())
+    }
     /// Retire transmit codec history; the product retains source timing ownership.
     pub(crate) fn reset_encoder(&mut self) -> Result<(), MediaError> {
         self.encoder.reset().map_err(|_| MediaError::Codec)?;
