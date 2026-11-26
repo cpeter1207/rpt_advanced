@@ -1215,6 +1215,47 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .iter_mut()
             .find(|node| node.name == local)
             .ok_or(RuntimeError::MissingNode)?;
+        Self::private_status_stream(node, &text, &spoken)
+    }
+    /// Prepare the originating station's own link announcement for one authenticated call.
+    pub fn prepare_phone_link_event(
+        &mut self,
+        local: &str,
+        remote: &str,
+        connected: bool,
+        echo_callsign: Option<&str>,
+        reply: &crate::link::PeerReply,
+    ) -> Result<Option<Box<dyn crate::audio::PcmStreamReader>>, RuntimeError> {
+        if reply.phone_source().is_none() || !reply.phone_authenticated() {
+            return Err(RuntimeError::Rejected);
+        }
+        let echo_node = echo_callsign
+            .map(|_| crate::link::EchoAlias::parse(remote).map(|node| node.to_string()))
+            .transpose()
+            .map_err(|_| RuntimeError::Rejected)?;
+        let echo = echo_node.as_deref().zip(echo_callsign);
+        let (_, label, wire) = self.link_notice_endpoint(remote, Self::link_notice_protocol(echo));
+        let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        if wire && node.links.suppresses_member_notice(&label, connected) {
+            return Ok(None);
+        }
+        let message = if connected {
+            Message::PeerConnectedLocal { peer: &label }
+        } else {
+            Message::PeerDisconnectedLocal { peer: &label }
+        };
+        let forms =
+            Self::link_event_forms(node, &message, echo, &[if wire { &label } else { "" }])?;
+        forms
+            .map(|(morse, spoken)| Self::private_status_stream(node, &morse, &spoken))
+            .transpose()
+    }
+
+    fn private_status_stream(
+        node: &mut RuntimeNode<A, C>,
+        morse: &str,
+        spoken: &str,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
         prepare::status_stream(
             node.control
                 .media_session
@@ -1222,10 +1263,11 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 .ok_or(RuntimeError::Preparation)?
                 .as_mut(),
             &node.status,
-            &text,
-            &spoken,
+            morse,
+            spoken,
         )
     }
+
     /// Queue a current local station dial failure under the originating command's actual permit.
     pub fn queue_phone_dial_failure(
         &mut self,
@@ -1335,16 +1377,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .catalog
             .format(&message)
             .map_err(|_| RuntimeError::Preparation)?;
-        prepare::status_stream(
-            node.control
-                .media_session
-                .as_mut()
-                .ok_or(RuntimeError::Preparation)?
-                .as_mut(),
-            &node.status,
-            &forms.morse,
-            &forms.tts,
-        )
+        Self::private_status_stream(node, &forms.morse, &forms.tts)
     }
     /// Prepare a fixed outcome for the authenticated private recipient only.
     pub fn prepare_phone_operation_result(
@@ -1445,6 +1478,15 @@ impl<A: Send, C: Send> Runtime<A, C> {
     ) -> Result<(), RuntimeError> {
         self.queue_link_rejection(local, peer, reply, Message::LoopRejected { node: peer })
     }
+    /// Return a fixed recognized-command outcome only on the issuing local transmitter.
+    pub fn queue_operation_result(
+        &mut self,
+        local: &str,
+        result: crate::messages::OperationResult,
+    ) -> Result<(), RuntimeError> {
+        self.queue_link_rejection(local, "", None, Message::OperationResult { result })
+    }
+
     /// Explain a stopped macro only to the issuing RF or exact peer endpoint.
     pub fn queue_macro_stopped(
         &mut self,
@@ -1479,22 +1521,46 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .iter_mut()
             .find(|node| node.name == local)
             .ok_or(RuntimeError::MissingNode)?;
-        let forms = node
-            .control
-            .catalog
-            .format(&message)
-            .map_err(|_| RuntimeError::Preparation)?;
-        let spoken = render::telemetry_speech(&forms.tts, &[peer]);
+        let (morse, spoken) = Self::link_rejection_forms(&node.control.catalog, &message, peer)?;
         queue_status_media(
             &mut node.control.telemetry,
             &mut node.control.media_session,
             &node.status,
-            &forms.morse,
+            &morse,
             &spoken,
             reply,
             None,
         )
     }
+
+    fn prepare_phone_link_rejection(
+        &mut self,
+        local: &str,
+        peer: &str,
+        reply: crate::link::PeerReply,
+        message: Message<'_>,
+    ) -> Result<LinkEffect, RuntimeError> {
+        if !reply.phone_authenticated() {
+            return Err(RuntimeError::Rejected);
+        }
+        let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        let (morse, spoken) = Self::link_rejection_forms(&node.control.catalog, &message, peer)?;
+        let stream = Self::private_status_stream(node, &morse, &spoken)?;
+        Ok(LinkEffect::PrivatePhoneMedia(reply, stream))
+    }
+
+    fn link_rejection_forms(
+        catalog: &MessageCatalog,
+        message: &Message<'_>,
+        peer: &str,
+    ) -> Result<(String, String), RuntimeError> {
+        let forms = catalog
+            .format(message)
+            .map_err(|_| RuntimeError::Preparation)?;
+        let spoken = render::telemetry_speech(&forms.tts, &[peer]);
+        Ok((forms.morse, spoken))
+    }
+
     /// Queue one direct-link lifecycle event from every configured node's perspective.
     ///
     /// Each node is attempted independently so one unavailable speech provider or full
@@ -1507,7 +1573,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
         second: &str,
         connected: bool,
     ) -> Result<(), RuntimeError> {
-        self.queue_link_event_with_echo(first, second, connected, None)
+        self.queue_command_link_event(first, second, connected, None)
+            .map(|_| ())
     }
     /// Use the owning QSO's validated callsign and full real ID, while retaining
     /// ordinary local/third-party wording, politeness and reconnect cancellation.
@@ -1518,10 +1585,28 @@ impl<A: Send, C: Send> Runtime<A, C> {
         callsign: &str,
         connected: bool,
     ) -> Result<(), RuntimeError> {
-        let node = crate::link::EchoAlias::parse(second)
-            .map_err(|_| RuntimeError::Rejected)?
-            .to_string();
-        self.queue_link_event_with_echo(first, second, connected, Some((&node, callsign)))
+        self.queue_command_link_event(first, second, connected, Some(callsign))
+            .map(|_| ())
+    }
+
+    /// Queue the ordinary lifecycle message and report whether it applied at the owning port.
+    pub fn queue_command_link_event(
+        &mut self,
+        first: &str,
+        second: &str,
+        connected: bool,
+        echo_callsign: Option<&str>,
+    ) -> Result<bool, RuntimeError> {
+        let echo_node = echo_callsign
+            .map(|_| crate::link::EchoAlias::parse(second).map(|node| node.to_string()))
+            .transpose()
+            .map_err(|_| RuntimeError::Rejected)?;
+        self.queue_link_event_with_echo(
+            first,
+            second,
+            connected,
+            echo_node.as_deref().zip(echo_callsign),
+        )
     }
     /// Invalidate a superseded disconnect notice for a caller's privately confirmed connect.
     pub fn cancel_link_disconnect_notice(
@@ -1596,18 +1681,44 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .unwrap_or(endpoint);
         (slot.to_owned(), display.to_owned(), false)
     }
+    fn link_notice_protocol(echo: Option<(&str, &str)>) -> crate::link::ProtocolId {
+        if echo.is_some() {
+            crate::link::ProtocolId::EchoLink
+        } else {
+            crate::link::ProtocolId::AllStarLink
+        }
+    }
+
+    fn link_event_forms(
+        node: &RuntimeNode<A, C>,
+        message: &Message<'_>,
+        echo: Option<(&str, &str)>,
+        wire_nodes: &[&str],
+    ) -> Result<Option<(String, String)>, RuntimeError> {
+        let forms = if let Some((number, callsign)) = echo {
+            node.control
+                .catalog
+                .format_echo_peer(node.echo_announcement, number, callsign, message)
+        } else {
+            node.control.catalog.format(message).map(Some)
+        };
+        let forms = forms.map_err(|_| RuntimeError::Preparation)?;
+        Ok(forms.map(|forms| {
+            (
+                forms.morse,
+                render::telemetry_speech(&forms.tts, wire_nodes),
+            )
+        }))
+    }
+
     fn queue_link_event_with_echo(
         &mut self,
         first: &str,
         second: &str,
         connected: bool,
         echo: Option<(&str, &str)>,
-    ) -> Result<(), RuntimeError> {
-        let protocol = if echo.is_some() {
-            crate::link::ProtocolId::EchoLink
-        } else {
-            crate::link::ProtocolId::AllStarLink
-        };
+    ) -> Result<bool, RuntimeError> {
+        let protocol = Self::link_notice_protocol(echo);
         let (first_id, first_label, first_wire) = self.link_notice_endpoint(first, protocol);
         let (second_id, second_label, second_wire) = self.link_notice_endpoint(second, protocol);
         let (lower, upper) = if first_id <= second_id {
@@ -1627,6 +1738,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             });
         }
         let mut failure = None;
+        let mut local_notice = false;
         for node in &mut self.nodes {
             if (node.name == first_id
                 && second_wire
@@ -1654,42 +1766,35 @@ impl<A: Send, C: Send> Runtime<A, C> {
             } else {
                 Message::PeerDisconnectedThirdParty { first, second }
             };
-            let forms = if let Some((number, callsign)) = echo {
-                node.control.catalog.format_echo_peer(
-                    node.echo_announcement,
-                    number,
-                    callsign,
-                    &message,
+            let queued = Self::link_event_forms(
+                node,
+                &message,
+                echo,
+                &[
+                    if first_wire { first } else { "" },
+                    if second_wire { second } else { "" },
+                ],
+            )
+            .and_then(|forms| {
+                let Some((morse, spoken)) = forms else {
+                    return Ok(());
+                };
+                local_notice |= node.name == first_id;
+                queue_status_media(
+                    &mut node.control.telemetry,
+                    &mut node.control.media_session,
+                    &node.status,
+                    &morse,
+                    &spoken,
+                    None,
+                    cancellation.clone(),
                 )
-            } else {
-                node.control.catalog.format(&message).map(Some)
-            };
-            let queued = forms
-                .map_err(|_| RuntimeError::Preparation)
-                .and_then(|forms| {
-                    let Some(forms) = forms else { return Ok(()) };
-                    let spoken = render::telemetry_speech(
-                        &forms.tts,
-                        &[
-                            if first_wire { first } else { "" },
-                            if second_wire { second } else { "" },
-                        ],
-                    );
-                    queue_status_media(
-                        &mut node.control.telemetry,
-                        &mut node.control.media_session,
-                        &node.status,
-                        &forms.morse,
-                        &spoken,
-                        None,
-                        cancellation.clone(),
-                    )
-                });
+            });
             if let Err(error) = queued {
                 failure = Some(error);
             }
         }
-        failure.map_or(Ok(()), Err)
+        failure.map_or(Ok(local_notice), Err)
     }
     /// Queue only a group's first active selection and transitions to complete unavailability.
     /// Member connects, recovery attempts, and later winner changes stay silent.

@@ -661,16 +661,16 @@ operation-result =
     .text = { operation-result.tts }
     .tts = { $result ->
         [unavailable] Requested operation is unavailable
-        [failed] Command failed
         [muted] Muted
         [unmuted] Unmuted
+        [failed] Command failed
        *[completed] Command completed
         }
     .morse = { $result ->
         [unavailable] OPERATION UNAVAILABLE
-        [failed] COMMAND FAILED
         [muted] MUTED
         [unmuted] UNMUTED
+        [failed] COMMAND FAILED
        *[completed] COMMAND COMPLETE
         }
 

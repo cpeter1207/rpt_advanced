@@ -260,7 +260,7 @@ impl Engine {
             DigitOutcome::Mapped(input) => {
                 let name = local.to_owned();
                 let clock = self.clock();
-                self.run(move |host| host.runtime.dispatch_mapping(&name, input, clock))
+                self.run(move |host| host.mapped_effect(&name, input, clock))
             }
             DigitOutcome::MacroStopped { reply } => {
                 let local = local.to_owned();
@@ -497,10 +497,20 @@ impl Engine {
             } else {
                 None
             };
+            let receiver = if current
+                && matches!(&attempt, Dial::Connect(attempt) if attempt.local_receiver())
+            {
+                host.runtime
+                    .node(&local)
+                    .and_then(|node| node.command_work())
+            } else {
+                None
+            };
             let mut dial = PendingLinkDial {
                 #[cfg(target_os = "linux")]
                 asl: observed_asl,
                 phone,
+                receiver,
             };
             let attached = match attempt {
                 Dial::Connect(attempt) if !current => {

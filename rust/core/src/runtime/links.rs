@@ -56,6 +56,14 @@ impl RetryWork {
     }
 }
 impl ConnectAttempt {
+    /// A directly issued receiver command retains a local result through the initial dial.
+    pub fn local_receiver(&self) -> bool {
+        self.pending_source
+            .as_ref()
+            .and_then(|source| source.action_permit.as_ref())
+            .is_some_and(|permit| permit.receiver && permit.deadline.is_none())
+    }
+
     /// The private caller entitled to the completed dial result.
     pub fn phone_reply(&self) -> Option<&PeerReply> {
         pending_phone_reply(self.pending_source.as_ref())
@@ -178,6 +186,8 @@ pub enum LinkEffect {
     RemoteBase(DigitOperation),
     /// Cancel only the currently admitted message attempt on the audio owner.
     CancelMessage,
+    /// Dispatch already queued the specific source response.
+    SpecificReplyQueued,
     /// No physical operation is needed (for example resumed retry intent).
     None,
 }

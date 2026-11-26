@@ -87,7 +87,7 @@ pub enum Message<'a> {
         /// Login/result stage; no caller-supplied digits can enter the catalog.
         prompt: PhoneAuthenticationPrompt,
     },
-    /// Fixed outcome of an authenticated caller's command, without supplied digits or credentials.
+    /// Fixed outcome of a local or caller command without supplied digits or credentials.
     OperationResult {
         /// One of the credential-free confirmation or failure states.
         result: OperationResult,
@@ -1268,7 +1268,7 @@ fn required_sample_args(id: &str) -> FluentArgs<'static> {
     }
     match id {
         "phone-dial-failure" => args.set("reason", "busy"),
-        "operation-result" => args.set("result", "completed"),
+        "operation-result" => args.set("result", "failed"),
         "phone-authentication" => {
             args.set("state", "login");
         }

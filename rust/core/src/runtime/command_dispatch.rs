@@ -548,6 +548,21 @@ impl<A: Send, C: Send> Runtime<A, C> {
         input: MappedInput,
         clock: RuntimeClock,
     ) -> Result<LinkEffect, RuntimeError> {
+        let (effect, _) = self.dispatch_mapping_feedback(local, input, clock)?;
+        effect.map(|effect| match effect {
+            LinkEffect::SpecificReplyQueued => LinkEffect::None,
+            effect => effect,
+        })
+    }
+
+    /// Distinguish an admitted command's result from an admission rejection.
+    /// The flag identifies actions whose successful response belongs to another path.
+    pub fn dispatch_mapping_feedback(
+        &mut self,
+        local: &str,
+        input: MappedInput,
+        clock: RuntimeClock,
+    ) -> Result<(Result<LinkEffect, RuntimeError>, bool), RuntimeError> {
         let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
         if !input.claim()
             || node
@@ -592,7 +607,15 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 false,
             )
             .map_err(|_| RuntimeError::Rejected)?;
-        self.dispatch_action(local, invocation, clock, None)
+        let specific = match &invocation.action {
+            Action::PadTest | Action::Message(..) => true,
+            Action::Link(command) => command.action == LinkAction::Message,
+            _ => false,
+        };
+        Ok((
+            self.dispatch_action(local, invocation, clock, None),
+            specific,
+        ))
     }
     pub(super) fn dispatch_action(
         &mut self,
@@ -848,21 +871,28 @@ impl<A: Send, C: Send> Runtime<A, C> {
             Err(RuntimeError::Link(
                 reason @ (crate::link::AdmissionError::Loop
                 | crate::link::AdmissionError::UnsupportedRoute),
-            )) if dtmf
-                && reply
-                    .as_ref()
-                    .is_none_or(|reply| reply.phone_source().is_none()) =>
-            {
+            )) if dtmf => {
+                let message = match reason {
+                    crate::link::AdmissionError::Loop => Message::LoopRejected { node: &peer },
+                    _ => Message::RemoteCommandUnsupported { node: &peer },
+                };
                 if let Some(reply) = &reply {
+                    if reply.phone_source().is_some() {
+                        return self.prepare_phone_link_rejection(
+                            local,
+                            &peer,
+                            reply.clone(),
+                            message,
+                        );
+                    }
                     self.echo_response_requested(local, reply, clock.now_ms);
                 }
-                match reason {
-                    crate::link::AdmissionError::Loop => {
-                        self.queue_loop_rejected(local, &peer, reply)?
-                    }
-                    _ => self.queue_remote_command_unsupported(local, &peer, reply)?,
-                }
-                return Ok(LinkEffect::None);
+                self.queue_link_rejection(local, &peer, reply, message)?;
+                return Ok(if sequence.is_none() {
+                    LinkEffect::SpecificReplyQueued
+                } else {
+                    LinkEffect::None
+                });
             }
             Err(error) => return Err(error),
         };

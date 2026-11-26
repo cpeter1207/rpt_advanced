@@ -335,6 +335,7 @@ pub(crate) struct PendingLinkDial {
     #[cfg(target_os = "linux")]
     pub(crate) asl: Option<status::PendingAslDial>,
     pub(crate) phone: Option<PhoneLinkReply>,
+    pub(crate) receiver: Option<Arc<GenerationWork>>,
 }
 
 pub(crate) struct PhoneLinkReply {
@@ -1010,7 +1011,7 @@ impl Host {
         if let Some(phone) = &dial.phone {
             self.current_phone_reply(local, &phone.reply)?;
         }
-        let private = dial.phone.is_some();
+        let command_reply = dial.phone.is_some() || dial.receiver.is_some();
         let protocol = io.identity().protocol();
         #[cfg(target_os = "linux")]
         if protocol == ProtocolId::EchoLink
@@ -1110,7 +1111,7 @@ impl Host {
                 false
             }
         };
-        if private || has_status {
+        if command_reply || has_status {
             self.pending_link_dials
                 .insert(connection, std::mem::take(dial));
         }
@@ -1124,7 +1125,7 @@ impl Host {
             .find(|peer| peer.control.connection_generation() == connection)
         {
             peer.announced = true;
-            if private {
+            if command_reply {
                 self.runtime
                     .cancel_link_disconnect_notice(local, remote, protocol);
             } else {
@@ -1190,7 +1191,7 @@ impl Host {
         connection: Option<u64>,
         now_ms: u64,
     ) -> bool {
-        self.detach_peer(local, remote, connection, now_ms, true)
+        self.detach_peer(local, remote, connection, now_ms, None).0
     }
 
     fn detach_peer(
@@ -1199,8 +1200,8 @@ impl Host {
         remote: &str,
         connection: Option<u64>,
         now_ms: u64,
-        notify: bool,
-    ) -> bool {
+        reply: Option<&PeerReply>,
+    ) -> (bool, bool) {
         let match_at = self.peers.iter().position(|peer| {
             peer.local == local
                 && peer.remote == remote
@@ -1212,7 +1213,7 @@ impl Host {
             let peer = self.peers.remove(index);
             self.finish_link_dial(peer.control.connection_generation(), local, remote, false);
             self.text.cancel(&peer.control.text_origin());
-            let announced = (notify && peer.announced).then(|| {
+            let announced = peer.announced.then(|| {
                 (
                     peer.control.text_origin().protocol,
                     peer.control.callsign().to_owned(),
@@ -1221,11 +1222,11 @@ impl Host {
             peer.control.stop();
             self.peer_io.reap();
             if peer.superseded {
-                return true;
+                return (true, false);
             }
             announced
         } else if connection.is_some() {
-            return false;
+            return (false, false);
         } else {
             None
         };
@@ -1233,19 +1234,42 @@ impl Host {
             node.links().ended(remote);
         }
         self.runtime.peer_detached(local, remote, now_ms);
-        if let Some((protocol, callsign)) = announced {
-            let _ = if protocol == ProtocolId::EchoLink as u32 {
-                self.runtime
-                    .queue_echo_link_event(local, remote, &callsign, false)
-            } else {
-                self.runtime.queue_link_event(local, remote, false)
-            };
-        }
-        match_at.is_some()
+        let specific = announced.is_some_and(|(protocol, callsign)| {
+            let echo = (protocol == ProtocolId::EchoLink as u32).then_some(callsign.as_str());
+            self.command_link_event(local, remote, false, echo, reply)
+                .unwrap_or(true)
+        });
+        (match_at.is_some(), specific)
     }
     fn finish_link_dial(&mut self, connection: u64, local: &str, remote: &str, attached: bool) {
-        if let Some(dial) = self.pending_link_dials.remove(&connection) {
-            self.settle_link_dial(dial, local, remote, attached);
+        let Some(mut dial) = self.pending_link_dials.remove(&connection) else {
+            return;
+        };
+        let mut phone = None;
+        let mut receiver = false;
+        if attached {
+            phone = dial
+                .phone
+                .take()
+                .filter(|phone| phone.generation.is_current());
+            receiver = dial
+                .receiver
+                .take()
+                .is_some_and(|generation| generation.is_current());
+        }
+        self.settle_link_dial(dial, local, remote, attached);
+        if (phone.is_some() || receiver)
+            && let Some(peer) = self
+                .peers
+                .iter()
+                .find(|peer| peer.control.connection_generation() == connection && !peer.superseded)
+        {
+            let echo = (peer.control.text_origin().protocol == ProtocolId::EchoLink as u32)
+                .then(|| peer.control.callsign().to_owned());
+            let reply = phone.as_ref().map(|phone| &phone.reply);
+            if self.command_link_event(local, remote, true, echo.as_deref(), reply) == Ok(false) {
+                self.command_outcome(local, reply, receiver, OperationResult::Completed);
+            }
         }
     }
 
@@ -1261,16 +1285,32 @@ impl Host {
         if let Some(asl) = dial.asl {
             self.record_asl_dial(asl, local, _remote, attached);
         }
-        if let Some(phone) = dial.phone
-            && phone.generation.is_current()
-            && (attached || phone.report_failure)
-        {
-            let result = if attached {
-                OperationResult::Completed
-            } else {
-                OperationResult::Unavailable
-            };
-            let _ = self.phone_operation_result(local, &phone.reply, result);
+        if !attached {
+            let reply = dial
+                .phone
+                .as_ref()
+                .filter(|phone| phone.generation.is_current() && phone.report_failure)
+                .map(|phone| &phone.reply);
+            let receiver = dial
+                .receiver
+                .is_some_and(|generation| generation.is_current());
+            self.command_outcome(local, reply, receiver, OperationResult::Unavailable);
+        }
+    }
+
+    fn command_link_event(
+        &mut self,
+        local: &str,
+        remote: &str,
+        connected: bool,
+        echo: Option<&str>,
+        reply: Option<&PeerReply>,
+    ) -> Result<bool, RuntimeError> {
+        match reply {
+            Some(reply) => self.phone_link_event(local, remote, connected, echo, reply),
+            None => self
+                .runtime
+                .queue_command_link_event(local, remote, connected, echo),
         }
     }
 
@@ -1556,6 +1596,72 @@ impl Host {
         }
         result
     }
+    fn command_outcome(
+        &mut self,
+        local: &str,
+        phone: Option<&PeerReply>,
+        receiver: bool,
+        outcome: OperationResult,
+    ) {
+        if let Some(reply) = phone {
+            let _ = self.phone_operation_result(local, reply, outcome);
+        } else if receiver {
+            let _ = self.runtime.queue_operation_result(local, outcome);
+        }
+    }
+
+    /// Execute a mapped command once, retaining deferred effects for the existing engine owner.
+    pub(crate) fn mapped_effect(
+        &mut self,
+        local: &str,
+        input: rpt_advanced_core::runtime::dtmf::MappedInput,
+        clock: RuntimeClock,
+    ) -> Result<LinkEffect, RuntimeError> {
+        let receiver = input.local_receiver();
+        let phone = input.phone_reply().cloned();
+        let admitted = self.runtime.dispatch_mapping_feedback(local, input, clock);
+        let (result, specific) = match admitted {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                self.command_outcome(local, phone.as_ref(), false, command_failure(&error));
+                return Err(error);
+            }
+        };
+        let result = result.and_then(|effect| {
+            let silent = match effect {
+                LinkEffect::Connect(_) | LinkEffect::PhoneDial(..) | LinkEffect::PhoneHangup(_) => {
+                    return Ok(effect);
+                }
+                LinkEffect::Detach(remotes) => {
+                    !self.detach_command_links(local, remotes, clock.now_ms, None)
+                }
+                LinkEffect::PrivateDetach { remotes, reply } => {
+                    !self.detach_command_links(local, remotes, clock.now_ms, Some(&reply))
+                }
+                effect => {
+                    let silent = matches!(
+                        effect,
+                        LinkEffect::None
+                            | LinkEffect::ParrotEnabled(_)
+                            | LinkEffect::EchoTelemetry(_)
+                            | LinkEffect::CancelMessage
+                            | LinkEffect::SiteCommand(..)
+                    );
+                    self.immediate(local, effect, clock)?;
+                    silent
+                }
+            };
+            if silent && !specific {
+                self.command_outcome(local, phone.as_ref(), receiver, OperationResult::Completed);
+            }
+            Ok(LinkEffect::None)
+        });
+        if let Err(error) = &result {
+            self.command_outcome(local, phone.as_ref(), receiver, command_failure(error));
+        }
+        result
+    }
+
     /// Execute consequences which never require a blocking outbound dial.
     pub fn immediate(
         &mut self,
@@ -1600,9 +1706,7 @@ impl Host {
         }
         match effect {
             LinkEffect::PrivatePhoneMedia(reply, stream) => {
-                if !reply.phone_authenticated() {
-                    return Err(RuntimeError::Rejected);
-                }
+                self.current_phone_reply(local, &reply)?;
                 let caller = reply.phone_source().ok_or(RuntimeError::Rejected)?;
                 self.queue_phone_reply(caller, &reply, stream)
             }
@@ -1627,13 +1731,13 @@ impl Host {
                 Err(RuntimeError::Rejected)
             }
             LinkEffect::Detach(remotes) => {
-                self.detach_command_links(local, remotes, clock.now_ms, true);
+                self.detach_command_links(local, remotes, clock.now_ms, None);
                 Ok(())
             }
             LinkEffect::PrivateDetach { remotes, reply } => {
                 // Runtime already committed the removal. Only the reply is revocable.
-                self.detach_command_links(local, remotes, clock.now_ms, false);
-                self.phone_operation_result(local, &reply, OperationResult::Completed)
+                self.detach_command_links(local, remotes, clock.now_ms, Some(&reply));
+                Ok(())
             }
             LinkEffect::PrivatePhoneResult(reply, result) => {
                 self.phone_operation_result(local, &reply, result)
@@ -1652,43 +1756,10 @@ impl Host {
             }
             LinkEffect::Digit(outcome) => {
                 if let DigitOutcome::Mapped(input) = outcome {
-                    let phone = input.phone_reply().cloned();
-                    let done =
-                        self.runtime
-                            .dispatch_mapping(local, input, clock)
-                            .and_then(|effect| {
-                                if matches!(
-                                    effect,
-                                    LinkEffect::Connect(_)
-                                        | LinkEffect::PhoneDial(..)
-                                        | LinkEffect::PhoneHangup(_)
-                                ) {
-                                    self.defer_link(local, effect);
-                                    return Ok(false);
-                                }
-                                let generic = !matches!(
-                                    effect,
-                                    LinkEffect::Telemetry(..)
-                                        | LinkEffect::PrivatePhoneMedia(..)
-                                        | LinkEffect::PrivatePhoneResult(..)
-                                        | LinkEffect::PrivatePhoneControl(..)
-                                        | LinkEffect::PrivateDetach { .. }
-                                        | LinkEffect::CommandQueued(_)
-                                );
-                                self.immediate(local, effect, clock).map(|()| generic)
-                            });
-                    if let Some(reply) = phone {
-                        let result = match done {
-                            Ok(false) => return Ok(()),
-                            Ok(true) => OperationResult::Completed,
-                            Err(
-                                RuntimeError::Rejected
-                                | RuntimeError::Unavailable
-                                | RuntimeError::Link(_),
-                            ) => OperationResult::Unavailable,
-                            Err(_) => OperationResult::Failed,
-                        };
-                        let _ = self.phone_operation_result(local, &reply, result);
+                    if let Ok(effect) = self.mapped_effect(local, input, clock)
+                        && !matches!(effect, LinkEffect::None)
+                    {
+                        self.defer_link(local, effect);
                     }
                 } else if let DigitOutcome::RemoteCandidate(operation) = outcome {
                     // Selection changes collection of the very next queued digit.
@@ -1720,6 +1791,7 @@ impl Host {
             | LinkEffect::ParrotEnabled(_)
             | LinkEffect::EchoTelemetry(_)
             | LinkEffect::CommandQueued(_)
+            | LinkEffect::SpecificReplyQueued
             | LinkEffect::None => Ok(()),
         }
     }
@@ -1728,8 +1800,9 @@ impl Host {
         local: &str,
         remotes: Vec<String>,
         now_ms: u64,
-        notify: bool,
-    ) {
+        reply: Option<&PeerReply>,
+    ) -> bool {
+        let mut specific = false;
         #[cfg(target_os = "linux")]
         let mut receipt = crate::management::live::Disconnect {
             selected_count: remotes.len(),
@@ -1737,7 +1810,8 @@ impl Host {
             peer_nodes: Vec::new(),
         };
         for remote in remotes {
-            let removed = self.detach_peer(local, &remote, None, now_ms, notify);
+            let (removed, announced) = self.detach_peer(local, &remote, None, now_ms, reply);
+            specific |= announced;
             #[cfg(target_os = "linux")]
             {
                 receipt.removed_count += usize::from(removed);
@@ -1754,6 +1828,7 @@ impl Host {
         }
         #[cfg(target_os = "linux")]
         self.record_disconnect(local, receipt);
+        specific
     }
 
     fn text(
@@ -2393,6 +2468,15 @@ mod fixture;
 #[cfg(test)]
 #[path = "host_tests.rs"]
 pub(crate) mod tests;
+
+fn command_failure(error: &RuntimeError) -> OperationResult {
+    match error {
+        RuntimeError::Rejected | RuntimeError::Unavailable | RuntimeError::Link(_) => {
+            OperationResult::Unavailable
+        }
+        _ => OperationResult::Failed,
+    }
+}
 
 fn received_effect(
     effect: LinkEffect,

@@ -28,6 +28,11 @@ pub struct MappedInput {
     pub(crate) generation: u64,
 }
 impl MappedInput {
+    /// Whether this completed command came from the port's own receiver.
+    pub fn local_receiver(&self) -> bool {
+        self.connection.is_none()
+    }
+
     /// Borrow the exact private recipient without exposing the collected command symbols.
     pub fn phone_reply(&self) -> Option<&PeerReply> {
         self.connection

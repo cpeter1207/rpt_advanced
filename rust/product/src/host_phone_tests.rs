@@ -7,14 +7,20 @@ use rpt_advanced_core::config::resources::{
 };
 
 fn mailbox_host_with(media: NativeMediaPreparer) -> Host {
-    let configuration = configuration(
-        "usb",
-        &[(
-            Kind::Mailbox,
-            "100",
-            json!({"first_name":"Chris","callsign":"KG0BP"}),
-        )],
-    );
+    mailbox_host_with_rows(media, &[])
+}
+
+fn mailbox_host_with_rows(
+    media: NativeMediaPreparer,
+    extra: &[(Kind, &str, serde_json::Value)],
+) -> Host {
+    let mut rows = vec![(
+        Kind::Mailbox,
+        "100",
+        json!({"first_name":"Chris","callsign":"KG0BP"}),
+    )];
+    rows.extend_from_slice(extra);
+    let configuration = configuration("usb", &rows);
     let port = ResourceScope::Port(LOCAL.parse().unwrap());
     let mailbox = configuration.runtime().scopes[&port].mailboxes.effective["100"]
         .binding
@@ -535,7 +541,7 @@ fn authenticated_command_phone(host: &mut Host) -> (PhoneSource, PeerReply) {
 }
 
 #[test]
-fn phone_commands_queue_private_mute_pause_and_failure_results() {
+fn phone_commands_confirm_mute_and_report_failures_privately() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -551,6 +557,7 @@ fn phone_commands_queue_private_mute_pause_and_failure_results() {
         ("*99#", false, true),
         ("*99#", true, true),
         ("*806#", true, true),
+        ("*816#", true, true),
         ("*722#", true, true),
         ("*0000000#", true, false),
     ] {
@@ -584,6 +591,22 @@ fn phone_commands_queue_private_mute_pause_and_failure_results() {
     );
 }
 
+fn stage_link_peer(host: &mut Host, remote: &str, io: PeerIo) -> (u64, PeerSession) {
+    let (_, outgoing) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+    let (session, control) = PeerSession::prepare(io, outgoing, "1000", remote, true).unwrap();
+    let connection = control.connection_generation();
+    host.peers.push(PeerOwner {
+        superseded: false,
+        local: LOCAL.into(),
+        remote: remote.into(),
+        mode: Mode::TRANSCEIVE,
+        group: None,
+        announced: true,
+        control,
+    });
+    (connection, session)
+}
+
 #[test]
 fn phone_link_feedback_waits_for_matching_ack_and_fences_reused_calls() {
     let _serial = crate::fixture::LIFECYCLE
@@ -601,28 +624,274 @@ fn phone_link_feedback_waits_for_matching_ack_and_fences_reused_calls() {
         ..PendingLinkDial::default()
     };
 
-    host.pending_link_dials.insert(23, receipt());
+    let (connection, session) = stage_link_peer(&mut host, "2000", peer(8000).0);
+    let (other, other_session) = stage_link_peer(&mut host, "3000", peer(8000).0);
+    host.pending_link_dials.insert(connection, receipt());
     assert!(host.take_phone_reply(&source, &reply).unwrap().is_none());
-    host.finish_link_dial(24, LOCAL, "2000", true);
+    host.finish_link_dial(other, LOCAL, "3000", true);
     assert!(host.take_phone_reply(&source, &reply).unwrap().is_none());
-    host.finish_link_dial(23, LOCAL, "2000", true);
+    host.finish_link_dial(connection, LOCAL, "2000", true);
     let result = host.take_phone_reply(&source, &reply).unwrap().unwrap();
     assert_eq!(result.source(), &source);
-    host.finish_link_dial(23, LOCAL, "2000", true);
+    host.finish_link_dial(connection, LOCAL, "2000", true);
     assert!(host.take_phone_reply(&source, &reply).unwrap().is_none());
 
-    host.pending_link_dials.insert(24, receipt());
+    host.pending_link_dials.insert(other, receipt());
     assert!(host.retire_phone(&source));
     let (replacement, replacement_reply) = authenticated_command_phone(&mut host);
     assert_eq!(replacement.call_id(), source.call_id());
     assert_ne!(replacement.ingress(), source.ingress());
-    host.finish_link_dial(24, LOCAL, "2000", true);
+    host.finish_link_dial(other, LOCAL, "3000", true);
     assert!(!result.current());
     assert!(
         host.take_phone_reply(&replacement, &replacement_reply)
             .unwrap()
             .is_none()
     );
+    session.stop();
+    other_session.stop();
+    assert!(host.fixture_stop(40));
+}
+
+fn collect_private_link_speech(
+    host: &mut Host,
+    source: &PhoneSource,
+    reply: &PeerReply,
+    speech: &crate::media::text::tests::SpeechFixture,
+    actual: &mut Vec<String>,
+) {
+    while let Some(mut result) = host.take_phone_reply(source, reply).unwrap() {
+        let start = Instant::now();
+        loop {
+            let _ = result.render(false, &mut [0.0; 960]);
+            let opened = speech.opened.lock().unwrap();
+            if let Some(text) = opened.get(actual.len()) {
+                actual.push(text.clone());
+                break;
+            }
+            drop(opened);
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "private reply never reached the speech provider"
+            );
+            std::thread::yield_now();
+        }
+    }
+}
+
+#[test]
+fn phone_link_commands_speak_the_existing_rf_connection_and_rejection_messages() {
+    use crate::media::text::tests::{SpeechFixture, preparer};
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let speech = Arc::<SpeechFixture>::default();
+    let mut host = mailbox_host_with_rows(
+        preparer(Arc::clone(&speech)),
+        &[(
+            Kind::TelemetrySettings,
+            "",
+            json!({"speech":{"voice":"voice.onnx","level_db":-6}}),
+        )],
+    );
+    let (source, reply) = authenticated_command_phone(&mut host);
+    let generation = host.runtime.node(LOCAL).unwrap().command_work().unwrap();
+    let mut sessions = Vec::new();
+    for remote in ["2000", "3000"] {
+        let LinkEffect::Connect(attempt) = host
+            .runtime
+            .command(
+                LOCAL,
+                operation(LinkAction::PermanentTransceive, remote),
+                clock(),
+                false,
+            )
+            .unwrap()
+        else {
+            panic!("test must publish a permanent peer");
+        };
+        assert_eq!(
+            host.runtime.finish_connect(LOCAL, attempt, true, clock()),
+            Ok(true)
+        );
+        let (connection, session) = stage_link_peer(&mut host, remote, peer(8000).0);
+        sessions.push(session);
+        if remote == "2000" {
+            host.pending_link_dials.insert(
+                connection,
+                PendingLinkDial {
+                    phone: Some(PhoneLinkReply {
+                        reply: reply.clone(),
+                        generation: Arc::clone(&generation),
+                        report_failure: true,
+                    }),
+                    ..PendingLinkDial::default()
+                },
+            );
+            host.finish_link_dial(connection, LOCAL, remote, true);
+        }
+    }
+    let mut actual = Vec::new();
+    collect_private_link_speech(&mut host, &source, &reply, &speech, &mut actual);
+
+    let mut now = clock();
+    for command in ["*806#", "*31000#"] {
+        for digit in command.chars() {
+            now.now_ms += 1;
+            let outcome = host.runtime.node(LOCAL).unwrap().links().phone_digit(
+                &source,
+                digit,
+                now.now_ms,
+                reply.clone(),
+            );
+            if let Some(outcome) = outcome {
+                host.immediate(LOCAL, LinkEffect::Digit(outcome), now)
+                    .unwrap();
+            }
+        }
+        collect_private_link_speech(&mut host, &source, &reply, &speech, &mut actual);
+    }
+    assert!(host.peers.is_empty());
+    for session in sessions {
+        session.stop();
+    }
+    assert!(host.fixture_stop(40));
+    assert_eq!(
+        actual,
+        [
+            "node,2,0,0,0 connected",
+            "node,2,0,0,0 disconnected",
+            "node,3,0,0,0 disconnected",
+            "Connection to node,1,0,0,0 rejected because it would create a link loop",
+        ]
+    );
+}
+
+#[test]
+fn phone_echolink_confirmation_obeys_the_originating_ports_announcement_setting() {
+    use crate::media::text::tests::{SpeechFixture, preparer};
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for (setting, expected) in [
+        ("callsign", Some("W,1,X,Y,Z,-,R connected")),
+        ("off", Some("Command completed")),
+    ] {
+        let speech = Arc::<SpeechFixture>::default();
+        let mut host = mailbox_host_with_rows(
+            preparer(Arc::clone(&speech)),
+            &[
+                (
+                    Kind::TelemetrySettings,
+                    "",
+                    json!({"speech":{"voice":"voice.onnx","level_db":-6}}),
+                ),
+                (Kind::Echolink, "", json!({"announcement":setting})),
+            ],
+        );
+        let (source, reply) = authenticated_command_phone(&mut host);
+        let generation = host.runtime.node(LOCAL).unwrap().command_work().unwrap();
+        let (io, _) = crate::link::session::tests::source_peer_on(LOCAL);
+        let remote = "3002000";
+        let (connection, session) = stage_link_peer(&mut host, remote, io);
+        host.pending_link_dials.insert(
+            connection,
+            PendingLinkDial {
+                phone: Some(PhoneLinkReply {
+                    reply: reply.clone(),
+                    generation,
+                    report_failure: true,
+                }),
+                ..PendingLinkDial::default()
+            },
+        );
+        host.finish_link_dial(connection, LOCAL, remote, true);
+        let mut actual = Vec::new();
+        collect_private_link_speech(&mut host, &source, &reply, &speech, &mut actual);
+        session.stop();
+        assert!(host.fixture_stop(40));
+        assert_eq!(
+            actual,
+            expected.into_iter().collect::<Vec<_>>(),
+            "{setting}"
+        );
+    }
+}
+
+#[test]
+fn local_rf_uses_the_same_generic_results_as_the_phone_for_silent_commands() {
+    use crate::media::text::tests::{SpeechFixture, preparer};
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let speech = Arc::<SpeechFixture>::default();
+    let mut host = mailbox_host_with_rows(
+        preparer(Arc::clone(&speech)),
+        &[(
+            Kind::TelemetrySettings,
+            "",
+            json!({"speech":{"voice":"voice.onnx","level_db":-6}}),
+        )],
+    );
+    let (source, reply) = authenticated_command_phone(&mut host);
+    let mut now = RuntimeClock {
+        civil: None,
+        ..clock()
+    };
+    let commands = ["*0000000#", "*816#", "*801#", "*722#"];
+    for command in commands {
+        for digit in command.chars() {
+            now.now_ms += 1;
+            let outcome = host.runtime.node(LOCAL).unwrap().links().phone_digit(
+                &source,
+                digit,
+                now.now_ms,
+                reply.clone(),
+            );
+            if let Some(outcome) = outcome {
+                host.immediate(LOCAL, LinkEffect::Digit(outcome), now)
+                    .unwrap();
+            }
+        }
+    }
+    let mut phone = Vec::new();
+    collect_private_link_speech(&mut host, &source, &reply, &speech, &mut phone);
+    assert_eq!(
+        phone,
+        ["Command completed", "Command completed", "Command failed"]
+    );
+    assert!(host.retire_phone(&source));
+    speech.opened.lock().unwrap().clear();
+
+    let lease = Arc::clone(&host.leases[0].1);
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    for command in commands {
+        for digit in command.chars() {
+            now.now_ms += 1;
+            if let Some(outcome) = host.runtime.digit(
+                LOCAL,
+                DigitEvent::Digit {
+                    digit,
+                    now_ms: now.now_ms,
+                },
+            ) {
+                host.immediate(LOCAL, LinkEffect::Digit(outcome), now)
+                    .unwrap();
+            }
+        }
+        if command != "*0000000#" {
+            assert!(
+                render_queued_telemetry(&mut host, &mut owners),
+                "no RF reply to {command}"
+            );
+        }
+    }
+    assert_eq!(*speech.opened.lock().unwrap(), phone);
+    lease.lock().unwrap().owners = Some(owners);
     assert!(host.fixture_stop(40));
 }
 

@@ -54,12 +54,16 @@ and private replies. Phone `*4` and addressed digit mode are unavailable. The
 outgoing account's isolation policy applies independently to each live attempt
 and call.
 
-Fixed, credential-free outcomes for phone commands go only to the initiating
-call through its existing private media queue. Telephone mute confirmation
-reflects the actual new state. A successful node dial is confirmed only after
-the media owner acknowledges the link ingress. When a phone command connects
-or disconnects a node, the command transition is reported privately. Ordinary
-link lifecycle events retain their configured audience.
+Phone commands use the port's localized on-air wording for command responses.
+Connection and disconnection replies use the same peer identity and EchoLink
+announcement policy as the radio. A successful node dial is confirmed after the
+media owner acknowledges the link ingress. Replies play only in the initiating
+call's private media queue. Authentication and mute use their own phone prompts,
+and the mute reply reflects the new state. A recognized command with no
+specific response uses the same localized generic result over the air and over
+the phone. Work that reports later keeps its own response timing. Unmatched
+DTMF remains silent. Ordinary link lifecycle events retain their configured
+audience.
 
 Add one bounded RF programme presentation FIFO on the existing transmit owner,
 after fresh peer processing/mixing and before the controller's local RF mix.

@@ -25,6 +25,27 @@ impl Host {
             .ok_or(RuntimeError::Rejected)
     }
 
+    pub(super) fn phone_link_event(
+        &mut self,
+        local: &str,
+        remote: &str,
+        connected: bool,
+        echo_callsign: Option<&str>,
+        reply: &PeerReply,
+    ) -> Result<bool, RuntimeError> {
+        self.current_phone_reply(local, reply)?;
+        let caller = reply.phone_source().ok_or(RuntimeError::Rejected)?;
+        if let Some(stream) =
+            self.runtime
+                .prepare_phone_link_event(local, remote, connected, echo_callsign, reply)?
+        {
+            self.queue_phone_reply(caller, reply, stream)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub(super) fn phone_operation_result(
         &mut self,
         local: &str,
