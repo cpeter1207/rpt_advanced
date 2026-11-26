@@ -53,7 +53,7 @@ JSON `null` represents exact digital silence for logarithmic readings and carrie
 
 | GET | Representation |
 | --- | --- |
-| `/api/v1/status/observations/` | Canonical HAL snapshot for a selected site and/or ports. It includes the meter descriptors and their most recent observations when selected. |
+| `/api/v1/status/snapshot/` | Canonical HAL snapshot for a selected site and/or ports. It includes the meter descriptors and their most recent observations when selected. |
 | `/api/v1/status/stream/` | WebSocket upgrade for the same selection. Discover via `rpt:status-stream` on the HAL status root and snapshot. Ordinary requests receive `426 Upgrade Required` with a link to the snapshot. |
 | Existing `/api/v1/status/site/` and `/api/v1/status/ports/{port-id}/` | Reuse the current site and port views, add links to the scoped snapshot/stream, and expose expanded resource fields through the existing status families. |
 
