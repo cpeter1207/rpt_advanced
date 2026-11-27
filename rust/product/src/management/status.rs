@@ -4,6 +4,7 @@ mod model;
 mod pages;
 mod peer;
 mod query;
+mod webrtc;
 
 use super::{Api, Fault, Id, Observed, Snapshot, fresh, response};
 use model::{Capture, Owner, RecordKey, Stamp};

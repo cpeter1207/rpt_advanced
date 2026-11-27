@@ -116,6 +116,7 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
     }
     let mut paths = PathsBuilder::new();
     for route in routes.values() {
+        let browser_signaling = route.target.is_webrtc();
         let mut item = PathItemBuilder::new();
         let parameters: Vec<_> = route
             .path
@@ -135,25 +136,49 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
         }
         for &name in route.methods {
             let mut op = OperationBuilder::new().summary(Some(format!("{name} {}", route.profile)));
+            if browser_signaling {
+                op = op.description(Some(
+                    "Requires an OIDC browser principal asserted by an authorized mutual TLS reverse proxy. Session operations bind the principal, port, service boot and session.",
+                ));
+            }
+            let created_session = name == "POST" && route.target == Target::WebRtcSessions;
             let status_capture =
                 matches!(route.target, Target::StatusSnapshot | Target::StatusStream);
             let success = match (name, route.target) {
                 ("GET", Target::StatusStream) => "101",
-                ("GET", _) | (_, Target::Operation | Target::MaintenanceLease) => "200",
+                ("GET", _)
+                | (
+                    _,
+                    Target::Operation
+                    | Target::MaintenanceLease
+                    | Target::WebRtcSession
+                    | Target::WebRtcCandidates,
+                ) => "200",
                 ("POST", _) => "201",
                 _ => "202",
             };
             let mut result = ResponseBuilder::new().description(match success {
+                "201" if created_session => "Created a private WebRTC signaling session",
                 "201" => "Created a registered member",
                 "202" => "Accepted desired configuration",
+                _ if browser_signaling => "Current private signaling representation",
                 _ => "Current representation or operation receipt",
             });
             let read = if name == "GET"
+                || browser_signaling
                 || matches!(route.target, Target::Operation | Target::MaintenanceLease)
             {
+                let response_route = if created_session {
+                    routes
+                        .values()
+                        .find(|route| route.target == Target::WebRtcSession)
+                        .expect("registered WebRTC session resource")
+                } else {
+                    route
+                };
                 Content::new(Some(Ref::new(format!(
                     "{mount}/schemas/{}/",
-                    schema::response_name(route)
+                    schema::response_name(response_route)
                 ))))
             } else {
                 Content::new(Some(Object::with_type(Type::Object)))
@@ -231,10 +256,10 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
                         .build(),
                 );
             }
-            if name == "GET" && !status_capture {
+            if name == "GET" && !status_capture && !browser_signaling {
                 result = result.header("ETag", Header::new(Object::with_type(Type::String)));
             }
-            if name == "POST" {
+            if name == "POST" && route.target != Target::WebRtcCandidates {
                 result = result.header("Location", Header::new(Object::with_type(Type::String)));
             }
             let result = result.build();
@@ -244,7 +269,16 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
             op = op.response(success, result);
             for error in errors {
                 let status = error.wire().0.as_u16().to_string();
+                if browser_signaling
+                    && matches!(
+                        error,
+                        Fault::PreconditionFailed | Fault::PreconditionRequired
+                    )
+                {
+                    continue;
+                }
                 if name == "GET"
+                    && !(browser_signaling && error == Fault::Gone)
                     && !matches!(
                         error,
                         Fault::Malformed
@@ -275,7 +309,16 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
                     ));
                 }
             }
-            if name != "GET" {
+            if route.target == Target::WebRtcSession && name == "DELETE" {
+                op = op.parameter(parameter(
+                    "ice_generation",
+                    ParameterIn::Query,
+                    true,
+                    "Canonical decimal generation from the close link of the current session.",
+                    Type::String,
+                ));
+            }
+            if name != "GET" && !browser_signaling {
                 let create = name == "PUT"
                     && matches!(route.target, Target::Operation | Target::MaintenanceLease);
                 op = op.parameter(parameter(
@@ -319,4 +362,56 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
     let mut document = serde_json::to_value(api).expect("serializable OpenAPI document");
     document["x-rptadv-status-stream"] = super::status::profile(true);
     document
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Api, Observed};
+    use super::*;
+
+    #[test]
+    fn webrtc_openapi_uses_browser_runtime_schemas_and_generation_preconditions() {
+        let api = Api::with_webrtc("/api/v1", true).unwrap();
+        let description = document(&api.mount, &api.routes);
+        let paths = &description["paths"];
+        let collection = &paths["/webrtc/ports/{port}/sessions/"];
+        let member = &paths["/webrtc/ports/{port}/sessions/{boot}/{session}/"];
+        let candidates = &paths["/webrtc/ports/{port}/sessions/{boot}/{session}/candidates/"];
+
+        assert_eq!(
+            collection["post"]["responses"]["201"]["content"]["application/hal+json"]["schema"]["$ref"],
+            "/api/v1/schemas/webrtc-session-response/"
+        );
+        assert_eq!(
+            candidates["post"]["requestBody"]["content"]["application/hal+json"]["schema"]["$ref"],
+            "/api/v1/schemas/webrtc-candidates-create/"
+        );
+        assert!(
+            collection["post"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("OIDC browser principal")
+        );
+        assert!(member.get("patch").is_none());
+        assert!(member["put"].get("parameters").is_none());
+        assert_eq!(member["delete"]["parameters"][0]["name"], "ice_generation");
+        assert_eq!(member["delete"]["parameters"][0]["required"], true);
+        assert!(candidates["post"]["responses"]["200"].is_object());
+
+        let live = Observed::default();
+        let profile = "/profiles/webrtc-sessions/";
+        let (route, params) = api
+            .lookup(&format!("{}{profile}", api.mount))
+            .map(|(r, _)| (r, r.match_path(profile).unwrap()))
+            .unwrap();
+        let profile = api.read(route, params, profile, None, &live, None).unwrap();
+        assert_eq!(
+            profile["_links"]["describedby"]["href"],
+            "/api/v1/schemas/webrtc-sessions-response/"
+        );
+        assert_eq!(
+            profile["_links"]["rpt:request"]["href"],
+            "/api/v1/schemas/webrtc-sessions-create/"
+        );
+    }
 }

@@ -197,6 +197,7 @@ enum AudioOrigin {
     Application {
         reply: super::PeerReply,
         transceive: bool,
+        admitted: Arc<AtomicBool>,
     },
     Phone {
         call: super::PeerReply,
@@ -242,7 +243,9 @@ impl AudioOrigin {
     fn current(&self) -> bool {
         match self {
             Self::Direct(_) => true,
-            Self::Application { reply, .. } => !reply.ended(),
+            Self::Application {
+                reply, admitted, ..
+            } => !reply.ended() && admitted.load(Ordering::Acquire),
             Self::Phone { call, staged, .. } => {
                 call.phone_media_allowed()
                     && staged
@@ -297,12 +300,13 @@ impl<P: PeerInput> AudioPeer<P> {
     pub fn for_application(
         reply: &super::PeerReply,
         transceive: bool,
+        admitted: Arc<AtomicBool>,
         input: P,
         outbound: LinkAudioProducer,
         maximum: usize,
     ) -> Result<Self, AdmissionError> {
         if reply.ended()
-            || reply.webrtc_session().is_none()
+            || reply.webrtc_binding().is_none()
             || input.signals().reply_target() != *reply
         {
             return Err(AdmissionError::Invalid);
@@ -311,6 +315,7 @@ impl<P: PeerInput> AudioPeer<P> {
             AudioOrigin::Application {
                 reply: reply.clone(),
                 transceive,
+                admitted,
             },
             if transceive {
                 Mode::TRANSCEIVE
@@ -753,6 +758,9 @@ impl<P: PeerInput> LinkAudio<P> {
             }
         }
         self.mix[..count].fill(0.0);
+        let block_end_ns = source
+            .born_ns
+            .and_then(|start| start.checked_add((count as u64) * 1_000_000_000 / 48_000));
         for peer in &mut self.peers {
             peer.input.begin_observation_span(source, count);
             let mute_epoch = peer.input.signals().receive_epoch();
@@ -807,7 +815,10 @@ impl<P: PeerInput> LinkAudio<P> {
             let qualified = peer.input.signals().output_radio_keyed(mute_epoch);
             let eligible = match peer.origin {
                 AudioOrigin::Application { .. } => {
-                    qualified && audio_active && peer.input.receive_audio_current()
+                    qualified
+                        && audio_active
+                        && peer.input.receive_audio_current()
+                        && peer.input.signals().webrtc_deadline_allows(block_end_ns)
                 }
                 AudioOrigin::Direct(_) => {
                     qualified || (audio_active && peer.input.receive_audio_current())

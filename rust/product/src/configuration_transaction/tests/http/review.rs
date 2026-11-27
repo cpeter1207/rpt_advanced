@@ -817,6 +817,9 @@ pub(super) fn run(
             native::standalone(&scenario, case == "standalone-private-pending")
         }
         "standalone-managed-direct-echo" => native::managed_echo::activation(&scenario),
+        "standalone-managed-webrtc-receive-only" | "standalone-managed-webrtc-transceive" => {
+            native::webrtc::run(&scenario, case == "standalone-managed-webrtc-transceive");
+        }
         "standalone-managed-asl-activation" | "standalone-managed-asl-originate" => {
             native::managed_asl::activation(&scenario)
         }

@@ -166,7 +166,7 @@ Add rx_mute_toggle to the shared action vocabulary, reusable by runtime requests
 }
 ```
 
-The owning port comes from the invocation context. target selects port, peer, peers or phone_patch. For peer, parameter identifies one current direct network peer. For peers, omit link_type to select all connected peers, including attached callers. A supplied link_type selects the exact allstarlink or echolink protocol. Callers without an active attachment retain their private audio and call identities. Routing mode/permanence and EchoLink proxy transport are not link types. No other default DTMF code is invented; operators can bind the same action with another target or call it from a macro.
+The owning port comes from the invocation context. target selects port, peer, peers or phone_patch. For peer, parameter identifies one current network peer. A WebRTC peer uses `webrtc:<media_binding>`. For peers, omit link_type to select all connected peers, including attached callers. A supplied link_type selects the exact allstarlink, echolink, or webrtc protocol. Callers without an active attachment retain their private audio and call identities. Routing mode/permanence and EchoLink proxy transport are not link types. No other default DTMF code is invented; operators can bind the same action with another target or call it from a macro.
 
 Editable [RX mute examples](../../../examples/rx-mute.example.json) show all target forms. A filtered action is:
 

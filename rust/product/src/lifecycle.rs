@@ -30,7 +30,7 @@ use std::{
         mpsc,
     },
     thread::JoinHandle,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 type ErasedResult = Box<dyn Any + Send>;
@@ -81,12 +81,18 @@ pub(crate) use site::{
     install_delayed_site_bank, site_bank_delay, site_bank_electrical, site_bank_sample,
 };
 
+struct StopBarrier {
+    reason: &'static str,
+    warn_at: Option<Instant>,
+}
+
 pub(crate) struct Engine {
     executor: ControlClient,
     host: Mutex<Option<Host>>,
     services: HostServices,
     origin: Instant,
     health: SchedulerHealth,
+    stop_barrier: Mutex<Option<StopBarrier>>,
     accepting: Arc<AtomicBool>,
     reloading: Arc<AtomicBool>,
     revision: Arc<AtomicU64>,
@@ -181,6 +187,7 @@ impl Engine {
             services,
             origin,
             health: SchedulerHealth::default(),
+            stop_barrier: Mutex::new(None),
             accepting: Arc::new(AtomicBool::new(true)),
             reloading: Arc::new(AtomicBool::new(false)),
             revision: Arc::new(AtomicU64::new(1)),
@@ -934,7 +941,39 @@ impl Engine {
             }
         }
     }
+    /// A normal asynchronous stop often needs one more poll. Report only persistent phases.
+    fn stop_pending(&self, reason: &'static str, started: Instant) -> bool {
+        let mut barrier = self.stop_barrier.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let warn = match barrier.as_mut() {
+            Some(prior) if prior.reason == reason => {
+                let due = prior.warn_at.is_some_and(|at| now >= at);
+                if due {
+                    prior.warn_at = None;
+                }
+                due
+            }
+            _ => {
+                let warn_at = started + Duration::from_millis(250);
+                let due = now >= warn_at;
+                *barrier = Some(StopBarrier {
+                    reason,
+                    warn_at: (!due).then_some(warn_at),
+                });
+                due
+            }
+        };
+        drop(barrier);
+        if warn {
+            self.services
+                .scheduler_notice(&format!("controller stop pending: {reason}"));
+        }
+        false
+    }
+
     pub(crate) fn stop(self: &Arc<Self>) -> bool {
+        let started = Instant::now();
+        let defer = |reason| self.stop_pending(reason, started);
         self.accepting.store(false, Ordering::Release);
         // Callbacks outlive control admission while site safe-output and device
         // retirement are pending. Latch their independent TX gate before joining.
@@ -943,7 +982,7 @@ impl Engine {
         self.revision.fetch_add(1, Ordering::AcqRel);
         if let Some(ticker) = self.ticker.lock().unwrap_or_else(|e| e.into_inner()).take() {
             if ticker.join().is_err() {
-                return false;
+                return defer("ticker join failed");
             }
         }
         let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
@@ -960,7 +999,7 @@ impl Engine {
                 .as_ref()
                 .is_some_and(Host::has_target_selections);
             if pending && self.site_control(Host::cancel_target_selections).is_err() {
-                return false;
+                return defer("media target selections could not be cancelled");
             }
         }
         {
@@ -968,16 +1007,16 @@ impl Engine {
             // Directory callbacks have no cancellation ABI. Retain providers and retry
             // through the existing stop poll; joining here must never wait for a resolver.
             if jobs.iter().any(|job| !job.is_finished()) {
-                return false;
+                return defer("asynchronous jobs have not finished");
             }
             for job in jobs.drain(..) {
                 if job.join().is_err() {
-                    return false;
+                    return defer("asynchronous job join failed");
                 }
             }
         }
         if !self.stop_sites() {
-            return false;
+            return defer("site safe-output barrier did not confirm shutdown");
         }
         let engine = Arc::clone(self);
         let (send, receive) = mpsc::sync_channel(1);
@@ -992,32 +1031,34 @@ impl Engine {
                 }
                 let stopped = host
                     .as_mut()
-                    .is_none_or(|host| host.stop(engine.clock().now_ms));
+                    .map_or(Ok(()), |host| host.poll_stop(engine.clock().now_ms));
                 #[cfg(test)]
                 let stopped = match stop_mode {
-                    1 => false,
+                    1 => Err("injected host retirement is pending"),
                     _ => stopped,
                 };
-                let retired = if stopped {
+                let retired = if stopped.is_ok() {
                     host.as_mut()
                         .map(|host| (host.take_status_posts(), host.take_sites()))
                 } else {
                     None
                 };
-                if stopped {
+                if stopped.is_ok() {
                     *host = None;
                 }
                 let _ = send.send((stopped, retired));
             })
             .is_err()
         {
-            return false;
+            return defer("host retirement task could not be submitted");
         }
-        let Ok((true, retired)) = receive.recv() else {
-            return false;
+        let retired = match receive.recv() {
+            Ok((Ok(()), retired)) => retired,
+            Ok((Err(reason), _)) => return defer(reason),
+            Err(_) => return defer("host retirement task did not return a result"),
         };
         if self.executor.stop_and_drain().is_err() {
-            return false;
+            return defer("control executor did not drain");
         }
         // HTTP and physical-device owners may still be leaving their worker loops.
         // Join them outside the serialized lifecycle executor.

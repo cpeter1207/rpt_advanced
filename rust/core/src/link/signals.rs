@@ -56,6 +56,8 @@ const WAITING_FOR_CALLER_UNMUTE: u64 = u64::MAX;
 struct WebRtcSource {
     session: uuid::Uuid,
     receive_epoch: AtomicU64,
+    deadline_ns: AtomicU64,
+    closed: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -137,8 +139,14 @@ impl PeerReply {
         self.0.phone.as_ref()
     }
     /// WebRTC session that owns this exact media endpoint.
-    pub fn webrtc_session(&self) -> Option<uuid::Uuid> {
+    pub fn webrtc_binding(&self) -> Option<uuid::Uuid> {
         self.0.webrtc.get().map(|source| source.session)
+    }
+    /// Close this connection and every prepared media redirection it owns.
+    pub fn close_webrtc_session(&self) {
+        if let Some(source) = self.0.webrtc.get() {
+            source.closed.store(true, Ordering::Release);
+        }
     }
     /// Mailbox admission is separate from provider authentication and admin unlock.
     pub fn phone_authenticated(&self) -> bool {
@@ -169,6 +177,11 @@ impl PeerReply {
     /// Ended connections cannot receive a delayed response.
     pub fn ended(&self) -> bool {
         self.0.ended.load(Ordering::Acquire)
+            || self
+                .0
+                .webrtc
+                .get()
+                .is_some_and(|source| source.closed.load(Ordering::Acquire))
     }
     pub(crate) fn set_telemetry_window(&self, until_ms: u64) {
         self.0.telemetry_until_ms.store(until_ms, Ordering::Release);
@@ -200,10 +213,16 @@ impl PeerSignals {
     }
     /// Prepare a WebRTC endpoint for an already authorized local session.
     pub fn for_webrtc(session: uuid::Uuid) -> Self {
+        Self::for_revocable_webrtc(session, Arc::new(AtomicBool::new(false)))
+    }
+    /// Prepare an endpoint with the admitted provider's shared revocation gate.
+    pub fn for_revocable_webrtc(session: uuid::Uuid, closed: Arc<AtomicBool>) -> Self {
         let signals = Self::new();
         let _ = signals.reply.0.webrtc.set(Arc::new(WebRtcSource {
             session,
             receive_epoch: AtomicU64::new(0),
+            deadline_ns: AtomicU64::new(0),
+            closed,
         }));
         signals
     }
@@ -330,9 +349,25 @@ impl PeerSignals {
     /// grant, including during an acknowledged graph redirection.
     pub fn revoke_webrtc_receive(&self) {
         if let Some(source) = self.reply.0.webrtc.get() {
+            source.deadline_ns.store(0, Ordering::Release);
             source.receive_epoch.fetch_add(2, Ordering::AcqRel);
             self.set_radio_keyed(false);
         }
+    }
+    /// Publish an accepted lease's receiver-local deadline on the native stream clock.
+    pub fn set_webrtc_deadline(&self, deadline_ns: u64) {
+        if let Some(source) = self.reply.0.webrtc.get() {
+            source.deadline_ns.store(deadline_ns, Ordering::Release);
+        }
+    }
+    /// Refuse a block whose native time is uncertain or crosses the lease deadline.
+    pub(super) fn webrtc_deadline_allows(&self, block_end_ns: Option<u64>) -> bool {
+        self.reply
+            .0
+            .webrtc
+            .get()
+            .zip(block_end_ns)
+            .is_some_and(|(source, end)| end < source.deadline_ns.load(Ordering::Acquire))
     }
     /// Whether the source is operationally muted.
     pub fn rx_muted(&self) -> bool {

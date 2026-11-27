@@ -67,7 +67,16 @@ impl SourceClock {
     }
     /// Sole media owner observes real callback progress, never preparation or idle wall time.
     pub(crate) fn observe(&self) {
-        self.observe_at(self.epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+        self.observe_at(self.now_ns());
+    }
+    /// Current monotonic time from the same epoch as the stamped native spans.
+    pub(crate) fn now_ns(&self) -> u64 {
+        self.at_ns(Instant::now())
+    }
+    pub(crate) fn at_ns(&self, at: Instant) -> u64 {
+        at.saturating_duration_since(self.epoch)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64
     }
     fn observe_at(&self, now_ns: u64) {
         let stream = self.stream.load(Ordering::Acquire);

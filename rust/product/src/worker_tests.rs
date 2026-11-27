@@ -165,6 +165,41 @@ fn transmit_callback_publishes_ptt_state_for_control_snapshot() {
     assert_eq!(status.transmit_observation(10), Some(false));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn transmit_policy_edges_and_snapshots_share_checked_callback_state() {
+    use crate::management::status::edges::RadioSignal;
+    use rpt_advanced_core::controller::TransmitPolicyStatus;
+
+    let status = RadioStatus::default();
+    assert_eq!(status.recent_transmit_policy(0), None);
+    status.transmit_observation(100);
+    super::publish_transmit_keyed(Some(&status), Some(false), None);
+    assert!(status.edges.pop().is_some());
+    let policy = TransmitPolicyStatus {
+        inhibited: true,
+        timed_out: false,
+        traffic_holding: false,
+    };
+    status.publish_transmit_policy(Some(policy));
+    let edge = status.edges.pop().unwrap();
+    assert_eq!(edge.at_ms, 100);
+    assert_eq!(edge.signal, RadioSignal::TransmitPolicy(Some(policy)));
+    assert_eq!(status.recent_transmit_policy(600), Some((100, policy)));
+    assert_eq!(status.recent_transmit_policy(601), None);
+
+    status.transmit_observation(201);
+    super::publish_transmit_keyed(Some(&status), Some(false), None);
+    status.publish_transmit_policy(Some(policy));
+    assert!(status.edges.pop().is_none());
+    assert_eq!(status.recent_transmit_policy(601), Some((100, policy)));
+
+    super::publish_transmit_keyed(Some(&status), None, None);
+    assert_eq!(status.recent_transmit_policy(601), None);
+    let unavailable = status.edges.pop().unwrap();
+    assert_eq!(unavailable.signal, RadioSignal::TransmitPolicy(None));
+}
+
 #[test]
 fn remote_metadata_applies_non_fm_on_the_serial_transmit_owner() {
     let _serial = crate::fixture::LIFECYCLE

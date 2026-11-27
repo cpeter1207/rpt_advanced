@@ -608,14 +608,15 @@ fn encode_entry(
     Ok(SecretBytes::new(encoded))
 }
 
-fn decode_value(bytes: &[u8], slot: CredentialSlot) -> Result<Option<SecretBytes>, SecretsState> {
+/// Decode a private JSON string without intermediate plaintext allocations.
+pub(crate) fn decode_secret_json_string(bytes: &[u8]) -> Result<SecretBytes, SecretsState> {
     use serde_json::de::{Read, SliceRead};
     let Some(tail) = bytes.strip_prefix(b"\"") else {
         return Err(SecretsState::Error);
     };
     // SliceRead borrows an unescaped string, or unescapes into our preallocated
     // zeroizing scratch. The decoded UTF-8 never exceeds the original token.
-    let value = SecretBytes::try_fill(tail.len(), |scratch| {
+    SecretBytes::try_fill(tail.len(), |scratch| {
         let mut reader = SliceRead::new(tail);
         let len = reader
             .parse_str(scratch)
@@ -628,7 +629,11 @@ fn decode_value(bytes: &[u8], slot: CredentialSlot) -> Result<Option<SecretBytes
             scratch.extend_from_slice(&tail[..len]);
         }
         Ok(())
-    })?;
+    })
+}
+
+fn decode_value(bytes: &[u8], slot: CredentialSlot) -> Result<Option<SecretBytes>, SecretsState> {
+    let value = decode_secret_json_string(bytes)?;
     let text = std::str::from_utf8(value.expose_bytes()).expect("decoded JSON string");
     if text.is_empty() {
         return Ok(None);

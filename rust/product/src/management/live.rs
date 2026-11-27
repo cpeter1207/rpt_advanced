@@ -23,6 +23,7 @@ pub(crate) struct Port {
     pub(crate) receiver: Option<Receive>,
     pub(crate) receive_sample_ms: Option<u64>,
     pub(crate) transmit_key_requested: Option<bool>,
+    pub(crate) transmit_policy: Option<(u64, rpt_advanced_core::controller::TransmitPolicyStatus)>,
     pub(crate) physical_transmit: Option<crate::radio_feedback::PhysicalTransmit>,
     pub(crate) physical_receive: Option<crate::radio_feedback::PhysicalReceive>,
     pub(crate) meters: [Option<Meter>; 2],
@@ -33,6 +34,7 @@ pub(crate) struct Port {
         [Option<crate::status_meter::Measurement>; crate::status_meter::LOCAL_TAP_COUNT],
     pub(crate) peers: Vec<Peer>,
     pub(crate) link_retries: Vec<Peer>,
+    pub(crate) webrtc: BTreeMap<Id, WebRtcObservation>,
     pub(crate) calls: Vec<Call>,
     pub(crate) phone_progress: BTreeMap<String, (u64, Value)>,
     pub(crate) calendar: Option<CalendarObservation>,
@@ -89,6 +91,8 @@ pub(crate) struct Peer {
     pub node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_binding: Option<String>,
     #[serde(skip)]
     pub connection: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -108,6 +112,22 @@ pub(crate) struct Peer {
     pub media: Option<Value>,
     #[serde(flatten)]
     pub receive: Receive,
+}
+
+/// Media-owner observations for an attached WebRTC peer.
+#[derive(Clone)]
+pub(crate) struct WebRtcObservation {
+    /// Opaque media ID also sent on this connection's control channel.
+    pub(crate) binding: Id,
+    pub(crate) connection_generation: u64,
+    pub(crate) transceive: bool,
+    pub(crate) graph_generation: u64,
+    pub(crate) anchor: Option<rptadv_peer_support::webrtc::channel::Reference>,
+    pub(crate) codec_input: Option<crate::status_meter::Measurement>,
+    pub(crate) decoded: Option<crate::status_meter::Measurement>,
+    pub(crate) ingress: Option<Arc<crate::link::status_audio::PeerMeasurements>>,
+    pub(crate) sender_rate: Option<rptadv_peer_support::webrtc::reports::SenderRate>,
+    pub(crate) receiver_quality: Vec<rptadv_peer_support::webrtc::quality::ReceiverQuality>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize)]

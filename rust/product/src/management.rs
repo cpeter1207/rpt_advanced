@@ -16,6 +16,7 @@ mod representation;
 pub(crate) mod resources;
 mod schema;
 pub(crate) mod status;
+pub(crate) mod webrtc_session;
 
 use crate::{
     configuration_private::CredentialEdit,
@@ -49,10 +50,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         mpsc::{self, SyncSender, TrySendError},
     },
     thread,
+    time::Instant,
 };
 
 /// Value-free coordinator failure; caller-supplied JSON never enters errors.
@@ -1171,6 +1173,7 @@ impl Drop for StatusProjection {
 pub struct Coordinator<R> {
     status: Arc<status::StatusApi>,
     status_projection: StatusProjection,
+    webrtc: Option<Mutex<webrtc_session::Signaling>>,
     backend: Arc<Backend<R>>,
     boot: Id,
     busy: Arc<std::sync::atomic::AtomicBool>,
@@ -1198,7 +1201,7 @@ impl<R: Runtime> Coordinator<R> {
         runtime: Arc<R>,
         inputs: Arc<ProfileInputs>,
     ) -> Result<Self, Fault> {
-        Self::start(store, key, mount, runtime, inputs, false)
+        Self::start(store, key, mount, runtime, inputs, false, None)
     }
 
     pub(crate) fn for_service(
@@ -1207,7 +1210,18 @@ impl<R: Runtime> Coordinator<R> {
         runtime: Arc<R>,
         inputs: Arc<ProfileInputs>,
     ) -> Result<Self, Fault> {
-        Self::start(store, key, "/api/v1", runtime, inputs, true)
+        Self::for_service_with_webrtc(store, key, runtime, inputs, None)
+    }
+
+    /// Enable the signaling inventory only with a real service transport owner.
+    pub(crate) fn for_service_with_webrtc(
+        store: Arc<ManagedStore>,
+        key: KeyId,
+        runtime: Arc<R>,
+        inputs: Arc<ProfileInputs>,
+        owner: Option<Box<dyn webrtc_session::Transport>>,
+    ) -> Result<Self, Fault> {
+        Self::start(store, key, "/api/v1", runtime, inputs, true, owner)
     }
 
     fn start(
@@ -1217,10 +1231,17 @@ impl<R: Runtime> Coordinator<R> {
         runtime: Arc<R>,
         inputs: Arc<ProfileInputs>,
         cold_start: bool,
+        owner: Option<Box<dyn webrtc_session::Transport>>,
     ) -> Result<Self, Fault> {
-        let api = Arc::new(Api::new(mount)?);
+        let api = Arc::new(if owner.is_some() {
+            Api::with_webrtc(mount, true)?
+        } else {
+            Api::new(mount)?
+        });
         let cached = Arc::new(RwLock::new(None));
         let boot = fresh()?;
+        let webrtc =
+            owner.map(|transport| Mutex::new(webrtc_session::Signaling::new(boot, transport)));
         let initial = store
             .files
             .try_edit()
@@ -1277,6 +1298,7 @@ impl<R: Runtime> Coordinator<R> {
         Ok(Self {
             status,
             status_projection,
+            webrtc,
             backend,
             boot,
             busy,
@@ -1314,8 +1336,14 @@ impl<R: Runtime> Coordinator<R> {
             let saved = self.cached.read().expect("management snapshot").clone()?;
             Some((self.runtime.observed(), saved))
         });
+        let signaled = self.webrtc.as_ref().is_some_and(|owner| {
+            owner
+                .lock()
+                .expect("WebRTC signaling owner")
+                .poll(&self.runtime.observed(), Instant::now())
+        });
         let Some(req) = inbox.try_recv() else {
-            return false;
+            return signaled;
         };
         self.serve(req);
         true
@@ -1365,6 +1393,36 @@ impl<R: Runtime> Coordinator<R> {
         }
         if req.is_status_upgrade() {
             let reply = send_error(Fault::Malformed);
+            req.respond(reply);
+            return;
+        }
+        if route.target.is_webrtc() {
+            let reply = if !route.methods.contains(&req.method.as_str()) {
+                send_error(Fault::Method)
+            } else if !accepts(&req.headers, media) {
+                send_error(Fault::Accept)
+            } else {
+                let present = self
+                    .cached
+                    .read()
+                    .expect("management snapshot")
+                    .as_ref()
+                    .is_some_and(|cached| params.present(route, &cached.registry));
+                self.webrtc
+                    .as_ref()
+                    .expect("routed WebRTC signaling owner")
+                    .lock()
+                    .expect("WebRTC signaling owner")
+                    .request(
+                        &req,
+                        route,
+                        params,
+                        &self.api,
+                        &self.runtime.observed(),
+                        present,
+                    )
+                    .unwrap_or_else(send_error)
+            };
             req.respond(reply);
             return;
         }
@@ -1491,7 +1549,16 @@ fn response(
     r: Option<&Route>,
     media: &'static str,
 ) -> Response<Vec<u8>> {
-    let mut reply = Response::new(serde_json::to_vec(&body).expect("public JSON"));
+    json_response(status, &body, r, media)
+}
+
+fn json_response(
+    status: StatusCode,
+    body: &impl serde::Serialize,
+    r: Option<&Route>,
+    media: &'static str,
+) -> Response<Vec<u8>> {
+    let mut reply = Response::new(serde_json::to_vec(body).expect("serializable HAL JSON"));
     *reply.status_mut() = status;
     let headers = reply.headers_mut();
     headers.insert("content-type", media.parse().expect("known media"));

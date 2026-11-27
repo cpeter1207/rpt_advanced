@@ -7521,6 +7521,12 @@ fn webrtc_ingress_checks_exact_session_and_current_endpoint() {
         };
 
     assert!(identity.operator_alias().is_none());
+    let mute_target = format!("webrtc:{id}");
+    assert_eq!(
+        PeerIdentity::mute_target(&mute_target),
+        Ok(identity.clone())
+    );
+    assert!(PeerIdentity::from_operator(&mute_target).is_err());
     assert!(PeerIdentity::parse(ProtocolId::WebRtc, "2000").is_err());
     assert_eq!(
         attach(links, identity.clone(), &regular),

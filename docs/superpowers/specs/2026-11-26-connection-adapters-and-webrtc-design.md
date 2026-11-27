@@ -63,6 +63,17 @@ connection. This gives the app a signaling path without opening a home
 listener. TURN independently supplies media and data connectivity. The
 signaling relay cannot grant port access or force transmit.
 
+In the service provisioning document, `webrtc_bind_address` enables WebRTC on
+an assigned local IP. Each media session obtains its own ephemeral UDP socket.
+The HTTPS signaling service uses the existing loopback listener and trusted
+proxy identity. The optional `webrtc_turn_credential` selects a protected
+systemd credential named `rpt-advanced.turn.<id>`. Its JSON contains
+`server`, `transport`, `expires_unix`, `username`, and `password`. For
+`tls`, it also contains `tls_name` and `tls_issuer`. The issuer names a
+DER credential in the existing TLS namespace. An unconfigured or unavailable
+relay leaves the direct candidate available. Signaling renews the port grant
+through the authenticated proxy before its receiver-local deadline.
+
 Use full ICE at both endpoints and Trickle ICE. Prefer an admissible direct candidate pair when one works. Supply a public authenticated TURN service with UDP and client-to-relay TCP and TLS on port 443 available for restrictive networks. Use a properly validated TURN TLS identity and short-lived, restricted allocation credentials. Test both ends behind independent CGNAT, including a case where each obtains a relay candidate. TURN over TCP or TLS carries datagrams on that client-to-relay leg. Its ordinary UDP allocation still relays over UDP toward the peer or its relay address. The design requires neither endpoint to accept public unsolicited media connections. Preserve consent freshness per selected candidate pair and close the transmit gate on lost consent. Track relay path, consent and setup failure using sanitized categories. [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445.html) · [RFC 8838](https://www.rfc-editor.org/rfc/rfc8838.html) · [RFC 8656](https://www.rfc-editor.org/rfc/rfc8656.html) · [RFC 7675](https://www.rfc-editor.org/rfc/rfc7675.html)
 
 Use DTLS-SRTP and the WebRTC transport and security profiles. Authenticate the negotiated peer fingerprint through the authorized signaling exchange. Keep SRTP and data-channel protection end to end when using TURN. Use Opus with a 48 kHz RTP timestamp clock. Pass decoded PCM, loss and continuity information to the adapter. The RTP clock rate defines timestamp units even when the codec encodes a different internal audio bandwidth. Browser playback and capture device clocks still require the appropriate source-clock mapping. [RFC 8827](https://www.rfc-editor.org/rfc/rfc8827.html) · [RFC 8834](https://www.rfc-editor.org/rfc/rfc8834.html) · [RFC 8835](https://www.rfc-editor.org/rfc/rfc8835.html) · [RFC 7587](https://www.rfc-editor.org/rfc/rfc7587.html)

@@ -374,12 +374,22 @@ fn prepare(v: &Value, persisted: bool) -> Result<PreparedAction> {
             }
             "rx_mute_toggle" => Action::Mute(match f.text("target")? {
                 "port" => MuteTarget::Port,
-                "peer" => MuteTarget::Peer(node(p)?),
+                "peer" => {
+                    let target = p.ok_or(ActionError::Parameter)?;
+                    PeerIdentity::mute_target(target).map_err(|_| ActionError::Parameter)?;
+                    MuteTarget::Peer(target.into())
+                }
                 "peers" => MuteTarget::Peers(
                     f.take("link_type")
                         .map(|_| {
-                            f.choice("link_type", &["allstarlink", "echolink"])
-                                .map(|i| [ProtocolId::AllStarLink, ProtocolId::EchoLink][i])
+                            f.choice("link_type", &["allstarlink", "echolink", "webrtc"])
+                                .map(|i| {
+                                    [
+                                        ProtocolId::AllStarLink,
+                                        ProtocolId::EchoLink,
+                                        ProtocolId::WebRtc,
+                                    ][i]
+                                })
                         })
                         .transpose()?,
                 ),

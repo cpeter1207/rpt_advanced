@@ -51,6 +51,12 @@ pub enum Target {
     Maintenance,
     /// Conditional, connection-bound tuning lease.
     MaintenanceLease,
+    /// Discover or create authenticated WebRTC sessions on a port.
+    WebRtcSessions,
+    /// Read, renew, restart or close an exact WebRTC session.
+    WebRtcSession,
+    /// Read or submit trickled ICE candidates for a WebRTC session.
+    WebRtcCandidates,
     /// Read-only operation inventory.
     Operations,
     /// Read-only change inventory.
@@ -83,6 +89,16 @@ pub enum Target {
     Relation,
 }
 
+impl Target {
+    /// Whether the route uses a browser-owned runtime signaling resource.
+    pub fn is_webrtc(self) -> bool {
+        matches!(
+            self,
+            Self::WebRtcSessions | Self::WebRtcSession | Self::WebRtcCandidates
+        )
+    }
+}
+
 const READ: &[&str] = &["GET"];
 const EDIT: &[&str] = &["GET", "PUT", "PATCH"];
 const MEMBER: &[&str] = &["GET", "PUT", "PATCH", "DELETE"];
@@ -105,7 +121,9 @@ pub struct Route {
 
 impl Route {
     fn new(path: &str, view: Option<View>, target: Target, profile: &str) -> Self {
-        let methods = match (view, target) {
+        let methods: &'static [&'static str] = match (view, target) {
+            (_, Target::WebRtcSessions | Target::WebRtcCandidates) => &["GET", "POST"],
+            (_, Target::WebRtcSession) => &["GET", "PUT", "DELETE"],
             (Some(View::Effective | View::Status), _) => READ,
             (_, Target::Collection(_)) => COLLECTION,
             (_, Target::Member(_) | Target::MaintenanceLease) => MEMBER,
@@ -151,6 +169,7 @@ impl Route {
                 "{member}" => params.member = Some(canonical_id(segment)?),
                 "{boot}" => params.boot = Some(canonical_id(segment)?),
                 "{request}" | "{lease}" => params.request = Some(canonical_id(segment)?),
+                "{session}" => params.session = Some(canonical_id(segment)?),
                 "{name}"
                     if !segment.is_empty()
                         && segment
@@ -183,6 +202,8 @@ pub struct Parameters<'a> {
     pub boot: Option<ResourceId>,
     /// Operation's client-generated request identity.
     pub request: Option<ResourceId>,
+    /// Opaque WebRTC session allocated by the current service boot.
+    pub session: Option<ResourceId>,
     /// Profile, schema or relation name.
     pub name: Option<&'a str>,
 }
@@ -279,6 +300,11 @@ pub fn members(
 
 /// Construct the documented method and route matrix from the working resource catalog.
 pub fn inventory() -> BTreeMap<String, Route> {
+    inventory_with_webrtc(false)
+}
+
+/// Extend the stable route inventory when a live WebRTC signaling owner is installed.
+pub fn inventory_with_webrtc(webrtc: bool) -> BTreeMap<String, Route> {
     let mut routes = BTreeMap::new();
     let mut add = |path: &str, view, target, profile: &str| {
         routes.insert(path.to_owned(), Route::new(path, view, target, profile));
@@ -325,6 +351,27 @@ pub fn inventory() -> BTreeMap<String, Route> {
         ("/rels/{name}/", Target::Relation, "relation"),
     ] {
         add(path, None, target, profile);
+    }
+    if webrtc {
+        for (path, target, profile) in [
+            (
+                "/webrtc/ports/{port}/sessions/",
+                Target::WebRtcSessions,
+                "webrtc-sessions",
+            ),
+            (
+                "/webrtc/ports/{port}/sessions/{boot}/{session}/",
+                Target::WebRtcSession,
+                "webrtc-session",
+            ),
+            (
+                "/webrtc/ports/{port}/sessions/{boot}/{session}/candidates/",
+                Target::WebRtcCandidates,
+                "webrtc-candidates",
+            ),
+        ] {
+            add(path, None, target, profile);
+        }
     }
     for view in [View::Configuration, View::Effective, View::Status] {
         let root = format!("/{}/", view.segment());
@@ -429,6 +476,32 @@ mod tests {
     use crate::config::resources::{PortKey, candidate::ResourceBinding};
     fn id(n: u8) -> ResourceId {
         format!("00000000-0000-4000-8000-{n:012x}").parse().unwrap()
+    }
+
+    #[test]
+    fn webrtc_route_inventory_requires_live_support_and_exact_session_paths() {
+        let collection = "/webrtc/ports/{port}/sessions/";
+        let member = "/webrtc/ports/{port}/sessions/{boot}/{session}/";
+        let candidates = "/webrtc/ports/{port}/sessions/{boot}/{session}/candidates/";
+        assert!(!inventory().contains_key(collection));
+        let routes = inventory_with_webrtc(true);
+        assert_eq!(routes[collection].methods, &["GET", "POST"]);
+        assert_eq!(routes[member].methods, &["GET", "PUT", "DELETE"]);
+        assert_eq!(routes[candidates].methods, &["GET", "POST"]);
+
+        let (port, boot, session) = (id(2), id(3), id(10));
+        let key = format!("/webrtc/ports/{port}/sessions/{boot}/{session}/");
+        let parsed = routes[member].match_path(&key).unwrap();
+        assert_eq!(parsed.port, Some(port));
+        assert_eq!(parsed.boot, Some(boot));
+        assert_eq!(parsed.session, Some(session));
+        assert_eq!(
+            routes[candidates].match_path(&format!("{key}candidates/")),
+            Some(parsed)
+        );
+        let uppercase = session.to_string().to_ascii_uppercase();
+        let noncanonical = format!("/webrtc/ports/{port}/sessions/{boot}/{uppercase}/");
+        assert!(routes[member].match_path(&noncanonical).is_none());
     }
 
     #[test]

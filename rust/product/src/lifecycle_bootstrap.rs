@@ -1,6 +1,13 @@
 //! Shared provisioned startup for native and Asterisk service owners.
 use super::*;
-use crate::management::{Coordinator, ManagedStore, ProfileInputs, native::NativeRuntime};
+use crate::management::{
+    Coordinator, ManagedStore, ProfileInputs,
+    native::NativeRuntime,
+    webrtc_session::{
+        Transport,
+        transport::{Sessions, TurnAccess},
+    },
+};
 use rpt_advanced_core::config::resources::candidate::ResourceId;
 use rptadv_peer_support::{
     https::{
@@ -12,7 +19,7 @@ use rptadv_peer_support::{
 };
 use serde::Deserialize;
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Component, PathBuf},
 };
 
@@ -31,6 +38,10 @@ struct Provisioning {
     store_uuid: String,
     write_key_id: String,
     listen: SocketAddr,
+    #[serde(default)]
+    webrtc_bind_address: Option<IpAddr>,
+    #[serde(default)]
+    webrtc_turn_credential: Option<String>,
     authorities: Vec<String>,
     #[serde(default)]
     origins: Vec<String>,
@@ -63,6 +74,10 @@ impl Provisioning {
                 .components()
                 .any(|p| p == Component::ParentDir)
             || !input.listen.ip().is_loopback()
+            || input
+                .webrtc_bind_address
+                .is_some_and(|ip| ip.is_unspecified() || ip.is_multicast())
+            || (input.webrtc_turn_credential.is_some() && input.webrtc_bind_address.is_none())
             || input.authorities.is_empty()
             || input.server_chain.is_empty()
             || input.client_issuers.is_empty()
@@ -122,6 +137,14 @@ impl Provisioning {
         Ok((identity, trust, policy))
     }
 
+    fn webrtc_relay(&self) -> Result<Option<TurnAccess>, RuntimeError> {
+        self.webrtc_turn_credential
+            .as_deref()
+            .map(TurnAccess::load)
+            .transpose()
+            .map_err(|_| RuntimeError::Preparation)
+    }
+
     fn listener(
         &self,
     ) -> Result<(Listener, rptadv_peer_support::https::CoordinatorInbox), RuntimeError> {
@@ -137,6 +160,7 @@ fn check(bytes: &[u8]) -> Result<crate::management::PreparedConfiguration, Runti
     let config = Provisioning::decode(bytes)?;
     let (identity, _, _) = config.transport()?;
     identity.validate().map_err(|_| RuntimeError::Preparation)?;
+    config.webrtc_relay()?;
     let expected: ResourceId = config
         .store_uuid
         .parse()
@@ -210,12 +234,27 @@ unsafe extern "C" fn start_management(
         let service: Result<(), RuntimeError> = (|| {
             engine.start_ticker()?;
             engine.start_domain_observer();
-            let coordinator = Coordinator::for_service(
-                store,
-                key,
-                Arc::new(NativeRuntime::new(Arc::clone(&engine))),
-                ProfileInputs::installed(),
-            )
+            let turn = config.webrtc_relay()?;
+            let webrtc = config
+                .webrtc_bind_address
+                .map(|address| {
+                    Sessions::new(Arc::downgrade(&engine), address, turn)
+                        .map(|sessions| Box::new(sessions) as Box<dyn Transport>)
+                })
+                .transpose()
+                .map_err(|_| RuntimeError::Preparation)?;
+            let runtime = Arc::new(NativeRuntime::new(Arc::clone(&engine)));
+            let coordinator = if let Some(webrtc) = webrtc {
+                Coordinator::for_service_with_webrtc(
+                    store,
+                    key,
+                    runtime,
+                    ProfileInputs::installed(),
+                    Some(webrtc),
+                )
+            } else {
+                Coordinator::for_service(store, key, runtime, ProfileInputs::installed())
+            }
             .map_err(|_| RuntimeError::Preparation)?;
             *engine
                 .management_state

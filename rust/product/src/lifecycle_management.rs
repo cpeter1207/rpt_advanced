@@ -32,6 +32,17 @@ impl ManagementState {
     }
 }
 impl Engine {
+    /// Pin the current management authorization and independent fail-closed TX gate.
+    pub(crate) fn webrtc_admission(
+        &self,
+        expected: &str,
+    ) -> Option<(MediaAdmission, Arc<AtomicBool>)> {
+        let revision = self.revision.load(Ordering::Acquire);
+        let gate = Arc::clone(self.management_state.gate.get()?);
+        let permit = self.media_admission(revision);
+        (self.permits_modular_save(expected) && permit.current()).then_some((permit, gate))
+    }
+
     pub(crate) fn fault_epoch(&self) -> u64 {
         self.management_state
             .state
@@ -230,6 +241,10 @@ impl Engine {
             }
             Ok(None)
         });
+    }
+
+    pub(crate) fn webrtc_setup_notice(&self, stage: &'static str) {
+        self.services.scheduler_notice(&format!("WebRTC setup ended during {stage}"));
     }
 
     pub(crate) fn management_diagnostic(&self, event: Diagnostic) {

@@ -19,11 +19,17 @@ fn measurement_ref(chain: &str, graph: Option<u64>, stage: &str) -> Value {
     })
 }
 
+/// The shared egress graph or a separately projected transport-specific graph.
+pub(super) enum EgressGraph {
+    Shared(Option<u64>),
+    Separate,
+}
+
 pub(super) fn project(
     port: Id,
     identity: (&'static str, &str, u64),
     meters: &PeerMeasurements,
-    egress_graph: Option<u64>,
+    egress: EgressGraph,
     stamp: &Stamp,
     clock: Option<RuntimeClock>,
     mut put: impl FnMut(RecordKey, Value),
@@ -107,40 +113,40 @@ pub(super) fn project(
             );
         }
     }
-    for (side, graph, stages) in [
-        (
-            "ingress",
-            meters.ingress_graph_generation,
-            [
-                (
-                    "decoded",
-                    "accepted_source_pcm",
-                    None,
-                    Some(&meters.decoded),
-                ),
-                (
-                    "jitter_resample",
-                    "elastic_48khz_conversion",
-                    Some("decoded"),
-                    None,
-                ),
-                (
-                    "provider_dsp_output",
-                    "provider_or_controller_processing",
-                    Some("jitter_resample"),
-                    None,
-                ),
-                (
-                    "station_mix_input",
-                    "admitted_programme",
-                    Some("provider_dsp_output"),
-                    None,
-                ),
-            ],
-        ),
-        (
+    let ingress = (
+        "ingress",
+        meters.ingress_graph_generation,
+        [
+            (
+                "decoded",
+                "accepted_source_pcm",
+                None,
+                Some(&meters.decoded),
+            ),
+            (
+                "jitter_resample",
+                "elastic_48khz_conversion",
+                Some("decoded"),
+                None,
+            ),
+            (
+                "provider_dsp_output",
+                "provider_or_controller_processing",
+                Some("jitter_resample"),
+                None,
+            ),
+            (
+                "station_mix_input",
+                "admitted_programme",
+                Some("provider_dsp_output"),
+                None,
+            ),
+        ],
+    );
+    let egress = match egress {
+        EgressGraph::Shared(graph) => Some((
             "egress",
-            egress_graph,
+            graph,
             [
                 (
                     "mix_minus",
@@ -162,8 +168,10 @@ pub(super) fn project(
                     None,
                 ),
             ],
-        ),
-    ] {
+        )),
+        EgressGraph::Separate => None,
+    };
+    for (side, graph, stages) in std::iter::once(ingress).chain(egress) {
         let chain = format!("{family}:{entity_id}:{side}");
         let descriptor = stages
             .iter()
@@ -332,7 +340,7 @@ mod tests {
                 "361c602c-7664-4600-990d-6bd6cae4b32c".parse().unwrap(),
                 ("link", "allstarlink:1234", 12),
                 measurements,
-                Some(7),
+                EgressGraph::Shared(Some(7)),
                 &stamp,
                 None,
                 |_, document| records.push(document),

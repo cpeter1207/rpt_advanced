@@ -2138,9 +2138,26 @@ fn lifecycle_thread_and_drain_failures_remain_recoverable() {
     SKIP_TICKER_THREAD.store(true, Ordering::Release);
     assert_eq!(unsafe { start(configuration()) }, 0);
     let (engine, call) = selected().unwrap();
-    engine.jobs.lock().unwrap().push(std::thread::spawn(|| {}));
+    let (release_job, finish_job) = mpsc::sync_channel::<()>(1);
+    engine
+        .jobs
+        .lock()
+        .unwrap()
+        .push(std::thread::spawn(move || {
+            let _ = finish_job.recv();
+        }));
     drop(call);
+    clear_scheduler_notices();
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, -1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, -1);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, -1);
+    release_job.send(()).unwrap();
     assert_eq!(crate::lifecycle::tests::fixture_stop(), 0);
+    assert_eq!(
+        scheduler_notices(),
+        ["controller stop pending: asynchronous jobs have not finished"]
+    );
 
     SKIP_TICKER_THREAD.store(true, Ordering::Release);
     assert_eq!(unsafe { start(configuration()) }, 0);

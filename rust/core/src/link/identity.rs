@@ -63,8 +63,8 @@ impl PeerIdentity {
             address: PeerAddress::WebRtc(session),
         }
     }
-    /// Opaque local session identity, present only for WebRTC.
-    pub fn webrtc_session(&self) -> Option<uuid::Uuid> {
+    /// The opaque media binding of a local WebRTC session.
+    pub fn webrtc_binding(&self) -> Option<uuid::Uuid> {
         match self.address {
             PeerAddress::WebRtc(session) => Some(session),
             _ => None,
@@ -93,6 +93,17 @@ impl PeerIdentity {
         } else {
             Err(IdentityError)
         }
+    }
+    /// Resolve one active ingress mute target without giving WebRTC a dial identity.
+    pub(crate) fn mute_target(value: &str) -> Result<Self, IdentityError> {
+        let Some(binding) = value.strip_prefix("webrtc:") else {
+            return Self::from_operator(value);
+        };
+        let id = uuid::Uuid::parse_str(binding).map_err(|_| IdentityError)?;
+        if id.to_string() != binding {
+            return Err(IdentityError);
+        }
+        Ok(Self::webrtc(id))
     }
     /// Canonical control/configuration key before duplicate, access or retry
     /// comparisons. AllStar spellings are retained; Echo aliases are reversible.

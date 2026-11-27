@@ -3,7 +3,9 @@ use super::*;
 use crate::{
     abi,
     management::{
-        live::{Call, Dial, Disconnect, Domain, Peer, Port, Receive, Registration},
+        live::{
+            Call, Dial, Disconnect, Domain, Peer, Port, Receive, Registration, WebRtcObservation,
+        },
         status::edges::{Edge, Payload},
     },
 };
@@ -304,7 +306,16 @@ impl Host {
             let logical = links.manager().snapshot();
             port.peers = links
                 .ingress_receive_status()
-                .map(|(identity, rx)| {
+                .filter_map(|(identity, rx)| {
+                    if let Some(binding) = identity.webrtc_binding() {
+                        let application = self.applications.iter().find(|app| {
+                            app.port == *id && app.binding.uuid() == binding && app.live()
+                        })?;
+                        let status = application.status_observation()?;
+                        let peer = webrtc_peer(&status, rx.into());
+                        port.webrtc.insert(status.binding, status);
+                        return Some(peer);
+                    }
                     let alias = identity.operator_alias();
                     let owner = self.peers.iter().find(|peer| {
                         peer.local == local
@@ -314,7 +325,7 @@ impl Host {
                     let status = logical
                         .iter()
                         .find(|status| alias.as_ref().is_some_and(|alias| alias == &status.name));
-                    peer_value(identity, rx.into(), status, owner)
+                    Some(peer_value(identity, rx.into(), status, owner))
                 })
                 .collect();
             // Retry intent has no active ingress transport and does not masquerade as one.
@@ -353,7 +364,12 @@ impl Host {
                 }
             }
             port.peers.sort_unstable_by(|a, b| {
-                (a.kind, &a.node, &a.call_id).cmp(&(b.kind, &b.node, &b.call_id))
+                (a.kind, &a.node, &a.call_id, &a.media_binding).cmp(&(
+                    b.kind,
+                    &b.node,
+                    &b.call_id,
+                    &b.media_binding,
+                ))
             });
             if let Some(mut lease) = site::live_station(&self.leases, &local, true) {
                 if let Some(worker) = lease.worker.as_mut() {
@@ -364,6 +380,7 @@ impl Host {
                 port.receive_sample_ms = lease.status.receive_sample_time();
                 port.physical_transmit = lease.status.physical_transmit(now_ms);
                 port.transmit_key_requested = lease.status.recent_transmit_request(now_ms);
+                port.transmit_policy = lease.status.recent_transmit_policy(now_ms);
             }
             domain.ports.insert(*id, port);
         }
@@ -468,6 +485,7 @@ fn peer_value(
         kind: protocol_label(identity.protocol()),
         node: identity.node().map(str::to_owned),
         call_id: identity.call_id().map(|id| id.to_string()),
+        media_binding: None,
         connection,
         connection_generation: connection.map(|id| id.to_string()),
         direction: owner
@@ -501,6 +519,36 @@ fn peer_value(
         quality: "valid",
         transmit_keyed: owner.and_then(|peer| peer.control.receive_status_key()),
         media,
+        receive,
+    }
+}
+
+fn webrtc_peer(status: &WebRtcObservation, receive: Receive) -> Peer {
+    Peer {
+        kind: "webrtc",
+        node: None,
+        call_id: None,
+        media_binding: Some(status.binding.to_string()),
+        connection: Some(status.connection_generation),
+        connection_generation: Some(status.connection_generation.to_string()),
+        direction: Some("incoming"),
+        mode: Some(if status.transceive {
+            "transceive"
+        } else {
+            "listen"
+        }),
+        permanent: None,
+        group_selected: None,
+        state: "connected",
+        quality: "valid",
+        transmit_keyed: None,
+        media: (status.sender_rate.is_some() || !status.receiver_quality.is_empty()).then(|| {
+            json!({
+                "sender_relative_clock": status.sender_rate,
+                "receiver_quality": status.receiver_quality,
+                "receiver_quality_origin": "authenticated_peer_report",
+            })
+        }),
         receive,
     }
 }

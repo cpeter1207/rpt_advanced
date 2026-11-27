@@ -139,6 +139,17 @@ struct TransmitBranchSample<'a> {
     public_telemetry: &'a mut f32,
 }
 
+/// Current policy state from the last completed transmit render.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransmitPolicyStatus {
+    /// The configured, site or configuration inhibit was applied at render.
+    pub inhibited: bool,
+    /// The traffic watchdog is blocking ordinary programme.
+    pub timed_out: bool,
+    /// Ordinary traffic PTT remains asserted on hang with no new demand.
+    pub traffic_holding: bool,
+}
+
 /// Single audio-owner node aggregate; construction and media preparation belong to control.
 ///
 /// Processing consumes elapsed native samples, never callback count or wall-clock time.
@@ -171,6 +182,8 @@ pub struct NodeController {
     key_idle: u64,
     keyed: bool,
     traffic_keyed: bool,
+    traffic_holding: bool,
+    transmit_inhibited: bool,
     exempt_release: bool,
     last_audio: u64,
     release_hang: u64,
@@ -326,6 +339,8 @@ impl NodeController {
                 key_idle: 0,
                 keyed: false,
                 traffic_keyed: false,
+                traffic_holding: false,
+                transmit_inhibited: false,
                 exempt_release: false,
                 last_audio: 0,
                 release_hang: 0,
@@ -461,6 +476,15 @@ impl NodeController {
     #[must_use]
     pub fn ctcss_enabled(&self) -> bool {
         !self.settings.transmit_disabled && self.ctcss_enabled
+    }
+
+    /// Observe the policy already applied by this serial transmit owner.
+    pub fn transmit_policy_status(&self) -> TransmitPolicyStatus {
+        TransmitPolicyStatus {
+            inhibited: self.transmit_inhibited,
+            timed_out: self.timeout.blocked(),
+            traffic_holding: self.traffic_holding,
+        }
     }
 
     fn process_event_with_activity(
@@ -923,6 +947,8 @@ impl NodeController {
                 .configuration_inhibit
                 .as_ref()
                 .is_some_and(|gate| gate.load(Ordering::Acquire));
+        self.transmit_inhibited = inhibited;
+        self.traffic_holding = false;
         if self.timeout.blocked() {
             return self.timeout_sample(
                 receive || source_activity,
@@ -1234,14 +1260,14 @@ impl NodeController {
         } else {
             samples(self.settings.hang_ms)
         };
-        let mut requested = self.duplex.update(
-            self.transmits_during_receive(),
-            receiving && !self.remote_non_fm,
-            transmit,
-            self.now,
-            hang,
-        );
-        if may_transmit && self.traffic_keyed && self.tails.hanging(self.now) {
+        let full_duplex = self.transmits_during_receive();
+        let receiver_demand = receiving && !self.remote_non_fm;
+        let mut requested =
+            self.duplex
+                .update(full_duplex, receiver_demand, transmit, self.now, hang);
+        let duplex_hang = requested && !transmit && !(full_duplex && receiver_demand);
+        let tail_hang = may_transmit && self.traffic_keyed && self.tails.hanging(self.now);
+        if tail_hang {
             requested = true;
         }
         if !transmit
@@ -1269,6 +1295,7 @@ impl NodeController {
                 parrot_output,
             );
         }
+        self.traffic_holding = self.traffic_keyed && !transmit && (duplex_hang || tail_hang);
         if !self.traffic_keyed {
             self.duplex = DuplexPolicy::default();
         }

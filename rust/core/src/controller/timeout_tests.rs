@@ -19,6 +19,43 @@ fn protected_node() -> (NodeController, ControllerControl) {
 }
 
 #[test]
+fn transmit_policy_reports_actual_held_timeout_and_inhibit_states() {
+    let (mut node, control) = protected_node();
+    assert!(node.process_audio(true, false, &[], &mut [0.5; 4]));
+    assert_eq!(
+        node.transmit_policy_status(),
+        TransmitPolicyStatus::default()
+    );
+    assert!(node.process_audio(false, false, &[], &mut [0.0; 4]));
+    assert!(node.transmit_policy_status().traffic_holding);
+
+    node.process_audio(true, false, &[], &mut [0.5; 960]);
+    assert_eq!(
+        node.transmit_policy_status(),
+        TransmitPolicyStatus {
+            timed_out: true,
+            ..TransmitPolicyStatus::default()
+        }
+    );
+    control.set_site_inhibit(true);
+    assert!(!node.process_audio(true, false, &[], &mut [0.5; 960]));
+    assert_eq!(
+        node.transmit_policy_status(),
+        TransmitPolicyStatus {
+            inhibited: true,
+            timed_out: true,
+            traffic_holding: false,
+        }
+    );
+    control.set_site_inhibit(false);
+    node.process_audio(false, false, &[], &mut [0.0; 960]);
+    assert_eq!(
+        node.transmit_policy_status(),
+        TransmitPolicyStatus::default()
+    );
+}
+
+#[test]
 fn timeout_speaks_over_muted_traffic_then_drops_without_traffic_hang() {
     let (mut node, _) = protected_node();
     let mut audio = [0.5; 4800];

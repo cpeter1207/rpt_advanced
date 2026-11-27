@@ -554,7 +554,11 @@ fn echo_ring_policy_survives_prepared_generation() {
     let candidate = prepared(
         LOCAL,
         host.runtime.settings(LOCAL).unwrap(),
-        (&host.peers, Some(&host.phone_calls)),
+        StationPeers {
+            links: &host.peers,
+            calls: Some(&host.phone_calls),
+            applications: &[],
+        },
         media_worker(&mut host.media_workers, LOCAL).unwrap(),
         &mut host.text,
         host.services,
@@ -2359,7 +2363,11 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
     let candidate = prepared(
         LOCAL,
         host.runtime.settings(LOCAL).unwrap(),
-        (&host.peers, Some(&host.phone_calls)),
+        StationPeers {
+            links: &host.peers,
+            calls: Some(&host.phone_calls),
+            applications: &[],
+        },
         media_worker(&mut host.media_workers, LOCAL).unwrap(),
         &mut host.text,
         host.services,
@@ -2453,7 +2461,11 @@ fn ended_ingress_is_omitted_and_unknown_peer_events_do_not_change_routes() {
     let candidate = prepared(
         LOCAL,
         host.runtime.settings(LOCAL).unwrap(),
-        (&host.peers, Some(&host.phone_calls)),
+        StationPeers {
+            links: &host.peers,
+            calls: Some(&host.phone_calls),
+            applications: &[],
+        },
         media_worker(&mut host.media_workers, LOCAL).unwrap(),
         &mut host.text,
         host.services,
@@ -2789,7 +2801,11 @@ fn saturated_media_publication_keeps_the_running_generation() {
             match prepared(
                 LOCAL,
                 host.runtime.settings(LOCAL).unwrap(),
-                (&host.peers, Some(&host.phone_calls)),
+                StationPeers {
+                    links: &host.peers,
+                    calls: Some(&host.phone_calls),
+                    applications: &[],
+                },
                 media_worker(&mut host.media_workers, LOCAL).unwrap(),
                 &mut host.text,
                 host.services,

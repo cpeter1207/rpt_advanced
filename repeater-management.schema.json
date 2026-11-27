@@ -19397,7 +19397,7 @@
             "parameter"
           ],
           "additionalProperties": false,
-          "description": "Toggle one currently connected direct peer selected by parameter. Resolve exact live identity/generation; never dial or retain future mute intent.",
+          "description": "Toggle one connected peer by current identity. A WebRTC peer uses webrtc:<media_binding>. Mute applies to its current ingress.",
           "x-availability": "new_design_action"
         },
         {
@@ -19416,7 +19416,8 @@
               "type": "string",
               "enum": [
                 "allstarlink",
-                "echolink"
+                "echolink",
+                "webrtc"
               ],
               "description": "Optional protocol filter over current network peers. Routing mode, permanence and proxy transport are not link types."
             }

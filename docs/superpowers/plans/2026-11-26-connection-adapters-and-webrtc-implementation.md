@@ -107,7 +107,7 @@ duration, decoding, and explicit concealment. It reports normal PCM origin as
 unavailable because its checked descriptor has no provenance support. A
 separate Opus candidate with the existing optional provenance ABI passed
 the codec-native reference and failure tests on AMD64 and ARM64. The
-provider source is preserved locally at \`df75c1a19ca6609a6a23069948ad8c1457917603\`.
+provider source is preserved locally at `df75c1a19ca6609a6a23069948ad8c1457917603`.
 Controller transmit and browser qualification remain separate. The direct transport fixture also verified DCEP role admission,
 backpressure, closure, and protected RTP. The bounded wire tests verified
 decimal clock coordinates and sample range containment through RTP wrap.

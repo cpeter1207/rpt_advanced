@@ -2,7 +2,7 @@
 use crate::{
     link::{
         dispatcher::{MediaWorker, PreparedDispatch},
-        ring::InboundRing,
+        ring::{InboundConsumer, InboundPolicy, InboundProducer, InboundRing},
         session::{Command as PeerCommand, Event, PeerControl, PeerIoWorker, PeerSession},
         text::{TextDestination, TextPayload, TextRouter},
     },
@@ -16,7 +16,7 @@ use crate::{
     worker::{Audio, AudioOwners, LocalRingUpdate, PrepareFailure, RadioWorker},
 };
 use rpt_advanced_core::{
-    audio::LinkAudioQueue,
+    audio::{LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue},
     config::ResolvedNodeSettings,
     link::{
         AudioPeer, GroupMemberSelection, HumanMessage, LinkAudio, LinkAudioStatus, LocalTextInput,
@@ -57,6 +57,9 @@ pub(crate) mod status;
 #[cfg(target_os = "linux")]
 #[path = "host_telemetry_status.rs"]
 mod telemetry_status;
+#[cfg(target_os = "linux")]
+#[path = "host_webrtc.rs"]
+pub(crate) mod webrtc;
 #[cfg(target_os = "linux")]
 pub(crate) use native::RadioTicket;
 pub(crate) use site::SiteBasis;
@@ -306,6 +309,8 @@ pub struct GenerationControl {
     status: LinkAudioStatus,
     redirects: Vec<(u64, PeerCommand)>,
     phones: Vec<crate::link::private_radio::Redirect>,
+    #[cfg(target_os = "linux")]
+    applications: Vec<webrtc::Redirect>,
     awaiting: Vec<(u64, crate::link::ring::InboundObserver)>,
     local_update: Option<LocalRingUpdate>,
     awaiting_local: bool,
@@ -370,6 +375,8 @@ pub struct Host {
     media_workers: Vec<(String, MediaWorker)>,
     peer_io: PeerIoWorker,
     peers: Vec<PeerOwner>,
+    #[cfg(target_os = "linux")]
+    applications: Vec<webrtc::Application>,
     phone_calls: PhoneCalls,
     phone_accounts: crate::phone::accounts::Participant,
     #[cfg(target_os = "linux")]
@@ -406,10 +413,65 @@ enum StationAudio<'a> {
     Modular(&'a native::RadioPlan),
 }
 
+struct PeerAudio {
+    inbound: InboundProducer,
+    input: ProcessedPeer<InboundConsumer>,
+    output: LinkAudioProducer,
+    outbound: LinkAudioConsumer,
+}
+
+impl PeerAudio {
+    fn prepare(
+        input_rate: u32,
+        policy: InboundPolicy,
+        reply: &PeerReply,
+        #[cfg(target_os = "linux")] graph: Option<&native::RadioPlan>,
+        measure_ingress: bool,
+        output_samples: usize,
+    ) -> Result<Self, RuntimeError> {
+        let (inbound, input) = InboundRing::redirected(input_rate, policy, reply)
+            .map_err(|_| RuntimeError::Preparation)?;
+        #[cfg(target_os = "linux")]
+        let input = if let Some(plan) = graph.filter(|plan| plan.process_incoming) {
+            let instance = plan
+                .incoming
+                .prepare_peer(input_rate, MAXIMUM_FRAMES as u32)
+                .map_err(|_| RuntimeError::Preparation)?;
+            input.install_provider_observer(instance.output_observer());
+            ProcessedPeer::modular(input, instance, MAXIMUM_FRAMES)
+        } else {
+            ProcessedPeer::new(input)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let input = ProcessedPeer::new(input);
+        let input = if measure_ingress {
+            input.with_native_ingress()
+        } else {
+            input
+        };
+        let (output, outbound) = LinkAudioQueue::new(output_samples, 64)
+            .map_err(|_| RuntimeError::Preparation)?
+            .into_endpoints();
+        Ok(Self {
+            inbound,
+            input,
+            output,
+            outbound,
+        })
+    }
+}
+
+struct StationPeers<'a> {
+    links: &'a [PeerOwner],
+    calls: Option<&'a PhoneCalls>,
+    #[cfg(target_os = "linux")]
+    applications: &'a [webrtc::Application],
+}
+
 fn prepared(
     local: &str,
     settings: &ResolvedNodeSettings,
-    connections: (&[PeerOwner], Option<&PhoneCalls>),
+    peers: StationPeers<'_>,
     worker: &mut MediaWorker,
     text: &mut TextExecutor,
     services: HostServices,
@@ -433,8 +495,7 @@ fn prepared(
     let mut redirects = Vec::new();
     let mut awaiting = Vec::new();
     let mut wakes = Vec::new();
-    let (peers, phone_calls) = connections;
-    for peer in peers.iter().filter(|peer| peer.local == local) {
+    for peer in peers.links.iter().filter(|peer| peer.local == local) {
         let snapshot = peer
             .control
             .snapshot()
@@ -449,29 +510,22 @@ fn prepared(
                 .map_err(|_| RuntimeError::Preparation)?,
         );
         text_origins.push((peer.remote.clone(), origin));
-        let (inbound, input) = InboundRing::redirected(
+        #[cfg(target_os = "linux")]
+        let StationAudio::Modular(plan) = source;
+        let PeerAudio {
+            inbound,
+            input,
+            output,
+            outbound,
+        } = PeerAudio::prepare(
             snapshot.input_rate,
             peer.control.inbound_policy(),
             &peer.control.reply_target(),
-        )
-        .map_err(|_| RuntimeError::Preparation)?;
-        let input = match source {
             #[cfg(target_os = "linux")]
-            StationAudio::Modular(plan) if plan.process_incoming => {
-                let graph = plan
-                    .incoming
-                    .prepare_peer(snapshot.input_rate, MAXIMUM_FRAMES as u32)
-                    .map_err(|_| RuntimeError::Preparation)?;
-                input.install_provider_observer(graph.output_observer());
-                ProcessedPeer::modular(input, graph, MAXIMUM_FRAMES)
-            }
-            #[cfg(target_os = "linux")]
-            StationAudio::Modular(_) => ProcessedPeer::new(input),
-        }
-        .with_native_ingress();
-        let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
-            .map_err(|_| RuntimeError::Preparation)?
-            .into_endpoints();
+            Some(plan),
+            true,
+            48_000 / 5,
+        )?;
         let prepared_peer = AudioPeer::new(
             &peer.remote,
             peer.mode,
@@ -497,9 +551,26 @@ fn prepared(
             },
         ));
     }
+    #[cfg(target_os = "linux")]
+    let applications = {
+        let StationAudio::Modular(plan) = source;
+        let mut redirects = Vec::new();
+        for application in peers
+            .applications
+            .iter()
+            .filter(|app| app.live() && app.port.to_string() == local)
+        {
+            let (peer, redirect) = application.prepare(plan)?;
+            wakes.push(crate::link::dispatcher::PeerWake::default());
+            audio.push(peer);
+            redirects.push(redirect);
+        }
+        redirects
+    };
     let mut phones = Vec::new();
     #[cfg(target_os = "linux")]
-    for (caller, activity, control) in phone_calls
+    for (caller, activity, control) in peers
+        .calls
         .into_iter()
         .flat_map(|calls| calls.audio_routes(local))
     {
@@ -512,38 +583,36 @@ fn prepared(
             continue;
         };
         let settings = &policy.settings;
-        use crate::link::{
-            private_radio::{Radio, Redirect},
-            ring::InboundPolicy,
-        };
+        use crate::link::private_radio::{Radio, Redirect};
         use rpt_advanced_core::config::resources::profiles::PhonePlayoutDestination;
         let reply = activity.reply_target();
-        let (inbound, input) = InboundRing::redirected(control.rate, InboundPolicy::Phone, &reply)
-            .map_err(|_| RuntimeError::Preparation)?;
         let bound = u64::from(settings.timing.maximum_latency_ms)
             .checked_mul(48)
             .and_then(|samples| usize::try_from(samples).ok())
             .ok_or(RuntimeError::Preparation)?;
-        let (output, outbound) = LinkAudioQueue::new(bound, 64)
-            .map_err(|_| RuntimeError::Preparation)?
-            .into_endpoints();
+        let PeerAudio {
+            inbound,
+            input,
+            output,
+            outbound,
+        } = PeerAudio::prepare(
+            control.rate,
+            InboundPolicy::Phone,
+            &reply,
+            None,
+            false,
+            bound,
+        )?;
         let mode =
             Mode::phone(settings.playout_destination == PhonePlayoutDestination::LocalAndLinks);
         audio.push(
-            AudioPeer::for_phone(
-                caller,
-                &reply,
-                mode,
-                ProcessedPeer::new(input),
-                output,
-                MAXIMUM_FRAMES,
-            )
-            .map_err(|_| RuntimeError::Preparation)?
-            .with_phone_policy(
-                settings.isolate_peers,
-                policy.hold_isolation,
-                Arc::clone(&policy.confirmed),
-            ),
+            AudioPeer::for_phone(caller, &reply, mode, input, output, MAXIMUM_FRAMES)
+                .map_err(|_| RuntimeError::Preparation)?
+                .with_phone_policy(
+                    settings.isolate_peers,
+                    policy.hold_isolation,
+                    Arc::clone(&policy.confirmed),
+                ),
         );
         let radio = Radio::new(
             inbound,
@@ -598,6 +667,8 @@ fn prepared(
             status,
             redirects,
             phones,
+            #[cfg(target_os = "linux")]
+            applications,
             awaiting,
             local_update: None,
             awaiting_local: false,
@@ -707,6 +778,8 @@ impl Host {
             media_workers: Vec::new(),
             peer_io,
             peers: Vec::new(),
+            #[cfg(target_os = "linux")]
+            applications: Vec::new(),
             phone_calls,
             phone_accounts: Default::default(),
             #[cfg(target_os = "linux")]
@@ -1213,7 +1286,11 @@ impl Host {
         let candidate = prepared(
             local,
             settings,
-            (&self.peers, Some(&self.phone_calls)),
+            StationPeers {
+                links: &self.peers,
+                calls: Some(&self.phone_calls),
+                applications: &self.applications,
+            },
             media_worker(&mut self.media_workers, local)?,
             &mut self.text,
             self.services,
@@ -2374,8 +2451,42 @@ impl Host {
                     peer.local == local && peer.control.connection_generation() == *connection
                 })
             });
+            #[cfg(target_os = "linux")]
+            let confirmed_applications = {
+                let mut installed = Vec::new();
+                if status.active == Some(generation) {
+                    control
+                        .applications
+                        .retain_mut(|route| match route.submit() {
+                            webrtc::RedirectState::Waiting => true,
+                            webrtc::RedirectState::Closed => false,
+                            webrtc::RedirectState::Installed(receipt) => {
+                                installed.push(receipt);
+                                false
+                            }
+                        });
+                }
+                installed
+            };
             let redirects_done =
                 control.awaiting.is_empty() && control.phones.is_empty() && !control.awaiting_local;
+            #[cfg(target_os = "linux")]
+            let redirects_done = redirects_done && control.applications.is_empty();
+            #[cfg(target_os = "linux")]
+            for receipt in confirmed_applications {
+                let observed = receipt.admit(
+                    self.runtime
+                        .node(&local)
+                        .ok_or(RuntimeError::MissingNode)?
+                        .links(),
+                    generation,
+                )?;
+                if let Some((binding, observer)) = observed
+                    && let Some(app) = self.applications.iter_mut().find(|app| app.binding == binding && app.live())
+                {
+                    app.observe_ingress(observer);
+                }
+            }
             for reply in confirmed_phone {
                 let call = reply
                     .phone_source()
@@ -2407,10 +2518,17 @@ impl Host {
         let _ = self.runtime.queue_priority_group_events();
         self.runtime.reclaim();
         self.prune_leases();
+        #[cfg(target_os = "linux")]
+        self.retire_applications(clock)?;
         Ok(())
     }
     /// Gate audio, stop media distribution, quiesce peers, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
+        self.poll_stop(now_ms).is_ok()
+    }
+
+    /// Return the first barrier still preventing safe Host retirement.
+    pub(crate) fn poll_stop(&mut self, now_ms: u64) -> Result<(), &'static str> {
         #[cfg(target_os = "linux")]
         self.cancel_target_selections();
         let mut cleared = true;
@@ -2422,7 +2540,7 @@ impl Host {
             cleared &= lease.clear_manual().is_ok();
         }
         if !cleared {
-            return false;
+            return Err("radio maintenance has not cleared");
         }
         #[cfg(target_os = "linux")]
         {
@@ -2430,13 +2548,15 @@ impl Host {
             self.phone_failures.clear();
         }
         self.retire_phones();
+        #[cfg(target_os = "linux")]
+        self.applications.clear();
         if self.phone_accounts.stop(self.services) != Ok(true) {
-            return false;
+            return Err("phone account retirement has not completed");
         }
 
         self.remote_pending.clear();
         if self.site_shutdown(now_ms) != Ok(true) {
-            return false;
+            return Err("site safe-output acknowledgments are pending");
         }
         self.status_post.request_stop();
         self.text.stop();
@@ -2467,13 +2587,15 @@ impl Host {
         let radio_stopped = self.runtime.stop(now_ms);
         #[cfg(target_os = "linux")]
         if self.asl.stop(self.services) != Ok(true) {
-            return false;
+            return Err("AllStarLink account retirement has not completed");
         }
         #[cfg(target_os = "linux")]
         if !self.echo.stop(self.services) {
-            return false;
+            return Err("EchoLink owner has not shut down");
         }
         radio_stopped
+            .then_some(())
+            .ok_or("radio generations have not retired")
     }
 
     pub(crate) fn take_status_posts(&mut self) -> StatusPostService {

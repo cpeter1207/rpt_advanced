@@ -228,6 +228,8 @@ pub struct RadioStatus {
     qualified_detail: Arc<AtomicU64>,
     #[cfg(target_os = "linux")]
     tx_detail: Arc<AtomicU32>,
+    #[cfg(target_os = "linux")]
+    transmit_policy: Arc<AtomicU64>,
     dtmf: Arc<AtomicBool>,
     transmit_keyed: Arc<AtomicU64>,
     // The control owner publishes monotonic time. The audio callback only copies its stamp.
@@ -415,6 +417,49 @@ impl RadioStatus {
             _ => None,
         }
     }
+    /// Last successfully rendered policy from the native TX owner.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn recent_transmit_policy(
+        &self,
+        now_ms: u64,
+    ) -> Option<(u64, rpt_advanced_core::controller::TransmitPolicyStatus)> {
+        let word = self.transmit_policy.load(Ordering::Acquire);
+        let at_ms = word >> 4;
+        (word & 1 != 0 && self.recent_transmit_request(now_ms).is_some()).then_some((
+            at_ms,
+            rpt_advanced_core::controller::TransmitPolicyStatus {
+                inhibited: word & 2 != 0,
+                timed_out: word & 4 != 0,
+                traffic_holding: word & 8 != 0,
+            },
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn publish_transmit_policy(
+        &self,
+        policy: Option<rpt_advanced_core::controller::TransmitPolicyStatus>,
+    ) {
+        let stamp = self
+            .transmit_control_ms
+            .load(Ordering::Acquire)
+            .min(u64::MAX >> 4);
+        let detail = policy.map_or(0, |policy| {
+            1 | u64::from(policy.inhibited) << 1
+                | u64::from(policy.timed_out) << 2
+                | u64::from(policy.traffic_holding) << 3
+        });
+        let previous = self.transmit_policy.load(Ordering::Acquire);
+        if previous & 15 != detail {
+            self.transmit_policy
+                .store(stamp << 4 | detail, Ordering::Release);
+            self.record_radio_edge(
+                stamp,
+                crate::management::status::edges::RadioSignal::TransmitPolicy(policy),
+            );
+        }
+    }
+
     #[cfg(test)]
     fn update(&self, receiving: bool, now_ms: u64) {
         self.update_carrier(receiving, now_ms);
@@ -999,8 +1044,9 @@ unsafe extern "C" fn transmit_callback(
     let ctcss_enabled = ctcss_enabled.expect("validated CTCSS output");
     *keyed = 0;
     *ctcss_enabled = 0;
+    let mut policy = None;
     let result = match catch_unwind(AssertUnwindSafe(|| unsafe {
-        transmit(context, samples, keyed, ctcss_enabled)
+        transmit(context, samples, keyed, ctcss_enabled, &mut policy)
     })) {
         Ok(result) => result,
         Err(_) => {
@@ -1015,6 +1061,12 @@ unsafe extern "C" fn transmit_callback(
         (result == 0).then_some(*keyed != 0),
         (result == 0).then_some(*ctcss_enabled != 0),
     );
+    #[cfg(target_os = "linux")]
+    if result == 0
+        && let Some(status) = status
+    {
+        status.publish_transmit_policy(policy);
+    }
     if result != 0 {
         invalidate_transmit_meters(callback_context, Quality::Fault);
     }
@@ -1045,6 +1097,9 @@ fn publish_transmit_keyed(status: Option<&RadioStatus>, keyed: Option<bool>, _ct
             .store(stamp << 2 | state, Ordering::Release);
         #[cfg(target_os = "linux")]
         {
+            if keyed.is_none() {
+                status.publish_transmit_policy(None);
+            }
             let detail = state as u32 | _ctcss.map_or(0, |value| 1 + u32::from(value)) << 2;
             if status.tx_detail.swap(detail, Ordering::AcqRel) != detail {
                 status.record_radio_edge(
@@ -1063,6 +1118,7 @@ unsafe fn transmit(
     samples: &mut [f32],
     keyed: &mut u32,
     ctcss_enabled: &mut u32,
+    policy: &mut Option<rpt_advanced_core::controller::TransmitPolicyStatus>,
 ) -> i32 {
     // SAFETY: the host retains this context until synchronous destroy returns.
     let Some(context) = (unsafe { context.cast::<TransmitContext>().as_ref() }) else {
@@ -1229,6 +1285,7 @@ unsafe fn transmit(
             telemetry_input_level.observe(span, public_telemetry_input);
             *keyed = u32::from(value);
             *ctcss_enabled = u32::from(transmit.controller.ctcss_enabled());
+            *policy = Some(transmit.controller.transmit_policy_status());
             0
         }
         Err(_) => {

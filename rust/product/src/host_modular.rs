@@ -1,6 +1,7 @@
 //! Core and physical preparations share one reservation until actual aggregate adoption.
 use super::{
-    Audio, Device, GenerationControl, Host, Lease, StationAudio, TextExecutor, media_worker,
+    Audio, Device, GenerationControl, Host, Lease, StationAudio, StationPeers, TextExecutor,
+    media_worker,
     native::{Plans, RadioTicket},
     prepared,
 };
@@ -84,7 +85,11 @@ impl Host {
                 let mut candidate = prepared(
                     &name,
                     settings,
-                    (&self.peers, Some(&self.phone_calls)),
+                    StationPeers {
+                        links: &self.peers,
+                        calls: Some(&self.phone_calls),
+                        applications: &[],
+                    },
                     media_worker(&mut self.media_workers, &name)?,
                     &mut text,
                     services,

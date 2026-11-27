@@ -29,6 +29,7 @@ pub(crate) enum RadioSignal {
         requested: Option<bool>,
         ctcss_requested: Option<bool>,
     },
+    TransmitPolicy(Option<rpt_advanced_core::controller::TransmitPolicyStatus>),
     Fault,
 }
 
@@ -67,6 +68,18 @@ impl RadioEdges {
     pub(crate) fn lost(&self) -> bool {
         self.lost.swap(false, Ordering::AcqRel)
     }
+}
+
+/// Public result from the same controller decision used by both status readers.
+pub(super) fn transmit_policy_document(
+    policy: Option<rpt_advanced_core::controller::TransmitPolicyStatus>,
+) -> Value {
+    json!({
+        "quality":if policy.is_some() {"valid"} else {"unavailable"},
+        "inhibited":policy.map(|policy|policy.inhibited),
+        "timed_out":policy.map(|policy|policy.timed_out),
+        "traffic_holding":policy.map(|policy|policy.traffic_holding)
+    })
 }
 
 pub(crate) struct Edge {
@@ -158,6 +171,11 @@ impl Edge {
                             "transmit_key_requested":requested, "physical_ptt":null,
                             "ctcss_requested":ctcss_requested, "ctcss_encoded":null, "dcs_encoded":null
                         }),
+                    ),
+                    RadioSignal::TransmitPolicy(policy) => (
+                        "transmit_policy",
+                        "transmit.protection_changed",
+                        transmit_policy_document(policy),
                     ),
                     RadioSignal::PhysicalTransmit {
                         rendered,

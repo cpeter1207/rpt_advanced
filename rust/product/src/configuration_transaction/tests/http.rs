@@ -226,7 +226,19 @@ impl Client<'_> {
         cond: Option<(&str, &str)>,
         body: Option<&Value>,
     ) -> Reply {
+        self.send_as(method, path, cond, body, None)
+    }
+
+    fn send_as(
+        &self,
+        method: &str,
+        path: &str,
+        cond: Option<(&str, &str)>,
+        body: Option<&Value>,
+        browser: Option<&str>,
+    ) -> Reply {
         let mut c = Command::new("curl");
+        let certificate = if browser.is_some() { "nginx" } else { "cli" };
         c.args([
             "--silent",
             "--show-error",
@@ -245,9 +257,19 @@ impl Client<'_> {
         ])
         .arg(self.pki.join("backend.pem"))
         .arg("--cert")
-        .arg(self.pki.join("cli.pem"))
+        .arg(self.pki.join(format!("{certificate}.pem")))
         .arg("--key")
-        .arg(self.pki.join("cli.key"));
+        .arg(self.pki.join(format!("{certificate}.key")));
+        if let Some(subject) = browser {
+            c.args([
+                "--header",
+                "Origin: https://console.local",
+                "--header",
+                "X-Rpt-Advanced-Oidc-Issuer: https://fixture.local/realms/test",
+                "--header",
+                &format!("X-Rpt-Advanced-Oidc-Subject: {subject}"),
+            ]);
+        }
         if let Some(proxy) = self.proxy {
             c.args([
                 "--user",
@@ -650,6 +672,19 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
                     "RPTADV_TEST_SIP_PROGRESS_PTT",
                     fixture.0.join("progress.ptt"),
                 );
+        }
+        if matches!(
+            case.as_deref(),
+            Ok("standalone-managed-webrtc-receive-only" | "standalone-managed-webrtc-transceive")
+        ) {
+            child
+                .env("RPTADV_TEST_SIP_IDLE_RTP", "1")
+                .env(
+                    "RPTADV_TEST_SIP_CARRIER_EDGE",
+                    fixture.0.join("webrtc-carrier"),
+                )
+                .env("RPTADV_TEST_SIP_PROGRESS_PTT", fixture.0.join("webrtc-ptt"))
+                .env("RPTADV_TEST_SIP_PROGRESS_PCM", fixture.0.join("webrtc.pcm"));
         }
         let out = child.status().unwrap();
         fs::set_permissions(keys, fs::Permissions::from_mode(0o700)).unwrap();

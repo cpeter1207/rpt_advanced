@@ -35,6 +35,11 @@ pub(super) fn binding_id(s: &Snapshot, r: &Route, p: Parameters<'_>) -> Option<I
 
 impl Api {
     pub fn new(mount: &str) -> Result<Self, Fault> {
+        Self::with_webrtc(mount, false)
+    }
+
+    /// Register signaling routes only when a live provider handles them.
+    pub fn with_webrtc(mount: &str, available: bool) -> Result<Self, Fault> {
         if !mount.starts_with('/')
             || mount.split('/').skip(1).any(|s| {
                 s.is_empty()
@@ -45,7 +50,7 @@ impl Api {
         {
             return Err(Fault::Invalid);
         }
-        let routes = routes::inventory();
+        let routes = routes::inventory_with_webrtc(available);
         let openapi = super::openapi::document(mount, &routes);
         Ok(Self {
             mount: mount.to_owned(),
@@ -175,6 +180,12 @@ impl Api {
                 }
                 links["describedby"] = self.href(&format!("/schemas/{name}/"));
                 body["profile"] = json!(name);
+                if subject.target.is_webrtc() {
+                    let response = super::schema::response_name(subject);
+                    let request = super::schema::name(subject, subject.methods.contains(&"POST"));
+                    links["describedby"] = self.href(&format!("/schemas/{response}/"));
+                    links["rpt:request"] = self.href(&format!("/schemas/{request}/"));
+                }
                 if matches!(
                     subject.target,
                     Target::StatusSnapshot | Target::StatusStream
@@ -187,7 +198,10 @@ impl Api {
             }
             Target::Relation => {
                 let name = p.name.ok_or(Fault::Missing)?;
-                if !self.routes.values().any(|r| r.relation() == name)
+                let registered = self.routes.values().any(|r| {
+                    r.relation() == name || (name == "close" && r.target == Target::WebRtcSession)
+                });
+                if !registered
                     && ![
                         "start-macro",
                         "lease",
@@ -544,6 +558,16 @@ impl Api {
                     .port
                     .map_or_else(|| "site=true".to_owned(), |port| format!("port={port}"));
                 self.link_status_views(&mut links, &query);
+                if let Some(port) = p.port
+                    && live.status_ready
+                    && live.owners.contains_key(&port)
+                    && let Some(collection) = self
+                        .routes
+                        .values()
+                        .find(|route| route.target == Target::WebRtcSessions)
+                {
+                    links["rpt:webrtc-sessions"] = self.href(&expand(&collection.path, p));
+                }
             }
         }
         body["_links"] = links;

@@ -19,19 +19,24 @@ fn live_row_schema(target: Target) -> Value {
     let text = json!({"type":"string"});
     let flag = json!({"type":"boolean"});
     if target == Target::Peers {
-        let mut peer = object(json!({"type":{"enum":["allstarlink","echolink","phone"]},
-            "node":text,"call_id":text,"muted":flag,"active":flag,
-            "connection_generation":status_decimal(false),
-            "direction":{"enum":["incoming","outgoing"]},
-            "mode":{"enum":["transceive","monitor","local-monitor"]},
-            "permanent":flag,"group_selected":flag,
-            "state":{"enum":["connected","paused","retrying","disconnected"]},
-            "quality":{"enum":["valid","stale","unavailable","fault","warming"]},
-            "transmit_keyed":{"type":["boolean","null"]},
-            "media":{"type":"object"}
-        }));
+        let mut peer = object(
+            json!({"type":{"enum":["allstarlink","echolink","phone","webrtc"]},
+                "node":text,"call_id":text,"muted":flag,"active":flag,
+                "media_binding":{"type":"string","format":"uuid"},
+                "connection_generation":status_decimal(false),
+                "direction":{"enum":["incoming","outgoing"]},
+                "mode":{"enum":["transceive","listen","monitor","local-monitor"]},
+                "permanent":flag,"group_selected":flag,
+                "state":{"enum":["connected","paused","retrying","disconnected"]},
+                "quality":{"enum":["valid","stale","unavailable","fault","warming"]},
+                "transmit_keyed":{"type":["boolean","null"]},
+                "media":{"type":"object"}
+            }),
+        );
         peer["required"] = json!(["type", "muted", "active"]);
-        peer["oneOf"] = json!([{"required":["node"]},{"required":["call_id"]}]);
+        peer["oneOf"] = json!([
+            {"required":["node"]},{"required":["call_id"]},{"required":["media_binding"]}
+        ]);
         peer
     } else {
         let optional = json!({"type":["boolean","null"]});
@@ -85,6 +90,46 @@ fn site_resource_status() -> Value {
     }))
 }
 
+fn status_media_correlation() -> Value {
+    let binding = json!({"type":"string","format":"uuid"});
+    let decimal = status_decimal(false);
+    let mut anchor = object(json!({
+        "binding":binding,"ssrc":{"type":"integer","minimum":0,"maximum":4294967295_u64},
+        "epoch":decimal,"source_generation":decimal,
+        "source_sample":decimal,"rtp_timestamp":decimal,
+        "time_basis":{"enum":["session_monotonic","tai",null]},
+        "time_ns":status_decimal(true),"uncertainty_ns":status_decimal(true)
+    }));
+    anchor["required"] = json!([
+        "binding",
+        "ssrc",
+        "epoch",
+        "source_generation",
+        "source_sample",
+        "rtp_timestamp",
+        "time_basis",
+        "time_ns",
+        "uncertainty_ns"
+    ]);
+    let mut window = object(json!({
+        "first_sample":decimal,"end_sample":decimal,
+        "first_rtp_timestamp":decimal,"end_rtp_timestamp":decimal
+    }));
+    window["required"] = json!([
+        "first_sample",
+        "end_sample",
+        "first_rtp_timestamp",
+        "end_rtp_timestamp"
+    ]);
+    let mut correlation = object(json!({
+        "binding":binding,"track":{"const":"audio"},"direction":{"const":"egress"},
+        "quality":{"enum":["valid","unavailable"]},
+        "anchor":{"oneOf":[anchor,{"type":"null"}]},"window":window
+    }));
+    correlation["required"] = json!(["binding", "track", "direction", "quality", "anchor"]);
+    correlation
+}
+
 fn status_meter_schema() -> Value {
     let decimal = status_decimal(false);
     let level = json!({"type":["number","null"]});
@@ -98,6 +143,7 @@ fn status_meter_schema() -> Value {
         "graph_generation":decimal,"measurement_epoch":decimal,
         "observed_at":{"type":["string","null"],"format":"date-time"},"monotonic_ms":decimal,
         "audio_position":{"oneOf":[sample,{"type":"null"}]},
+        "media_correlation":status_media_correlation(),
         "quality":{"enum":["valid","warming","unavailable","stale","fault"]},
         "signal_state":{"enum":["present","silence","unknown"]},
         "freshness_ms":{"type":"integer","minimum":0},"valid_samples":decimal,
@@ -319,6 +365,39 @@ fn field_schema(kind: Kind, port: bool) -> Value {
     config
 }
 
+/// Nonzero decimal ICE generation. Text retains the full unsigned 64-bit value.
+fn ice_generation() -> Value {
+    json!({"type":"string","pattern":"^[1-9][0-9]{0,19}$",
+        "description":"Canonical nonzero unsigned 64-bit ICE generation."})
+}
+
+fn webrtc_request(target: Target) -> Value {
+    let offer = json!({"type":"string","minLength":1,"writeOnly":true,
+        "description":"Session description in SDP. The decoded size may not exceed 64 KiB."});
+    let generation = ice_generation();
+    match target {
+        Target::WebRtcSessions => json!({
+            "type":"object",
+            "properties":{"direction":{"enum":["receive_only","transceive"]},"offer":offer},
+            "required":["direction","offer"],"additionalProperties":false
+        }),
+        Target::WebRtcSession => json!({"oneOf":[
+            {"type":"object","properties":{"action":{"const":"renew"},"ice_generation":generation},
+                "required":["action","ice_generation"],"additionalProperties":false},
+            {"type":"object","properties":{"action":{"const":"restart"},"ice_generation":generation,"offer":offer},
+                "required":["action","ice_generation","offer"],"additionalProperties":false}
+        ]}),
+        Target::WebRtcCandidates => json!({
+            "type":"object","properties":{
+                "ice_generation":generation,"sequence":{"type":"integer","minimum":0},
+                "candidate":{"type":["string","null"],"minLength":1,"writeOnly":true,
+                    "description":"ICE candidate up to 4 KiB decoded, or null for end-of-candidates."}
+            },"required":["ice_generation","sequence","candidate"],"additionalProperties":false
+        }),
+        _ => unreachable!("signaling request target"),
+    }
+}
+
 pub(super) fn name(route: &Route, create: bool) -> String {
     if create {
         format!("{}-create", route.profile)
@@ -349,6 +428,38 @@ pub(super) fn response_document(route: &Route) -> Value {
     let links = json!({"type":"object","properties":{"self":link,"profile":link,"item":{"type":"array","items":link},"curies":{"type":"array","items":link}},"required":["self","profile","curies"]});
     let text = json!({"type":"string"});
     let id = json!({"type":"string","format":"uuid"});
+    if route.target.is_webrtc() {
+        let mut properties = json!({"_links":links});
+        properties["_links"]["properties"]["up"] = link.clone();
+        match route.target {
+            Target::WebRtcSessions => s["required"] = json!(["_links"]),
+            Target::WebRtcSession => {
+                properties["_links"]["properties"]["rpt:webrtc-candidates"] = link.clone();
+                properties["_links"]["properties"]["rpt:close"] = link;
+                properties["session_id"] = id.clone();
+                properties["port_id"] = id;
+                properties["phase"] = json!({"enum":["pending","active","closed"]});
+                properties["ice_generation"] = ice_generation();
+                properties["answer"] = json!({"type":"string","description":"SDP answer when ready. Available only to the owning browser."});
+                s["required"] =
+                    json!(["_links", "session_id", "port_id", "phase", "ice_generation"]);
+            }
+            Target::WebRtcCandidates => {
+                properties["ice_generation"] = ice_generation();
+                properties["candidates"] = json!({"type":"array","items":{
+                    "type":"object","properties":{
+                        "sequence":{"type":"integer","minimum":0},
+                        "candidate":{"type":["string","null"],"description":"Local trickled ICE candidate, or null for end-of-candidates."}
+                    },"required":["sequence","candidate"],"additionalProperties":false
+                }});
+                s["required"] = json!(["_links", "ice_generation", "candidates"]);
+            }
+            _ => unreachable!("signaling response target"),
+        }
+        s["properties"] = properties;
+        s["additionalProperties"] = json!(false);
+        return s;
+    }
     let nullable_text = json!({"type":["string","null"]});
     let flags = object(
         json!({"password_configured":{"type":"boolean"},"pin_configured":{"type":"boolean"},"unlock_configured":{"type":"boolean"},"lock_configured":{"type":"boolean"}}),
@@ -483,7 +594,10 @@ pub(super) fn response_document(route: &Route) -> Value {
                 "radio_signals":{"type":"object","additionalProperties":{"type":"object"}},
                 "link_registrations":{"type":"object"},"phone_patch":{"type":"object"},
                 "equipment":{"type":"object"},"telemetry":{"type":"object"},"diagnostics":{"type":"object"},
-                "graphs":{"type":"object"},"meters":{"type":"object","additionalProperties":status_meter_schema()}
+                "graphs":{"type":"object","additionalProperties":{
+                    "type":"object","properties":{"media_correlation":status_media_correlation()}
+                }},
+                "meters":{"type":"object","additionalProperties":status_meter_schema()}
             }))}
         }));
         s["required"] = json!([
@@ -517,6 +631,7 @@ pub(super) fn response_document(route: &Route) -> Value {
 /// Rooted schema with only transitively used reusable definitions.
 pub(super) fn document(route: &Route, create: bool) -> Value {
     let mut schema = match route.target {
+        target if target.is_webrtc() => webrtc_request(target),
         Target::MaintenanceLease => object(json!({"configuration":lease_fields()})),
         Target::Operation => {
             let mut cfg = object(

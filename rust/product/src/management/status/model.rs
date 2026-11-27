@@ -52,6 +52,7 @@ pub(super) struct RecordKey {
     class: &'static str,
     id: String,
     generation: Option<u64>,
+    media_epoch: Option<u64>,
     pub(super) dependency: Option<Entity>,
 }
 
@@ -71,6 +72,7 @@ impl RecordKey {
             class,
             id,
             generation,
+            media_epoch: None,
             dependency: None,
         }
     }
@@ -82,6 +84,11 @@ impl RecordKey {
             id: id.to_owned(),
             generation,
         });
+        self
+    }
+
+    pub(super) fn with_media_epoch(mut self, epoch: Option<u64>) -> Self {
+        self.media_epoch = epoch;
         self
     }
 
@@ -218,7 +225,7 @@ pub(super) struct Capture {
     pub(super) cursor: u64,
     pub(super) records: Records,
     pub(super) visible_ports: Vec<Id>,
-    source_health: BTreeMap<Id, [bool; 3]>,
+    source_health: BTreeMap<Id, [bool; 4]>,
 }
 
 impl Capture {
@@ -303,6 +310,12 @@ impl Capture {
                     "receiver":live.and_then(|port| port.receiver),
                     "receive_sample_monotonic_ms":live.and_then(|port|port.receive_sample_ms).map(|at|at.to_string()),
                     "transmit_key_requested":live.and_then(|port| port.transmit_key_requested),
+                    "transmit_policy":live.and_then(|port|port.transmit_policy).map(|(at_ms, policy)| {
+                        let mut value = super::edges::transmit_policy_document(Some(policy));
+                        value["monotonic_ms"] = json!(at_ms.to_string());
+                        value["observed_at"] = json!(super::stamp_at(observed.clock, at_ms).utc);
+                        value
+                    }),
                     "physical_ptt":live.and_then(|port|port.physical_transmit.as_ref()).and_then(|tx|tx.observed),
                     "feedback":live.and_then(|port|port.physical_transmit.as_ref()).map(|tx|json!({
                         "rendered_ptt":tx.rendered,"serviced_ptt":tx.serviced,"observed_ptt":tx.observed,
@@ -387,11 +400,14 @@ impl Capture {
                 }),
             );
             for peer in port.peers.iter().chain(&port.link_retries) {
-                let alias = peer
+                let Some(alias) = peer
                     .node
                     .as_deref()
                     .or(peer.call_id.as_deref())
-                    .unwrap_or_default();
+                    .or(peer.media_binding.as_deref())
+                else {
+                    continue;
+                };
                 let peer_id = format!("{}:{alias}", peer.kind);
                 let mut status = json!(peer);
                 status["quality"] = json!("valid");
@@ -413,11 +429,16 @@ impl Capture {
                         id,
                         (family, entity, *generation),
                         measurement,
-                        port.audio_generation,
+                        super::peer::EgressGraph::Shared(port.audio_generation),
                         &stamp,
                         observed.clock,
                         &mut put,
                     );
+                }
+            }
+            for webrtc in port.webrtc.values() {
+                if port.audio_generation == Some(webrtc.graph_generation) {
+                    super::webrtc::project(id, webrtc, &stamp, observed.clock, &mut put);
                 }
             }
             for (attempt, (generation, state)) in &port.phone_progress {
@@ -503,6 +524,7 @@ impl Capture {
                         rx,
                         status.transmit_key_requested.is_some(),
                         status.physical_transmit.is_some(),
+                        status.transmit_policy.is_some(),
                     ],
                 )
             })
@@ -528,6 +550,7 @@ impl Capture {
             "source" | "admission" => 0,
             "transmit" => 1,
             "physical_transmit" => 2,
+            "transmit_policy" => 3,
             _ => return false,
         };
         self.source_health

@@ -1555,11 +1555,13 @@ fn application_audio_requires_qualified_key_and_preserves_listen_only_mix_minus(
         let signals = PeerSignals::for_webrtc(uuid::Uuid::from_u128(session));
         signals.publish_pcm();
         signals.set_radio_keyed(keyed);
+        signals.set_webrtc_deadline(1_000_000_000);
         let reply = signals.reply_target();
         let (writer, output) = LinkAudioQueue::new(960, 4).unwrap().into_endpoints();
         let peer = AudioPeer::for_application(
             &reply,
             transceive,
+            Arc::new(AtomicBool::new(true)),
             FiniteInput {
                 signals,
                 samples: vec![sample; 12_800].into(),
@@ -1580,29 +1582,41 @@ fn application_audio_requires_qualified_key_and_preserves_listen_only_mix_minus(
         CourtesySettings::default(),
     )
     .unwrap();
-    let block = |graph: &mut LinkAudio<FiniteInput>, node: &mut NodeController| {
+    let block = |graph: &mut LinkAudio<FiniteInput>, node: &mut NodeController, born_ns| {
         graph
-            .process(node, false, &mut [0.0; 4], SourcePosition::default())
+            .process(
+                node,
+                false,
+                &mut [0.0; 4],
+                SourcePosition {
+                    born_ns,
+                    ..SourcePosition::default()
+                },
+            )
             .unwrap();
         graph.peer_source_active()
     };
 
     // Receive-only input and unqualified transport PCM cannot open the station.
-    assert!(!block(&mut graph, &mut node));
+    assert!(!block(&mut graph, &mut node, Some(0)));
     assert!(!talker_reply.active());
     dispatcher.dispatch(1);
     let mut samples = [0.0; 4];
     assert!(station_audio.read_span(&mut samples).is_none());
 
     graph.peers[0].input.signals.set_radio_keyed(true);
-    assert!(block(&mut graph, &mut node));
+    assert!(!block(&mut graph, &mut node, None));
+    dispatcher.dispatch(1);
+    assert!(block(&mut graph, &mut node, Some(0)));
     assert!(talker_reply.active());
     dispatcher.dispatch(1);
     assert!(self_audio.read_span(&mut samples).is_none());
     assert_eq!(station_audio.read_span(&mut samples).unwrap().frames, 4);
     assert_eq!(samples, [0.125; 4]);
 
+    assert!(!block(&mut graph, &mut node, Some(999_999_000)));
+    assert!(!talker_reply.active());
     talker_reply.set_rx_muted(true);
-    assert!(!block(&mut graph, &mut node));
+    assert!(!block(&mut graph, &mut node, Some(0)));
     assert!(!talker_reply.active());
 }

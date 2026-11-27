@@ -2466,6 +2466,13 @@ fn denied_save(client: &Client<'_>, root: &Path, reason: &str) {
 }
 
 fn provisioning(scenario: &Scenario<'_>) -> (Value, std::net::SocketAddr) {
+    provisioning_with_browser(scenario, false)
+}
+
+fn provisioning_with_browser(
+    scenario: &Scenario<'_>,
+    browser_proxy: bool,
+) -> (Value, std::net::SocketAddr) {
     let directory = std::path::PathBuf::from(std::env::var_os("CREDENTIALS_DIRECTORY").unwrap());
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     let put = |name: &str, bytes: &[u8]| {
@@ -2475,6 +2482,9 @@ fn provisioning(scenario: &Scenario<'_>) -> (Value, std::net::SocketAddr) {
     };
     for name in ["server", "client", "cli"] {
         put(name, cert(scenario.client.pki, name).as_ref());
+    }
+    if browser_proxy {
+        put("nginx", cert(scenario.client.pki, "nginx").as_ref());
     }
     let key = Command::new("openssl")
         .args(["pkcs8", "-topk8", "-nocrypt", "-outform", "DER", "-in"])
@@ -2488,12 +2498,18 @@ fn provisioning(scenario: &Scenario<'_>) -> (Value, std::net::SocketAddr) {
         .unwrap()
         .local_addr()
         .unwrap();
-    let provision = json!({
+    let mut provision = json!({
         "store_path":scenario.fixture.0, "store_uuid":STORE, "write_key_id":"example",
         "listen":address.to_string(),"authorities":["localhost",format!("localhost:{}",address.port())],
         "server_chain":["server"],"server_key":"server-key","client_issuers":["client"],
         "clients":[{"identity":"cli","leaf_certificate":"cli"}]
     });
+    if browser_proxy {
+        provision["origins"] = json!(["https://console.local"]);
+        provision["clients"].as_array_mut().unwrap().push(json!(
+            {"identity":"nginx","leaf_certificate":"nginx","browser_principal_proxy":true}
+        ));
+    }
     (provision, address)
 }
 
@@ -2544,6 +2560,8 @@ pub(super) mod managed_asl;
 pub(super) mod managed_echo;
 #[path = "native_private_phone.rs"]
 mod private_phone;
+#[path = "native_managed_webrtc.rs"]
+pub(super) mod webrtc;
 
 #[path = "native_managed_phone_dial.rs"]
 pub(super) mod managed_phone_dial;
