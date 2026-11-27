@@ -94,10 +94,15 @@ impl Drop for ServerIdentity {
     }
 }
 
+struct PinnedService {
+    id: ServiceId,
+    browser_proxy: bool,
+}
+
 /// Current client issuer trust and authorized exact SHA-256 leaf pins.
 pub struct ServiceTrust {
     webpki: Arc<dyn ClientCertVerifier>,
-    pins: BTreeMap<[u8; 32], ServiceId>,
+    pins: BTreeMap<[u8; 32], PinnedService>,
 }
 
 impl fmt::Debug for ServiceTrust {
@@ -123,7 +128,11 @@ impl ServiceTrust {
         .build()
         .map_err(|_| TransportError::Tls)?;
         let mut identities = BTreeMap::new();
-        for (pin, service) in pins {
+        for (pin, id) in pins {
+            let service = PinnedService {
+                id,
+                browser_proxy: false,
+            };
             if identities.insert(pin, service).is_some() {
                 return Err(TransportError::Policy);
             }
@@ -132,6 +141,26 @@ impl ServiceTrust {
             webpki,
             pins: identities,
         })
+    }
+
+    /// Allow only these existing exact TLS leaf pins to vouch for a browser principal.
+    pub fn with_browser_principal_proxies(
+        mut self,
+        pins: impl IntoIterator<Item = [u8; 32]>,
+    ) -> Result<Self, TransportError> {
+        for pin in pins {
+            let service = self.pins.get_mut(&pin).ok_or(TransportError::Policy)?;
+            service.browser_proxy = true;
+        }
+        Ok(self)
+    }
+
+    /// Test authorization for a leaf whose certificate chain is verified separately.
+    pub(super) fn allows_browser_principal(&self, chain: &[CertificateDer<'_>]) -> bool {
+        chain
+            .first()
+            .and_then(|leaf| self.pins.get(&Self::leaf_pin(leaf)))
+            .is_some_and(|service| service.browser_proxy)
     }
 
     /// Calculate the configured pin over the complete DER leaf certificate.
@@ -151,6 +180,7 @@ impl ServiceTrust {
         self.webpki.verify_client_cert(leaf, intermediates, now)?;
         self.pins
             .get(&Self::leaf_pin(leaf))
+            .map(|service| &service.id)
             .ok_or(Error::InvalidCertificate(
                 CertificateError::ApplicationVerificationFailure,
             ))

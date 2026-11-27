@@ -866,6 +866,75 @@ fn rejects_invalid_method_syntax_before_handoff_and_checks_local_policy() {
     }
 }
 #[test]
+fn browser_principal_is_per_request_and_requires_an_exact_proxy_pin() {
+    let pki = Pki::new();
+    let trust = || pki.trust("client", &[("cli", "management"), ("nginx", "management")]);
+    let permitted = trust()
+        .with_browser_principal_proxies([ServiceTrust::leaf_pin(&pki.cert("nginx"))])
+        .unwrap();
+    let (mut listener, mut inbox) = pki.start(permitted);
+    let addr = listener.local_addr();
+    let mut cli = connect(addr, pki.client("backend", Some("cli")), "localhost");
+    let mut proxy = connect(addr, pki.client("backend", Some("nginx")), "localhost");
+    let assertion = |subject: &str| {
+        format!(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nOrigin: https://console.local\r\n\
+             X-Rpt-Advanced-Oidc-Issuer: https://fixture.local/realms/test\r\n\
+             X-Rpt-Advanced-Oidc-Subject: {subject}\r\n\r\n"
+        )
+    };
+    let accept = |inbox: &mut CoordinatorInbox| {
+        let request = claim(inbox);
+        assert_eq!(request.actor.as_str(), "management");
+        assert!(!request.headers.contains_key("x-rpt-advanced-oidc-issuer"));
+        assert!(!request.headers.contains_key("x-rpt-advanced-oidc-subject"));
+        let principal = request.browser_principal().cloned();
+        request.respond(
+            hyper::Response::builder()
+                .status(204)
+                .body(Vec::new())
+                .unwrap(),
+        );
+        principal
+    };
+
+    send(&mut cli, GET).unwrap();
+    assert!(accept(&mut inbox).is_none());
+    assert_eq!(status(&mut cli).unwrap(), 204);
+    send(&mut cli, assertion("subject-a").as_bytes()).unwrap();
+    assert_eq!(status(&mut cli).unwrap(), 403);
+    assert!(inbox.try_recv().is_none());
+
+    send(&mut proxy, assertion("subject-a").as_bytes()).unwrap();
+    let first = accept(&mut inbox).unwrap();
+    assert_eq!(status(&mut proxy).unwrap(), 204);
+    send(&mut proxy, assertion("subject-b").as_bytes()).unwrap();
+    let second = accept(&mut inbox).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(status(&mut proxy).unwrap(), 204);
+    send(&mut proxy, assertion("subject-a").as_bytes()).unwrap();
+    assert_eq!(accept(&mut inbox), Some(first));
+    assert_eq!(status(&mut proxy).unwrap(), 204);
+    send(&mut proxy, GET).unwrap();
+    assert!(accept(&mut inbox).is_none());
+    assert_eq!(status(&mut proxy).unwrap(), 204);
+
+    for subject in ["", "subject-a\r\nX-Rpt-Advanced-Oidc-Subject: duplicate"] {
+        let mut invalid = connect(addr, pki.client("backend", Some("nginx")), "localhost");
+        send(&mut invalid, assertion(subject).as_bytes()).unwrap();
+        assert_eq!(status(&mut invalid).unwrap(), 400);
+        assert!(inbox.try_recv().is_none());
+    }
+
+    send(&mut proxy, b"PUT / HTTP/1.1\r\nHost: localhost\r\nOrigin: https://console.local\r\nX-Rpt-Advanced-Oidc-Issuer: https://fixture.local/realms/test\r\nX-Rpt-Advanced-Oidc-Subject: subject-a\r\nContent-Type: application/hal+json\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n").unwrap();
+    assert_eq!(status(&mut proxy).unwrap(), 100);
+    listener.replace_trust(trust()).unwrap();
+    send(&mut proxy, b"{}").unwrap();
+    assert_eq!(status(&mut proxy).unwrap(), 403);
+    assert!(inbox.try_recv().is_none());
+}
+
+#[test]
 fn revalidates_actor_after_receiving_a_streamed_body() {
     let pki = Pki::new();
     let (mut listener, mut inbox) = pki.start(pki.trust("client", &[("cli", "before")]));

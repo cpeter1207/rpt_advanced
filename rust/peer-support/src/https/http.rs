@@ -19,8 +19,8 @@ use tokio_rustls::TlsAcceptor;
 use zeroize::Zeroizing;
 
 use super::{
-    CONNECTIONS, Chain, CoordinatorReply, HANDSHAKES, HttpInput, RequestBody, ServiceId, Shared,
-    StatusStream, TransportError, dispatch, status,
+    BrowserPrincipal, CONNECTIONS, Chain, CoordinatorReply, HANDSHAKES, HttpInput, RequestBody,
+    ServiceId, ServiceTrust, Shared, StatusStream, TransportError, dispatch, status,
 };
 
 const HEADERS: usize = 64;
@@ -98,6 +98,51 @@ pub(super) fn single(
         return Err(StatusCode::BAD_REQUEST);
     }
     Ok(value)
+}
+
+const BROWSER_ISSUER: HeaderName = HeaderName::from_static("x-rpt-advanced-oidc-issuer");
+const BROWSER_SUBJECT: HeaderName = HeaderName::from_static("x-rpt-advanced-oidc-subject");
+
+/// Extract the proxy-derived OIDC issuer and subject without forwarding request headers.
+fn browser_principal(
+    headers: &HeaderMap,
+    trust: &ServiceTrust,
+    chain: &Chain,
+) -> Result<Option<BrowserPrincipal>, StatusCode> {
+    if !headers.contains_key(&BROWSER_ISSUER) && !headers.contains_key(&BROWSER_SUBJECT) {
+        return Ok(None);
+    }
+    if !trust.allows_browser_principal(chain) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let required = |name| {
+        single(headers, name)?
+            .and_then(|value| value.to_str().ok())
+            .ok_or(StatusCode::BAD_REQUEST)
+    };
+    let issuer = required(BROWSER_ISSUER)?;
+    let subject = required(BROWSER_SUBJECT)?;
+    if issuer.len() > TARGET_BYTES
+        || issuer.contains('#')
+        || subject.is_empty()
+        || subject.len() > 255
+        || !subject.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let uri = issuer.parse::<Uri>().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if uri.scheme_str() != Some("https")
+        || !uri
+            .authority()
+            .is_some_and(|authority| !authority.as_str().contains('@'))
+        || uri.query().is_some()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Some(BrowserPrincipal {
+        issuer: issuer.to_owned(),
+        subject: subject.to_owned(),
+    }))
 }
 
 pub(super) fn empty(status: StatusCode) -> Response<Vec<u8>> {
@@ -219,6 +264,7 @@ impl Connection {
             .ok_or(StatusCode::FORBIDDEN)?;
         let target = target(request.uri())?;
         self.policy.check(request.headers())?;
+        let browser_principal = browser_principal(request.headers(), &trust, &self.chain)?;
         let allowed = media(request.method(), request.headers())?;
         let upgrade = status::accept_key(
             target.path(),
@@ -255,6 +301,7 @@ impl Connection {
                 target,
                 headers,
                 body,
+                browser_principal,
                 status_upgrade: upgrade.is_some(),
             },
         )

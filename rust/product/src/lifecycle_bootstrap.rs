@@ -45,6 +45,9 @@ struct Provisioning {
 struct Client {
     identity: String,
     leaf_certificate: String,
+    /// This exact provisioned certificate belongs to a trusted browser proxy.
+    #[serde(default)]
+    browser_principal_proxy: bool,
 }
 
 impl Provisioning {
@@ -99,14 +102,20 @@ impl Provisioning {
             .clone_key();
         let identity = ServerIdentity::new(certs(&self.server_chain)?, key);
         let mut clients = Vec::with_capacity(self.clients.len());
+        let mut browser_proxies = Vec::new();
         for client in &self.clients {
             let certificate = Self::cert(&client.leaf_certificate)?;
+            let pin = ServiceTrust::leaf_pin(&certificate);
             clients.push((
-                ServiceTrust::leaf_pin(&certificate),
+                pin,
                 ServiceId::new(&client.identity).map_err(|_| RuntimeError::Preparation)?,
             ));
+            if client.browser_principal_proxy {
+                browser_proxies.push(pin);
+            }
         }
         let trust = ServiceTrust::new(certs(&self.client_issuers)?, clients)
+            .and_then(|trust| trust.with_browser_principal_proxies(browser_proxies))
             .map_err(|_| RuntimeError::Preparation)?;
         let policy = OriginPolicy::new(self.authorities.clone(), self.origins.clone())
             .map_err(|_| RuntimeError::Preparation)?;

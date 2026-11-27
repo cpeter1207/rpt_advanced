@@ -272,6 +272,65 @@ fn real_proxies_keep_status_websocket_under_frontend_and_backend_policy() {
     }
 }
 
+#[test]
+#[ignore = "staged Debian nginx and apache2-bin packages required"]
+fn real_proxies_replace_browser_principal_headers_with_the_authenticated_user() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let pki = Pki::new();
+    for service in ["nginx", "apache"] {
+        let (mut listener, mut inbox) = backend(&pki, service, "server");
+        listener
+            .replace_trust(
+                pki.trust("client", &[(service, service)])
+                    .with_browser_principal_proxies([ServiceTrust::leaf_pin(&pki.cert(service))])
+                    .unwrap(),
+            )
+            .unwrap();
+        let proxy = Proxy::start(
+            service,
+            &pki.0,
+            listener.local_addr(),
+            "backend",
+            "localhost",
+        );
+        let path = proxy.dir.join("users");
+        let row = fs::read_to_string(&path).unwrap();
+        let second = row.replacen("user:", "other:", 1);
+        assert_ne!(row, second);
+        fs::write(&path, format!("{row}{second}")).unwrap();
+        let mut principals = Vec::new();
+        for user in ["user", "other", "user"] {
+            let addr = SocketAddr::from(([127, 0, 0, 1], proxy.port));
+            let mut browser = connect(addr, pki.client("backend", None), "localhost");
+            let basic = STANDARD.encode(format!("{user}:fixture-password"));
+            let request = format!(
+                "GET /frontend-principal HTTP/1.1\r\nHost: localhost:{}\r\n\
+                 Authorization: Basic {basic}\r\nOrigin: {ORIGIN}\r\n\
+                 X-Rpt-Advanced-Oidc-Issuer: https://spoof.local\r\n\
+                 X-Rpt-Advanced-Oidc-Subject: spoofed\r\n\r\n",
+                proxy.port
+            );
+            send(&mut browser, request.as_bytes()).unwrap();
+            let admitted = claim(&mut inbox);
+            assert_eq!(admitted.actor.as_str(), service);
+            assert!(admitted.headers.get("authorization").is_none());
+            assert!(!admitted.headers.contains_key("x-rpt-advanced-oidc-issuer"));
+            assert!(!admitted.headers.contains_key("x-rpt-advanced-oidc-subject"));
+            principals.push(admitted.browser_principal().unwrap().clone());
+            admitted.respond(
+                hyper::Response::builder()
+                    .status(204)
+                    .body(Vec::new())
+                    .unwrap(),
+            );
+            assert_eq!(status(&mut browser).unwrap(), 204);
+        }
+        assert_ne!(principals[0], principals[1]);
+        assert_eq!(principals[0], principals[2]);
+    }
+}
+
 fn log_without_marker(path: &std::path::Path) -> io::Result<bool> {
     let log = fs::read(path)?;
     Ok(!log

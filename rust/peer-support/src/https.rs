@@ -81,6 +81,19 @@ impl Drop for ConnectionOwner {
     }
 }
 
+/// Stable per-request browser identity asserted by the authenticated, authorized proxy.
+#[derive(Clone, Eq, PartialEq)]
+pub struct BrowserPrincipal {
+    issuer: String,
+    subject: String,
+}
+
+impl fmt::Debug for BrowserPrincipal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("BrowserPrincipal([redacted])")
+    }
+}
+
 /// A request owned by the coordinator after admission, independently of its client.
 pub struct AdmittedRequest {
     /// Transport correlation only. Durable submission identity belongs to the resource.
@@ -97,6 +110,7 @@ pub struct AdmittedRequest {
     pub headers: HeaderMap,
     /// Owned bounded input.
     pub body: RequestBody,
+    browser_principal: Option<BrowserPrincipal>,
     status_upgrade: bool,
     reply: oneshot::Sender<CoordinatorReply>,
 }
@@ -110,6 +124,11 @@ impl AdmittedRequest {
     /// Complete once. A client disconnect only discards the response.
     pub fn respond(self, response: Response<Vec<u8>>) {
         let _ = self.reply.send(CoordinatorReply::Http(response));
+    }
+
+    /// Exact issuer/subject of this request's verified browser, when the proxy asserted it.
+    pub fn browser_principal(&self) -> Option<&BrowserPrincipal> {
+        self.browser_principal.as_ref()
     }
 
     /// Whether the request offered the authorized status WebSocket subprotocol.
@@ -152,7 +171,15 @@ struct ClaimProof {
     last: u64,
 }
 impl ClaimProof {
-    fn verify(trust: Arc<ServiceTrust>, chain: &Chain, actor: &ServiceId) -> Option<Self> {
+    fn verify(
+        trust: Arc<ServiceTrust>,
+        chain: &Chain,
+        actor: &ServiceId,
+        requires_browser_proxy: bool,
+    ) -> Option<Self> {
+        if requires_browser_proxy && !trust.allows_browser_principal(chain) {
+            return None;
+        }
         let first = UnixTime::now().as_secs();
         let last = (first..=first.saturating_add(ADMISSION.as_secs()))
             .take_while(|&second| {
@@ -441,12 +468,19 @@ fn refresh_pending(state: &Shared) {
             .pending
             .iter()
             .filter(|p| !Arc::ptr_eq(&p.proof.trust, &trust))
-            .map(|p| (p.request.id, p.chain.clone(), p.request.actor.clone()))
+            .map(|p| {
+                (
+                    p.request.id,
+                    p.chain.clone(),
+                    p.request.actor.clone(),
+                    p.request.browser_principal.is_some(),
+                )
+            })
             .collect();
         (trust, pending)
     };
-    for (id, chain, actor) in pending {
-        let proof = ClaimProof::verify(trust.clone(), &chain, &actor);
+    for (id, chain, actor, requires_browser_proxy) in pending {
+        let proof = ClaimProof::verify(trust.clone(), &chain, &actor, requires_browser_proxy);
         let mut queue = state.lock().expect("management state");
         if !queue.uses(&trust) {
             return;
@@ -467,6 +501,7 @@ struct HttpInput {
     target: PathAndQuery,
     headers: HeaderMap,
     body: RequestBody,
+    browser_principal: Option<BrowserPrincipal>,
     status_upgrade: bool,
 }
 
@@ -480,7 +515,9 @@ async fn dispatch(
     let (actor, connection) = identity;
     let deadline = Instant::now() + ADMISSION;
     let trust = state.lock().expect("management state").trust();
-    let Some(proof) = trust.and_then(|trust| ClaimProof::verify(trust, &chain, &actor)) else {
+    let Some(proof) = trust.and_then(|trust| {
+        ClaimProof::verify(trust, &chain, &actor, input.browser_principal.is_some())
+    }) else {
         return error(StatusCode::FORBIDDEN);
     };
     let (reply, mut result) = oneshot::channel();
@@ -505,6 +542,7 @@ async fn dispatch(
             target: input.target,
             headers: input.headers,
             body: input.body,
+            browser_principal: input.browser_principal,
             status_upgrade: input.status_upgrade,
             reply,
         };

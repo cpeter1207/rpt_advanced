@@ -134,6 +134,22 @@ The service runs as the `rpt-advanced` user. Do not run it as root.
 Speech needs Piper and a local voice model. Put the model where that user can
 read it, outside a home directory, and set its path in the configuration.
 
+## Forward authenticated browser identity
+
+For a reverse proxy that authenticates browser users with OIDC, set
+`"browser_principal_proxy": true` in the standalone service JSON entry for
+that proxy's exact pinned client certificate. The setting defaults to false.
+Continue to configure the proxy's verified backend TLS and accepted browser
+origins.
+
+For each request that needs the browser's identity, the proxy replaces
+`X-Rpt-Advanced-Oidc-Issuer` and `X-Rpt-Advanced-Oidc-Subject` with the
+verified `iss` and `sub` pair after applying frontend authentication and
+authorization. Use the issuer's HTTPS URL and the original subject. Strip
+both headers on routes that do not require the assertion. Keep OIDC
+credentials and sessions at the proxy. The controller retains the pair only
+as internal request identity. Ordinary management requests omit both headers.
+
 ## Check the radio
 
 1. Leave links disconnected during the local test.
