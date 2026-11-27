@@ -28,6 +28,23 @@ qualification are distinct from software implementation and passive node health.
 
 ## Entries
 
+### Accessible React controller console
+
+**Status: Design proposed 2026-11-27.** Review the
+[React controller console design](docs/superpowers/specs/2026-11-27-controller-react-management-design.md)
+and [editable Fluent mapping](docs/superpowers/specs/controller-react-fluent-mapping.tsv)
+before implementation.
+
+- Use one responsive React app for site and port management, status, and
+  WebRTC listening and transmission through the existing HAL and media
+  boundaries. Keep the controller CLI and existing USBRadioPlus tuner.
+- Meet WCAG 2.2 AAA across complete workflows. Use native controls and
+  automate practical checks with Guidepup and available platform tools.
+  Qualify real screen reader use on desktop and mobile.
+- Resolve authorized live caption delivery and privacy for monitored
+  broadcast audio. Retain the adapter checklist's transceive and
+  interoperability requirements.
+
 ### Modular JSON configuration and authenticated HAL management
 
 **Status: Implementation started 2026-11-19; runtime cutover pending.** Follow
