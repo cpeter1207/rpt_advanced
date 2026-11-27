@@ -227,6 +227,11 @@ pub struct RadioStatus {
     #[cfg(target_os = "linux")]
     qualified_detail: Arc<AtomicU64>,
     #[cfg(target_os = "linux")]
+    qualified_burst: Arc<AtomicU64>,
+    /// The last exact admission closed by RX, with a validity bit independent of the next key.
+    #[cfg(target_os = "linux")]
+    qualified_end: Arc<AtomicU64>,
+    #[cfg(target_os = "linux")]
     tx_detail: Arc<AtomicU32>,
     #[cfg(target_os = "linux")]
     transmit_policy: Arc<AtomicU64>,
@@ -246,6 +251,8 @@ pub struct RadioStatus {
 struct LocalHandoff {
     token: AtomicU64,
     admission: AtomicU64,
+    #[cfg(target_os = "linux")]
+    status_burst: AtomicU64,
     reset_required: AtomicU64,
     reset_ack: AtomicU64,
     pending_reset_dropped: AtomicU64,
@@ -503,6 +510,15 @@ impl RadioStatus {
         }
         self.qualified_detail
             .store((now_ms.min(u64::MAX >> 2) << 2) | state, Ordering::Release);
+        let burst = self.qualified_burst.load(Ordering::Relaxed);
+        if state == 2 {
+            let next = if burst < u64::MAX >> 1 {
+                burst + 1
+            } else {
+                u64::MAX
+            };
+            self.qualified_burst.store(next, Ordering::Release);
+        }
         let signal = match receiving {
             Some(qualified) => RadioSignal::Receive {
                 qualified,
@@ -512,27 +528,11 @@ impl RadioStatus {
             None => RadioSignal::ReceiveUnknown,
         };
         self.record_radio_edge(now_ms, signal);
-    }
-    #[cfg(target_os = "linux")]
-    fn publish_local_receive_release(
-        &self,
-        release: rpt_advanced_core::controller::LocalReceiveRelease,
-        at_ms: u64,
-    ) {
-        // A closed internal gate can also come from fault, mute, or a pending
-        // receive reset. Only a confirmed inactive input is an on-air unkey.
-        if self.qualified_detail.load(Ordering::Acquire) & 3 == 1
-            && self.receive_sample_time().is_some_and(|sample| {
-                at_ms.saturating_sub(sample) <= crate::radio_feedback::FRESH_MS
-            })
-        {
-            self.record_radio_edge(
-                at_ms,
-                crate::management::status::edges::RadioSignal::ReceiveRelease(release),
-            );
+        if state != 2 && prior == 2 && (1..=u64::MAX >> 1).contains(&burst) {
+            self.qualified_end
+                .store(burst << 1 | u64::from(state == 1), Ordering::Release);
         }
     }
-
     #[cfg(target_os = "linux")]
     fn record_radio_edge(&self, at_ms: u64, signal: crate::management::status::edges::RadioSignal) {
         self.edges
@@ -583,6 +583,86 @@ struct ReceiveContext {
     origin_ms: u64,
     status: RadioStatus,
 }
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct ReceiveReleaseTracker {
+    graph: u64,
+    active: Option<u64>,
+    pending: Option<PendingReceiveRelease>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct PendingReceiveRelease {
+    burst: u64,
+    at_ms: u64,
+    release: rpt_advanced_core::controller::LocalReceiveRelease,
+}
+
+#[cfg(target_os = "linux")]
+enum ReceiveTrace {
+    Admitted(u64),
+    Closed,
+    Other,
+}
+
+#[cfg(target_os = "linux")]
+impl ReceiveReleaseTracker {
+    fn observe(
+        &mut self,
+        status: &RadioStatus,
+        graph: u64,
+        at_ms: u64,
+        input: ReceiveTrace,
+        release: Option<rpt_advanced_core::controller::LocalReceiveRelease>,
+    ) {
+        if self.graph != graph {
+            *self = Self {
+                graph,
+                ..Self::default()
+            };
+        }
+        if let Some(release) = release
+            && let Some(burst) = self.active.take()
+            && matches!(input, ReceiveTrace::Closed)
+            && status.receive_sample_time().is_some_and(|sample| {
+                at_ms.saturating_sub(sample) <= crate::radio_feedback::FRESH_MS
+            })
+        {
+            if self.pending.is_some() {
+                status.edges.mark_lost();
+            }
+            self.pending = Some(PendingReceiveRelease {
+                burst,
+                at_ms,
+                release,
+            });
+        }
+        if let ReceiveTrace::Admitted(burst) = input {
+            self.active = (1..=u64::MAX >> 1).contains(&burst).then_some(burst);
+        }
+        let Some(pending) = self.pending else { return };
+        if at_ms.saturating_sub(pending.at_ms) > crate::radio_feedback::FRESH_MS {
+            self.pending = None;
+            return;
+        }
+        let end = status.qualified_end.load(Ordering::Acquire);
+        let ended_burst = end >> 1;
+        if ended_burst == pending.burst && end & 1 != 0 {
+            status.record_radio_edge(
+                pending.at_ms,
+                crate::management::status::edges::RadioSignal::ReceiveRelease(pending.release),
+            );
+        } else if ended_burst < pending.burst {
+            return;
+        } else if ended_burst > pending.burst {
+            // The bounded receipt slot was superseded before TX could correlate it.
+            status.edges.mark_lost();
+        }
+        self.pending = None;
+    }
+}
+
 struct TransmitContext {
     active: Arc<AtomicBool>,
     owner: UnsafeCell<Option<TransmitOwner>>,
@@ -595,6 +675,8 @@ struct TransmitContext {
     status_pcm: UnsafeCell<[Box<[f32]>; 6]>,
     remote_controls: UnsafeCell<u32>,
     linked_active: UnsafeCell<bool>,
+    #[cfg(target_os = "linux")]
+    receive_release: UnsafeCell<ReceiveReleaseTracker>,
 }
 // SAFETY: callbacks are serialized independently by the host. Control writes owner slots
 // only before release-publishing active, and takes them only after synchronous radio destroy.
@@ -936,12 +1018,20 @@ fn receive(
                 && (!vad
                     || (metadata.vad_voice_sample_index != u64::MAX
                         && metadata.vad_voice_sample_index >= state.voice_after));
+            #[cfg(target_os = "linux")]
+            if admitted {
+                context.status.observe_qualified(Some(true), now_ms);
+                let burst = context.status.qualified_burst.load(Ordering::Relaxed);
+                handoff.status_burst.store(burst, Ordering::Release);
+            }
             handoff
                 .admission
                 .store(if admitted { token } else { 0 }, Ordering::Release);
             context.status.update_carrier(admitted, now_ms);
             #[cfg(target_os = "linux")]
-            context.status.observe_qualified(Some(admitted), now_ms);
+            if !admitted {
+                context.status.observe_qualified(Some(false), now_ms);
+            }
         }
         _ => {
             handoff
@@ -1192,6 +1282,8 @@ unsafe fn transmit(
     let consumer = &mut ring.consumer;
     consumer.local_epoch(receive_epoch);
     let handoff = &ring.handoff;
+    #[cfg(target_os = "linux")]
+    let rx_burst = handoff.status_burst.load(Ordering::Acquire);
     let token = handoff.token.load(Ordering::Acquire);
     let epoch = token & !1;
     let mut reset_ok = true;
@@ -1216,15 +1308,29 @@ unsafe fn transmit(
         receiving = false;
     }
     // Cancel the rendered tail if RX unkeyed or changed bursts during this call.
-    receiving &= handoff.token.load(Ordering::Acquire) == token
-        && handoff.admission.load(Ordering::Acquire) == token
-        && std::ptr::eq(
-            Arc::as_ptr(&ring.handoff),
-            context.status.current_handoff.load(Ordering::Acquire),
-        );
+    let current_token = handoff.token.load(Ordering::Acquire);
+    let current_admission = handoff.admission.load(Ordering::Acquire);
+    let same_ring = std::ptr::eq(
+        Arc::as_ptr(&ring.handoff),
+        context.status.current_handoff.load(Ordering::Acquire),
+    );
+    receiving &= current_token == token && current_admission == token && same_ring;
+    #[cfg(target_os = "linux")]
+    let rx_closed = !receiving
+        && same_ring
+        && (current_token != token || current_token & 1 == 0 || current_admission == 0);
     receiving &= receive_epoch & 1 == 0
         && generation.state().controller.receive_epoch() == receive_epoch
         && (receive_epoch == 0 || consumer.fresh());
+    #[cfg(target_os = "linux")]
+    let rx_trace = if receiving {
+        let same = rx_burst == handoff.status_burst.load(Ordering::Acquire);
+        ReceiveTrace::Admitted(if same { rx_burst } else { 0 })
+    } else if rx_closed {
+        ReceiveTrace::Closed
+    } else {
+        ReceiveTrace::Other
+    };
     if !receiving || context.status.dtmf_muted() {
         samples.fill(0.0);
     }
@@ -1333,10 +1439,16 @@ unsafe fn transmit(
             *ctcss_enabled = u32::from(transmit.controller.ctcss_enabled());
             *policy = Some(transmit.controller.transmit_policy_status());
             #[cfg(target_os = "linux")]
-            if let Some(release) = transmit.controller.take_local_receive_release() {
-                context
-                    .status
-                    .publish_local_receive_release(release, span.end_ms);
+            {
+                // SAFETY: this tracker belongs only to the serial TX callback.
+                let tracker = unsafe { &mut *context.receive_release.get() };
+                tracker.observe(
+                    &context.status,
+                    span.graph_generation,
+                    span.end_ms,
+                    rx_trace,
+                    transmit.controller.take_local_receive_release(),
+                );
             }
             0
         }
@@ -1651,6 +1763,8 @@ impl RadioWorker {
             })),
             remote_controls: UnsafeCell::new(0),
             linked_active: UnsafeCell::new(false),
+            #[cfg(target_os = "linux")]
+            receive_release: UnsafeCell::new(ReceiveReleaseTracker::default()),
         });
         if radio.bind_metadata(Some(metadata_callback)).is_err() {
             return Err(PrepareFailure::Reservation(

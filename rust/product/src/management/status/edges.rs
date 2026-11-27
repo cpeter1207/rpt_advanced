@@ -58,8 +58,12 @@ impl Default for RadioEdges {
 impl RadioEdges {
     pub(crate) fn push(&self, edge: RadioEdge) {
         if self.queue.push(edge).is_err() {
-            self.lost.store(true, Ordering::Release);
+            self.mark_lost();
         }
+    }
+
+    pub(crate) fn mark_lost(&self) {
+        self.lost.store(true, Ordering::Release);
     }
 
     pub(crate) fn pop(&self) -> Option<RadioEdge> {

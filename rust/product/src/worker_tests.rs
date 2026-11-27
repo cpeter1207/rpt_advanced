@@ -205,34 +205,77 @@ fn transmit_policy_edges_and_snapshots_share_checked_callback_state() {
 fn authoritative_unkey_requires_confirmed_fresh_inactive_input() {
     use crate::management::status::edges::RadioSignal;
     use rpt_advanced_core::controller::LocalReceiveRelease;
-    let status = RadioStatus::default();
     let release = LocalReceiveRelease {
         duration_samples: 48,
         kerchunk: true,
     };
 
-    status.receive_sample_ms.store(101, Ordering::Release);
-    status.observe_qualified(Some(true), 100);
-    assert!(status.edges.pop().is_some());
-    status.publish_local_receive_release(release, 120);
-    assert!(status.edges.pop().is_none());
+    for (conclusion, input, at_ms, expected) in [
+        (Some(false), ReceiveTrace::Closed, 120, true),
+        (None, ReceiveTrace::Closed, 120, false),
+        (Some(false), ReceiveTrace::Closed, 601, false),
+        (Some(false), ReceiveTrace::Other, 120, false),
+    ] {
+        let status = RadioStatus::default();
+        let mut tracker = ReceiveReleaseTracker::default();
+        status.receive_sample_ms.store(101, Ordering::Release);
+        status.observe_qualified(Some(true), 100);
+        tracker.observe(&status, 1, 100, ReceiveTrace::Admitted(1), None);
+        assert!(status.edges.pop().is_some());
+        tracker.observe(&status, 1, at_ms, input, Some(release));
+        assert!(status.edges.pop().is_none());
+        status.observe_qualified(conclusion, 120);
+        assert!(status.edges.pop().is_some());
+        tracker.observe(&status, 1, at_ms, ReceiveTrace::Other, None);
+        assert_eq!(
+            status.edges.pop().map(|edge| (edge.at_ms, edge.signal)),
+            expected.then_some((at_ms, RadioSignal::ReceiveRelease(release)))
+        );
+    }
+}
 
-    status.observe_qualified(None, 120);
-    assert_eq!(
-        status.edges.pop().unwrap().signal,
-        RadioSignal::ReceiveUnknown
-    );
-    status.publish_local_receive_release(release, 120);
-    assert!(status.edges.pop().is_none());
+#[cfg(target_os = "linux")]
+#[test]
+fn transmit_release_waits_for_the_exact_receive_result_across_rekey() {
+    use crate::management::status::edges::RadioSignal;
 
-    status.observe_qualified(Some(false), 120);
-    assert!(status.edges.pop().is_some());
-    status.publish_local_receive_release(release, 601);
-    assert!(status.edges.pop().is_none());
-    status.publish_local_receive_release(release, 120);
-    let edge = status.edges.pop().unwrap();
-    assert_eq!(edge.at_ms, 120);
-    assert_eq!(edge.signal, RadioSignal::ReceiveRelease(release));
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for conclusion in [Some(false), None] {
+        let (mut runtime, owners) = audio_owners();
+        let mut worker = worker();
+        assert!(worker.attach(owners).is_ok());
+        let status = &worker.receive.status;
+        assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+        assert_eq!(tx(&worker, &mut [0.0; 8]), (0, 1));
+        while status.edges.pop().is_some() {}
+
+        // RX closes routing before it can finish observing the unkey. Let the
+        // independent TX callback process the resulting controller transition.
+        status.update_qualification(false, &worker.handoff);
+        assert_eq!(tx(&worker, &mut [0.0; 8]).0, 0);
+        while let Some(edge) = status.edges.pop() {
+            assert!(!matches!(edge.signal, RadioSignal::ReceiveRelease(_)));
+        }
+        status.observe_qualified(conclusion, 0);
+        // An immediately following valid key must not erase the prior result.
+        assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+        assert_eq!(tx(&worker, &mut [0.0; 8]).0, 0);
+        let releases = std::iter::from_fn(|| status.edges.pop())
+            .filter_map(|edge| match edge.signal {
+                RadioSignal::ReceiveRelease(value) => Some(value.duration_samples),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            releases,
+            conclusion.map(|_| 8).into_iter().collect::<Vec<_>>()
+        );
+
+        drop(worker.stop());
+        assert!(runtime.stop(1));
+    }
 }
 
 #[test]
