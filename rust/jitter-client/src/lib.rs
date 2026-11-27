@@ -1,10 +1,14 @@
 //! Client of the composed, codec-neutral jitter ABI. No jitter implementation lives here.
 #![deny(missing_docs)]
 
+mod provider;
+pub use provider::{JITTER_LIBRARY_NAME, JitterProvider};
+
 use std::{
     ffi::c_void,
     mem::size_of,
     ptr::{self, NonNull},
+    sync::Arc,
 };
 
 const CAPABILITY: [u8; 16] = *b"rptadv.jitter\0\0\0";
@@ -160,6 +164,7 @@ pub struct Jitter {
     rate: u32,
     delays_ms: [u32; 3],
     update_delays: Option<UpdateDelays>,
+    _provider: Option<Arc<JitterProvider>>,
 }
 
 // The capability contract permits thread migration and forbids simultaneous calls.
@@ -297,6 +302,7 @@ impl Jitter {
             rate,
             delays_ms,
             update_delays,
+            _provider: None,
         })
     }
 

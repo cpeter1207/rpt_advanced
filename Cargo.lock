@@ -1433,6 +1433,9 @@ dependencies = [
 [[package]]
 name = "rptadv-jitter-client"
 version = "0.1.0-alpha24"
+dependencies = [
+ "libloading",
+]
 
 [[package]]
 name = "rptadv-json"

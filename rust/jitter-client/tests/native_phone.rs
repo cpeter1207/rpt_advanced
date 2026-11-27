@@ -1,39 +1,21 @@
 #![cfg(target_os = "linux")]
 
-use rptadv_jitter_client::{Admission, Jitter, Kind};
-use std::{
-    ffi::{CString, c_char, c_int, c_void},
-    path::PathBuf,
-};
+use rptadv_jitter_client::{Admission, JITTER_LIBRARY_NAME, Jitter, JitterProvider, Kind};
+use std::{ffi::c_void, path::PathBuf, sync::Arc};
 
-#[link(name = "dl")]
-unsafe extern "C" {
-    fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn dlclose(handle: *mut c_void) -> c_int;
+fn provider() -> Arc<JitterProvider> {
+    let path = std::env::var_os("RPT_ADVANCED_LIBDIR")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(JITTER_LIBRARY_NAME);
+    // The native checkpoint supplies the trusted composition directory.
+    unsafe { JitterProvider::load(&path) }
+        .unwrap_or_else(|_| panic!("load required provider {path:?}"))
 }
 
 fn with_provider(check: impl FnOnce(*const c_void)) {
-    let directory = std::env::var_os("RPT_ADVANCED_LIBDIR")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let path = CString::new(
-        directory
-            .join("librptadv_jitter_adapter.so.1")
-            .as_os_str()
-            .as_encoded_bytes(),
-    )
-    .unwrap();
-    // SAFETY: the path and symbol strings remain live; this setup-only test
-    // retains the library until both exclusive contexts have been destroyed.
-    let library = unsafe { dlopen(path.as_ptr(), 2) };
-    assert!(!library.is_null(), "load required native provider {path:?}");
-    let symbol = unsafe { dlsym(library, c"rptadv_jitter_adapter_descriptor_v1".as_ptr()) };
-    assert!(!symbol.is_null());
-    let descriptor: unsafe extern "C" fn() -> *const c_void =
-        unsafe { std::mem::transmute(symbol) };
-    check(unsafe { descriptor() });
-    assert_eq!(unsafe { dlclose(library) }, 0);
+    let code = provider();
+    check(code.descriptor());
 }
 
 #[test]
@@ -294,4 +276,23 @@ fn policy_revision_short_coding_unit_rolls_back_on_the_original_call() {
         call.advance(30_000_000, 0).unwrap();
         assert_eq!(call.observe().unwrap().delay, 80);
     });
+}
+
+#[test]
+fn owned_context_retains_the_native_provider_until_after_destroy() {
+    let provider = provider();
+    let lease = Arc::downgrade(&provider);
+    let mut context = provider.create(48_000, 960, 1200, [20, 40, 100]).unwrap();
+    assert_eq!(
+        context.supports_delay_update(),
+        provider.supports_delay_update()
+    );
+    drop(provider);
+
+    assert!(lease.upgrade().is_some());
+    assert_eq!(context.release_span(), 960);
+    assert_eq!(context.observe().unwrap().delay, 1920);
+    context.reset().unwrap();
+    drop(context);
+    assert!(lease.upgrade().is_none());
 }

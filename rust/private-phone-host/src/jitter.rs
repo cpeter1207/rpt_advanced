@@ -1,47 +1,31 @@
-//! One independently retained code lease for all private-call packet jitter contexts.
-use libloading::Library;
-use rptadv_jitter_client::Jitter;
-use std::{ffi::c_void, path::Path, ptr::NonNull, sync::Arc};
+//! Keep existing private-call composition and error semantics at the shared loader.
+use rptadv_jitter_client::{Jitter, JitterProvider as SharedProvider};
+use std::{ffi::c_void, path::Path, sync::Arc};
 
-/// The immutable descriptor belongs to the library until every native context has retired.
+/// Checked jitter code retained by the private-call owner.
 pub struct JitterProvider {
-    descriptor: NonNull<c_void>,
-    _library: Library,
+    provider: Arc<SharedProvider>,
     pub(crate) live_update: bool,
 }
-
-// The released descriptor is immutable, and each created jitter context has one serial caller.
-unsafe impl Send for JitterProvider {}
-unsafe impl Sync for JitterProvider {}
 
 impl JitterProvider {
     /// Load the product's configured, trusted jitter adapter.
     ///
     /// # Safety
-    /// Loading a dynamic library executes code from the supplied path.
+    /// Loading a dynamic library executes code from the supplied path. The library
+    /// must implement the jitter ABI.
     pub unsafe fn load(path: &Path) -> Result<Arc<Self>, crate::Error> {
-        let library = unsafe { Library::new(path) }.map_err(|_| crate::Error::Provider)?;
-        let get = unsafe {
-            library.get::<unsafe extern "C" fn() -> *const c_void>(
-                b"rptadv_jitter_adapter_descriptor_v1\0",
-            )
-        }
-        .map_err(|_| crate::Error::Provider)?;
-        let descriptor = NonNull::new(unsafe { get() }.cast_mut()).ok_or(crate::Error::Provider)?;
-        let probe =
-            unsafe { Jitter::phone(descriptor.as_ptr()) }.map_err(|_| crate::Error::Provider)?;
-        let live_update = probe.supports_delay_update();
-        drop(probe);
+        let provider = unsafe { SharedProvider::load(path) }.map_err(|_| crate::Error::Provider)?;
         Ok(Arc::new(Self {
-            descriptor,
-            _library: library,
-            live_update,
+            live_update: provider.supports_delay_update(),
+            provider,
         }))
     }
 
     pub(crate) fn descriptor(&self) -> *const c_void {
-        self.descriptor.as_ptr()
+        self.provider.descriptor()
     }
+
     pub(crate) fn create(
         &self,
         rate: u32,
@@ -49,6 +33,6 @@ impl JitterProvider {
         bytes: usize,
         delays: [u32; 3],
     ) -> Result<Jitter, rptadv_jitter_client::Error> {
-        unsafe { Jitter::with_delays(self.descriptor.as_ptr(), rate, frames, bytes, delays) }
+        self.provider.create(rate, frames, bytes, delays)
     }
 }
