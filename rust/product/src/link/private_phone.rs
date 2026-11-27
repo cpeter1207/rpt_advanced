@@ -1,6 +1,8 @@
 //! Private call transport on its native registered executor. Only its exact
 //! reply queue reaches this encoder. Authentication and command execution own
 //! the other endpoints on ordinary product control.
+#[cfg(target_os = "linux")]
+use super::session::status::ReceiveStatus;
 use super::{
     dispatcher::PeerWake,
     outbound::Outbound,
@@ -50,10 +52,27 @@ pub(crate) struct Control {
     pub(crate) wake: PeerWake,
     stop: Arc<AtomicBool>,
     meters: PeerReaders,
+    #[cfg(target_os = "linux")]
+    pub(super) receive_status: Arc<ReceiveStatus>,
 }
 impl Control {
     pub(crate) fn status_meters(&self, call_generation: u64) -> PeerMeasurements {
         self.meters.readings(Some(call_generation))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn next_receive_status(&self) -> Option<(u64, bool)> {
+        self.receive_status.next()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn receive_status_lost(&self) -> bool {
+        self.receive_status.lost()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn discard_receive_status(&self) {
+        self.receive_status.discard();
     }
 
     pub(crate) fn send(&mut self, reply: PrivatePhoneReply) -> Result<(), Error> {
@@ -149,6 +168,8 @@ impl Session {
             wake: wake.clone(),
             stop: Arc::clone(&stop),
             meters: PeerReaders::new(rate, decoded_reader, egress_meters),
+            #[cfg(target_os = "linux")]
+            receive_status: Arc::new(ReceiveStatus::default()),
         };
         Ok((
             Self {
@@ -212,8 +233,18 @@ impl Session {
             return Err(Error::Hangup);
         }
         let now_ms = self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        #[cfg(target_os = "linux")]
+        if let Some(radio) = &mut self.radio {
+            radio.observe_at(now_ms);
+        }
         if let Some(new) = self.redirect.lock().map_err(|_| Error::Operation)?.take() {
             self.decoded_meter.discontinuity();
+            #[cfg(target_os = "linux")]
+            let new = {
+                let mut new = new;
+                new.observe_at(now_ms);
+                new
+            };
             new.activate();
             self.radio = Some(new);
         }

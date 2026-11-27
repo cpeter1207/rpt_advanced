@@ -659,11 +659,25 @@ impl Host {
         }
     }
 
-    /// Record call phases and operator mute at their existing serialized admission boundaries.
+    /// Publish call phases, mute and each qualified receive transition of the live route.
     pub(super) fn collect_phone_status_edges(&mut self, at_ms: u64) {
         let mut current = PhoneObservations::new();
+        let mut previous = std::mem::take(&mut self.phone_status);
         let mut generations = BTreeMap::new();
-        for (local, call) in self.phone_calls.observations() {
+        let emit = |port, generation, at_ms, call: &Call, kind, present: bool| {
+            self.status_edges.push(Edge {
+                port,
+                generation,
+                at_ms,
+                payload: Payload::Phone {
+                    id: call.call_id.clone(),
+                    call_generation: call.generation,
+                    kind,
+                    value: present.then(|| json!(call)),
+                },
+            });
+        };
+        for (local, mut call, control) in self.phone_calls.observations_with_control() {
             let Ok(port) = local.parse() else { continue };
             let generation = *generations.entry(port).or_insert_with(|| {
                 self.runtime
@@ -671,67 +685,91 @@ impl Host {
                     .command_work()
                     .map(|work| work.id())
             });
-            if let Some(generation) = generation {
-                current.insert((port, call.call_id.clone()), (generation, call));
-            }
-        }
-        for ((port, id), (generation, call)) in &self.phone_status {
-            if current
-                .get(&(*port, id.clone()))
-                .is_none_or(|(_, new)| new.generation != call.generation)
+            let Some(generation) = generation else {
+                continue;
+            };
+            let key = (port, call.call_id.clone());
+            let old = previous.remove(&key);
+            if let Some((old_generation, old_call)) = &old
+                && old_call.generation != call.generation
             {
-                self.status_edges.push(Edge {
-                    port: *port,
-                    generation: *generation,
+                emit(
+                    port,
+                    *old_generation,
                     at_ms,
-                    payload: Payload::Phone {
-                        id: id.clone(),
-                        call_generation: call.generation,
-                        kind: "phone_patch.call_disconnected",
-                        value: None,
-                    },
-                });
+                    old_call,
+                    "phone_patch.call_disconnected",
+                    false,
+                );
             }
-        }
-        for ((port, id), (generation, call)) in &current {
-            let last = self
-                .phone_status
-                .get(&(*port, id.clone()))
-                .filter(|(previous, old)| {
-                    previous == generation && old.generation == call.generation
-                })
-                .map(|(_, call)| call);
+            let last = old
+                .as_ref()
+                .filter(|(owner, old)| *owner == generation && old.generation == call.generation)
+                .map(|(_, old)| old);
+            let control = control.filter(|_| call.attached);
+            let sampled_active = call.active;
+            if let Some(control) = control {
+                if old.as_ref().is_some_and(|(owner, old)| {
+                    *owner != generation && old.generation == call.generation
+                }) {
+                    // A retained call can change station owners. Do not relabel
+                    // queued observations of the former owner as current.
+                    control.discard_receive_status();
+                } else {
+                    call.active = Some(
+                        call.muted != Some(true)
+                            && last.and_then(|old| old.active).unwrap_or(false),
+                    );
+                }
+            }
             let kind = match last {
-                Some(last) if last == call => continue,
-                Some(last) if last.phase == call.phase && last.muted != call.muted => {
-                    if call.muted == Some(true) {
+                Some(last) if last.phase == call.phase => {
+                    (last.muted != call.muted).then_some(if call.muted == Some(true) {
                         "phone_patch.call_muted"
                     } else {
                         "phone_patch.call_unmuted"
-                    }
+                    })
                 }
-                Some(last) if last.phase == call.phase && last.active != call.active => {
-                    if call.active == Some(true) {
-                        "phone_patch.call_keyed"
-                    } else {
-                        "phone_patch.call_unkeyed"
-                    }
-                }
-                _ if call.attached => "phone_patch.call_attached",
-                _ if call.authenticated => "phone_patch.call_authenticated",
-                _ => "phone_patch.call_private",
+                _ if call.attached => Some("phone_patch.call_attached"),
+                _ if call.authenticated => Some("phone_patch.call_authenticated"),
+                _ => Some("phone_patch.call_private"),
             };
-            self.status_edges.push(Edge {
-                port: *port,
-                generation: *generation,
+            if let Some(kind) = kind {
+                emit(port, generation, at_ms, &call, kind, true);
+            }
+            if let Some(control) = control {
+                if control.receive_status_lost() {
+                    self.status_edges.mark_lost();
+                    control.discard_receive_status();
+                    call.active = sampled_active;
+                } else {
+                    for (at_ms, keyed) in
+                        std::iter::from_fn(|| control.next_receive_status()).take(64)
+                    {
+                        if call.active == Some(keyed) || (keyed && call.muted == Some(true)) {
+                            continue;
+                        }
+                        call.active = Some(keyed);
+                        let kind = if keyed {
+                            "phone_patch.call_keyed"
+                        } else {
+                            "phone_patch.call_unkeyed"
+                        };
+                        emit(port, generation, at_ms, &call, kind, true);
+                    }
+                }
+            }
+            current.insert(key, (generation, call));
+        }
+        for ((port, _), (generation, call)) in previous {
+            emit(
+                port,
+                generation,
                 at_ms,
-                payload: Payload::Phone {
-                    id: id.clone(),
-                    call_generation: call.generation,
-                    kind,
-                    value: Some(json!(call)),
-                },
-            });
+                &call,
+                "phone_patch.call_disconnected",
+                false,
+            );
         }
         self.phone_status = current;
     }

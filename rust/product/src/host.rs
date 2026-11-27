@@ -1040,7 +1040,7 @@ impl Host {
         }
         // Telephone media needs explicit authenticated *3 policy and per-node rings.
         // Pending private calls must never enter this numeric-node/ASL path.
-        if io.identity().protocol() == ProtocolId::Phone {
+        if protocol == ProtocolId::Phone {
             return Err(RuntimeError::Rejected);
         }
         self.peers
@@ -1118,6 +1118,8 @@ impl Host {
                 .expect("running port")
                 .links()
                 .retire_source(&old.control.reply_target());
+            // Revoke both the exact reply and its owner before exposing the successor.
+            old.control.stop();
         }
         #[cfg(target_os = "linux")]
         for retired in superseded {
@@ -1151,26 +1153,42 @@ impl Host {
             self.detach_connection(local, remote, Some(connection), clock.now_ms);
             return Err(error);
         }
-        if let Some(peer) = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.control.connection_generation() == connection)
-        {
-            peer.announced = true;
-            if command_reply {
-                self.runtime
-                    .cancel_link_disconnect_notice(local, remote, protocol);
-            } else {
-                let _ = if protocol == ProtocolId::EchoLink {
-                    self.runtime
-                        .queue_echo_link_event(local, remote, peer.control.callsign(), true)
-                } else {
-                    self.runtime.queue_link_event(local, remote, true)
-                };
-            }
-        }
         Ok(())
     }
+
+    /// Announce the exact endpoint once the prepared ingress is usable.
+    fn announce_peer_attachment(&mut self, local: &str, remote: &str, connection: u64) {
+        let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.control.connection_generation() == connection && !peer.superseded)
+        else {
+            return;
+        };
+        if std::mem::replace(&mut peer.announced, true) {
+            return;
+        }
+        let protocol = if peer.control.text_origin().protocol == ProtocolId::EchoLink as u32 {
+            ProtocolId::EchoLink
+        } else {
+            ProtocolId::AllStarLink
+        };
+        let command_reply = self
+            .pending_link_dials
+            .get(&connection)
+            .is_some_and(|dial| dial.phone.is_some() || dial.receiver.is_some());
+        if command_reply {
+            self.runtime
+                .cancel_link_disconnect_notice(local, remote, protocol);
+        } else if protocol == ProtocolId::EchoLink {
+            let _ =
+                self.runtime
+                    .queue_echo_link_event(local, remote, peer.control.callsign(), true);
+        } else {
+            let _ = self.runtime.queue_link_event(local, remote, true);
+        }
+    }
+
     fn refresh(&mut self, local: &str, clock: RuntimeClock) -> Result<(), RuntimeError> {
         for _ in 0..100 {
             self.pump(clock)?;
@@ -2174,9 +2192,10 @@ impl Host {
                         let id = PeerIdentity::from_operator(&remote)
                             .map_err(|_| RuntimeError::Rejected)?;
                         let attached = node.links().attach_ingress(id, target);
-                        #[cfg(target_os = "linux")]
                         if attached.is_ok() {
+                            #[cfg(target_os = "linux")]
                             self.peer_status_connected(&local, connection, clock.now_ms);
+                            self.announce_peer_attachment(&local, &remote, connection);
                         }
                         self.finish_link_dial(connection, &local, &remote, attached.is_ok());
                         attached.map_err(RuntimeError::Link)?;

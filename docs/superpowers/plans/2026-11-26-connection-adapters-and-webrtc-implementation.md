@@ -20,8 +20,31 @@ Scope includes the shared adapter, WebRTC controller transport and management co
 
 Start with `rust/product/src/link/{mod,session,outbound,ring,egress,dispatcher,source_clock}.rs`, `rust/product/src/services.rs`, `rust/core/src/link/`, the managed ASL and EchoLink frontends in `rust/peer-support/frontend/`, and `rust/private-phone-host/src/{calls,progress,iax/media,sip/call_media}.rs`. Review ADRs 0018, 0021, 0023, 0025, 0026, 0035, 0037, 0043, 0044 and 0045.
 
-- [ ] Trace incoming and outgoing AllStarLink, EchoLink, SIP phone and IAX phone through standalone and applicable Asterisk entry points. Map existing begin, progress, ready and attachment acknowledgment, cancellation, quiescence and ownership handoff. Record which provider generations, source proofs, clock positions, key edges and capabilities are actually available.
+- [x] Trace incoming and outgoing AllStarLink, EchoLink, SIP phone and IAX phone through standalone and applicable Asterisk entry points. Map existing begin, progress, ready and attachment acknowledgment, cancellation, quiescence and ownership handoff. Record which provider generations, source proofs, clock positions, key edges and capabilities are actually available.
 - [ ] Establish a conformance baseline with the existing Product peer, private-call, ring, egress, host and same-process reload fixtures. Preserve traces for accepted-prefix retry, private reply ownership, mute and mix-minus, connect versus attach, fast key edges where supplied, cancellation before and after answer, same-device redirect and terminal cleanup. Record unknown measurements separately from known off or silent observations.
+
+### Existing ownership
+
+| Provider | Admission and exact identity | Readiness and media ownership |
+| --- | --- | --- |
+| AllStarLink | The standalone managed IAX listener and the Asterisk answered-channel hook reach `lifecycle_asl` with an account generation and validated provider source. The ordinary incoming route cannot issue this capability. | The answered negotiated handle joins `PeerSession` only after Product validation and radio binding. Product checks the exact redirected ingress observer before acknowledging attachment. Standalone can expose negotiated radio-key events. Legacy PCM paths lack some source timing and key evidence. |
+| EchoLink | Both hosts use the managed frontend. Its claimed QSO and frontend/account generation survive into Product admission. | The acknowledged provider registration is followed by the same Product redirect. Source selection, finite burst drain and input provenance remain provider-owned. The current managed runtime prepares direct profiles and rejects proxy profiles, so proxy qualification remains open. |
+| SIP and IAX phone | Both hosts use the same private frontend and checked Product transfer. An opaque call keeps the provider account, call generation and ingress token. Reverse calls require a current mailbox binding before joining the radio. | `PrivateCall` supplies timed PCM, source loss, and provider callback registration. The private session shares `PeerIoWorker` with ordinary peers. Product confirms the exact radio route through the private redirect. Outgoing status currently reports attachment before that acknowledgment, and polling may miss a short phone key pulse. |
+
+The existing `PeerIo::ready` reports whether an input frame can now be read.
+Usable endpoint evidence comes from the prepared or answered provider handle,
+successful registration and Product's exact route acknowledgment. The code
+currently keeps superseded link transports live until separate detach and
+can announce an ordinary connection before that acknowledgment.
+
+### Baseline evidence
+
+The isolated Debian 13 arm64 baseline at `eaef6bf` passed 154 Product tests
+across peer sessions, rings, egress, dispatch, private calls, redirect withdrawal,
+radio-bind refusal and owner retirement. The Asterisk fixture closed the status
+subscription, module and channel in the same process. A later ordinary unload
+in the stress loop failed. Full native provider and repeated lifecycle baseline
+coverage remains open.
 
 ## 2. Share lifetime, media ownership and station policy
 
@@ -32,6 +55,19 @@ Use the current `PeerIo` transfer, `PeerSession`, private-call session, provider
 - [ ] Share the existing mix-minus, per-source DSP, station receive qualification and egress dispatcher. Preserve blocking, per-peer RX mute and its epoch, monitor modes, priority, routing and privacy isolation on fresh and retained media. Encode once and retry the exact uncommitted packet within its original deadline. Keep provider acceptance, socket submission and confirmed feedback distinct. Verify three independent parties, private reply isolation, and a stalled destination beside a healthy one.
 - [ ] Reuse the existing station TX arbiter. Carry transport talk state, valid PCM, station qualification, software PTT and measured PTT as distinct observations. Keep the reason for release and current handling of lead-in, hang, receive priority and TX protection. Verify fast key and unkey, timeout, mute, stale audio, provider loss, and a physical PTT reading different from the software request.
 - [ ] Reuse the current HAL/status observation types and owner handoffs. Publish real lifecycle and key transitions where the owner supplies them, order graph and connection retirement before dependent meters, and declare observation loss. Retain counter and jitter diagnostics independently of key or attachment authority. Verify rapid transitions, recovery after an observation gap, and absence of protected payloads. Observe legacy PCM-only key or egress behavior at its owner before claiming equal coverage.
+
+### Lifecycle evidence
+
+The replacement regression failed before the old owner was stopped and passed
+with the exact reply retired and the provider quiesced. The successor kept its
+command route. The controller now reports link success and outgoing call
+attachment from the exact media acknowledgment. Both continue to use the
+existing station link hub and serialized peer worker. The ARM64 standalone
+fixtures passed SIP dial, hangup, RTP handover and three-party mix-minus, plus
+AllStarLink originate. The phone receive fixture recorded a qualified key and
+unkey between status reads. The reverse IAX and managed EchoLink cases still
+need their explicit SDK/provider fixture inputs. The managed Proxy timing
+extension has its own provider qualification.
 
 ## 3. Migrate one existing provider at a time
 
@@ -50,6 +86,22 @@ Start with the existing routes, HAL discovery, OpenAPI, runtime coordinator, HTT
 - [ ] Expose runtime session creation, candidates, state/restart and closure on the selected port through authenticated HAL discovery. Reuse the authenticated frontend principal and the existing backend trust and Origin checks. Verify the principal at the backend boundary and distinguish two users sharing one proxy service certificate. Bind each session to its exact principal, port, generation and authorized direction. Revalidate on offer, restart and authorization changes. Verify cross-principal rejection through the same proxy, wrong-port rejection, stale ICE generation and fingerprint, bounded SDP/candidates, idempotent candidate retry/close, and receive-only sessions with no microphone ingress.
 - [ ] Connect the approved session to the common adapter after transport and media are ready. Use DTLS-SRTP and protected data channels end to end, and Opus with its 48 kHz RTP clock. Supply packet timing, provenance, loss and discontinuity at the existing handoff. Apply ordinary network and audio blocking and station TX policy. Verify independent receive-only and transceive sessions, usable-endpoint acknowledgment, restarts, revocation and cleanup on refusal or provider error.
 - [ ] Qualify signaling from behind CGNAT through the approved proxy/relay or existing overlay path, using an outbound authenticated site connection. Verify independent media traversal with full ICE and Trickle ICE. Test direct where reachable, two independent CGNAT endpoints, both using relay candidates, TURN/UDP, TURN/TCP, TLS on port 443, blocked UDP, consent loss and ICE restart. Use short-lived TURN credentials and validated TLS identity in the fixture. Verify one relay failure cannot disrupt unrelated peers. Keep SDP, candidate addresses and credentials out of public status and logs.
+
+### Transport evidence
+
+The Debian 13 arm64 proof built on Rust 1.88.0. `str0m` 0.24.1 with dynamic
+OpenSSL negotiated direct Trickle ICE, DTLS fingerprint verification, both
+DCEP modes and Opus RTP with the actual SSRC, extended timestamp and receiver
+arrival. It mapped the codec-input sample window to the observed RTP epoch.
+The local coturn fixture verified bidirectional datagrams over TURN/UDP,
+TURN/TCP and TURN/TLS with time-limited credentials and normal certificate
+validation. Full browser and RTC-over-relay consent and restart tests remain
+part of qualification.
+
+The ARM64 mTLS handoff fixture verified two browser identities on one proxy
+certificate, denial of spoofed assertions, and revocation at request claim.
+The existing proxy owns OIDC. WebRTC session creation must bind the typed
+frontend identity to the port and runtime owner before admitting media.
 
 ## 5. Implement timed keying and receiver observations
 

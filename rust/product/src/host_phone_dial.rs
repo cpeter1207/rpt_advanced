@@ -12,7 +12,11 @@ use std::{sync::Weak, time::Duration};
 enum Phase {
     Dialing(PhoneDial),
     Answered(Option<PeerIo>),
-    Publishing(PhoneSource, u32),
+    Publishing {
+        source: PhoneSource,
+        remaining: u32,
+        submitted: bool,
+    },
 }
 
 pub(super) struct Pending {
@@ -250,7 +254,7 @@ impl Host {
             "phone_patch.dial_cancelled"
         };
         self.record_phone_progress(&attempt, Some(terminal));
-        if !completed && let Phase::Publishing(source, _) = &attempt.phase {
+        if !completed && let Phase::Publishing { source, .. } = &attempt.phase {
             self.retire_phone(source);
         }
         if attempt.report {
@@ -271,7 +275,7 @@ impl Host {
                 .iter()
                 .enumerate()
                 .filter(|(_, attempt)| {
-                    attempt.local == local && !matches!(&attempt.phase, Phase::Publishing(_, _))
+                    attempt.local == local && !matches!(&attempt.phase, Phase::Publishing { .. })
                 })
                 .map(|(index, _)| Outgoing::Pending(index));
             let active = self
@@ -286,18 +290,24 @@ impl Host {
             }
             selected
         };
-        let ended = match selected {
-            Outgoing::Pending(index) => {
-                let attempt = self
-                    .phone_dials
-                    .remove(index)
-                    .expect("selected outgoing attempt");
-                self.record_phone_progress(&attempt, Some("phone_patch.dial_cancelled"));
-                if attempt.report {
-                    self.services.command_notice(local, false);
-                }
-                true
+        let pending = match &selected {
+            Outgoing::Pending(index) => Some(*index),
+            Outgoing::Active(source) => self.phone_dials.iter().position(|attempt| {
+                matches!(&attempt.phase, Phase::Publishing { source: pending, .. } if pending == source)
+            }),
+        };
+        if let Some(index) = pending {
+            let attempt = self
+                .phone_dials
+                .remove(index)
+                .expect("selected outgoing attempt");
+            self.record_phone_progress(&attempt, Some("phone_patch.dial_cancelled"));
+            if attempt.report {
+                self.services.command_notice(local, false);
             }
+        }
+        let ended = match selected {
+            Outgoing::Pending(_) => true,
             Outgoing::Active(source) => self.retire_phone(&source),
         };
         ended.then_some(()).ok_or(RuntimeError::Rejected)
@@ -476,7 +486,11 @@ impl Host {
                 .phone_calls
                 .admit_outgoing(io, clock.now_ms, attempt.isolation.take())
                 .map_err(|_| RuntimeError::Rejected)?;
-            attempt.phase = Phase::Publishing(source.clone(), 100);
+            attempt.phase = Phase::Publishing {
+                source: source.clone(),
+                remaining: 100,
+                submitted: false,
+            };
             attempt.observed_phase = "publishing";
             self.record_phone_progress(attempt, None);
             let reply = self
@@ -488,7 +502,12 @@ impl Host {
                 .map_err(|_| RuntimeError::Rejected)?;
             self.collect_phone_status_edges(clock.now_ms);
         }
-        let Phase::Publishing(source, remaining) = &mut attempt.phase else {
+        let Phase::Publishing {
+            source,
+            remaining,
+            submitted,
+        } = &mut attempt.phase
+        else {
             return Err(RuntimeError::Rejected);
         };
         let reply = self
@@ -498,11 +517,11 @@ impl Host {
         if reply.ended() {
             return Err(RuntimeError::Rejected);
         }
-        if self.try_refresh(local, clock)? {
-            if reply.ended() || !attempt.current() {
-                return Err(RuntimeError::Rejected);
-            }
+        if self.phone_calls.radio_attachment_confirmed(source, &reply) {
             return Ok(true);
+        }
+        if !*submitted {
+            *submitted = self.try_refresh(local, clock)?;
         }
         *remaining -= 1;
         if *remaining == 0 {

@@ -3,7 +3,7 @@ use crossbeam_queue::ArrayQueue;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// The serial provider publishes actual transitions before another packet can replace them.
-pub(super) struct ReceiveStatus {
+pub(in crate::link) struct ReceiveStatus {
     edges: ArrayQueue<(u64, bool)>,
     key: AtomicU8,
     lost: AtomicBool,
@@ -20,7 +20,7 @@ impl Default for ReceiveStatus {
 }
 
 impl ReceiveStatus {
-    pub(super) fn observe(&self, at_ms: u64, keyed: bool) {
+    pub(in crate::link) fn observe(&self, at_ms: u64, keyed: bool) {
         let state = if keyed { 2 } else { 1 };
         if self.key.swap(state, Ordering::AcqRel) != state
             && self.edges.push((at_ms, keyed)).is_err()
@@ -29,7 +29,7 @@ impl ReceiveStatus {
         }
     }
 
-    pub(super) fn discard(&self) {
+    pub(in crate::link) fn discard(&self) {
         for _ in 0..self.edges.capacity() {
             if self.edges.pop().is_none() {
                 break;
@@ -38,18 +38,18 @@ impl ReceiveStatus {
         let _ = self.lost();
     }
 
-    pub(super) fn key(&self) -> Option<bool> {
+    pub(in crate::link) fn key(&self) -> Option<bool> {
         match self.key.load(Ordering::Acquire) {
             0 => None,
             state => Some(state == 2),
         }
     }
 
-    pub(super) fn next(&self) -> Option<(u64, bool)> {
+    pub(in crate::link) fn next(&self) -> Option<(u64, bool)> {
         self.edges.pop()
     }
 
-    pub(super) fn lost(&self) -> bool {
+    pub(in crate::link) fn lost(&self) -> bool {
         self.lost.swap(false, Ordering::AcqRel)
     }
 }

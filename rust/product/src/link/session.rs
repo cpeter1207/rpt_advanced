@@ -145,7 +145,7 @@ pub type PeerObservation = crate::abi::rptadv_peer_observation_v1;
 
 mod observation;
 #[cfg(target_os = "linux")]
-mod status;
+pub(super) mod status;
 use observation::PeerObservationCache;
 pub(crate) use observation::describe as describe_peer_observation;
 /// Single control producer/event consumer; never borrowed by audio callbacks.

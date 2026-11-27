@@ -1,4 +1,6 @@
 //! The real private transport's endpoints in one prepared station audio generation.
+#[cfg(target_os = "linux")]
+use super::session::status::ReceiveStatus;
 use super::{
     phone_speech::SpeechAnalysis,
     ring::{InboundProducer, MuteSpan},
@@ -23,6 +25,10 @@ pub(crate) struct Radio {
     call: PeerReply,
     confirmed: Arc<AtomicBool>,
     activity: Arc<rpt_advanced_core::link::PeerSignals>,
+    #[cfg(target_os = "linux")]
+    receive_status: Option<Arc<ReceiveStatus>>,
+    #[cfg(target_os = "linux")]
+    observed_at_ms: u64,
     speech: Option<SpeechAnalysis>,
     timing: PhoneLatencyTiming,
     hang_ns: u64,
@@ -65,6 +71,10 @@ impl Radio {
             call,
             confirmed,
             activity,
+            #[cfg(target_os = "linux")]
+            receive_status: None,
+            #[cfg(target_os = "linux")]
+            observed_at_ms: 0,
             speech,
             timing,
             hang_ns: u64::from(vad.hang_ms) * 1_000_000,
@@ -84,6 +94,11 @@ impl Radio {
     }
     pub(crate) fn bind(&mut self, clock: Arc<SourceClock>) {
         self.clock = Some(clock);
+    }
+    /// Use the engine-relative timestamp of this serial provider turn.
+    #[cfg(target_os = "linux")]
+    pub(super) fn observe_at(&mut self, at_ms: u64) {
+        self.observed_at_ms = at_ms;
     }
     pub(super) fn begin(&mut self, now: u64) -> u64 {
         let epoch = self.incoming.epoch();
@@ -117,7 +132,7 @@ impl Radio {
             self.incoming
                 .signals()
                 .set_radio_keyed_at(false, self.epoch);
-            self.activity.set_active(false);
+            self.observe_activity(false);
         }
     }
     fn key(&self, now: u64, receipt: u64) {
@@ -127,7 +142,16 @@ impl Radio {
             && now < self.healthy_until
             && (self.speech.is_none() || now < self.voice_until);
         self.incoming.signals().set_radio_keyed_at(active, receipt);
+        self.observe_activity(active);
+    }
+    fn observe_activity(&self, active: bool) {
         self.activity.set_active(active);
+        #[cfg(target_os = "linux")]
+        if let Some(status) = &self.receive_status
+            && self.call.phone_media_allowed()
+        {
+            status.observe(self.observed_at_ms, active && !self.call.rx_muted());
+        }
     }
     fn ring_position(&mut self, source: u64) -> Result<u64, Error> {
         #[cfg(test)]
@@ -390,6 +414,12 @@ impl Redirect {
         control: &super::private_phone::Control,
         radio: Radio,
     ) -> Self {
+        #[cfg(target_os = "linux")]
+        let radio = {
+            let mut radio = radio;
+            radio.receive_status = Some(Arc::clone(&control.receive_status));
+            radio
+        };
         Self {
             call,
             slot: Arc::clone(&control.redirect),
@@ -417,7 +447,7 @@ impl Drop for Radio {
     fn drop(&mut self) {
         self.incoming.signals().end();
         if self.installed.load(Ordering::Acquire) {
-            self.activity.set_active(false);
+            self.observe_activity(false);
         }
     }
 }
@@ -436,6 +466,76 @@ mod tests {
             SourcePosition,
         },
     };
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn qualified_phone_key_pulse_survives_between_status_reads() {
+        let source = PhoneSource::new(
+            PhoneAccountId::new("native-account").unwrap(),
+            3,
+            PhoneCallId::new([7; 16]).unwrap(),
+            5,
+            9,
+        )
+        .unwrap();
+        let activity = Arc::new(PeerSignals::for_phone(source));
+        let reply = activity.reply_target();
+        let (writer, _reader) =
+            InboundRing::redirected(8000, InboundPolicy::Phone, &reply).unwrap();
+        let (_, egress) = LinkAudioQueue::new(960, 2).unwrap().into_endpoints();
+        let mut radio = Radio::new(
+            writer,
+            egress,
+            Arc::clone(&activity),
+            PhoneVadSettings {
+                enabled: false,
+                mode: VadMode::Continuous,
+                hang_ms: 100,
+            },
+            PhoneLatencyTiming {
+                target_latency_ms: 250,
+                maximum_latency_ms: 500,
+            },
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+        let status = Arc::new(ReceiveStatus::default());
+        radio.receive_status = Some(Arc::clone(&status));
+        radio.activate();
+
+        radio.observe_at(10);
+        radio.begin(1_000_000_000);
+        assert_eq!(
+            status.next(),
+            None,
+            "private media must not publish key state"
+        );
+
+        assert!(activity.authenticate_phone());
+        radio.observe_at(20);
+        let now = 1_010_000_000;
+        let epoch = radio.begin(now);
+        assert_eq!(
+            radio.input(
+                Input::Audio {
+                    start: 0,
+                    pcm: &[0.; 160],
+                    born_ns: Some(now),
+                    concealed: false,
+                },
+                now,
+                epoch,
+            ),
+            Ok(160)
+        );
+
+        radio.observe_at(21);
+        radio.control(true, None);
+        assert_eq!(status.next(), Some((20, false)));
+        assert_eq!(status.next(), Some((20, true)));
+        assert_eq!(status.next(), Some((21, false)));
+        assert_eq!(status.next(), None);
+    }
+
     #[test]
     fn timed_private_ingress_preserves_continuous_silence_vad_qualification_and_retirement() {
         for enabled in [false, true] {

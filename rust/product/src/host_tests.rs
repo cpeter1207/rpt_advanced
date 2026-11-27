@@ -739,7 +739,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
 }
 
 #[test]
-fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
+fn replacing_a_peer_quiesces_only_the_retired_connection() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -748,6 +748,13 @@ fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
     );
     attach(&mut host, "4000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let old = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let retired = host
+        .peers
+        .iter()
+        .find(|peer| peer.remote == "2000")
+        .unwrap()
+        .control
+        .connection_generation();
     // Logical removal and physical detach run as separate executor operations.
     // An incoming replacement may be admitted between those operations.
     let effect = host
@@ -764,14 +771,14 @@ fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
     let (io, replacement) = peer(48000);
     host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock())
         .unwrap();
-    let origins = host
+    let current = host
         .peers
         .iter()
-        .filter(|peer| peer.remote == "2000")
-        .map(|peer| peer.control.text_origin().connection_generation)
-        .collect::<Vec<_>>();
-    assert_eq!(origins.len(), 2);
-    assert_ne!(origins[0], origins[1]);
+        .find(|peer| peer.remote == "2000" && !peer.superseded)
+        .unwrap()
+        .control
+        .connection_generation();
+    assert_ne!(retired, current);
     let origin = host
         .peers
         .iter()
@@ -790,35 +797,33 @@ fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
         },
     );
     pump_until(&mut host, |_| {
-        [&old, &replacement].iter().all(|state| {
-            state
+        old.lock().unwrap().drops == 1
+            && replacement
                 .lock()
                 .unwrap()
                 .texts
                 .iter()
                 .any(|text| text == b"M 4000 0 one copy per connection")
-        })
     });
-    for state in [old, replacement] {
-        assert_eq!(
-            state
-                .lock()
-                .unwrap()
-                .texts
-                .iter()
-                .filter(|text| text.starts_with(b"M "))
-                .count(),
-            1
-        );
-    }
+    let count = |state: &Mutex<crate::link::session::tests::State>| {
+        state
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .filter(|text| text.starts_with(b"M "))
+            .count()
+    };
+    assert_eq!(count(&old), 0);
+    assert_eq!(count(&replacement), 1);
     let surviving = host
         .peers
         .iter()
-        .find(|p| p.control.connection_generation() == origins[1])
+        .find(|peer| peer.control.connection_generation() == current)
         .unwrap()
         .control
         .reply_target();
-    host.detach_connection(LOCAL, "2000", Some(origins[0]), clock().now_ms);
+    host.detach_connection(LOCAL, "2000", Some(retired), clock().now_ms);
     assert!(!surviving.ended());
     let links = host.runtime.node(LOCAL).unwrap().links();
     assert!(
@@ -3586,6 +3591,7 @@ fn status_keeps_network_connect_and_disconnect_between_captures() {
             .first()
             .is_some_and(|peer| peer.control.status_connected)
     });
+    assert!(host.peers[0].announced);
     let connection = host.peers[0].control.connection_generation();
     host.detach(LOCAL, "2000", clock().now_ms);
     let (lost, edges) = host.status_edges.drain();

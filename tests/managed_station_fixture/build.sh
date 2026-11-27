@@ -13,10 +13,11 @@ test "$(realpath -e "$base")" = "$base" && test -x "$linkdir/ld.lld"
 src="$base/src/tests/managed_station_fixture"
 out="$base/station-fixture"
 
-audio_include="$dev/task-46-published-native/runtime-overlay/usr/include"
+# Match standalone bindgen's installed audio descriptor, including its optional tail.
+audio_include=/usr/include
 gpio_include="$dev/task-53-rf/arm64-1/sdk/include"
 sha256sum --strict --quiet -c - <<HEADERS
-415abf94b0c9d8a6ee84d6a3d14d800cad98eced6bedcee5fbf8ae3df24471f1  $audio_include/rptadv_portaudio_alsa_adapter/rptadv_portaudio_alsa_adapter.h
+3a047a1518b79b6c2e171e99e08de636b46ab7a285efb1e78ee3c3bcd7caa01d  $audio_include/rptadv_portaudio_alsa_adapter/rptadv_portaudio_alsa_adapter.h
 85fa20420ae7e516cad75cc83dcf73c1eea6de7b1a27a0b890f00a27ff619b15  $gpio_include/rptadv_gpio_adapter/rptadv_gpio_adapter.h
 HEADERS
 
@@ -55,7 +56,7 @@ class Descriptor(ctypes.Structure):
 for path, getter, expected in zip(
     sys.argv[1:],
     ("rptadv_portaudio_alsa_adapter_descriptor", "rptadv_gpio_adapter_descriptor"),
-    ((200, 2, b"rptadv.portaudio-alsa-audio"), (360, 1, b"rptadv.cm119-hid-gpio")),
+    ((208, 2, b"rptadv.portaudio-alsa-audio"), (360, 1, b"rptadv.cm119-hid-gpio")),
     strict=True,
 ):
     library = ctypes.CDLL(path)

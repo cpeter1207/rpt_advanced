@@ -189,7 +189,7 @@ impl PhoneCalls {
     pub fn admit(&mut self, io: PeerIo, now_ms: u64) -> Result<PhoneSource, Error> {
         self.admit_call(io, now_ms, false, None)
     }
-    /// Adopt an answered leg with media only and retain its exact isolation claim.
+    /// Prepare the answered leg for route installation and retain its exact isolation claim.
     pub(crate) fn admit_outgoing(
         &mut self,
         io: PeerIo,
@@ -237,7 +237,7 @@ impl PhoneCalls {
             login_revision: 0,
             login_prompt: None,
             attachment: if outgoing {
-                Attachment::Attached
+                Attachment::Publishing
             } else {
                 Attachment::Detached
             },
@@ -284,12 +284,13 @@ impl PhoneCalls {
         Ok(())
     }
 
+    /// Return reverse calls awaiting the mailbox attachment retry path.
     pub(crate) fn pending_radio_attachments(&self) -> BTreeMap<String, BTreeSet<usize>> {
         let mut pending = BTreeMap::<String, BTreeSet<usize>>::new();
         for call in &self.calls {
             if call.attachment == Attachment::Publishing {
                 let reply = call.signals.reply_target();
-                if !reply.ended() {
+                if !reply.ended() && !reply.outgoing_phone() {
                     pending
                         .entry(call.local.clone())
                         .or_default()
@@ -307,6 +308,17 @@ impl PhoneCalls {
         {
             call.attachment = Attachment::Attached;
         }
+    }
+
+    /// Check the same live call and reply that received route installation acknowledgement.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn radio_attachment_confirmed(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+    ) -> bool {
+        self.current(source, reply)
+            .is_ok_and(|call| call.attachment == Attachment::Attached)
     }
 
     pub(crate) fn fail_radio_attachments(
@@ -451,25 +463,38 @@ impl PhoneCalls {
     pub(crate) fn observations(
         &self,
     ) -> impl Iterator<Item = (&str, crate::management::live::Call)> {
+        self.observations_with_control()
+            .map(|(local, call, _)| (local, call))
+    }
+
+    /// Pair public call state with the status lane of the exact live private control.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn observations_with_control(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &str,
+            crate::management::live::Call,
+            Option<&crate::link::private_phone::Control>,
+        ),
+    > {
         self.calls.iter().filter_map(|call| {
             let reply = call.signals.reply_target();
-            if reply.ended() {
+            let attached = call.attachment == Attachment::Attached;
+            let outgoing = reply.outgoing_phone();
+            // An outgoing leg remains represented by its dial attempt until installed.
+            if reply.ended() || (outgoing && !attached) {
                 return None;
             }
             let muted = reply.rx_muted();
             let authenticated = reply.phone_authenticated();
-            let attached = call.attachment == Attachment::Attached;
             Some((
                 call.local.as_str(),
                 crate::management::live::Call {
                     call_id: call.source.call_id().to_string(),
                     account: call.source.account().as_str().to_owned(),
                     generation: call.source.call_generation(),
-                    direction: if reply.outgoing_phone() {
-                        "outgoing"
-                    } else {
-                        "incoming"
-                    },
+                    direction: if outgoing { "outgoing" } else { "incoming" },
                     phase: if attached {
                         "attached"
                     } else if authenticated {
@@ -482,6 +507,7 @@ impl PhoneCalls {
                     muted: (attached || authenticated).then_some(muted),
                     active: attached.then_some(!muted && reply.active()),
                 },
+                call.transport.as_ref(),
             ))
         })
     }

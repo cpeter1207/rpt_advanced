@@ -475,6 +475,38 @@ fn private_call_reservation_can_grow_while_preserving_per_call_reply_limits() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn outgoing_phone_attachment_requires_the_exact_live_route_acknowledgement() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut calls = PhoneCalls::new(2, 1).unwrap();
+    let first = calls.admit_outgoing(peer(false), 0, None).unwrap();
+    let second = calls.admit_outgoing(peer(true), 0, None).unwrap();
+    let first_reply = calls.reply(&first).unwrap();
+    let second_reply = calls.reply(&second).unwrap();
+    assert!(first_reply.phone_media_allowed());
+    assert!(!first_reply.phone_authenticated());
+    assert!(calls.observations().next().is_none());
+    assert!(calls.pending_radio_attachments().is_empty());
+
+    calls.confirm_radio_attachment(&first_reply);
+    let (_, call) = calls.observations().next().unwrap();
+    assert_eq!(call.call_id, first.call_id().to_string());
+    assert!(call.attached && !call.authenticated);
+    assert_eq!(calls.observations().count(), 1);
+
+    calls.retire(&second).unwrap();
+    let replacement = calls.admit_outgoing(peer(true), 1, None).unwrap();
+    assert_eq!(second.call_id(), replacement.call_id());
+    assert_ne!(second, replacement);
+    calls.confirm_radio_attachment(&second_reply);
+    assert_eq!(calls.observations().count(), 1);
+    calls.confirm_radio_attachment(&calls.reply(&replacement).unwrap());
+    assert_eq!(calls.observations().count(), 2);
+}
+
 #[test]
 fn dropping_the_call_owner_revokes_retained_private_replies() {
     let _serial = crate::fixture::LIFECYCLE

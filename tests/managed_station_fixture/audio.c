@@ -390,7 +390,7 @@ static enum rptadv_audio_result mixer_paths(const char *path,
 }
 
 _Static_assert(RPTADV_AUDIO_ADAPTER_ABI_VERSION == 2, "expected audio ABI 2");
-_Static_assert(sizeof(struct rptadv_audio_adapter_descriptor) == 200, "expected full alpha4 table");
+_Static_assert(sizeof(struct rptadv_audio_adapter_descriptor) == 208, "expected the output-timing tail");
 
 static const struct rptadv_audio_adapter_descriptor AUDIO = {
     .struct_size = sizeof(AUDIO),
