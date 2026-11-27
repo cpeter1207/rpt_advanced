@@ -114,8 +114,7 @@ fn ice_restart_keeps_authenticated_channels_and_rtp_on_the_same_driver() {
             );
             assert!(answerer.add_remote_candidate(&old_caller).is_err());
             assert_ne!(answerer.candidate(), old_answerer);
-            caller.rtc.sdp_api().accept_answer(pending, answer).unwrap();
-            caller.connection.ice = IceConnectionState::Checking;
+            caller.accept_restart_answer(pending, answer).unwrap();
 
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !caller.connection_state().secure_connected()

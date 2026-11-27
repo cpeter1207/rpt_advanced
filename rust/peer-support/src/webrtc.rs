@@ -17,7 +17,7 @@ mod timing;
 pub use driver::{ConnectionState, IceRestartBasis, RelaySocket, UdpDriver};
 pub use timing::{MediaAnchor, ReceiveGate, ReceiveLease, native_delta_ns};
 
-pub use str0m::change::{SdpAnswer, SdpOffer};
+pub use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 pub use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 pub use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Pt, SenderFeedback};
 pub use str0m::rtp::{RtpPacket, RtpWrite, SeqNo, Ssrc};

@@ -168,6 +168,80 @@ impl Browser {
         );
     }
 
+    async fn restart(&mut self, client: &Client<'_>) {
+        let (offer, pending) = self.driver.restart_offer().unwrap();
+        let requested = json!({
+            "action":"restart","ice_generation":"1","offer":offer.to_sdp_string()
+        });
+        let restarted = browser(client, "PUT", &self.session, Some(&requested));
+        assert_eq!(restarted.code, 200);
+        assert_eq!(restarted.body["ice_generation"], "2");
+        assert_eq!(restarted.body["phase"], "pending");
+        self.close = href(&restarted.body, "rpt:close").to_owned();
+        let candidates = href(&restarted.body, "rpt:webrtc-candidates");
+        let stale = json!({"ice_generation":"1","sequence":0,"candidate":null});
+        assert_eq!(browser(client, "POST", candidates, Some(&stale)).code, 409);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (answer, remote) = loop {
+            let reply = browser(client, "GET", &self.session, None);
+            let ice = browser(client, "GET", candidates, None);
+            assert_eq!((reply.code, ice.code), (200, 200));
+            assert_eq!(reply.body["phase"], "pending");
+            assert_eq!(reply.body["ice_generation"], "2");
+            if let Some(sdp) = reply.body["answer"].as_str()
+                && let Some(remote) = ice.body["candidates"][0]["candidate"].as_str()
+            {
+                break (SdpAnswer::from_sdp_string(sdp).unwrap(), remote.to_owned());
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no answer for the new ICE generation"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        };
+        self.driver.accept_restart_answer(pending, answer).unwrap();
+        self.driver.add_remote_candidate(&remote).unwrap();
+        for (sequence, candidate) in [Some(self.driver.candidate()), None]
+            .into_iter()
+            .enumerate()
+        {
+            let work = json!({"ice_generation":"2","sequence":sequence,"candidate":candidate});
+            assert_eq!(browser(client, "POST", candidates, Some(&work)).code, 200);
+        }
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match self.driver.next_event().await.unwrap() {
+                    Event::ChannelData(data) => {
+                        if let Some(Control::Ready {
+                            binding,
+                            ice_generation,
+                        }) = Control::decode(&data.data)
+                        {
+                            assert_eq!(binding, self.binding);
+                            assert_eq!(ice_generation, Coordinate(2));
+                            assert_eq!(
+                                self.driver.bound_channel_kind(data.id),
+                                Some(ChannelKind::Control)
+                            );
+                            assert!(self.driver.connection_state().secure_connected());
+                            break;
+                        }
+                    }
+                    Event::ChannelOpen(..)
+                    | Event::ChannelClose(..)
+                    | Event::Connected
+                    | Event::Closed => {
+                        panic!("restart replaced the existing secure media association");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("same controller session acknowledged fresh ICE and station media");
+    }
+
     fn close(self, client: &Client<'_>) -> String {
         let closed = browser(client, "DELETE", &self.close, None);
         assert_eq!(closed.code, 200);
@@ -516,11 +590,41 @@ async fn receive_only(
     let correlation = &meter["media_correlation"];
     assert_eq!(correlation["binding"], browser_peer.binding);
     assert_eq!(correlation["track"], "audio");
+    let previous = anchor.unwrap();
     assert_eq!(
         serde_json::from_value::<Reference>(correlation["anchor"].clone()).unwrap(),
-        anchor.unwrap(),
+        previous,
     );
 
+    fs::remove_file(carrier).unwrap();
+    browser_peer.restart(client).await;
+    fs::write(carrier, b"").unwrap();
+    tokio::time::timeout(Duration::from_secs(6), async {
+        let mut anchored = false;
+        loop {
+            match browser_peer.driver.next_event().await.unwrap() {
+                Event::ChannelData(data) => {
+                    if let Some(Control::Anchor { reference }) = Control::decode(&data.data) {
+                        assert_eq!(reference.binding, previous.binding);
+                        assert!(reference.epoch.0 > previous.epoch.0);
+                        anchored = true;
+                    }
+                }
+                Event::RtpPacket(packet) if anchored => {
+                    let result = decode
+                        .decode(packet.payload.as_ref(), &mut pcm, &mut spans)
+                        .unwrap();
+                    if marker(&pcm[..result.frames], 1000.0, 48_000.0) {
+                        break;
+                    }
+                }
+                Event::Closed => panic!("restarted controller session lost media"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("restarted RTC and station endpoint delivered the receiver marker");
     fs::remove_file(carrier).unwrap();
     browser_peer.close(client)
 }
