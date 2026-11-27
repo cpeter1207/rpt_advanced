@@ -42,9 +42,9 @@ Track browser implementation and remaining release evidence in the
 - Meet WCAG 2.2 AAA across complete workflows. Use native controls and
   automate practical checks with Guidepup and available platform tools.
   Qualify real screen reader use on desktop and mobile.
-- Resolve authorized live caption delivery and privacy for monitored
-  broadcast audio. Retain the adapter checklist's transceive and
-  interoperability requirements.
+- The owner deferred live captions for monitored broadcast audio on
+  2026-11-27. Keep the corresponding AAA conformance work open. Retain the
+  adapter checklist's transceive and interoperability requirements.
 
 ### Modular JSON configuration and authenticated HAL management
 
