@@ -1,15 +1,17 @@
-#!/usr/bin/env python3
 """Run the disposable coturn fixture on a private loopback-only network."""
 
 import base64
 import hmac
+import json
 import os
+import re
 import secrets
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 PORT = 3478
@@ -119,6 +121,7 @@ def start_configuration(directory):
         "no-multicast-peers\n"
         "relay-threads=1\n"
         "fingerprint\n"
+        "verbose\n"
         "use-auth-secret\n"
         f"static-auth-secret={secret}\n"
         f"cert={directory / 'server.pem'}\n"
@@ -153,6 +156,23 @@ def wait_ready(server):
     raise RuntimeError("isolated TURN listener never became ready")
 
 
+def report_failure(log_path):
+    messages = re.compile(
+        r"user <[0-9]+:fixture-(udp|tcp|tls)-[a-f0-9]+>: incoming packet "
+        r"([A-Z_]+) processed, (success|error [0-9]{3})"
+    )
+    counts = Counter()
+    with log_path.open("rb") as source:
+        for line in source:
+            outcome = messages.search(line.decode("utf-8", errors="replace"))
+            if outcome:
+                counts["/".join(outcome.groups())] += 1
+    print(
+        "coturn processing counts " + json.dumps(counts, sort_keys=True),
+        file=sys.stderr,
+    )
+
+
 def inside(turnserver, test):
     interfaces = {
         line.split(":", 1)[0].strip()
@@ -160,11 +180,16 @@ def inside(turnserver, test):
     }
     if interfaces != {"lo"}:
         raise RuntimeError("refusing to start coturn outside a loopback-only namespace")
-    subprocess.run(["ip", "link", "set", "dev", "lo", "up"], check=True)
+    link = subprocess.run(
+        ["ip", "-j", "link", "show", "dev", "lo"], capture_output=True, check=True
+    )
+    if "UP" not in json.loads(link.stdout)[0]["flags"]:
+        subprocess.run(["ip", "link", "set", "dev", "lo", "up"], check=True)
     with tempfile.TemporaryDirectory(prefix="rpt-turn-probe-") as temporary:
         directory = Path(temporary)
         config = start_configuration(directory)
-        with (directory / "coturn.log").open("wb") as log:
+        log_path = directory / "coturn.log"
+        with log_path.open("wb") as log:
             server = subprocess.Popen(
                 [turnserver, "-c", config],
                 cwd=directory,
@@ -179,6 +204,9 @@ def inside(turnserver, test):
                     check=True,
                     timeout=30,
                 )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                report_failure(log_path)
+                raise
             finally:
                 if server.poll() is None:
                     server.terminate()

@@ -246,7 +246,12 @@ fn relay_adapter_uses_udp_tcp_and_verified_tls() {
     );
 }
 
-async fn relay_driver(rtc: webrtc::Rtc, directory: &Path, leg: &str) -> UdpDriver {
+async fn relay_driver(
+    rtc: webrtc::Rtc,
+    directory: &Path,
+    leg: &str,
+    direct_bind: Option<&str>,
+) -> UdpDriver {
     let plain = "127.0.0.1:3478";
     let (socket, transport) = match leg {
         "udp" => {
@@ -279,16 +284,94 @@ async fn relay_driver(rtc: webrtc::Rtc, directory: &Path, leg: &str) -> UdpDrive
     let credentials =
         std::fs::read_to_string(directory.join(format!("{leg}.credentials"))).unwrap();
     let mut credentials = credentials.lines();
-    UdpDriver::new_relay(
-        rtc,
-        socket,
-        transport,
-        credentials.next().unwrap(),
-        credentials.next().unwrap(),
-        Instant::now() + WAIT,
-    )
-    .await
-    .unwrap()
+    let username = credentials.next().unwrap();
+    let password = credentials.next().unwrap();
+    let deadline = Instant::now() + WAIT;
+    if let Some(bind) = direct_bind {
+        let direct = tokio::net::UdpSocket::bind(bind).await.unwrap();
+        let mut driver = UdpDriver::new(rtc, direct).unwrap();
+        driver
+            .add_relay(socket, transport, username, password, deadline)
+            .await
+            .unwrap();
+        driver
+    } else {
+        UdpDriver::new_relay(rtc, socket, transport, username, password, deadline)
+            .await
+            .unwrap()
+    }
+}
+
+#[test]
+#[ignore = "requires the loopback-only coturn fixture"]
+fn mixed_turn_legs_nominate_when_the_answerer_has_a_blocked_direct_path() {
+    let directory = fixture_directory();
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        let now = Instant::now();
+        let mut caller = webrtc::transport(now);
+        let mut change = caller.sdp_api();
+        change.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None);
+        let (offer, pending) = change.apply().unwrap();
+        let (answerer, answer) = webrtc::accept_offer(now, offer).unwrap();
+        caller.sdp_api().accept_answer(pending, answer).unwrap();
+        let (mut caller, mut answerer) = tokio::join!(
+            relay_driver(caller, &directory, "udp", None),
+            relay_driver(answerer, &directory, "tls", Some("127.0.0.2:0")),
+        );
+
+        assert!(answerer.candidate().contains(" typ host"));
+        // The caller grants TURN permission only to the advertised relay's IP.
+        // The answerer's direct candidate uses a separate loopback IP.
+        caller
+            .add_remote_candidate(answerer.relay_candidate().unwrap())
+            .unwrap();
+        answerer
+            .add_remote_candidate(caller.relay_candidate().unwrap())
+            .unwrap();
+
+        let ready = tokio::time::timeout(WAIT, async {
+            while !(caller.connection_state().secure_connected()
+                && answerer.connection_state().secure_connected())
+            {
+                tokio::select! {
+                    event = caller.next_event() => {
+                        event.map_err(|error| ("caller", error.kind()))?;
+                    }
+                    event = answerer.next_event() => {
+                        event.map_err(|error| ("answerer", error.kind()))?;
+                    }
+                }
+            }
+            Ok::<(), (&'static str, io::ErrorKind)>(())
+        })
+        .await;
+        if !matches!(ready, Ok(Ok(()))) {
+            let caller_state = caller.connection_state();
+            let answerer_state = answerer.connection_state();
+            panic!(
+                "mixed TURN setup {ready:?}; caller ice={:?} dtls={} relay={}; answerer ice={:?} dtls={} relay={}",
+                caller_state.ice,
+                caller_state.dtls_authenticated,
+                caller.relay_candidate().is_some(),
+                answerer_state.ice,
+                answerer_state.dtls_authenticated,
+                answerer.relay_candidate().is_some()
+            );
+        }
+        assert!(caller.relay_candidate().is_some());
+        assert!(answerer.relay_candidate().is_some());
+        let closing = Instant::now() + WAIT;
+        let (caller_closed, answerer_closed) = tokio::join!(
+            caller.close_relay(closing),
+            answerer.close_relay(closing),
+        );
+        caller_closed.unwrap();
+        answerer_closed.unwrap();
+    });
 }
 
 #[test]
@@ -310,8 +393,8 @@ fn driver_exchanges_ice_dtls_and_rtp_using_only_relays() {
             caller.sdp_api().accept_answer(pending, answer).unwrap();
             let opus = caller.codec_config().params()[0].pt();
             let (mut caller, mut remote) = tokio::join!(
-                relay_driver(caller, &directory, leg),
-                relay_driver(remote, &directory, leg),
+                relay_driver(caller, &directory, leg, None),
+                relay_driver(remote, &directory, leg, None),
             );
             assert!(caller.candidate().contains(" typ relay"));
             assert!(remote.candidate().contains(" typ relay"));

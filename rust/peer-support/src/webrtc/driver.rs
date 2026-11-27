@@ -284,6 +284,7 @@ pub struct UdpDriver {
     retired_relay: Option<(SocketAddr, String)>,
     connection: ConnectionState,
     restart_remote_ufrag: Option<[u8; 32]>,
+    initial_tick: bool,
     channels: [Option<ChannelId>; 2],
 }
 
@@ -309,6 +310,7 @@ impl UdpDriver {
             retired_relay: None,
             connection: ConnectionState::INITIAL,
             restart_remote_ufrag: None,
+            initial_tick: true,
             channels: [None; 2],
         })
     }
@@ -329,6 +331,7 @@ impl UdpDriver {
             retired_relay: None,
             connection: ConnectionState::INITIAL,
             restart_remote_ufrag: None,
+            initial_tick: true,
             channels: [None; 2],
         };
         driver
@@ -588,6 +591,13 @@ impl UdpDriver {
     }
 
     async fn next_transport_event(&mut self) -> io::Result<Event> {
+        // The ICE agent needs its first tick before it can request a deadline.
+        // A passive TURN path may receive nothing until its first check creates permission.
+        if std::mem::take(&mut self.initial_tick) {
+            self.rtc
+                .handle_input(Input::Timeout(Instant::now()))
+                .map_err(|_| invalid_transport())?;
+        }
         loop {
             if let Some(leg) = &mut self.direct
                 && let Some(packet) = &leg.pending

@@ -100,6 +100,7 @@ impl UdpDriver {
         })?;
         self.refresh_local_candidates()?;
 
+        self.initial_tick = true;
         self.restart_remote_ufrag = Some(next.ufrag);
         *basis = next;
         Ok(answer)
@@ -156,6 +157,7 @@ impl UdpDriver {
             self.failed_restart();
             return Err(invalid_transport());
         }
+        self.initial_tick = true;
         self.restart_remote_ufrag = Some(remote_ufrag);
         Ok(())
     }
