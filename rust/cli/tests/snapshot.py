@@ -35,6 +35,7 @@ def check_snapshots(cli, calls, documents, root, status):
     }
     single = {
         **metadata,
+        "observed_at": None,
         "selection": {"site": True, "ports": [], "topics": ["radio"]},
         "status": {"site": {"quiet": True}},
         "_links": {"self": {"href": SNAPSHOT}},
@@ -101,6 +102,12 @@ def check_snapshots(cli, calls, documents, root, status):
         assert calls[start:] == [(path, "cli") for path in [root, status] + pages]
 
     snapshot([], [SNAPSHOT], body=single)
+    missing_time = {key: value for key, value in single.items() if key != "observed_at"}
+    for invalid in (missing_time, {**single, "observed_at": 0}):
+        documents[SNAPSHOT] = invalid
+        snapshot([], [SNAPSHOT], error="invalid snapshot metadata")
+    documents[SNAPSHOT] = single
+
     snapshot(selectors, [selected, continuation], body=complete)
     snapshot(["--topics", "not-a-topic"], [bad_filter], error="HTTP 400")
     documents[continuation] = 410
@@ -109,6 +116,7 @@ def check_snapshots(cli, calls, documents, root, status):
         ("boot_id", "different-boot"),
         ("snapshot_id", "different-capture"),
         ("state_cursor", "28"),
+        ("observed_at", None),
         ("selection", {"site": False, "ports": [port], "topics": ["radio"]}),
     ):
         documents[continuation] = {**second, key: value}

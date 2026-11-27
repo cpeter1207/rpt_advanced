@@ -68,15 +68,16 @@ fn next_url(client: &Client, page: &Value, index: usize) -> Result<Option<Url>> 
     if page["page_index"].as_u64() != Some(index as u64) {
         return Err("invalid snapshot page index".into());
     }
-    if !["boot_id", "snapshot_id", "observed_at"]
+    if !["boot_id", "snapshot_id"]
         .iter()
         .all(|key| is_text(&page[*key]))
         || !["state_cursor", "monotonic_ms"]
             .iter()
             .all(|key| is_decimal(&page[*key]))
-        || page
-            .get("active_revision")
-            .is_none_or(|value| !value.is_null() && !is_text(value))
+        || ["active_revision", "observed_at"].iter().any(|key| {
+            page.get(*key)
+                .is_none_or(|value| !value.is_null() && !is_text(value))
+        })
         || !page["selection"]["site"].is_boolean()
         || !is_text_array(&page["selection"]["ports"])
         || !is_text_array(&page["selection"]["topics"])
