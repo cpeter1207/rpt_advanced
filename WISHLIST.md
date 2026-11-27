@@ -39,6 +39,9 @@ Track browser implementation and remaining release evidence in the
 - Use one responsive React app for site and port management, status, and
   WebRTC listening and transmission through the existing HAL and media
   boundaries. Keep the controller CLI and existing USBRadioPlus tuner.
+- Package the app independently as rpt-advanced-console with an nginx
+  dependency. Qualify colocated and separate hosting through the controller's
+  nginx ingress using the existing native Docker quality images.
 - Meet WCAG 2.2 AAA across complete workflows. Use native controls and
   automate practical checks with Guidepup and available platform tools.
   Qualify real screen reader use on desktop and mobile.

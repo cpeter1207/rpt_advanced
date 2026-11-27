@@ -241,3 +241,23 @@ new feature is implied by this staging.
 - [Design](../../../docs/superpowers/specs/2026-11-18-json-rest-configuration-design.md)
 - [Checklist](../../../docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md)
 - [Baseline and progress](../../../docs/superpowers/plans/2026-11-19-json-rest-implementation-progress.md)
+
+## nginx ingress and console package
+
+The owner selected nginx and an independently installable React console
+package on 2026-11-27. The console package depends on nginx and can run on a
+separate web host. The controller provides deliberately enabled nginx
+configuration assets. Its management service stays loopback-only and
+continues to authenticate the trusted proxy by mTLS.
+
+The separate console host uses its own verified TLS forwarding identity to
+reach the controller-host nginx ingress. The controller-host nginx remains the
+OIDC and browser-policy owner and forwards authenticated subject assertions
+to the loopback API. It uses the configured public browser origin for Origin
+and CSRF checks and authentication callbacks. This leaves the app, API and
+status stream on one browser origin in either deployment. WebRTC signaling
+uses that path. The media and data association retains the separate transport
+defined by ADR 0046.
+
+See the [React console design](../../../docs/superpowers/specs/2026-11-27-controller-react-management-design.md)
+and [implementation checklist](../../../docs/superpowers/plans/2026-11-27-controller-react-management-implementation.md).
