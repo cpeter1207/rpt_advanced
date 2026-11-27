@@ -52,6 +52,7 @@ const PAGE_TTL: Duration = Duration::from_secs(20);
 const CACHE_BYTES: usize = 32 * 1024 * 1024;
 const CACHE_CAPTURES: usize = 8;
 const FAST_RECORDS: usize = 4096;
+const LINK_DIAGNOSTIC_INTERVAL_MS: u64 = 1_000;
 
 struct Subscriber {
     selection: Selection,
@@ -108,6 +109,23 @@ impl Published {
     }
 
     fn publish(&mut self, mut next: Capture, owners: &BTreeMap<Id, u64>) {
+        if let Some(previous) = self.latest.as_ref()
+            && previous.stamp.monotonic_ms / LINK_DIAGNOSTIC_INTERVAL_MS
+                == next.stamp.monotonic_ms / LINK_DIAGNOSTIC_INTERVAL_MS
+        {
+            // Packet and jitter counters change almost every block. Preserve
+            // their latest diagnostic sample without delaying key or link edges.
+            for (key, record) in &mut next.records {
+                if key.polled_fields().contains(&"media")
+                    && let Some(media) = previous.records.get(key).and_then(|row| row.get("media"))
+                    && media.is_object()
+                    && let Some(current) = record.get("media").filter(|value| value.is_object())
+                    && current != media
+                {
+                    Arc::make_mut(record)["media"] = media.clone();
+                }
+            }
+        }
         self.fast.retain(|key, record| {
             let Owner::Port(port) = key.owner else {
                 return false;
@@ -758,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_polled_media_counts_survive_the_last_fast_peer_edge() {
+    fn peer_diagnostics_keep_cadence_without_replacing_fast_key_state() {
         let port: Id = PORT.parse().unwrap();
         let owners = BTreeMap::from([(port, 7)]);
         let peer = "allstarlink:9182";
@@ -794,6 +812,15 @@ mod tests {
             ),
             Arc::new(json!({"state":"connected","transmit_keyed":null,"media":{"lost":"4"}})),
         );
+        polled.stamp.monotonic_ms = 500;
+        hub.publish(polled.clone(), &owners);
+        let latest = hub.capture(&scope(port)).unwrap();
+        let value = latest.records.values().next().unwrap();
+        assert_eq!(value["transmit_keyed"], true);
+        assert_eq!(value["media"]["lost"], "2");
+        assert_eq!(latest.cursor, 1);
+
+        polled.stamp.monotonic_ms = 1_000;
         hub.publish(polled, &owners);
         let latest = hub.capture(&scope(port)).unwrap();
         let value = latest.records.values().next().unwrap();

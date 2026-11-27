@@ -155,6 +155,11 @@ reopened one stream, then verified normal shutdown and proof retirement for
 every subscriber. The HTTP admission slot ends at upgrade. Read, write and
 buffer budgets still apply per subscriber.
 
+The ARM64 Product status suite passed all ten targeted tests after sampling
+link media counters at one-second intervals in the shared capture. The
+regression verified that a fast key edge remained current through both a
+suppressed counter-only update and the next published diagnostic sample.
+
 The isolated Asterisk run completed the 12 same-process reloads with a
 subscriber, delivered close code `1001` and EOF at unload, and retired the
 radio channel. The subsequent ordinary load/unload stress loop hit a module
