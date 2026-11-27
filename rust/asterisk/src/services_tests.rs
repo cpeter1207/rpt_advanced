@@ -221,8 +221,14 @@ unsafe extern "C" fn ast_log(
     format: *const c_char,
     text: *const c_char,
 ) {
-    if matches!(unsafe { std::ffi::CStr::from_ptr(function) }, name if name == c"scheduler" || name == c"echolink")
-    {
+    let name = unsafe { std::ffi::CStr::from_ptr(function) };
+    if name == c"unload" {
+        crate::lifecycle::tests::record_unload_warning(
+            level,
+            unsafe { std::ffi::CStr::from_ptr(format) },
+            unsafe { std::ffi::CStr::from_ptr(text) },
+        );
+    } else if name == c"scheduler" || name == c"echolink" {
         SCHEDULER_LOGS.with(|logs| {
             logs.borrow_mut().push((
                 level,

@@ -10,10 +10,19 @@ thread_local! {
     static REENTRANT_UNLOAD: Cell<Option<i32>> = const { Cell::new(None) };
     static RELOAD_RESULT: Cell<i32> = const { Cell::new(0) };
     static POLLS: Cell<usize> = const { Cell::new(0) };
+    static UNLOAD_WARNING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 #[unsafe(no_mangle)]
 static mut ast_config_AST_CONFIG_DIR: *const std::ffi::c_char = ptr::null();
+
+pub(crate) fn record_unload_warning(level: i32, format: &CStr, reason: &CStr) {
+    assert_eq!(level, ffi::__LOG_WARNING as i32);
+    assert_eq!(format, c"rpt_advanced: unload deferred: %s\n");
+    UNLOAD_WARNING.with(|warning| {
+        *warning.borrow_mut() = Some(reason.to_str().unwrap().to_owned());
+    });
+}
 
 pub(crate) fn incoming_result(result: i32) {
     INCOMING_RESULT.set(result);
@@ -616,6 +625,10 @@ fn managed_reload_holds_module_until_receipt_and_uncertain_boot_drains() {
     );
     assert_eq!(load(), 1);
     assert_eq!(super::unload(), -1);
+    assert_eq!(
+        UNLOAD_WARNING.with(|warning| warning.take()).as_deref(),
+        Some("controller did not quiesce before the unload deadline"),
+    );
     STOP_RESULT.set(0);
     assert_eq!(super::unload(), 0);
     START_RESULT.set(0);
@@ -649,6 +662,10 @@ fn managed_reload_holds_module_until_receipt_and_uncertain_boot_drains() {
     }
     assert_eq!(super::reload(), 0);
     assert_eq!(REENTRANT_UNLOAD.get(), Some(-1));
+    assert_eq!(
+        UNLOAD_WARNING.with(|warning| warning.take()).as_deref(),
+        Some("another lifecycle operation is in progress"),
+    );
     assert!(
         STATE
             .lock()

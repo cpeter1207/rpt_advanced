@@ -211,10 +211,25 @@ extern "C" fn reload() -> i32 {
     .unwrap_or(-1)
 }
 
+fn unload_deferred(reason: &'static CStr) -> i32 {
+    // SAFETY: format and reason are static and contain no provider or user data.
+    unsafe {
+        ffi::ast_log(
+            ffi::__LOG_WARNING as i32,
+            c"rust/asterisk/lifecycle.rs".as_ptr(),
+            0,
+            c"unload".as_ptr(),
+            c"rpt_advanced: unload deferred: %s\n".as_ptr(),
+            reason.as_ptr(),
+        )
+    };
+    -1
+}
+
 extern "C" fn unload() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let Ok(_transition) = TRANSITION.try_lock() else {
-            return -1;
+            return unload_deferred(c"another lifecycle operation is in progress");
         };
         // TRANSITION pins the module while product stop drains callbacks that may look up STATE.
         let product = {
@@ -223,7 +238,8 @@ extern "C" fn unload() -> i32 {
                 return 0;
             };
             if !state.services.close_asl_ingress() {
-                return -1;
+                drop(selected);
+                return unload_deferred(c"AllStarLink ingress is still draining");
             }
             state.product
         };
@@ -232,24 +248,31 @@ extern "C" fn unload() -> i32 {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !product.stop() {
             if std::time::Instant::now() >= deadline {
-                return -1;
+                return unload_deferred(c"controller did not quiesce before the unload deadline");
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let mut selected = STATE.lock().unwrap_or_else(|e| e.into_inner());
         let state = selected.as_ref().expect("transition retains lifecycle");
-        if !state.services.echo_stopped()
-            || !state.services.private_stopped()
-            || !crate::registration::drain_resolver()
-        {
-            return -1;
+        let deferred = if !state.services.echo_stopped() {
+            Some(c"EchoLink owner did not confirm shutdown")
+        } else if !state.services.private_stopped() {
+            Some(c"phone owner did not confirm shutdown")
+        } else if !crate::registration::drain_resolver() {
+            Some(c"registration resolver is still draining")
+        } else {
+            None
+        };
+        if let Some(reason) = deferred {
+            drop(selected);
+            return unload_deferred(reason);
         }
         let state = selected.take().expect("selected lifecycle remains owned");
         drop(selected);
         drop(state.registration);
         0
     }))
-    .unwrap_or(-1)
+    .unwrap_or_else(|_| unload_deferred(c"lifecycle callback failed"))
 }
 
 static DESCRIPTOR: Descriptor = Descriptor {

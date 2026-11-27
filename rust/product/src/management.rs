@@ -54,7 +54,7 @@ use std::{
         mpsc::{self, SyncSender, TrySendError},
     },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// Value-free coordinator failure; caller-supplied JSON never enters errors.
@@ -179,6 +179,8 @@ pub enum Diagnostic {
     Transport(rptadv_peer_support::https::TransportEvent),
     /// An envelope or private codec returned a recoverable warning.
     PrivateSettings(usize),
+    /// An accepted configuration save remains in a pre-publication phase.
+    SlowSave(&'static str),
 }
 
 /// A terminal observation from the existing serialized hardware/runtime owner.
@@ -501,8 +503,74 @@ impl ManagedStore {
     }
 }
 
+/// The independent request coordinator can diagnose a stalled, serialized writer.
+#[derive(Default)]
+struct SaveProgress {
+    phase: Mutex<Option<(&'static str, Instant)>>,
+}
+
+impl SaveProgress {
+    fn track(&self) -> SaveAttempt<'_> {
+        let attempt = SaveAttempt { progress: self };
+        attempt.enter("validate candidate");
+        attempt
+    }
+
+    fn overdue(&self, now: Instant) -> Option<&'static str> {
+        let mut phase = self.phase.lock().expect("save progress");
+        if phase.is_some_and(|(_, deadline)| now >= deadline) {
+            return phase.take().map(|(name, _)| name);
+        }
+        None
+    }
+}
+
+struct SaveAttempt<'a> {
+    progress: &'a SaveProgress,
+}
+impl SaveAttempt<'_> {
+    fn enter(&self, name: &'static str) {
+        *self.progress.phase.lock().expect("save progress") =
+            Some((name, Instant::now() + Duration::from_secs(1)));
+    }
+}
+
+impl Drop for SaveAttempt<'_> {
+    fn drop(&mut self) {
+        self.progress.phase.lock().expect("save progress").take();
+    }
+}
+
+#[cfg(test)]
+mod save_progress_tests {
+    use super::*;
+
+    #[test]
+    fn warnings_follow_only_an_active_overdue_phase() {
+        let progress = SaveProgress::default();
+        let start = Instant::now();
+        {
+            let save = progress.track();
+            assert_eq!(progress.overdue(start), None);
+            let overdue = Instant::now() + std::time::Duration::from_secs(2);
+            assert_eq!(progress.overdue(overdue), Some("validate candidate"));
+            assert_eq!(progress.overdue(overdue), None);
+
+            save.enter("prepare credential owners");
+            let overdue = Instant::now() + std::time::Duration::from_secs(2);
+            assert_eq!(progress.overdue(overdue), Some("prepare credential owners"));
+            save.enter("publish selected revision");
+        }
+        assert_eq!(
+            progress.overdue(Instant::now() + std::time::Duration::from_secs(2)),
+            None
+        );
+    }
+}
+
 struct Backend<R> {
     stopping: std::sync::atomic::AtomicBool,
+    save_progress: SaveProgress,
     boot: Id,
     ledger: RwLock<Option<Arc<operations::Ledger>>>,
     maintenance: std::sync::Mutex<maintenance::Book>,
@@ -731,6 +799,7 @@ impl<R: Runtime> Backend<R> {
         r: &Route,
         p: Parameters<'_>,
         relative: &str,
+        progress: &SaveAttempt<'_>,
     ) -> Result<(StatusCode, Value, R::Prepared, String), Fault> {
         let guard = self.store.files.try_edit().map_err(lock_error)?;
         self.admit_writer(&guard, None)?;
@@ -853,10 +922,13 @@ impl<R: Runtime> Backend<R> {
         }
         let candidate = graph.assemble(&manifest)?;
         let compiled = PreparedConfiguration::prepare(&candidate, zone.as_deref(), &self.inputs)?;
+        progress.enter("prepare station and site owners");
         let mut prepared = self
             .runtime
             .prepare(&compiled, manifest.revision().as_str())?;
+        progress.enter("inventory working files");
         let source = transaction.inventory()?;
+        progress.enter("stage durable selection");
         let (receipt, store_warnings) = transaction.commit_prepared(
             Publication {
                 admission: Admission::Save {
@@ -869,15 +941,20 @@ impl<R: Runtime> Backend<R> {
                 edits: &private,
             },
             |credentials| {
-                self.runtime
+                progress.enter("prepare credential owners");
+                let result = self
+                    .runtime
                     .prepare_credentials(&mut prepared, credentials)
-                    .map_err(|_| TransactionError::Conflict)
+                    .map_err(|_| TransactionError::Conflict);
+                progress.enter("commit durable selection");
+                result
             },
         )?;
         if store_warnings > 0 {
             self.runtime
                 .diagnostic(Diagnostic::PrivateSettings(store_warnings));
         }
+        progress.enter("publish selected revision");
         self.complete_publication(&transaction, &receipt.desired, compiled)?;
         drop(guard);
         #[cfg(test)]
@@ -995,9 +1072,11 @@ impl<R: Runtime> Backend<R> {
             req.respond(reply);
             return;
         }
-        let result = self.mutate(&req, r, p, relative);
+        let progress = self.save_progress.track();
+        let result = self.mutate(&req, r, p, relative, &progress);
         match result {
             Err(e) => {
+                progress.enter("refresh status after rejected save");
                 let _ = self.refresh(false);
                 if matches!(e, Fault::Storage | Fault::DurabilityUnknown) {
                     self.runtime.inhibit_uncertain(None, e);
@@ -1006,6 +1085,7 @@ impl<R: Runtime> Backend<R> {
                 req.respond(response);
             }
             Ok((status, mut body, prepared, revision)) => {
+                progress.enter("build save receipt");
                 body["desired_revision"] = json!(revision);
                 let created = body.get("created").and_then(Value::as_str);
                 let location = created.map(|id| format!("{}{relative}{id}/", self.api.mount));
@@ -1034,6 +1114,7 @@ impl<R: Runtime> Backend<R> {
                         .headers_mut()
                         .insert("location", location.parse().expect("canonical location"));
                 }
+                drop(progress);
                 req.respond(reply);
                 let outcome = self.adopt(&revision, prepared);
                 let _ = self.finish_adoption(&revision, outcome);
@@ -1250,6 +1331,7 @@ impl<R: Runtime> Coordinator<R> {
             .map(Arc::new);
         let backend = Arc::new(Backend {
             stopping: std::sync::atomic::AtomicBool::new(false),
+            save_progress: SaveProgress::default(),
             boot,
             ledger: RwLock::new(initial),
             maintenance: Default::default(),
@@ -1332,6 +1414,11 @@ impl<R: Runtime> Coordinator<R> {
 
     /// Claim at most one authenticated request. GET uses only the published read snapshot.
     pub fn poll(&self, inbox: &mut CoordinatorInbox) -> bool {
+        if self.busy.load(std::sync::atomic::Ordering::Acquire)
+            && let Some(phase) = self.backend.save_progress.overdue(Instant::now())
+        {
+            self.runtime.diagnostic(Diagnostic::SlowSave(phase));
+        }
         self.status.tick(|| {
             let saved = self.cached.read().expect("management snapshot").clone()?;
             Some((self.runtime.observed(), saved))
