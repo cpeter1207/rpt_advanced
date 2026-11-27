@@ -105,9 +105,10 @@ remain part of qualification.
 The ARM64 release Opus adapter passed negotiation, encoding, variable packet
 duration, decoding, and explicit concealment. It reports normal PCM origin as
 unavailable because its checked descriptor has no provenance support. A
-separate Opus candidate with the existing optional provenance ABI passed the
-AMD64 codec-native reference tests. ARM64 and browser transmit qualification
-remain open. The direct transport fixture also verified DCEP role admission,
+separate Opus candidate with the existing optional provenance ABI passed
+the codec-native reference and failure tests on AMD64 and ARM64. The
+provider source is preserved locally at \`df75c1a19ca6609a6a23069948ad8c1457917603\`.
+Controller transmit and browser qualification remain separate. The direct transport fixture also verified DCEP role admission,
 backpressure, closure, and protected RTP. The bounded wire tests verified
 decimal clock coordinates and sample range containment through RTP wrap.
 
@@ -130,6 +131,14 @@ Reuse the status graph, meter `audio_position`, capture/stream visibility and ge
 
 - [ ] Publish the opaque session media binding, media epoch, selected track/direction, RTP source and anchor over WebRTC control. Project the same binding and epoch for authorized meter viewers. Anchor the actual egress codec-input samples to the encoded RTP timestamp. Carry stage/signal, graph generation, rate, the end-exclusive meter window and relevant anchor. Report estimated or unavailable upstream correlation where measured delay or a common mix cannot be established.
 - [ ] Use a known audio marker and a browser fixture with `RTCRtpReceiver.getSynchronizationSources()` to align a meter window at track delivery. Verify early and late frames, missing anchors, concealed spans, different mixes, source/graph changes, ICE or SSRC restart, and the supported receiver fallback. Retire pending old-epoch display data. Measure hardware output delay separately if making hardware-playout claims. Verify audio and key handling with status absent or disconnected.
+
+The browser loopback fixture passed three consecutive Edge 158 runs. Its
+1 kHz marker crossed a real 32-bit RTP wrap. The receiver held an early meter
+until track delivery, discarded a late meter and retired the old SSRC and
+epoch. A new track continued with no status traffic. The fixture uses
+simulated status records and a browser test flag to place the timestamp near
+the wrap. Live controller and status-stream interoperability remain part of
+qualification.
 
 ## 7. Review and qualify the combined implementation
 

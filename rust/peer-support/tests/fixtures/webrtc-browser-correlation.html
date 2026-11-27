@@ -1,0 +1,364 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebRTC browser track correlation fixture</title>
+<pre id="result">Running browser loopback</pre>
+<script type="module">
+const WRAP = 2n ** 32n;
+const RATE = 48_000;
+const FRAMES = 960;
+const BINDING = "188a8e15-8cdf-4149-b532-fefb99f34270";
+const OBSERVATION_GAP = 4_800n;
+
+function require(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+function unwrap(raw, near) {
+  let position = near - near % WRAP + BigInt(raw);
+  if (position - near > WRAP / 2n) position -= WRAP;
+  if (near - position > WRAP / 2n) position += WRAP;
+  return position;
+}
+
+class TrackTimeline {
+  bind(reference, graph) {
+    this.reference = reference;
+    this.graph = graph;
+    this.recent = null;
+    const retired = this.pending?.length ?? 0;
+    this.pending = [];
+    return retired;
+  }
+
+  meter(reading) {
+    const correlation = reading.media_correlation;
+    const anchor = correlation.anchor;
+    const reference = this.reference;
+    if (!reference || !anchor || correlation.quality !== "valid" ||
+        correlation.binding !== reference.binding || anchor.epoch !== reference.epoch ||
+        anchor.source_generation !== reference.source_generation || anchor.ssrc !== reference.ssrc ||
+        reading.graph_generation !== this.graph || correlation.direction !== "egress" ||
+        reading.stage_id !== "opus_encoder_input" || !correlation.window) {
+      return "unavailable";
+    }
+    const window = correlation.window;
+    const start = BigInt(window.first_rtp_timestamp);
+    const end = BigInt(window.end_rtp_timestamp);
+    const origin = BigInt(reference.rtp_timestamp) - BigInt(reference.source_sample);
+    if (start >= end || start !== origin + BigInt(window.first_sample) ||
+        end !== origin + BigInt(window.end_sample)) return "unavailable";
+    if (this.recent && this.recent.rtp > end) return "stale";
+    this.pending.push(end);
+    return "pending";
+  }
+
+  observe(source) {
+    if (!source || !this.reference || source.source !== this.reference.ssrc) return [];
+    const prior = this.recent;
+    if (prior && source.timestamp <= prior.timestamp) return [];
+    const rtp = unwrap(source.rtpTimestamp, prior?.rtp ?? BigInt(this.reference.rtp_timestamp));
+    if (prior && rtp <= prior.rtp) return [];
+    this.recent = { rtp, timestamp: source.timestamp, raw: source.rtpTimestamp };
+    const results = [];
+    this.pending = this.pending.filter(end => {
+      if (rtp < end) return true;
+      if (prior && prior.rtp <= end && rtp - prior.rtp <= OBSERVATION_GAP) {
+        const part = Number(end - prior.rtp) / Number(rtp - prior.rtp);
+        results.push({ end, delivery: prior.timestamp + part * (source.timestamp - prior.timestamp) });
+      }
+      return false;
+    });
+    return results;
+  }
+}
+
+// Standards-based test instrumentation: force a sender timestamp origin near wrap and
+// substitute independently encoded 1 kHz Opus packets over a known input sample span.
+function instrument() {
+  self.onrtctransform = ({ transformer }) => {
+    const { first, start, packets } = transformer.options;
+    let original;
+    transformer.readable.pipeThrough(new TransformStream({
+      transform(frame, controller) {
+        const metadata = frame.getMetadata();
+        original ??= metadata.rtpTimestamp;
+        const offset = (metadata.rtpTimestamp - original) >>> 0;
+        const index = (offset - start) / 960;
+        if (index >= 0 && index < packets.length) {
+          if (!Number.isInteger(index)) throw new Error("Fixture expects 20 ms Opus packets");
+          frame.data = packets[index].slice(0);
+        }
+        if (offset === 0) self.postMessage({ ssrc: metadata.synchronizationSource });
+        frame.setMetadata({ ...metadata, rtpTimestamp: (first + offset) >>> 0 });
+        controller.enqueue(frame);
+      },
+    })).pipeTo(transformer.writable).catch(error => self.postMessage({ error: String(error) }));
+  };
+}
+
+async function opusMarker() {
+  const samples = Float32Array.from({ length: FRAMES }, (_, n) => .35 * Math.sin(2 * Math.PI * n / 48));
+  const packets = [];
+  const durations = [];
+  let failure;
+  const encoder = new AudioEncoder({
+    output(chunk) {
+      const bytes = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(bytes);
+      packets.push(bytes.buffer);
+      durations.push(chunk.duration);
+    },
+    error(error) { failure = error; },
+  });
+  encoder.configure({
+    codec: "opus", sampleRate: RATE, numberOfChannels: 1, bitrate: 32_000,
+    opus: { frameDuration: 20_000 },
+  });
+  for (let block = 0; block < 20; block++) {
+    const data = new AudioData({
+      format: "f32", sampleRate: RATE, numberOfChannels: 1, numberOfFrames: FRAMES,
+      timestamp: 20_000 * block, data: samples,
+    });
+    encoder.encode(data);
+    data.close();
+  }
+  await encoder.flush();
+  encoder.close();
+  if (failure) throw failure;
+  require(packets.length >= 20 && durations.every(value => value === 20_000),
+    "Unexpected Opus marker frame durations: " + JSON.stringify(durations));
+  // WebCodecs can emit a padded terminal packet to flush encoder lookahead.
+  return packets.slice(0, 20);
+}
+
+const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+async function until(action, name, milliseconds = 7000) {
+  const deadline = performance.now() + milliseconds;
+  do {
+    const found = action();
+    if (found) return found;
+    await delay(8);
+  } while (performance.now() < deadline);
+  throw new Error("Timed out waiting for " + name);
+}
+
+function marker(analyser, pcm, witness = {}) {
+  analyser.getFloatTimeDomainData(pcm);
+  let sin = 0, cos = 0, energy = 0;
+  for (let i = 0; i < pcm.length; i++) {
+    const phase = 2 * Math.PI * i / 48;
+    sin += pcm[i] * Math.sin(phase);
+    cos += pcm[i] * Math.cos(phase);
+    energy += pcm[i] * pcm[i];
+  }
+  const power = energy / pcm.length;
+  const fraction = energy ? 2 * (sin * sin + cos * cos) / (pcm.length * energy) : 0;
+  if (power > (witness.power ?? 0)) Object.assign(witness, { power, fraction });
+  return power > .001 && fraction > .65;
+}
+
+function windowReading(anchor, graph, start, end) {
+  const origin = BigInt(anchor.rtp_timestamp) - BigInt(anchor.source_sample);
+  return {
+    graph_generation: graph, stage_id: "opus_encoder_input",
+    media_correlation: {
+      binding: anchor.binding, quality: "valid", anchor, direction: "egress",
+      window: {
+        first_sample: String(start), end_sample: String(end),
+        first_rtp_timestamp: String(origin + BigInt(start)), end_rtp_timestamp: String(origin + BigInt(end)),
+      },
+    },
+  };
+}
+
+async function connect(context, packets, first, start, epoch) {
+  const tx = new RTCPeerConnection();
+  const rx = new RTCPeerConnection();
+  const graph = String(epoch);
+  const track = context.createMediaStreamDestination();
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  gain.gain.value = .0001;
+  oscillator.connect(gain).connect(track);
+  oscillator.start();
+  const sender = tx.addTrack(track.stream.getAudioTracks()[0], track.stream);
+  const opus = RTCRtpSender.getCapabilities("audio").codecs.filter(c => c.mimeType === "audio/opus");
+  tx.getTransceivers()[0].setCodecPreferences(opus);
+  const workerUrl = URL.createObjectURL(new Blob(["(" + instrument + ")()"], { type: "text/javascript" }));
+  const worker = new Worker(workerUrl);
+  const control = tx.createDataChannel("control", { ordered: true, protocol: "rptadv.webrtc.v1" });
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 512;
+  const playback = document.createElement("audio");
+  playback.autoplay = true;
+  document.body.append(playback);
+  analyser.connect(context.destination);
+  let reference, observedAnchor, receiver, error;
+  sender.transform = new RTCRtpScriptTransform(worker, { packets, first, start });
+  function sendAnchor() {
+    if (reference && control.readyState === "open") {
+      control.send(JSON.stringify({ type: "anchor", reference }));
+    }
+  }
+  worker.onmessage = ({ data }) => {
+    if (data.error) {
+      error = data.error;
+      return;
+    }
+    reference = {
+      binding: BINDING, ssrc: data.ssrc, epoch: graph, source_generation: graph,
+      source_sample: "0", rtp_timestamp: String(first),
+      time_basis: null, time_ns: null, uncertainty_ns: null,
+    };
+    sendAnchor();
+  };
+  control.onopen = sendAnchor;
+  rx.ondatachannel = ({ channel }) => {
+    channel.onmessage = ({ data }) => { observedAnchor = JSON.parse(data).reference; };
+  };
+  rx.ontrack = ({ receiver: input, streams }) => {
+    receiver = input;
+    playback.srcObject = streams[0];
+    context.createMediaStreamSource(streams[0]).connect(analyser);
+    playback.play().catch(failure => { error = String(failure); });
+  };
+  function close() {
+    tx.close();
+    rx.close();
+    worker.terminate();
+    URL.revokeObjectURL(workerUrl);
+    oscillator.stop();
+    playback.pause();
+    playback.srcObject = null;
+    playback.remove();
+    analyser.disconnect();
+  }
+  try {
+    await tx.setLocalDescription(await tx.createOffer());
+    await until(() => tx.iceGatheringState === "complete", "local loopback candidates");
+    await rx.setRemoteDescription(tx.localDescription);
+    await rx.setLocalDescription(await rx.createAnswer());
+    await until(() => rx.iceGatheringState === "complete", "remote loopback candidates");
+    await tx.setRemoteDescription(rx.localDescription);
+    await until(() => {
+      if (error) throw new Error(error);
+      return receiver && observedAnchor;
+    }, "the receiving track and protected data-channel anchor");
+    return { receiver, analyser, graph, anchor: observedAnchor, close };
+  } catch (failure) {
+    close();
+    throw failure;
+  }
+}
+
+async function test() {
+  require(typeof RTCRtpScriptTransform === "function", "Missing browser Encoded Transform");
+  require(typeof AudioEncoder === "function", "Missing browser WebCodecs Opus encoder");
+  const context = new AudioContext({ sampleRate: RATE });
+  await context.resume();
+  const packets = await opusMarker();
+  const timeline = new TrackTimeline();
+  const first = Number(WRAP) - 144_000;
+  const start = 134_400;
+  const end = start + packets.length * FRAMES;
+  const pcm = new Float32Array(512);
+  const run = await connect(context, packets, first, start, 1);
+  let markerRtp, beforeWrap, afterWrap, shown, oldSsrc, deliveredAt;
+  try {
+    const reading = windowReading(run.anchor, run.graph, start, end);
+    require(timeline.meter(reading) === "unavailable", "unanchored readings must remain unavailable");
+    timeline.bind(run.anchor, run.graph);
+    const getSource = () => run.receiver.getSynchronizationSources().find(x => x.source === run.anchor.ssrc);
+    try {
+      await until(getSource, "first actual SSRC observation");
+    } catch (failure) {
+      const sources = run.receiver.getSynchronizationSources();
+      const inbound = [...(await run.receiver.getStats()).values()]
+        .filter(x => x.type === "inbound-rtp")
+        .map(x => ({ ssrc: x.ssrc, packets: x.packetsReceived, frames: x.totalSamplesReceived }));
+      throw new Error(failure.message + " " + JSON.stringify({
+        expected: run.anchor.ssrc, sources, inbound, audioContext: context.state,
+      }));
+    }
+    timeline.observe(getSource());
+    const firstObservation = timeline.recent;
+    require(timeline.recent.rtp < BigInt(first + start), "test needs an early status delivery");
+    require(timeline.meter(reading) === "pending", "early status must wait for track delivery");
+    const unusable = structuredClone(reading);
+    unusable.media_correlation.quality = "unavailable";
+    require(timeline.meter(unusable) === "unavailable", "missing or concealed mapping is unavailable");
+    const otherMix = { ...reading, stage_id: "station_input" };
+    require(timeline.meter(otherMix) === "unavailable", "another mix needs its own mapping");
+    const otherGraph = { ...reading, graph_generation: "0" };
+    require(timeline.meter(otherGraph) === "unavailable", "retired graphs cannot supply marker windows");
+
+    const audioWitness = {};
+    try {
+      await until(() => {
+        const source = getSource();
+        const emitted = timeline.observe(source);
+        if (source && timeline.recent) {
+          const current = timeline.recent;
+          if (current.rtp < WRAP) beforeWrap = current.raw;
+          if (current.rtp >= WRAP) afterWrap ??= current.raw;
+          if (markerRtp === undefined && marker(run.analyser, pcm, audioWitness)) markerRtp = current.rtp;
+        }
+        shown ??= emitted[0];
+        return markerRtp !== undefined && shown && afterWrap !== undefined &&
+          timeline.recent.rtp > shown.end;
+      }, "decoded 1 kHz marker, wire wrap and its track-delivery window");
+    } catch (failure) {
+      throw new Error(failure.message + " " + JSON.stringify({
+        firstObservation, last: timeline.recent, beforeWrap, afterWrap, shown, markerRtp, audioWitness,
+      }, (_, value) => typeof value === "bigint" ? String(value) : value));
+    }
+    require(beforeWrap > 0xffff0000 && afterWrap < 0x10000, "the actual browser SSRC did not cross RTP wrap");
+    require(shown.end === BigInt(first + end), "end-exclusive sample position drifted");
+    require(markerRtp >= BigInt(first + start) - OBSERVATION_GAP &&
+        markerRtp <= shown.end + OBSERVATION_GAP, "decoded marker fell outside the RTP meter window");
+    require(timeline.meter(reading) === "stale", "late status must not replay a past meter");
+    require(timeline.meter(windowReading(run.anchor, run.graph, end + 48000, end + 96000)) === "pending",
+      "fixture failed to queue an old-epoch window");
+    deliveredAt = shown.delivery;
+    oldSsrc = run.anchor.ssrc;
+  } finally {
+    run.close();
+  }
+
+  const next = await connect(context, packets, 24_000, 48_000, 2);
+  try {
+    require(next.anchor.ssrc !== oldSsrc, "expected the new PeerConnection to have a different real SSRC");
+    require(timeline.bind(next.anchor, next.graph) === 1, "replacement failed to retire queued windows");
+    require(timeline.observe({ source: oldSsrc, timestamp: performance.now(), rtpTimestamp: afterWrap }).length === 0 &&
+      timeline.recent === null, "the retired SSRC must not advance the replacement timeline");
+    require(timeline.meter(windowReading(run.anchor, run.graph, start, end)) === "unavailable",
+      "a retired epoch must not populate the new timeline");
+    // Do not submit any meter for the replacement. Actual track media still plays.
+    await until(() => {
+      const source = next.receiver.getSynchronizationSources().find(x => x.source === next.anchor.ssrc);
+      timeline.observe(source);
+      return timeline.recent && marker(next.analyser, pcm);
+    }, "new-epoch marker with status absent");
+    return {
+      passed: true, scope: "browser loopback with simulated meter delivery",
+      browser: navigator.userAgent, beforeWrap, afterWrap,
+      markerRtp: String(markerRtp), meterEndRtp: String(shown.end),
+      deliveryTimestampMs: deliveredAt, oldSsrc, newSsrc: next.anchor.ssrc,
+      earlyMeterHeld: true, lateMeterStale: true, retiredEpochDropped: true, audioWithoutStatus: true,
+    };
+  } finally {
+    next.close();
+    await context.close();
+  }
+}
+
+let evidence;
+try {
+  evidence = await test();
+} catch (error) {
+  evidence = { passed: false, error: String(error), stack: error.stack };
+}
+document.getElementById("result").textContent = JSON.stringify(evidence, null, 2);
+await fetch("/result", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(evidence) });
+</script>
