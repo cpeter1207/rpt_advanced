@@ -7,6 +7,7 @@ use super::{
     dispatcher::PeerWake,
     outbound::Outbound,
     private_radio::Radio,
+    ring::InboundObserver,
     status_audio::{DecodedMeter, PeerMeasurements, PeerReaders},
 };
 use crate::{Error, phone::PrivatePhoneReply, services::PeerIo};
@@ -42,9 +43,16 @@ fn station_birth(born: Option<u64>, host_now: u64, call_now: u64) -> Option<u64>
     u64::try_from(translated).ok()
 }
 
+/// The redirected route and observer share the private serial owner's handoff.
+#[derive(Default)]
+pub(super) struct RedirectSlot {
+    pub(super) pending: Option<Radio>,
+    installed: Option<InboundObserver>,
+}
+
 pub(crate) struct Control {
     pub(crate) rate: u32,
-    pub(crate) redirect: Arc<Mutex<Option<Radio>>>,
+    pub(super) redirect: Arc<Mutex<RedirectSlot>>,
     replies: Producer<PrivatePhoneReply>,
     digits: Consumer<Digit>,
     last_processed: u64,
@@ -57,7 +65,18 @@ pub(crate) struct Control {
 }
 impl Control {
     pub(crate) fn status_meters(&self, call_generation: u64) -> PeerMeasurements {
-        self.meters.readings(Some(call_generation))
+        let observer = self
+            .redirect
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .installed
+            .clone();
+        PeerMeasurements {
+            native_ingress: observer
+                .filter(|observer| !observer.signals().ended())
+                .and_then(|observer| observer.native_ingress()),
+            ..self.meters.readings(Some(call_generation))
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -111,7 +130,7 @@ pub(super) struct Session {
     pub(crate) wake: PeerWake,
     pub(super) stop: Arc<AtomicBool>,
     pub(super) epoch: Instant,
-    redirect: Arc<Mutex<Option<Radio>>>,
+    redirect: Arc<Mutex<RedirectSlot>>,
     radio: Option<Radio>,
     incoming: Consumer<PrivatePhoneReply>,
     current: Option<PrivatePhoneReply>,
@@ -157,7 +176,7 @@ impl Session {
         )?;
         let stop = Arc::new(AtomicBool::new(false));
         let wake = PeerWake::default();
-        let redirect = Arc::new(Mutex::new(None));
+        let redirect = Arc::new(Mutex::new(RedirectSlot::default()));
         let control = Control {
             rate: io.rate(),
             redirect: Arc::clone(&redirect),
@@ -237,7 +256,15 @@ impl Session {
         if let Some(radio) = &mut self.radio {
             radio.observe_at(now_ms);
         }
-        if let Some(new) = self.redirect.lock().map_err(|_| Error::Operation)?.take() {
+        let new = {
+            let mut redirect = self.redirect.lock().map_err(|_| Error::Operation)?;
+            let new = redirect.pending.take();
+            if let Some(route) = &new {
+                redirect.installed = Some(route.incoming.observer());
+            }
+            new
+        };
+        if let Some(new) = new {
             self.decoded_meter.discontinuity();
             #[cfg(target_os = "linux")]
             let new = {

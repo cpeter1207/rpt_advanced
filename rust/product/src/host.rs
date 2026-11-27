@@ -600,7 +600,7 @@ fn prepared(
             InboundPolicy::Phone,
             &reply,
             None,
-            false,
+            true,
             bound,
         )?;
         let mode =

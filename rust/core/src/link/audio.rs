@@ -171,6 +171,9 @@ pub trait PeerInput: Send {
     }
     /// Supply the exact native output-clock span before rendering this peer.
     fn begin_observation_span(&mut self, _source: SourcePosition, _frames: usize) {}
+    /// Observe the contribution at the station mix after receive and group selection.
+    /// A rejected contribution is silence over the same native span.
+    fn observe_station_mix(&mut self, _samples: &[f32], _admitted: bool) {}
     /// Render native F32, returning real samples (not concealment), or None on failure.
     fn render(&mut self, output: &mut [f32]) -> Option<usize>;
     /// Whether processed output belongs to the current operational receive epoch.
@@ -896,6 +899,7 @@ impl<P: PeerInput> LinkAudio<P> {
                 controller.phone_voice_edge(source.ingress(), active);
             }
             peer.reported_active = active;
+            peer.input.observe_station_mix(&peer.audio[..count], active);
             if active {
                 for (mixed, input) in self.mix[..count].iter_mut().zip(&peer.audio) {
                     *mixed += input;

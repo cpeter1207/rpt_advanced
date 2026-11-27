@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 const RING_OUTPUT: &str = "native_ring_output";
 const DSP_OUTPUT: &str = "provider_dsp_pcm_output";
+const STATION_MIX_INPUT: &str = "station_mix_input";
 
 fn measurement_ref(chain: &str, graph: Option<u64>, stage: &str) -> Value {
     json!({
@@ -53,6 +54,12 @@ pub(super) fn project(
                 "processed_peer_pcm",
                 Some(RING_OUTPUT),
                 &native.dsp_output,
+            ),
+            (
+                STATION_MIX_INPUT,
+                "admitted_programme",
+                Some(DSP_OUTPUT),
+                &native.station_mix_input,
             ),
         ];
         let descriptors = stages
@@ -136,7 +143,7 @@ pub(super) fn project(
                 None,
             ),
             (
-                "station_mix_input",
+                STATION_MIX_INPUT,
                 "admitted_programme",
                 Some("provider_dsp_output"),
                 None,
@@ -187,6 +194,9 @@ pub(super) fn project(
                             (DSP_OUTPUT, &native.dsp_output, "active")
                         }
                         "provider_dsp_output" => (RING_OUTPUT, &native.ring_output, "bypassed"),
+                        STATION_MIX_INPUT if native.station_mix_input.available => {
+                            (STATION_MIX_INPUT, &native.station_mix_input, "active")
+                        }
                         _ => return None,
                     };
                     Some((measurement_ref(chain, native.graph_generation, point), reading.rate, state))
@@ -324,6 +334,7 @@ mod tests {
                 graph_generation: Some(7),
                 ring_output: stage(48_000, true),
                 dsp_output: stage(48_000, true),
+                station_mix_input: stage(48_000, true),
             }),
             provider_output: Some(ProviderOutput {
                 rate: 8_000,
@@ -369,6 +380,15 @@ mod tests {
         assert_eq!(ingress["stages"][2]["state"], "active");
         assert_eq!(ingress["stages"][2]["sample_rate_hz"], 48_000);
         assert_eq!(ingress["stages"][2]["reason"], "provider_rate_mismatch");
+        assert_eq!(ingress["stages"][3]["state"], "active");
+        assert_eq!(
+            ingress["stages"][3]["measurement_ref"]["stage_id"],
+            STATION_MIX_INPUT
+        );
+        assert_eq!(
+            ingress["stages"][3]["measurement_ref"]["graph_generation"],
+            "7"
+        );
         assert!(!docs.iter().any(|doc| doc.get("integrated_lufs").is_some()));
 
         measurements.native_ingress.as_mut().unwrap().dsp_output = stage(48_000, false);

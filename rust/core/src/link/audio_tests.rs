@@ -400,13 +400,39 @@ fn authenticated_phone_hears_only_the_selected_network_group_member() {
     use crate::link::{PhoneAccountId, PhoneCallId, PhoneSource};
     use std::num::NonZeroUsize;
 
+    struct ObservedPeer {
+        input: FiniteInput,
+        mix: Option<[f32; 4]>,
+    }
+
+    impl PeerInput for ObservedPeer {
+        fn source_rate(&self) -> u32 {
+            self.input.source_rate()
+        }
+        fn signals(&self) -> &PeerSignals {
+            self.input.signals()
+        }
+        fn available(&self) -> u64 {
+            self.input.available()
+        }
+        fn render(&mut self, samples: &mut [f32]) -> Option<usize> {
+            self.input.render(samples)
+        }
+        fn observe_station_mix(&mut self, samples: &[f32], admitted: bool) {
+            self.mix = admitted.then(|| samples.try_into().unwrap());
+        }
+    }
+
     let selection = GroupSelection::new();
     let first = NonZeroUsize::new(1).unwrap();
     let second = NonZeroUsize::new(2).unwrap();
     let queue = || LinkAudioQueue::new(960, 4).unwrap().into_endpoints();
-    let empty = |signals| FiniteInput {
-        signals,
-        samples: Default::default(),
+    let empty = |signals| ObservedPeer {
+        input: FiniteInput {
+            signals,
+            samples: Default::default(),
+        },
+        mix: None,
     };
     let link = |name, slot| {
         let (writer, _) = queue();
@@ -451,7 +477,7 @@ fn authenticated_phone_hears_only_the_selected_network_group_member() {
         CourtesySettings::default(),
     )
     .unwrap();
-    let mut playout = |graph: &mut LinkAudio<FiniteInput>| {
+    let mut playout = |graph: &mut LinkAudio<ObservedPeer>| {
         graph
             .process(&mut node, false, &mut [0.0; 4], SourcePosition::default())
             .unwrap();
@@ -467,24 +493,30 @@ fn authenticated_phone_hears_only_the_selected_network_group_member() {
     assert_eq!(playout(&mut graph), None);
     assert_eq!(selection.active(), Some(second));
     for (peer, level) in graph.peers[..2].iter_mut().zip([0.5, 0.25]) {
-        peer.input.samples = vec![level; 12_512].into();
-        peer.input.signals.publish_pcm();
-        peer.input.signals.set_radio_keyed(true);
+        peer.input.input.samples = vec![level; 12_512].into();
+        peer.input.input.signals.publish_pcm();
+        peer.input.input.signals.set_radio_keyed(true);
     }
     assert_eq!(playout(&mut graph), Some([0.25; 4]));
+    assert_eq!(graph.peers[0].input.mix, None);
+    assert_eq!(graph.peers[1].input.mix, Some([0.25; 4]));
 
     selection.publish_desired(Some(first));
     assert_eq!(playout(&mut graph), Some([0.25; 4]));
     assert_eq!(selection.active(), Some(second));
     for peer in &mut graph.peers[..2] {
-        peer.input.signals.reply_target().set_rx_muted(true);
+        peer.input.input.signals.reply_target().set_rx_muted(true);
     }
     assert_eq!(playout(&mut graph), None);
     assert_eq!(selection.active(), Some(first));
+    assert_eq!(graph.peers[0].input.mix, None);
+    assert_eq!(graph.peers[1].input.mix, None);
     for peer in &mut graph.peers[..2] {
-        peer.input.signals.reply_target().set_rx_muted(false);
+        peer.input.input.signals.reply_target().set_rx_muted(false);
     }
     assert_eq!(playout(&mut graph), Some([0.5; 4]));
+    assert_eq!(graph.peers[0].input.mix, Some([0.5; 4]));
+    assert_eq!(graph.peers[1].input.mix, None);
 }
 
 #[test]

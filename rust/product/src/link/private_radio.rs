@@ -403,7 +403,7 @@ impl Radio {
 }
 pub(crate) struct Redirect {
     call: PeerReply,
-    slot: Arc<std::sync::Mutex<Option<Radio>>>,
+    slot: Arc<std::sync::Mutex<super::private_phone::RedirectSlot>>,
     wake: super::dispatcher::PeerWake,
     radio: Option<Radio>,
     installed: Arc<AtomicBool>,
@@ -437,7 +437,7 @@ impl Redirect {
         }
         if let Some(mut candidate) = self.radio.take() {
             candidate.bind(Arc::clone(clock));
-            *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(candidate);
+            self.slot.lock().unwrap_or_else(|e| e.into_inner()).pending = Some(candidate);
             self.wake.notify();
         }
         self.installed.load(Ordering::Acquire)

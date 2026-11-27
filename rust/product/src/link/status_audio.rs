@@ -21,34 +21,43 @@ pub(crate) struct PeerMeasurements {
     pub(crate) provider_output: Option<crate::configuration_radio::ProviderOutput>,
 }
 
-/// Actual native mono playout after the ring and before the peer receive/mix gates.
+/// Actual native mono playout before and after the peer receive/mix gates.
 pub(crate) struct NativeIngressMeasurements {
     pub(crate) graph_generation: Option<u64>,
     pub(crate) ring_output: StageReading,
     pub(crate) dsp_output: StageReading,
+    pub(crate) station_mix_input: StageReading,
 }
 
 /// Owning callback's writers, allocated alongside the exact peer ring.
 pub(crate) struct NativeIngressWriter {
     ring: Tap,
     dsp: Option<Tap>,
+    station_mix: Tap,
 }
 
 /// Off-audio reader for the corresponding peer ring allocation.
 pub(super) struct NativeIngressReaders {
     ring: Reader,
     dsp: Option<Reader>,
+    station_mix: Reader,
 }
 
 impl NativeIngressWriter {
     pub(super) fn new(has_dsp: bool) -> (Self, NativeIngressReaders) {
         let (ring, ring_reader) = Tap::new();
         let (dsp, dsp_reader) = has_dsp.then(Tap::new).unzip();
+        let (station_mix, station_mix_reader) = Tap::new();
         (
-            Self { ring, dsp },
+            Self {
+                ring,
+                dsp,
+                station_mix,
+            },
             NativeIngressReaders {
                 ring: ring_reader,
                 dsp: dsp_reader,
+                station_mix: station_mix_reader,
             },
         )
     }
@@ -71,6 +80,14 @@ impl NativeIngressWriter {
         }
     }
 
+    pub(crate) fn station_mix(&mut self, span: Option<Span>, pcm: &[f32], admitted: bool) {
+        match span {
+            Some(span) if admitted => self.station_mix.observe(span, pcm),
+            Some(span) => self.station_mix.observe_silence(span, pcm.len()),
+            None => self.station_mix.invalidate(Quality::Unavailable),
+        }
+    }
+
     pub(crate) fn dsp_failed(&mut self) {
         if let Some(tap) = &mut self.dsp {
             tap.invalidate(Quality::Fault);
@@ -87,9 +104,11 @@ impl NativeIngressReaders {
     pub(super) fn readings(&mut self) -> NativeIngressMeasurements {
         let ring = self.ring.latest();
         let dsp = self.dsp.as_mut().and_then(Reader::latest);
+        let station_mix = self.station_mix.latest();
         let graph_generation = ring
             .iter()
             .chain(dsp.iter())
+            .chain(station_mix.iter())
             .max_by_key(|value| (value.monotonic_ms, value.graph_generation))
             .map(|value| value.graph_generation);
         NativeIngressMeasurements {
@@ -103,6 +122,12 @@ impl NativeIngressReaders {
                 rate: NATIVE_RATE,
                 available: self.dsp.is_some(),
                 measurement: dsp.filter(|value| Some(value.graph_generation) == graph_generation),
+            },
+            station_mix_input: StageReading {
+                rate: NATIVE_RATE,
+                available: true,
+                measurement: station_mix
+                    .filter(|value| Some(value.graph_generation) == graph_generation),
             },
         }
     }
@@ -249,6 +274,7 @@ mod native_ingress_tests {
         };
         writer.ring(Some(span), &[0.5; 4_800]);
         writer.dsp(Some(span), &[0.25; 4_800]);
+        writer.station_mix(Some(span), &[0.25; 4_800], true);
         let measured = readers.readings();
         assert_eq!(measured.graph_generation, Some(19));
         let ring = measured.ring_output.measurement.unwrap();
@@ -258,6 +284,35 @@ mod native_ingress_tests {
         assert_eq!((ring.monotonic_ms, dsp.monotonic_ms), (2_100, 2_100));
         assert!((ring.peak_dbfs.unwrap() + 6.0206).abs() < 0.001);
         assert!((dsp.peak_dbfs.unwrap() + 12.0412).abs() < 0.001);
+
+        let admitted = measured.station_mix_input.measurement.unwrap();
+        assert_eq!(admitted.end_sample, dsp.end_sample);
+        assert_eq!(admitted.peak_dbfs, dsp.peak_dbfs);
+        let mut muted = admitted;
+        for block in 0..8 {
+            writer.station_mix(
+                Some(Span {
+                    first_sample: 100_800 + 2_400 * block,
+                    end_ms: 2_100 + 50 * (block + 1),
+                    ..span
+                }),
+                &[0.25; 2_400],
+                false,
+            );
+            muted = readers.readings().station_mix_input.measurement.unwrap();
+        }
+        assert_eq!(muted.end_sample, 120_000);
+        assert_eq!(muted.measurement_epoch, admitted.measurement_epoch);
+        assert_eq!(muted.quality, Quality::Valid);
+        assert_eq!(
+            muted.signal_state,
+            crate::status_meter::SignalState::Silence
+        );
+        assert_eq!(
+            (muted.peak_dbfs, muted.rms_dbfs, muted.lufs),
+            (None, None, None)
+        );
+        assert_eq!(muted.peak_hold_dbfs, admitted.peak_dbfs);
 
         writer.ring(None, &[]);
         writer.dsp_failed();

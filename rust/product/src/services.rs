@@ -241,7 +241,7 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         }
     }
     fn render(&mut self, output: &mut [f32]) -> Option<usize> {
-        let span = self.observation_span.take();
+        let span = self.observation_span;
         let Some(real) = self.input.render(output) else {
             if let Some(meters) = &mut self.native_ingress {
                 meters.unavailable();
@@ -267,8 +267,13 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
         }
         Some(real)
     }
+    fn observe_station_mix(&mut self, samples: &[f32], admitted: bool) {
+        let span = self.observation_span.take();
+        if let Some(meters) = &mut self.native_ingress {
+            meters.station_mix(span, samples, admitted);
+        }
+    }
     fn silence(&mut self, scratch: &mut [f32]) {
-        self.observation_span = None;
         if let Some(meters) = &mut self.native_ingress {
             meters.unavailable();
         }

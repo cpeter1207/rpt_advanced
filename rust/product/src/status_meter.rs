@@ -483,15 +483,25 @@ impl Tap {
 
     /// Advance consecutive samples using their original generation and position.
     pub(crate) fn observe(&mut self, span: Span, samples: &[f32]) {
-        if samples.is_empty() {
+        self.observe_samples(span, samples.iter().copied());
+    }
+
+    /// Advance an exactly silent mixer contribution on the same sample clock.
+    pub(crate) fn observe_silence(&mut self, span: Span, frames: usize) {
+        self.observe_samples(span, std::iter::repeat_n(0.0, frames));
+    }
+
+    fn observe_samples(&mut self, span: Span, samples: impl ExactSizeIterator<Item = f32>) {
+        let count = samples.len();
+        if count == 0 {
             return;
         }
-        let Some(next) = span.first_sample.checked_add(samples.len() as u64) else {
+        let Some(next) = span.first_sample.checked_add(count as u64) else {
             self.invalidate(Quality::Fault);
             return;
         };
         let rate = u64::from(self.windows.rate);
-        let ms = samples.len() as u64 * 1000 / rate;
+        let ms = count as u64 * 1000 / rate;
         if self
             .windows
             .position
@@ -513,14 +523,14 @@ impl Tap {
             next,
             span.end_ms,
         ));
-        for (index, &sample) in samples.iter().enumerate() {
+        for (index, sample) in samples.enumerate() {
             if !sample.is_finite() {
                 self.invalidate(Quality::Fault);
                 return;
             }
             self.windows.push(f64::from(sample));
             if self.windows.accumulating.samples == self.windows.block {
-                let remaining = (samples.len() - index - 1) as u64 * 1000 / rate;
+                let remaining = (count - index - 1) as u64 * 1000 / rate;
                 let measurement = self.windows.complete(
                     span,
                     span.first_sample + index as u64 + 1,

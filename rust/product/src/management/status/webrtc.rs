@@ -241,6 +241,7 @@ mod tests {
                     }),
                 ),
                 dsp_output: stage(false, None),
+                station_mix_input: stage(true, None),
             }),
             provider_output: None,
         }));
@@ -259,7 +260,11 @@ mod tests {
             .unwrap();
         assert_eq!(ingress["stages"][1]["measurement_ref"]["chain_id"], native);
         assert_eq!(ingress["stages"][2]["state"], "bypassed");
-        assert_eq!(ingress["stages"][3]["state"], "unavailable");
+        assert_eq!(ingress["stages"][3]["state"], "active");
+        assert_eq!(
+            ingress["stages"][3]["measurement_ref"]["stage_id"],
+            "station_mix_input"
+        );
         assert_eq!(
             records
                 .iter()
