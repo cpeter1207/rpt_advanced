@@ -15,8 +15,8 @@ pub(super) fn scoped_view(path: &str, query: &str) -> String {
 use query::{Query, Selection};
 use rpt_advanced_core::management::routes::{Route, Target};
 use rptadv_peer_support::https::{
-    AdmittedRequest, Method, Response, ServiceId, StatusCode, StatusPublisher, StatusResyncReason,
-    StatusStream,
+    AdmittedRequest, BrowserPrincipal, Method, Response, ServiceId, StatusCode, StatusPublisher,
+    StatusResyncReason, StatusStream,
 };
 use serde_json::{Value, json};
 use std::{
@@ -60,9 +60,15 @@ struct Subscriber {
     sink: StatusPublisher,
 }
 
+#[derive(PartialEq, Eq)]
+struct Reader {
+    service: ServiceId,
+    browser: Option<BrowserPrincipal>,
+}
+
 struct Continuation {
     id: Id,
-    reader: ServiceId,
+    reader: Reader,
     expires: Instant,
     pages: Arc<Pages>,
 }
@@ -361,7 +367,7 @@ impl Published {
     fn continuation(
         &mut self,
         id: Id,
-        reader: &ServiceId,
+        reader: &Reader,
         selection: &Selection,
         now: Instant,
     ) -> Result<Option<Arc<Pages>>, Fault> {
@@ -375,7 +381,7 @@ impl Published {
         }
     }
 
-    fn retain_capture(&mut self, id: Id, reader: ServiceId, pages: Pages, now: Instant) {
+    fn retain_capture(&mut self, id: Id, reader: Reader, pages: Pages, now: Instant) {
         self.prune(now);
         while self.cache.len() >= CACHE_CAPTURES
             || self
@@ -558,13 +564,17 @@ impl StatusApi {
         boot: Id,
         query: Query,
     ) -> Result<Output, Fault> {
+        let reader = Reader {
+            service: request.actor.clone(),
+            browser: request.browser_principal().cloned(),
+        };
         let now = Instant::now();
         let (status, document) = if let Some((id, index)) = query.page {
             let pages = self
                 .published
                 .lock()
                 .expect("status observations")
-                .continuation(id, &request.actor, &query.selection, now)?;
+                .continuation(id, &reader, &query.selection, now)?;
             match pages {
                 Some(pages) => (StatusCode::OK, pages.document(api, boot, index, false)?),
                 None => {
@@ -590,7 +600,7 @@ impl StatusApi {
                 self.published
                     .lock()
                     .expect("status observations")
-                    .retain_capture(id, request.actor.clone(), pages, Instant::now());
+                    .retain_capture(id, reader, pages, Instant::now());
             }
             (StatusCode::OK, document)
         };
@@ -967,21 +977,28 @@ mod tests {
         assert!(pages.len() > 1);
         let api = Api::new("/api/v1").unwrap();
         let start = Instant::now();
-        let reader = ServiceId::new("cli").unwrap();
-        hub.retain_capture(port, reader.clone(), pages, start);
+        let reader = || Reader {
+            service: ServiceId::new("cli").unwrap(),
+            browser: None,
+        };
+        hub.retain_capture(port, reader(), pages, start);
         hub.publish(capture(port), &owners);
+        let other = Reader {
+            service: ServiceId::new("nginx").unwrap(),
+            browser: None,
+        };
         assert!(matches!(
-            hub.continuation(port, &ServiceId::new("nginx").unwrap(), &scope(port), start),
+            hub.continuation(port, &other, &scope(port), start),
             Err(Fault::Missing)
         ));
         let mut wrong_selection = scope(port);
         wrong_selection.site = true;
         assert!(matches!(
-            hub.continuation(port, &reader, &wrong_selection, start),
+            hub.continuation(port, &reader(), &wrong_selection, start),
             Err(Fault::Missing)
         ));
         let saved = hub
-            .continuation(port, &reader, &scope(port), start)
+            .continuation(port, &reader(), &scope(port), start)
             .unwrap()
             .unwrap();
         let mut rows = 0;
@@ -996,7 +1013,7 @@ mod tests {
         }
         assert_eq!(rows, 25);
         assert!(
-            hub.continuation(port, &reader, &scope(port), start + PAGE_TTL)
+            hub.continuation(port, &reader(), &scope(port), start + PAGE_TTL)
                 .unwrap()
                 .is_none()
         );

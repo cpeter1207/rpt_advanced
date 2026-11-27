@@ -778,6 +778,8 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
             })
             .collect(),
     )
+    .unwrap()
+    .with_browser_principal_proxies([ServiceTrust::leaf_pin(&cert(&dir, "nginx"))])
     .unwrap();
     let address = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()

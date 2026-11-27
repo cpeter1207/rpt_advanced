@@ -94,7 +94,7 @@ the descriptor and retire its epochs when the graph changes.
 
 - [x] Register canonical routes, status discovery relations `rpt:status-snapshot` and `rpt:status-stream`, and the links from site, port and snapshot views. Parse selection once for both surfaces. Check unknown/malformed selectors with `400`, unavailable IDs with `404` under existing visibility rules, no view with `503`, and regular GET to the stream URL with `426` plus the snapshot link.
 - [x] Construct `application/hal+json` pages with `Cache-Control: no-store`. Keep each page within the existing 4 MiB limit. When needed, retain the capture under a bounded opaque reader/selection-bound cursor. Return HAL `next`, a deterministic merge key, repeated snapshot identity/state cursor and the page completion flag. Expiry returns `410` with a fresh-capture link.
-- [ ] Test site-only, port-only and mixed selectors, repeated port IDs, omitted topics, `meters`, existing HAL compatibility, malformed route queries and captures too large for one page. Change peer membership and graph generation during paging and verify each page still describes the original cut. Test expiry and an authorized but mismatched reader or scope.
+- [x] Test site-only, port-only and mixed selectors, repeated port IDs, omitted topics, `meters`, existing HAL compatibility, malformed route queries and captures too large for one page. Change peer membership and graph generation during paging and verify each page still describes the original cut. Test expiry and an authorized but mismatched reader or scope.
 - [x] Generate the REST request/response schemas, link relations, status/media types, `101` upgrade and `426` documentation from the route inventory. Describe the stream frames and authentication alongside the generated OpenAPI. Verify each reachable endpoint/method matches the documented inventory.
 
 ## 6. WebSocket transport and stream delivery
@@ -206,6 +206,18 @@ provider callbacks, multiple viewers and network load are separate gates.
 The maintained Debian 13 amd64 quality image passed
 `make lint dependency-boundary product-surface`, the Cppcheck and Clang-Tidy
 commands from `make static-analysis`, and Ruff on the additional fixtures.
+
+The Debian 13 arm64 Product `snapshot-paging` case used authenticated loopback
+HTTPS. Before the fix a different browser subject on the same proxy received
+the original reader's continuation with HTTP 200. The fixed case confirmed
+HTTP 404 for the other subject and another TLS service. The original reader
+kept the same snapshot metadata, link rows and graph generation after a new
+active revision changed the link membership and graph. A missing continuation
+returned HTTP 410 with a working fresh-snapshot link. The deterministic TTL
+and selection mismatch checks also passed in all 12 Product
+`management::status` tests. The full authenticated HAL and held-cut stream
+fixture passed on repeat after one curl transport failure during the first
+run. The live service retained its process and invocation.
 
 ## 8. Qualification and handoff
 
