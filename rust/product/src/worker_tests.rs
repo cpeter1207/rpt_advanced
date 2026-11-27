@@ -784,10 +784,26 @@ fn local_status_taps_measure_before_and_after_the_receive_gate() {
         }
         worker.collect_snapshots();
     }
-    let [provider, gated, ring, programme, voice, telemetry, station] =
-        worker.status_meters().map(Option::unwrap);
+    let [
+        provider,
+        gated,
+        ring,
+        programme,
+        voice,
+        telemetry,
+        station,
+        telemetry_input,
+    ] = worker.status_meters().map(Option::unwrap);
     assert!((provider.peak_dbfs.unwrap() + 12.0412).abs() < 0.001);
-    for meter in [gated, ring, programme, voice, telemetry, station] {
+    for meter in [
+        gated,
+        ring,
+        programme,
+        voice,
+        telemetry,
+        station,
+        telemetry_input,
+    ] {
         assert_eq!(meter.quality, crate::status_meter::Quality::Valid);
         assert_eq!(
             meter.signal_state,

@@ -145,9 +145,10 @@ impl NodeController {
             self.tails.unkeyed(self.now);
         }
         if let Some(output) = output {
-            if let Some((voice, public_telemetry)) = output.branches {
-                *voice = 0.0;
-                *public_telemetry = sample[0];
+            if let Some(branches) = output.branches {
+                *branches.voice = 0.0;
+                *branches.public_telemetry_input = sample[0];
+                *branches.public_telemetry = sample[0];
             }
             *output.parrot = 0.0;
             if let Some(reply) = output.reply {

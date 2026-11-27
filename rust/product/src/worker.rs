@@ -525,9 +525,9 @@ struct TransmitContext {
     maximum: usize,
     status: RadioStatus,
     meter: UnsafeCell<MeterPublisher>,
-    status_taps: UnsafeCell<[Tap; 5]>,
-    /// Borrowed only while measuring the serial TX callback's three programme inputs.
-    status_pcm: UnsafeCell<[Box<[f32]>; 3]>,
+    status_taps: UnsafeCell<[Tap; 6]>,
+    /// Borrowed only while measuring the serial TX callback's programme inputs.
+    status_pcm: UnsafeCell<[Box<[f32]>; 4]>,
     remote_controls: UnsafeCell<u32>,
     linked_active: UnsafeCell<bool>,
 }
@@ -1170,13 +1170,20 @@ unsafe fn transmit(
         voice_level,
         telemetry_level,
         station_level,
+        telemetry_input_level,
     ] = unsafe { &mut *context.status_taps.get() };
     // SAFETY: these buffers are allocated before publication and shared only by this TX turn.
-    let [station_input, voice, public_telemetry] = unsafe { &mut *context.status_pcm.get() };
+    let [
+        station_input,
+        voice,
+        public_telemetry_input,
+        public_telemetry,
+    ] = unsafe { &mut *context.status_pcm.get() };
     let count = samples.len();
-    let (station_input, voice, public_telemetry) = (
+    let (station_input, voice, public_telemetry_input, public_telemetry) = (
         &mut station_input[..count],
         &mut voice[..count],
+        &mut public_telemetry_input[..count],
         &mut public_telemetry[..count],
     );
     local_ring.observe(span, samples);
@@ -1205,6 +1212,7 @@ unsafe fn transmit(
         Some(rpt_advanced_core::controller::LocalTransmitBranches {
             station_input,
             voice,
+            public_telemetry_input,
             public_telemetry,
         }),
     );
@@ -1218,6 +1226,7 @@ unsafe fn transmit(
             voice_level.observe(span, voice);
             telemetry_level.observe(span, public_telemetry);
             station_level.observe(span, station_input);
+            telemetry_input_level.observe(span, public_telemetry_input);
             *keyed = u32::from(value);
             *ctcss_enabled = u32::from(transmit.controller.ctcss_enabled());
             0
@@ -1477,6 +1486,7 @@ impl RadioWorker {
             (tx_voice, tx_voice_reader),
             (tx_telemetry, tx_telemetry_reader),
             (rx_station, rx_station_reader),
+            (tx_telemetry_input, tx_telemetry_input_reader),
         ] = std::array::from_fn(|_| Tap::new());
         let active = Arc::new(AtomicBool::new(false));
         status.source_clock.restart();
@@ -1515,7 +1525,14 @@ impl RadioWorker {
                 snapshots: transmit_publisher,
                 dropped_snapshots: 0,
             }),
-            status_taps: UnsafeCell::new([rx_ring, tx_program, tx_voice, tx_telemetry, rx_station]),
+            status_taps: UnsafeCell::new([
+                rx_ring,
+                tx_program,
+                tx_voice,
+                tx_telemetry,
+                rx_station,
+                tx_telemetry_input,
+            ]),
             status_pcm: UnsafeCell::new(std::array::from_fn(|_| {
                 vec![0.0; maximum].into_boxed_slice()
             })),
@@ -1550,6 +1567,7 @@ impl RadioWorker {
                 tx_voice_reader,
                 tx_telemetry_reader,
                 rx_station_reader,
+                tx_telemetry_input_reader,
             ],
             last_physical_receive: None,
             reported_faults: [0; 6],

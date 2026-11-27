@@ -1080,6 +1080,7 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
         let mut parrot = [0.0];
         let mut active = false;
         let mut replies = [PeerReplySample::default()];
+        let [mut station, mut voice, mut telemetry_input, mut telemetry] = [[f32::NAN]; 4];
         AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
         let keyed = node.process_audio_with_parrot(
             false,
@@ -1088,7 +1089,12 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
             &[],
             &mut radio,
             ParrotOutput {
-                branches: None,
+                branches: Some(LocalTransmitBranches {
+                    station_input: &mut station,
+                    voice: &mut voice,
+                    public_telemetry_input: &mut telemetry_input,
+                    public_telemetry: &mut telemetry,
+                }),
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(&mut replies),
@@ -1101,6 +1107,7 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
         assert!(!keyed);
         assert!(!node.ctcss_enabled());
         assert_eq!(radio, [0.0]);
+        assert_eq!((telemetry_input, telemetry), ([0.0], [0.0]));
         assert_eq!(replies[0].sample, if ended { 0.0 } else { 0.4 });
         assert_eq!(control.reclaim().count(), 1);
     }
@@ -3887,6 +3894,7 @@ fn transmit_branch_taps_report_public_audio_before_the_sum() {
     let (mut node, _) = NodeController::new(
         ControllerSettings {
             full_duplex: true,
+            telemetry_duck_db: -6,
             ..ControllerSettings::default()
         },
         vec![],
@@ -3903,6 +3911,7 @@ fn transmit_branch_taps_report_public_audio_before_the_sum() {
         let mut audio = [0.1875];
         let mut voice = [f32::NAN];
         let mut telemetry = [f32::NAN];
+        let mut telemetry_input = [f32::NAN];
         let mut station = [0.0];
         node.process_audio_with_parrot(
             true,
@@ -3922,14 +3931,18 @@ fn transmit_branch_taps_report_public_audio_before_the_sum() {
                 branches: Some(LocalTransmitBranches {
                     station_input: &mut station,
                     voice: &mut voice,
+                    public_telemetry_input: &mut telemetry_input,
                     public_telemetry: &mut telemetry,
                 }),
             },
         );
+        assert_eq!(telemetry_input, [0.125]);
         if let Some(replacement) = regeneration {
             assert_eq!((audio, voice, telemetry), ([replacement], [0.0], [0.0]));
         } else {
-            assert_eq!((audio, voice, telemetry), ([0.4375], [0.25], [0.125]));
+            assert_eq!(voice, [0.25]);
+            assert!(telemetry[0] > 0.124 && telemetry[0] < telemetry_input[0]);
+            assert_eq!(audio, [voice[0] + telemetry[0] + 0.0625]);
         }
     }
 }

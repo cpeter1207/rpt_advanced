@@ -160,6 +160,11 @@ link media counters at one-second intervals in the shared capture. The
 regression verified that a fast key edge remained current through both a
 suppressed counter-only update and the next published diagnostic sample.
 
+The ARM64 native tap and controller tests verified a separate public TX
+telemetry input before ducking. The output retains the existing telemetry
+meter identity. The callback tests covered downstream replacement and
+private reply exclusion without adding audio-thread allocation.
+
 The isolated Asterisk run completed the 12 same-process reloads with a
 subscriber, delivered close code `1001` and EOF at unload, and retired the
 radio channel. The subsequent ordinary load/unload stress loop hit a module

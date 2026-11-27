@@ -95,6 +95,8 @@ pub struct LocalTransmitBranches<'a> {
     pub station_input: &'a mut [f32],
     /// Voice admitted to the final controller combine.
     pub voice: &'a mut [f32],
+    /// Locally routed public telemetry entering the ducking stage.
+    pub public_telemetry_input: &'a mut [f32],
     /// Locally routed public telemetry immediately before the final combine.
     pub public_telemetry: &'a mut [f32],
 }
@@ -128,7 +130,13 @@ struct ProgramSample<'a> {
     reply: Option<&'a mut PeerReplySample>,
     regeneration: Option<f32>,
     local_media: Option<f32>,
-    branches: Option<(&'a mut f32, &'a mut f32)>,
+    branches: Option<TransmitBranchSample<'a>>,
+}
+
+struct TransmitBranchSample<'a> {
+    voice: &'a mut f32,
+    public_telemetry_input: &'a mut f32,
+    public_telemetry: &'a mut f32,
 }
 
 /// Single audio-owner node aggregate; construction and media preparation belong to control.
@@ -544,14 +552,15 @@ impl NodeController {
             .as_mut()
             .and_then(|output| output.branches.take())
             .filter(|branch| {
-                branch.voice.len() == audio.len() && branch.public_telemetry.len() == audio.len()
+                branch.voice.len() == audio.len()
+                    && branch.public_telemetry_input.len() == audio.len()
+                    && branch.public_telemetry.len() == audio.len()
             });
         for (offset, sample) in audio.iter_mut().enumerate() {
-            let observed = branches.as_mut().map(|branch| {
-                (
-                    &mut branch.voice[offset],
-                    &mut branch.public_telemetry[offset],
-                )
+            let observed = branches.as_mut().map(|branch| TransmitBranchSample {
+                voice: &mut branch.voice[offset],
+                public_telemetry_input: &mut branch.public_telemetry_input[offset],
+                public_telemetry: &mut branch.public_telemetry[offset],
             });
             let parrot_sample = parrot_output.as_mut().map(|output| ProgramSample {
                 branches: observed,
@@ -1313,19 +1322,21 @@ impl NodeController {
         } else {
             0.0
         };
-        let telemetry = if !local_output {
-            0.0
+        let telemetry_input = if local_output {
+            telemetry_sample[0]
         } else {
-            telemetry_sample[0] * gain
+            0.0
         };
+        let telemetry = telemetry_input * gain;
         if let Some(output) = parrot_output {
-            if let Some((voice, public_telemetry)) = output.branches {
+            if let Some(branches) = output.branches {
+                *branches.public_telemetry_input = telemetry_input;
                 if regeneration.is_none() && !inhibited {
-                    *voice = local + link;
-                    *public_telemetry = telemetry;
+                    *branches.voice = local + link;
+                    *branches.public_telemetry = telemetry;
                 } else {
-                    *voice = 0.0;
-                    *public_telemetry = 0.0;
+                    *branches.voice = 0.0;
+                    *branches.public_telemetry = 0.0;
                 }
             }
             if rendered_source == Some(Source::Parrot) && made != 0 {
