@@ -21,7 +21,7 @@ Scope includes the shared adapter, WebRTC controller transport and management co
 Start with `rust/product/src/link/{mod,session,outbound,ring,egress,dispatcher,source_clock}.rs`, `rust/product/src/services.rs`, `rust/core/src/link/`, the managed ASL and EchoLink frontends in `rust/peer-support/frontend/`, and `rust/private-phone-host/src/{calls,progress,iax/media,sip/call_media}.rs`. Review ADRs 0018, 0021, 0023, 0025, 0026, 0035, 0037, 0043, 0044 and 0045.
 
 - [x] Trace incoming and outgoing AllStarLink, EchoLink, SIP phone and IAX phone through standalone and applicable Asterisk entry points. Map existing begin, progress, ready and attachment acknowledgment, cancellation, quiescence and ownership handoff. Record which provider generations, source proofs, clock positions, key edges and capabilities are actually available.
-- [ ] Establish a conformance baseline with the existing Product peer, private-call, ring, egress, host and same-process reload fixtures. Preserve traces for accepted-prefix retry, private reply ownership, mute and mix-minus, connect versus attach, fast key edges where supplied, cancellation before and after answer, same-device redirect and terminal cleanup. Record unknown measurements separately from known off or silent observations.
+- [x] Establish a conformance baseline with the existing Product peer, private-call, ring, egress, host and same-process reload fixtures. Preserve traces for accepted-prefix retry, private reply ownership, mute and mix-minus, connect versus attach, fast key edges where supplied, cancellation before and after answer, same-device redirect and terminal cleanup. Record unknown measurements separately from known off or silent observations.
 
 ### Existing ownership
 
@@ -41,10 +41,16 @@ can announce an ordinary connection before that acknowledgment.
 
 The isolated Debian 13 arm64 baseline at `eaef6bf` passed 154 Product tests
 across peer sessions, rings, egress, dispatch, private calls, redirect withdrawal,
-radio-bind refusal and owner retirement. The Asterisk fixture closed the status
-subscription, module and channel in the same process. A later ordinary unload
-in the stress loop failed. Full native provider and repeated lifecycle baseline
-coverage remains open.
+radio-bind refusal and owner retirement. Suite 12 exercised actual standalone
+ASL origination, private and mute status, a received key pulse, and exact media
+attachment. The three-party mixer and private reply receipts record source
+isolation separately from known silent periods. Tests retain unknown
+observations as unknown. The baseline Asterisk stress run failed at ordinary
+unload. The isolated same-process fixture subsequently passed in native suite
+25 at `18bdb9dd` and suite 26 at `fd5c49b0`. Suite 30 rechecked cancellation
+before dial and after a late provider answer, exact retirement, and addressed
+command and reconnect retry paths against the same Product entry point.
+Full native provider, load and repeated lifecycle qualification remain open.
 
 ## 2. Share lifetime, media ownership and station policy
 
@@ -174,7 +180,20 @@ Reuse the existing admission fences, source timeline, station gating, and negoti
 
 - [ ] Add the versioned reliable ordered control channel and unordered, partially reliable timing channel. Key leases bind the exact session, station grant, media epoch, sequence, sample window and receiver-local expiry. Bound each channel's messages, outstanding work and timing. Apply leases to sample eligibility through Product and release on expiry, uncertainty, loss of consent, revocation, restart or key-off. Test duplicate, late and reordered updates, lost key-off, overlap, stale samples and receiver-local release with the status socket absent.
 - [ ] Implement sample-to-extended-RTP anchors with source/graph epochs, a rational sample period or rate, nanosecond values as decimal strings, and measured uncertainty. Use RTCP Sender Reports and RFC 6051/7273 where supported and qualified. Use verified TAI only where established. Handle RTP wrap, drift, clock jumps, source reset and concealment. Use browser Encoded Transform timestamps where exposed, or the designed reduced-precision receiver mapping. Qualify any native RFC 8285 extension only when both ends negotiate it. Keep unknown or insufficient precision explicit.
-- [ ] Carry calibrated RF RSSI with sample span, clock epoch, calibration identity and uncertainty where the provider supplies it. Carry measured noise floor or SNR in their own units and windows where available. Preserve unavailable and uncalibrated states. Verify source ownership and timing comparability and publish only the authorized sanitized observation. Keep the work to timing and RF-quality metadata.
+- [x] Carry calibrated RF RSSI with sample span, clock epoch, calibration identity and uncertainty where the provider supplies it. Carry measured noise floor or SNR in their own units and windows where available. Preserve unavailable and uncalibrated states. Verify source ownership and timing comparability and publish only the authorized sanitized observation. Keep the work to timing and RF-quality metadata.
+
+In native suite 30, the isolated foreground transceive fixture negotiated
+the actual timing channel and sent calibrated RSSI, SNR and an unavailable
+noise floor through the authenticated session. The authorized HAL peers
+response preserved those sample spans, source and clock epochs, units and
+uncertainty as peer-reported observations. Reports from the wrong binding,
+source generation, clock epoch or sample window never replaced them. Lease
+expiry removed the readings with the old input grant. The existing wire
+tests also distinguish uncalibrated readings from unavailable observations.
+The fixture uses an isolated Opus provenance provider and simulated RF
+values. It establishes the reporting contract and owner fences. Physical
+calibration and cross-receiver clock comparability require actual receiver
+evidence.
 
 ## 6. Correlate status meters with receiver playout
 

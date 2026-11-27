@@ -6,6 +6,7 @@ use rptadv_peer_support::webrtc::{
     Pt, RelaySocket, Reliability, RtpWrite, SdpAnswer, SeqNo, Ssrc, UdpDriver,
     channel::{Control, Coordinate, Lease, Reference},
     opus::{DecodeSpan, Encoder, OpusDecoder, OpusProvider, PACKET_FRAMES, RECEIVE_FRAMES},
+    quality::{Measurement, Quantity, ReceiverQuality},
     relay::RelayTransport,
 };
 use std::{
@@ -852,7 +853,7 @@ async fn exercise_transceive(
     let mut listener = connect(client, collection, Direction::RecvOnly, None).await;
     let mut talker = connect(client, collection, Direction::SendRecv, None).await;
     assert_ne!(talker.binding, listener.binding);
-    let observed_key = |binding: &str| {
+    let observed_peer = |binding: &str| {
         let reply = client.get(peers);
         assert_eq!(reply.code, 200);
         reply.body["_embedded"]["item"]
@@ -860,7 +861,8 @@ async fn exercise_transceive(
             .unwrap()
             .iter()
             .find(|peer| peer["media_binding"] == binding)
-            .and_then(|peer| peer["transmit_keyed"].as_bool())
+            .cloned()
+            .expect("the admitted peer is visible")
     };
     let opus = OpusProvider::load().unwrap();
     let mut voice = TalkMedia::new(&opus);
@@ -957,6 +959,7 @@ async fn exercise_transceive(
         end: Coordinate(voice.position + OPUS_RATE as u64),
     };
     let mut heard_monitor = false;
+    let mut reports = Vec::new();
     for frame in 0..24 {
         if frame % 2 == 0 {
             lease.sequence.0 += 1;
@@ -976,6 +979,9 @@ async fn exercise_transceive(
             .await;
         }
         let _ = voice.send(&mut talker);
+        if frame == 8 {
+            reports = send_receiver_quality(&mut talker, lease);
+        }
         service(
             &mut talker,
             &mut listener,
@@ -998,8 +1004,26 @@ async fn exercise_transceive(
         heard_monitor,
         "an independently attached browser heard real permitted talker RTP"
     );
-    assert_eq!(observed_key(&talker.binding), Some(true));
-    assert_eq!(observed_key(&listener.binding), None);
+    let talker_status = observed_peer(&talker.binding);
+    assert_eq!(talker_status["transmit_keyed"], true);
+    assert_eq!(
+        observed_peer(&listener.binding)["transmit_keyed"],
+        Value::Null
+    );
+    assert_eq!(
+        talker_status["media"]["receiver_quality_origin"],
+        "authenticated_peer_report"
+    );
+    let visible = talker_status["media"]["receiver_quality"]
+        .as_array()
+        .expect("the authorized peer's exact RF observations are visible");
+    assert_eq!(visible.len(), reports.len());
+    for report in reports {
+        assert!(
+            visible.contains(&json!(report)),
+            "unexpected reports: {visible:?}"
+        );
+    }
     let active = fs::read(ptt).unwrap();
     assert!(
         active[idle_trace.len()..].contains(&b'1'),
@@ -1038,7 +1062,9 @@ async fn exercise_transceive(
         "local lease expiry must release PTT"
     );
     assert_eq!(expired.get(idle_trace.len()..), Some(&b"10"[..]));
-    assert_eq!(observed_key(&talker.binding), Some(false));
+    let retired = observed_peer(&talker.binding);
+    assert_eq!(retired["transmit_keyed"], false);
+    assert!(retired["media"]["receiver_quality"].is_null());
 
     // A later sequence for a retired grant still cannot revive it.
     for _ in 0..7 {
@@ -1077,6 +1103,70 @@ async fn exercise_transceive(
     fs::remove_file(carrier).unwrap();
     let _ = listener.close(client);
     session
+}
+
+/// Send measurements from a known source and competing later reports whose
+/// receiver identity or capture window does not belong to the active grant.
+fn send_receiver_quality(talker: &mut Browser, lease: Lease) -> Vec<ReceiverQuality> {
+    let rssi = ReceiverQuality {
+        binding: talker.binding.clone(),
+        epoch: lease.epoch,
+        source_generation: Coordinate(1),
+        clock_epoch: lease.epoch,
+        start: lease.start,
+        end: Coordinate(lease.start.0 + PACKET_FRAMES as u64),
+        rate_hz: OPUS_RATE as u32,
+        timestamp: None,
+        measurement: Measurement::CalibratedRssi {
+            dbm: -103.25,
+            calibration_id: "fixture-rf-input".into(),
+            uncertainty_db: 1.5,
+        },
+    };
+    let snr = ReceiverQuality {
+        measurement: Measurement::Snr {
+            db: 14.5,
+            uncertainty_db: None,
+        },
+        ..rssi.clone()
+    };
+    let noise = ReceiverQuality {
+        measurement: Measurement::Unavailable {
+            quantity: Quantity::NoiseFloor,
+        },
+        ..rssi.clone()
+    };
+    let later = ReceiverQuality {
+        end: Coordinate(rssi.end.0 + 1),
+        ..rssi.clone()
+    };
+    let send = |talker: &mut Browser, report: &ReceiverQuality| {
+        talker.send(ChannelKind::Timing, &report.encode().unwrap());
+    };
+    for report in [&rssi, &snr, &noise] {
+        send(talker, report);
+    }
+    for report in [
+        ReceiverQuality {
+            binding: "other-peer".into(),
+            ..later.clone()
+        },
+        ReceiverQuality {
+            clock_epoch: Coordinate(lease.epoch.0 + 1),
+            ..later.clone()
+        },
+        ReceiverQuality {
+            source_generation: Coordinate(2),
+            ..later.clone()
+        },
+        ReceiverQuality {
+            end: Coordinate(lease.end.0 + 1),
+            ..later
+        },
+    ] {
+        send(talker, &report);
+    }
+    vec![rssi, snr, noise]
 }
 
 /// Detect a phase-independent test tone in received Opus or simulated DAC PCM.
