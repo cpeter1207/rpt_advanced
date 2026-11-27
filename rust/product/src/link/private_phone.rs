@@ -20,7 +20,7 @@ use std::{
     ffi::c_void,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, TryLockError,
         atomic::{AtomicBool, Ordering},
     },
     time::Instant,
@@ -47,7 +47,28 @@ fn station_birth(born: Option<u64>, host_now: u64, call_now: u64) -> Option<u64>
 #[derive(Default)]
 pub(super) struct RedirectSlot {
     pub(super) pending: Option<Radio>,
-    installed: Option<InboundObserver>,
+    installed: Option<(InboundObserver, Arc<AtomicBool>)>,
+}
+
+impl RedirectSlot {
+    fn take_next(slot: &Mutex<Self>) -> Result<(Option<Radio>, bool), Error> {
+        let mut redirect = match slot.try_lock() {
+            Ok(redirect) => redirect,
+            Err(TryLockError::WouldBlock) => return Ok((None, true)),
+            Err(TryLockError::Poisoned(_)) => return Err(Error::Operation),
+        };
+        let new = redirect.pending.take();
+        if let Some(route) = &new {
+            redirect.installed = Some((route.incoming.observer(), Arc::clone(&route.installed)));
+        }
+        Ok((new, false))
+    }
+
+    fn observation(&self) -> Option<InboundObserver> {
+        let (observer, installed) = self.installed.as_ref()?;
+        // The callback releases the redirect lock before activating the route.
+        installed.load(Ordering::Acquire).then(|| observer.clone())
+    }
 }
 
 pub(crate) struct Control {
@@ -69,8 +90,7 @@ impl Control {
             .redirect
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .installed
-            .clone();
+            .observation();
         PeerMeasurements {
             native_ingress: observer
                 .filter(|observer| !observer.signals().ended())
@@ -256,14 +276,7 @@ impl Session {
         if let Some(radio) = &mut self.radio {
             radio.observe_at(now_ms);
         }
-        let new = {
-            let mut redirect = self.redirect.lock().map_err(|_| Error::Operation)?;
-            let new = redirect.pending.take();
-            if let Some(route) = &new {
-                redirect.installed = Some(route.incoming.observer());
-            }
-            new
-        };
+        let (new, retry_redirect) = RedirectSlot::take_next(&self.redirect)?;
         if let Some(new) = new {
             self.decoded_meter.discontinuity();
             #[cfg(target_os = "linux")]
@@ -274,6 +287,14 @@ impl Session {
             };
             new.activate();
             self.radio = Some(new);
+        } else if retry_redirect
+            && self
+                .radio
+                .as_ref()
+                .is_some_and(|old| old.incoming.signals().ended())
+        {
+            self.decoded_meter.discontinuity();
+            self.radio = None;
         }
         self.receive.settle(self.radio.as_mut());
         let now = self.io.private_now()?;
@@ -440,10 +461,14 @@ impl Session {
                 .as_mut()
                 .is_some_and(|radio| radio.outgoing.peek_span().is_some()))
         .then_some(now);
+        // A notification may have led to this conflicted turn. Retry on the
+        // existing media cadence even if the call otherwise has no pending work.
+        let redirect = retry_redirect.then_some(now.saturating_add(GENERATED_NS));
         self.io.set_deadline(
             send.into_iter()
                 .chain(render)
                 .chain(station)
+                .chain(redirect)
                 .chain(self.radio.as_ref().and_then(|radio| radio.deadline(now)))
                 .min()
                 .map_or(u64::MAX, |at| at.saturating_sub(now)),
@@ -475,6 +500,97 @@ pub(super) unsafe extern "C" fn step(context: *mut c_void) -> i32 {
 mod cadence_tests {
     use super::*;
     use crate::link::source_clock::SourceClock;
+
+    #[test]
+    fn contended_redirect_keeps_media_live_until_the_next_turn_installs() {
+        use crate::{
+            link::ring::{InboundPolicy, InboundRing},
+            services::phone_media::Input,
+        };
+        use rpt_advanced_core::{
+            config::resources::profiles::{PhoneLatencyTiming, PhoneVadSettings, VadMode},
+            link::{PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource},
+        };
+
+        let source = PhoneSource::new(
+            PhoneAccountId::new("native-account").unwrap(),
+            3,
+            PhoneCallId::new([7; 16]).unwrap(),
+            5,
+            9,
+        )
+        .unwrap();
+        let activity = Arc::new(PeerSignals::for_phone(source));
+        assert!(activity.authenticate_phone());
+        let route = || {
+            let (writer, reader) =
+                InboundRing::redirected(8000, InboundPolicy::Phone, &activity.reply_target())
+                    .unwrap();
+            let (_, egress) = LinkAudioQueue::new(960, 2).unwrap().into_endpoints();
+            let route = Radio::new(
+                writer,
+                egress,
+                Arc::clone(&activity),
+                PhoneVadSettings {
+                    enabled: false,
+                    mode: VadMode::Continuous,
+                    hang_ms: 100,
+                },
+                PhoneLatencyTiming {
+                    target_latency_ms: 250,
+                    maximum_latency_ms: 500,
+                },
+                Arc::new(AtomicBool::new(true)),
+            )
+            .unwrap();
+            (route, reader)
+        };
+        let (mut current, _current_reader) = route();
+        let (replacement, _replacement_reader) = route();
+        let replacement_observer = replacement.incoming.observer();
+        let installed = Arc::clone(&replacement.installed);
+        current.activate();
+        let slot = Mutex::new(RedirectSlot {
+            pending: Some(replacement),
+            installed: Some((current.incoming.observer(), Arc::clone(&current.installed))),
+        });
+
+        let held = slot.lock().unwrap();
+        let (next, retry) = RedirectSlot::take_next(&slot).unwrap();
+        assert!(next.is_none() && retry);
+        assert!(!installed.load(Ordering::Acquire));
+        let now = 1_000_000_000;
+        let receipt = current.begin(now);
+        assert_eq!(
+            current.input(
+                Input::Audio {
+                    start: 0,
+                    pcm: &[0.25; 160],
+                    born_ns: Some(now),
+                    concealed: false,
+                },
+                now,
+                receipt,
+            ),
+            Ok(160)
+        );
+        drop(held);
+
+        let (next, retry) = RedirectSlot::take_next(&slot).unwrap();
+        assert!(!retry);
+        let replacement = next.unwrap();
+        assert!(!installed.load(Ordering::Acquire));
+        assert!(slot.lock().unwrap().observation().is_none());
+        replacement.activate();
+        assert!(installed.load(Ordering::Acquire));
+        assert!(
+            slot.lock()
+                .unwrap()
+                .observation()
+                .unwrap()
+                .same_generation(&replacement_observer)
+        );
+    }
 
     #[test]
     fn retains_the_birth_of_station_audio_read_ahead_of_its_clock() {
