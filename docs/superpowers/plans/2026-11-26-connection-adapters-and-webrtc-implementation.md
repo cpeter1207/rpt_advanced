@@ -85,7 +85,7 @@ Keep each provider's signaling and codec behavior where it already lives. Compar
 Start with the existing routes, HAL discovery, OpenAPI, runtime coordinator, HTTPS/TLS trust and proxy fixtures in `rust/core/src/management/`, `rust/product/src/management*` and `rust/peer-support/src/https*`. Review ADRs 0006, 0016, 0018, 0021 and 0045 and the approved WebRTC transport section.
 
 - [ ] Qualify the simplest maintained WebRTC implementation that supplies full ICE, Trickle ICE, consent, TURN UDP/TCP/TLS, DTLS-SRTP, Opus and the two required data channels. Check how it exposes RTP timestamp, source, packet acceptance, loss and clock observations. Reuse existing codec, RTP, jitter, rate conversion and peer-support code where the selected provider can do so without adding another playout owner. Keep the transport outside the station audio thread.
-- [ ] Expose runtime session creation, candidates, state/restart and closure on the selected port through authenticated HAL discovery. Reuse the authenticated frontend principal and the existing backend trust and Origin checks. Verify the principal at the backend boundary and distinguish two users sharing one proxy service certificate. Bind each session to its exact principal, port, generation and authorized direction. Revalidate on offer, restart and authorization changes. Verify cross-principal rejection through the same proxy, wrong-port rejection, stale ICE generation and fingerprint, bounded SDP/candidates, idempotent candidate retry/close, and receive-only sessions with no microphone ingress.
+- [x] Expose runtime session creation, candidates, state/restart and closure on the selected port through authenticated HAL discovery. Reuse the authenticated frontend principal and the existing backend trust and Origin checks. Verify the principal at the backend boundary and distinguish two users sharing one proxy service certificate. Bind each session to its exact principal, port, generation and authorized direction. Revalidate on offer, restart and authorization changes. Verify cross-principal rejection through the same proxy, wrong-port rejection, stale ICE generation and fingerprint, bounded SDP/candidates, idempotent candidate retry/close, and receive-only sessions with no microphone ingress.
 - [ ] Connect the approved session to the common adapter after transport and media are ready. Use DTLS-SRTP and protected data channels end to end, and Opus with its 48 kHz RTP clock. Supply packet timing, provenance, loss and discontinuity at the existing handoff. Apply ordinary network and audio blocking and station TX policy. Verify independent receive-only and transceive sessions, usable-endpoint acknowledgment, restarts, revocation and cleanup on refusal or provider error.
 - [ ] Qualify signaling from behind CGNAT through the approved proxy/relay or existing overlay path, using an outbound authenticated site connection. Verify independent media traversal with full ICE and Trickle ICE. Test direct where reachable, two independent CGNAT endpoints, both using relay candidates, TURN/UDP, TURN/TCP, TLS on port 443, blocked UDP, consent loss and ICE restart. Use short-lived TURN credentials and validated TLS identity in the fixture. Verify one relay failure cannot disrupt unrelated peers. Keep SDP, candidate addresses and credentials out of public status and logs.
 
@@ -124,8 +124,15 @@ decimal clock coordinates and sample range containment through RTP wrap.
 
 The ARM64 mTLS handoff fixture verified two browser identities on one proxy
 certificate, denial of spoofed assertions, and revocation at request claim.
-The existing proxy owns OIDC. WebRTC session creation must bind the typed
-frontend identity to the port and runtime owner before admitting media.
+The existing proxy owns OIDC. The three WebRTC signaling tests passed in
+native suite 29 at `49ab545f`. They verified the exact browser, port, station
+owner and ICE generation, direction revalidation, and idempotent candidate
+retry and close. Signaling enforces decoded SDP and candidate bounds before
+submitting provider work. The foreground receive-only fixture rejected talk.
+The transport restart fixture refused a changed DTLS fingerprint and retained
+the existing authenticated channels for an accepted ICE restart. Compatible
+configuration activation and transport qualification have separate acceptance
+criteria below.
 
 The ARM64 foreground controller at ccd6323c passed both isolated station
 fixtures. Receive-only delivered the simulated receiver marker over Opus and
