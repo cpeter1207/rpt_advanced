@@ -194,7 +194,7 @@ async function connect(context, packets, first, start, epoch) {
   playback.autoplay = true;
   document.body.append(playback);
   analyser.connect(context.destination);
-  let reference, observedAnchor, receiver, error;
+  let reference, observedAnchor, receiver, error, restartProbe;
   sender.transform = new RTCRtpScriptTransform(worker, { packets, first, start });
   function sendAnchor() {
     if (reference && control.readyState === "open") {
@@ -215,7 +215,11 @@ async function connect(context, packets, first, start, epoch) {
   };
   control.onopen = sendAnchor;
   rx.ondatachannel = ({ channel }) => {
-    channel.onmessage = ({ data }) => { observedAnchor = JSON.parse(data).reference; };
+    channel.onmessage = ({ data }) => {
+      const message = JSON.parse(data);
+      if (message.type === "anchor") observedAnchor = message.reference;
+      if (message.type === "restart_probe") restartProbe = channel.id;
+    };
   };
   rx.ontrack = ({ receiver: input, streams }) => {
     receiver = input;
@@ -245,7 +249,37 @@ async function connect(context, packets, first, start, epoch) {
       if (error) throw new Error(error);
       return receiver && observedAnchor;
     }, "the receiving track and protected data-channel anchor");
-    return { receiver, analyser, graph, anchor: observedAnchor, close };
+    async function restart() {
+      const original = tx.localDescription.sdp;
+      const trackId = receiver.track.id;
+      const channelId = control.id;
+      tx.restartIce();
+      await tx.setLocalDescription(await tx.createOffer());
+      await until(() => tx.iceGatheringState === "complete", "restart local candidates");
+      const next = tx.localDescription.sdp;
+      const attributes = (sdp, name) => sdp.split(/\r?\n/).filter(line => line.startsWith(name));
+      for (const name of ["a=ice-ufrag:", "a=ice-pwd:"]) {
+        const previous = attributes(original, name);
+        const current = attributes(next, name);
+        require(previous.length && current.length && current.every(value => !previous.includes(value)),
+          "standard ICE restart did not replace a credential");
+      }
+      for (const name of ["a=fingerprint:", "a=mid:", "a=sctp-port:"]) {
+        const previous = attributes(original, name);
+        require(previous.length && JSON.stringify(previous) === JSON.stringify(attributes(next, name)),
+          "standard restart changed the protected media contract");
+      }
+      await rx.setRemoteDescription(tx.localDescription);
+      await rx.setLocalDescription(await rx.createAnswer());
+      await until(() => rx.iceGatheringState === "complete", "restart remote candidates");
+      await tx.setRemoteDescription(rx.localDescription);
+      control.send(JSON.stringify({ type: "restart_probe" }));
+      await until(() => restartProbe === channelId && receiver.track.id === trackId &&
+        ["connected", "completed"].includes(tx.iceConnectionState) &&
+        ["connected", "completed"].includes(rx.iceConnectionState),
+      "retained track and protected channel after browser ICE restart");
+    }
+    return { receiver, analyser, graph, anchor: observedAnchor, restart, close };
   } catch (failure) {
     close();
     throw failure;
@@ -322,6 +356,9 @@ async function test() {
       "fixture failed to queue an old-epoch window");
     deliveredAt = shown.delivery;
     oldSsrc = run.anchor.ssrc;
+    await run.restart();
+    require(run.receiver.getSynchronizationSources().some(x => x.source === oldSsrc),
+      "ICE restart lost the established browser RTP source");
   } finally {
     run.close();
   }
@@ -346,6 +383,7 @@ async function test() {
       markerRtp: String(markerRtp), meterEndRtp: String(shown.end),
       deliveryTimestampMs: deliveredAt, oldSsrc, newSsrc: next.anchor.ssrc,
       earlyMeterHeld: true, lateMeterStale: true, retiredEpochDropped: true, audioWithoutStatus: true,
+      retainedIceRestart: true,
     };
   } finally {
     next.close();
