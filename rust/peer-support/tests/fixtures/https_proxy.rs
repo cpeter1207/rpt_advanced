@@ -331,6 +331,173 @@ fn real_proxies_replace_browser_principal_headers_with_the_authenticated_user() 
     }
 }
 
+#[test]
+#[ignore = "staged Debian nginx package required"]
+fn packaged_controller_admits_only_authenticated_browser_requests() {
+    let pki = Pki::new();
+    let (listener, mut inbox) = Listener::start(
+        "127.0.0.1:0".parse().unwrap(),
+        ServerIdentity::new(vec![pki.cert("server")], pki.key("server")),
+        pki.trust("client", &[("nginx", "nginx")])
+            .with_browser_principal_proxies([ServiceTrust::leaf_pin(&pki.cert("nginx"))])
+            .unwrap(),
+        OriginPolicy::new(vec!["localhost:8443".into()], vec![ORIGIN.into()]).unwrap(),
+    )
+    .unwrap();
+    let signaling = "/api/v1/webrtc/ports/31c6bf12-7e60-4b4b-86be-71a3c065dc95/sessions/";
+    let offer = r#"{"direction":"receive_only","offer":"v=0\r\n"}"#;
+    let host = "console.local";
+    let unauthenticated =
+        format!("GET /api/v1/ HTTP/1.1\r\nHost: {host}\r\nX-Auth-Request-User: spoof\r\n\r\n");
+    let authenticated =
+        format!("GET /api/v1/ HTTP/1.1\r\nHost: {host}\r\nCookie: session=valid\r\n\r\n");
+
+    for mode in ["local", "forwarded"] {
+        let proxy = Proxy::start(
+            &format!("controller-{mode}"),
+            &pki.0,
+            listener.local_addr(),
+            "backend",
+            "localhost",
+        );
+        let address = ([127, 0, 0, 1], proxy.port).into();
+        let browser = pki.client("backend", (mode == "forwarded").then_some("apache"));
+        let open = || connect(address, browser.clone(), "localhost");
+        if mode == "forwarded" {
+            for (certificate, expected) in [(None, 400), (Some("cli"), 403)] {
+                let mut denied = connect(address, pki.client("backend", certificate), "localhost");
+                send(&mut denied, authenticated.as_bytes()).unwrap();
+                assert_eq!(status(&mut denied).unwrap(), expected);
+                assert!(inbox.try_recv().is_none());
+            }
+        }
+        let mut denied = open();
+        send(&mut denied, unauthenticated.as_bytes()).unwrap();
+        assert_eq!(status(&mut denied).unwrap(), 401);
+        assert!(inbox.try_recv().is_none());
+
+        let mut accepted = open();
+        let root = format!(
+            "GET /api/v1/ HTTP/1.1\r\nHost: {host}\r\nCookie: session=valid\r\n\
+             X-Rpt-Advanced-Oidc-Subject: spoof\r\nX-Rpt-Advanced-Oidc-Issuer: https://spoof.local\r\n\r\n"
+        );
+        send(&mut accepted, root.as_bytes()).unwrap();
+        let request = claim(&mut inbox);
+        assert_eq!(request.actor.as_str(), "nginx");
+        let principal = request.browser_principal().unwrap().clone();
+        request.respond(hyper::Response::new(Vec::new()));
+        let mut status_line = String::new();
+        accepted.read_line(&mut status_line).unwrap();
+        assert_eq!(status_line.split_ascii_whitespace().nth(1), Some("200"));
+        let mut csrf_cookie = None;
+        loop {
+            let mut line = String::new();
+            assert!(accepted.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("set-cookie")
+            {
+                let (pair, flags) = value.trim().split_once("; ").unwrap();
+                assert_eq!(flags, "Path=/; Secure; SameSite=Strict");
+                csrf_cookie = Some(pair.strip_prefix("__Host-rpt-csrf=").unwrap().to_owned());
+            }
+        }
+        let token = csrf_cookie.unwrap();
+        assert_eq!(token.len(), 32);
+        for (origin, submitted, media, expected) in [
+            (
+                "https://elsewhere.local",
+                token.as_str(),
+                "application/hal+json",
+                403,
+            ),
+            (
+                ORIGIN,
+                "00000000000000000000000000000000",
+                "application/hal+json",
+                403,
+            ),
+            (ORIGIN, token.as_str(), "text/plain", 415),
+            (ORIGIN, token.as_str(), "application/hal+json", 204),
+        ] {
+            let mut write = open();
+            let input = format!(
+                "POST {signaling} HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\n\
+                 Cookie: session=valid; __Host-rpt-csrf={token}\r\nX-CSRF-Token: {submitted}\r\n\
+                 Content-Type: {media}\r\nContent-Length: {}\r\n\r\n{offer}",
+                offer.len()
+            );
+            send(&mut write, input.as_bytes()).unwrap();
+            if expected == 204 {
+                let request = claim(&mut inbox);
+                assert_eq!(request.target.path(), signaling);
+                assert_eq!(request.headers["content-type"], "application/hal+json");
+                assert_eq!(request.body.as_bytes(), offer.as_bytes());
+                assert_eq!(request.browser_principal(), Some(&principal));
+                request.respond(
+                    hyper::Response::builder()
+                        .status(204)
+                        .body(Vec::new())
+                        .unwrap(),
+                );
+            }
+            assert_eq!(status(&mut write).unwrap(), expected);
+            assert!(inbox.try_recv().is_none());
+        }
+        let mut patch = open();
+        let input = format!(
+            "PATCH /api/v1/site/ HTTP/1.1\r\nHost: {host}\r\nOrigin: {ORIGIN}\r\n\
+             Cookie: session=valid; __Host-rpt-csrf={token}\r\nX-CSRF-Token: {token}\r\n\
+             If-Match: \"test-revision\"\r\nContent-Type: application/json-patch+json\r\n\
+             Content-Length: 2\r\n\r\n[]"
+        );
+        send(&mut patch, input.as_bytes()).unwrap();
+        let request = claim(&mut inbox);
+        assert_eq!(request.headers["if-match"], "\"test-revision\"");
+        assert_eq!(request.body.as_bytes(), b"[]");
+        request.respond(hyper::Response::new(Vec::new()));
+        assert_eq!(status(&mut patch).unwrap(), 200);
+
+        let mut missing_origin = open();
+        send_status(&mut missing_origin, host, "Cookie: session=valid\r\n");
+        assert_eq!(status(&mut missing_origin).unwrap(), 403);
+        assert!(inbox.try_recv().is_none());
+
+        let mut connection = open();
+        send_status(
+            &mut connection,
+            host,
+            &format!("Cookie: session=valid\r\nOrigin: {ORIGIN}\r\n"),
+        );
+        let request = claim(&mut inbox);
+        assert!(request.is_status_upgrade());
+        let page =
+            json!({"state_cursor":"42","complete":true,"status":{"site":{"quality":"valid"}}});
+        let (_publisher, stream) =
+            StatusStream::new("packaged-controller".into(), vec![page.clone()], None);
+        request.respond_status_stream(stream);
+        let mut connection = status_socket(connection);
+        assert_eq!(status_frame(&mut connection)["data"], page);
+        connection.send(Message::Close(None)).unwrap();
+
+        let mut callback = open();
+        let input = format!("GET /oauth2/callback?code=fixture HTTP/1.1\r\nHost: {host}\r\n\r\n");
+        send(&mut callback, input.as_bytes()).unwrap();
+        assert_eq!(status(&mut callback).unwrap(), 204);
+    }
+
+    for (ca, name) in [("foreign", "localhost"), ("backend", "wrong.local")] {
+        let proxy = Proxy::start("controller-local", &pki.0, listener.local_addr(), ca, name);
+        let address = ([127, 0, 0, 1], proxy.port).into();
+        let mut browser = connect(address, pki.client("backend", None), "localhost");
+        send(&mut browser, authenticated.as_bytes()).unwrap();
+        assert_eq!(status(&mut browser).unwrap(), 502);
+        assert!(inbox.try_recv().is_none());
+    }
+}
+
 fn log_without_marker(path: &std::path::Path) -> io::Result<bool> {
     let log = fs::read(path)?;
     Ok(!log

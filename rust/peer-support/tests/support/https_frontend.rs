@@ -62,10 +62,97 @@ impl Proxy {
             .local_addr()
             .unwrap()
             .port();
-        let (mut command, template) = if kind == "nginx" {
+        let (mut command, template) = if let Some(mode) = kind.strip_prefix("controller-") {
             let mut command = Command::new("/usr/sbin/nginx");
             command.arg("-p").arg(&dir).arg("-c");
-            (command, include_str!("../fixtures/https-nginx.conf"))
+            let snippets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debian/nginx");
+            let auth = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let fingerprint = Command::new("openssl")
+                .args(["x509", "-noout", "-fingerprint", "-sha1", "-in"])
+                .arg(pki.join("apache.pem"))
+                .output()
+                .unwrap();
+            assert!(fingerprint.status.success());
+            let fingerprint = String::from_utf8(fingerprint.stdout).unwrap();
+            let fingerprint = fingerprint.split_once('=').unwrap().1.trim();
+            let ssl = pki.to_str().unwrap();
+            for file in [
+                "controller-http.conf".to_owned(),
+                "controller-server.conf".to_owned(),
+                format!("controller-{mode}.conf"),
+            ] {
+                let config = fs::read_to_string(snippets.join(&file))
+                    .unwrap_or_else(|error| panic!("missing packaged nginx {file}: {error}"))
+                    .replace(
+                        "/usr/share/rpt-advanced/nginx/",
+                        &format!("{}/", dir.display()),
+                    )
+                    .replace(
+                        "/etc/rpt-advanced/nginx/management-ca.pem",
+                        &format!("{ssl}/{ca}.pem"),
+                    )
+                    .replace(
+                        "/etc/rpt-advanced/nginx/management-client.pem",
+                        &format!("{ssl}/nginx.pem"),
+                    )
+                    .replace(
+                        "/etc/rpt-advanced/nginx/management-client.key",
+                        &format!("{ssl}/nginx.key"),
+                    )
+                    .replace(
+                        "/etc/rpt-advanced/nginx/frontend.pem",
+                        &format!("{ssl}/server.pem"),
+                    )
+                    .replace(
+                        "/etc/rpt-advanced/nginx/frontend.key",
+                        &format!("{ssl}/server.key"),
+                    )
+                    .replace(
+                        "/etc/rpt-advanced/nginx/forwarder-ca.pem",
+                        &format!("{ssl}/client.pem"),
+                    )
+                    .replace(
+                        "0000000000000000000000000000000000000000",
+                        &fingerprint.replace(':', "").to_ascii_lowercase(),
+                    )
+                    .replace(
+                        "https://identity.example.invalid/realms/radio",
+                        "https://fixture.local/realms/test",
+                    )
+                    .replace("console.example.invalid", "console.local")
+                    .replace("127.0.0.1:4180", &format!("127.0.0.1:{auth}"))
+                    .replace("127.0.0.1:8443", &backend.to_string())
+                    .replace(
+                        "proxy_ssl_name localhost",
+                        &format!("proxy_ssl_name {name}"),
+                    )
+                    .replace(
+                        "listen 127.0.0.1:443 ssl",
+                        &format!("listen 127.0.0.1:{port} ssl"),
+                    )
+                    .replace(
+                        "listen 127.0.0.1:8444 ssl",
+                        &format!("listen 127.0.0.1:{port} ssl"),
+                    );
+                fs::write(dir.join(&file), config).unwrap();
+            }
+            (
+                command,
+                include_str!("../fixtures/https-nginx-controller.conf")
+                    .replace("@MODE@", mode)
+                    .replace("@AUTH@", &auth.to_string()),
+            )
+        } else if kind == "nginx" {
+            let mut command = Command::new("/usr/sbin/nginx");
+            command.arg("-p").arg(&dir).arg("-c");
+            (
+                command,
+                include_str!("../fixtures/https-nginx.conf").to_owned(),
+            )
         } else {
             let key = Command::new("openssl")
                 .args(["pkey", "-traditional", "-in"])
@@ -78,7 +165,10 @@ impl Proxy {
             fs::write(pki.join("apache-pair.pem"), pair).unwrap();
             let mut command = Command::new("/usr/sbin/apache2");
             command.args(["-DFOREGROUND", "-f"]);
-            (command, include_str!("../fixtures/https-apache.conf"))
+            (
+                command,
+                include_str!("../fixtures/https-apache.conf").to_owned(),
+            )
         };
         let file = dir.join("server.conf");
         fs::write(
