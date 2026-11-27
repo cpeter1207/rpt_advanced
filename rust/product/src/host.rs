@@ -1416,6 +1416,7 @@ impl Host {
                 ProtocolId::AllStarLink => "allstarlink",
                 ProtocolId::EchoLink => "echolink",
                 ProtocolId::Phone => "phone",
+                ProtocolId::WebRtc => "webrtc",
             };
             let _ = writeln!(
                 result,

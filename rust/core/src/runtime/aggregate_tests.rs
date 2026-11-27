@@ -7503,3 +7503,52 @@ fn permanent_group_config_is_expanded_into_ordered_routes() {
 
 #[path = "coffee_transition_tests.rs"]
 mod coffee_transition;
+
+#[test]
+fn webrtc_ingress_checks_exact_session_and_current_endpoint() {
+    use crate::link::{AdmissionError, PeerIdentity, PeerSignals, ProtocolId};
+    let mut runtime = command_runtime(json!({}), &[]);
+    runtime.incoming(PORT, "2000", true).unwrap();
+    let id = uuid::Uuid::from_u128(1);
+    let identity = PeerIdentity::webrtc(id);
+    let endpoint = PeerSignals::for_webrtc(id);
+    let regular = PeerSignals::new();
+    let replacement = PeerSignals::redirected(&endpoint.reply_target());
+    let links = runtime.node(PORT).unwrap().links();
+    let attach =
+        |links: &mut crate::runtime::links::NodeLinkControl, identity, signals: &PeerSignals| {
+            links.attach_ingress(identity, signals.reply_target())
+        };
+
+    assert!(identity.operator_alias().is_none());
+    assert!(PeerIdentity::parse(ProtocolId::WebRtc, "2000").is_err());
+    assert_eq!(
+        attach(links, identity.clone(), &regular),
+        Err(AdmissionError::Denied)
+    );
+    assert_eq!(
+        attach(
+            links,
+            PeerIdentity::from_operator("2000").unwrap(),
+            &endpoint
+        ),
+        Err(AdmissionError::Denied)
+    );
+    attach(links, identity.clone(), &endpoint).unwrap();
+    assert_eq!(
+        attach(links, identity.clone(), &replacement),
+        Err(AdmissionError::Stale)
+    );
+
+    let old_epoch = endpoint.receive_epoch();
+    endpoint.set_radio_keyed(true);
+    replacement.set_radio_keyed(true);
+    endpoint.revoke_webrtc_receive();
+    assert_eq!(replacement.receive_epoch(), endpoint.receive_epoch());
+    assert!(!replacement.output_radio_keyed(endpoint.receive_epoch()));
+    assert!(!endpoint.output_radio_keyed(old_epoch));
+    endpoint.end();
+    attach(links, identity.clone(), &replacement).unwrap();
+    assert_eq!(links.ingress_receive_status().count(), 1);
+    assert!(!links.ingress_receive_status().next().unwrap().1.active);
+}

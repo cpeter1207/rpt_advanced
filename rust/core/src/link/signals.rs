@@ -53,8 +53,15 @@ impl Drop for MediaIsolationClaim {
 const WAITING_FOR_CALLER_UNMUTE: u64 = u64::MAX;
 
 #[derive(Debug)]
+struct WebRtcSource {
+    session: uuid::Uuid,
+    receive_epoch: AtomicU64,
+}
+
+#[derive(Debug)]
 struct ReplyState {
     phone: Option<super::PhoneSource>,
+    webrtc: OnceLock<Arc<WebRtcSource>>,
     phone_authenticated: AtomicBool,
     phone_media_only: bool,
     peer_callsign: OnceLock<Arc<str>>,
@@ -129,6 +136,10 @@ impl PeerReply {
     pub fn phone_source(&self) -> Option<&super::PhoneSource> {
         self.0.phone.as_ref()
     }
+    /// WebRTC session that owns this exact media endpoint.
+    pub fn webrtc_session(&self) -> Option<uuid::Uuid> {
+        self.0.webrtc.get().map(|source| source.session)
+    }
     /// Mailbox admission is separate from provider authentication and admin unlock.
     pub fn phone_authenticated(&self) -> bool {
         !self.ended() && self.0.phone_authenticated.load(Ordering::Acquire)
@@ -152,7 +163,8 @@ impl PeerReply {
     }
     /// A response waits for transport keying and buffered receive activity to clear.
     pub fn active(&self) -> bool {
-        self.0.radio_keyed.load(Ordering::Acquire) || self.0.edge.load(Ordering::Acquire) & 1 != 0
+        self.0.edge.load(Ordering::Acquire) & 1 != 0
+            || (self.0.webrtc.get().is_none() && self.0.radio_keyed.load(Ordering::Acquire))
     }
     /// Ended connections cannot receive a delayed response.
     pub fn ended(&self) -> bool {
@@ -186,6 +198,15 @@ impl PeerSignals {
     pub fn new() -> Self {
         Self::with_phone(None)
     }
+    /// Prepare a WebRTC endpoint for an already authorized local session.
+    pub fn for_webrtc(session: uuid::Uuid) -> Self {
+        let signals = Self::new();
+        let _ = signals.reply.0.webrtc.set(Arc::new(WebRtcSource {
+            session,
+            receive_epoch: AtomicU64::new(0),
+        }));
+        signals
+    }
     /// Construct private control state before any radio attachment exists.
     pub fn for_phone(source: super::PhoneSource) -> Self {
         Self::with_phone(Some(source))
@@ -218,6 +239,9 @@ impl PeerSignals {
             previous.0.rx_muted.clone(),
             previous.0.phone_media_only,
         );
+        if let Some(source) = previous.0.webrtc.get() {
+            let _ = next.reply.0.webrtc.set(Arc::clone(source));
+        }
         if let Some(callsign) = previous.0.peer_callsign.get() {
             let _ = next.reply.0.peer_callsign.set(Arc::clone(callsign));
         }
@@ -239,6 +263,7 @@ impl PeerSignals {
             dtmf_muted: AtomicBool::new(false),
             reply: PeerReply(Arc::new(ReplyState {
                 phone,
+                webrtc: OnceLock::new(),
                 phone_authenticated: AtomicBool::new(false),
                 phone_media_only,
                 peer_callsign: OnceLock::new(),
@@ -293,7 +318,21 @@ impl PeerSignals {
             .media_isolation
             .get()
             .map_or(0, |gate| gate.epoch());
-        (muted & !1).wrapping_add(isolated & !1) | ((muted | isolated) & 1)
+        let lease = self
+            .reply
+            .0
+            .webrtc
+            .get()
+            .map_or(0, |source| source.receive_epoch.load(Ordering::Acquire));
+        (muted & !1).wrapping_add(isolated & !1).wrapping_add(lease) | ((muted | isolated) & 1)
+    }
+    /// Release the qualified source and invalidate PCM retained under its old
+    /// grant, including during an acknowledged graph redirection.
+    pub fn revoke_webrtc_receive(&self) {
+        if let Some(source) = self.reply.0.webrtc.get() {
+            source.receive_epoch.fetch_add(2, Ordering::AcqRel);
+            self.set_radio_keyed(false);
+        }
     }
     /// Whether the source is operationally muted.
     pub fn rx_muted(&self) -> bool {

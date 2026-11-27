@@ -360,7 +360,8 @@ impl NodeLinkControl {
     }
 
     /// Register the confirmed transport endpoint after attachment or an acknowledged ring redirect.
-    /// Numeric peers must already be admitted. Only the phone attachment owner registers callers for media.
+    /// Numeric peers must already be admitted. Phone and WebRTC media require a
+    /// source token issued by their authorized attachment owner.
     pub fn attach_ingress(
         &mut self,
         identity: PeerIdentity,
@@ -375,7 +376,12 @@ impl NodeLinkControl {
             {
                 return Err(AdmissionError::Denied);
             }
+        } else if let Some(session) = identity.webrtc_session() {
+            if reply.webrtc_session() != Some(session) {
+                return Err(AdmissionError::Denied);
+            }
         } else if reply.phone_source().is_some()
+            || reply.webrtc_session().is_some()
             || !identity.operator_alias().is_some_and(|alias| {
                 self.manager
                     .snapshot()
@@ -393,6 +399,9 @@ impl NodeLinkControl {
                 Err(AdmissionError::Stale)
             };
         }
+        self.ingress
+            .try_reserve(1)
+            .map_err(|_| AdmissionError::Invalid)?;
         self.ingress.push((identity, reply));
         Ok(())
     }

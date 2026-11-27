@@ -410,6 +410,7 @@ fn protocol_label(protocol: ProtocolId) -> &'static str {
         ProtocolId::AllStarLink => "allstarlink",
         ProtocolId::EchoLink => "echolink",
         ProtocolId::Phone => "phone",
+        ProtocolId::WebRtc => "webrtc",
     }
 }
 

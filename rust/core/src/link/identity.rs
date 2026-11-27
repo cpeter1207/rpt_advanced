@@ -11,6 +11,8 @@ pub enum ProtocolId {
     EchoLink = 2,
     /// Private telephone call, without a public node/dial alias.
     Phone = 3,
+    /// WebRTC application session owned by the local controller.
+    WebRtc = 4,
 }
 
 /// An invalid real identity or reserved operator alias.
@@ -37,6 +39,8 @@ pub enum PeerAddress {
     Node(String),
     /// Locally assigned opaque phone call token.
     PhoneCall(super::PhoneCallId),
+    /// An opaque WebRTC session, with no operator dial spelling or topology route.
+    WebRtc(uuid::Uuid),
 }
 impl PeerIdentity {
     /// Parse a real protocol identity, never a prefixed operator dial alias.
@@ -48,8 +52,23 @@ impl PeerIdentity {
             ProtocolId::AllStarLink => PeerAddress::Node(node.to_owned()),
             ProtocolId::EchoLink => PeerAddress::Node(positive_id(node)?.to_string()),
             ProtocolId::Phone => PeerAddress::PhoneCall(node.parse()?),
+            ProtocolId::WebRtc => return Err(IdentityError),
         };
         Ok(Self { protocol, address })
+    }
+    /// Bind a locally issued WebRTC session identity.
+    pub fn webrtc(session: uuid::Uuid) -> Self {
+        Self {
+            protocol: ProtocolId::WebRtc,
+            address: PeerAddress::WebRtc(session),
+        }
+    }
+    /// Opaque local session identity, present only for WebRTC.
+    pub fn webrtc_session(&self) -> Option<uuid::Uuid> {
+        match self.address {
+            PeerAddress::WebRtc(session) => Some(session),
+            _ => None,
+        }
     }
     /// Resolve the reserved EchoLink dial range before any AllStar directory lookup.
     pub fn from_operator(alias: &str) -> Result<Self, IdentityError> {
@@ -93,14 +112,14 @@ impl PeerIdentity {
     pub fn node(&self) -> Option<&str> {
         match &self.address {
             PeerAddress::Node(node) => Some(node),
-            PeerAddress::PhoneCall(_) => None,
+            PeerAddress::PhoneCall(_) | PeerAddress::WebRtc(_) => None,
         }
     }
     /// Opaque call identity, absent for public protocol nodes.
     pub fn call_id(&self) -> Option<super::PhoneCallId> {
         match self.address {
             PeerAddress::PhoneCall(call) => Some(call),
-            PeerAddress::Node(_) => None,
+            PeerAddress::Node(_) | PeerAddress::WebRtc(_) => None,
         }
     }
     /// Canonical copied provider metadata spelling, never an authorization identity.
@@ -108,6 +127,7 @@ impl PeerIdentity {
         match &self.address {
             PeerAddress::Node(node) => node.clone(),
             PeerAddress::PhoneCall(call) => call.to_string(),
+            PeerAddress::WebRtc(session) => session.to_string(),
         }
     }
     /// Canonical dial spelling; all aliases for one EchoLink ID normalize here.

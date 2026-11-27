@@ -36,6 +36,11 @@ impl Mode {
         transmit: false,
         forward: true,
     };
+    /// Deliver station programme to a listener that contributes no source audio.
+    pub const LISTEN: Self = Self {
+        transmit: true,
+        forward: false,
+    };
     /// Receive locally only.
     pub const LOCAL_MONITOR: Self = Self {
         transmit: false,
