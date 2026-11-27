@@ -93,10 +93,12 @@ The Debian 13 arm64 proof built on Rust 1.88.0. `str0m` 0.24.1 with dynamic
 OpenSSL negotiated direct Trickle ICE, DTLS fingerprint verification, both
 DCEP modes and Opus RTP with the actual SSRC, extended timestamp and receiver
 arrival. It mapped the codec-input sample window to the observed RTP epoch.
-The local coturn fixture verified bidirectional datagrams over TURN/UDP,
-TURN/TCP and TURN/TLS with time-limited credentials and normal certificate
-validation. Full browser and RTC-over-relay consent and restart tests remain
-part of qualification.
+The ARM64 coturn fixture verified bidirectional datagrams and connected
+two relay-only RTC endpoints with protected RTP over TURN/UDP, TURN/TCP
+and TURN/TLS. It used time-limited credentials and normal certificate
+validation. Direct ICE on owned UDP sockets and the simulated DCEP and RTP
+fixture passed in the same run. Browser, consent loss and restart fixtures
+remain part of qualification.
 
 The ARM64 mTLS handoff fixture verified two browser identities on one proxy
 certificate, denial of spoofed assertions, and revocation at request claim.

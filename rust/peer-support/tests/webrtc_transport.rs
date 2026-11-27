@@ -275,3 +275,61 @@ fn trickle_dtls_dcep_and_opus_timing() {
     assert_eq!(anchor.rtp_window(12, 5, 96_000..96_960), None);
     assert_eq!(webrtc::native_delta_ns(96_000, 96_960), 20_000_000);
 }
+
+#[test]
+fn driver_exchanges_direct_ice_on_owned_udp_sockets() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        let now = Instant::now();
+        let mut caller = webrtc::transport(now);
+        let mut change = caller.sdp_api();
+        let media = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        let (offer, pending) = change.apply().unwrap();
+        let (remote, answer) = webrtc::accept_offer(now, offer).unwrap();
+        caller.sdp_api().accept_answer(pending, answer).unwrap();
+        let opus = caller.codec_config().params()[0].pt();
+        let socket = || tokio::net::UdpSocket::bind(("127.0.0.1", 0));
+        let mut caller = webrtc::UdpDriver::new(caller, socket().await.unwrap()).unwrap();
+        let mut remote = webrtc::UdpDriver::new(remote, socket().await.unwrap()).unwrap();
+        caller.add_remote_candidate(remote.candidate()).unwrap();
+        remote.add_remote_candidate(caller.candidate()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut connected = [false; 2];
+            while !connected.iter().all(|value| *value) {
+                tokio::select! {
+                    event = caller.next_event() => {
+                        connected[0] |= matches!(event.unwrap(), Event::Connected);
+                    }
+                    event = remote.next_event() => {
+                        connected[1] |= matches!(event.unwrap(), Event::Connected);
+                    }
+                }
+            }
+        })
+        .await
+        .expect("both DTLS sessions connected");
+
+        let frame = RtpWrite::new(opus, SeqNo::from(5), 9_600, Instant::now(), &[0xf8, 0xff, 0xfe][..]);
+        let source = caller.write_rtp(media, frame).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                tokio::select! {
+                    event = caller.next_event() => { event.unwrap(); }
+                    event = remote.next_event() => {
+                        if let Event::RtpPacket(packet) = event.unwrap() {
+                            assert_eq!(packet.header.ssrc, source);
+                            assert_eq!(packet.time, MediaTime::new(9_600, Frequency::FORTY_EIGHT_KHZ));
+                            assert_eq!(packet.payload.as_ref(), &[0xf8, 0xff, 0xfe]);
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("prepared Opus reached the receiver");
+    });
+}

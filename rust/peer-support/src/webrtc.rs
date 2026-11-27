@@ -3,7 +3,11 @@
 use std::time::Instant;
 use str0m::channel::{ChannelConfig, Reliability};
 
+mod driver;
+/// Connection-owned TURN allocation and relayed datagrams.
+pub mod relay;
 mod timing;
+pub use driver::{RelaySocket, UdpDriver};
 pub use timing::{MediaAnchor, ReceiveGate, ReceiveLease, native_delta_ns};
 
 pub use str0m::change::{SdpAnswer, SdpOffer};
