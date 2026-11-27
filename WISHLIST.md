@@ -30,10 +30,11 @@ qualification are distinct from software implementation and passive node health.
 
 ### Accessible React controller console
 
-**Status: Design proposed 2026-11-27.** Review the
+**Status: Implementation started 2026-11-27.** The owner approved the
 [React controller console design](docs/superpowers/specs/2026-11-27-controller-react-management-design.md)
-and [editable Fluent mapping](docs/superpowers/specs/controller-react-fluent-mapping.tsv)
-before implementation.
+and [Fluent mapping](docs/superpowers/specs/controller-react-fluent-mapping.tsv).
+Track browser implementation and remaining release evidence in the
+[implementation checklist](docs/superpowers/plans/2026-11-27-controller-react-management-implementation.md).
 
 - Use one responsive React app for site and port management, status, and
   WebRTC listening and transmission through the existing HAL and media
