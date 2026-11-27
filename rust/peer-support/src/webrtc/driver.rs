@@ -475,6 +475,14 @@ impl UdpDriver {
         })
     }
 
+    /// Exact receive track already associated with this authenticated RTP source.
+    pub fn receive_track(&mut self, source: Ssrc) -> Option<Mid> {
+        self.rtc
+            .direct_api()
+            .stream_rx(&source)
+            .map(|stream| stream.mid())
+    }
+
     /// Queue prepared RTP for a negotiated track and return its actual SSRC.
     /// This only transfers ownership to the transport.
     pub fn write_rtp(&mut self, media: Mid, packet: RtpWrite) -> io::Result<Ssrc> {

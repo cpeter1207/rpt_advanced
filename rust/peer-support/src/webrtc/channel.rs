@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{ops::Range, time::Instant};
 
 const MAX_CONTROL_BYTES: usize = 4096;
-const MAX_TIMING_BYTES: usize = 512;
+pub(super) const MAX_TIMING_BYTES: usize = 512;
 
 /// An unsigned clock coordinate that round-trips through browser JSON.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,7 +70,16 @@ impl Reference {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Control {
+    Ready {
+        binding: String,
+        ice_generation: Coordinate,
+    },
     RequestTalk,
+    RequestObservedTalk,
+    ObservedRtp {
+        reference: Reference,
+        received_at_ns: Coordinate,
+    },
     TalkGranted {
         grant: Coordinate,
         epoch: Coordinate,
@@ -127,7 +136,7 @@ impl Lease {
     }
 }
 
-fn decode<T: serde::de::DeserializeOwned>(input: &[u8], bound: usize) -> Option<T> {
+pub(super) fn decode<T: serde::de::DeserializeOwned>(input: &[u8], bound: usize) -> Option<T> {
     if input.is_empty() || input.len() > bound {
         return None;
     }
@@ -135,7 +144,7 @@ fn decode<T: serde::de::DeserializeOwned>(input: &[u8], bound: usize) -> Option<
     serde_json::from_value(value).ok()
 }
 
-fn encode<T: Serialize>(value: &T, bound: usize) -> Option<Vec<u8>> {
+pub(super) fn encode<T: Serialize>(value: &T, bound: usize) -> Option<Vec<u8>> {
     let bytes = serde_json::to_vec(value).ok()?;
     (bytes.len() <= bound).then_some(bytes)
 }

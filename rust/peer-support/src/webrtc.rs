@@ -1,22 +1,25 @@
 //! WebRTC transport setup and data-channel negotiation for an authorized controller session.
 
 use std::time::Instant;
-use str0m::channel::{ChannelConfig, Reliability};
 
 /// Versioned controller records for the negotiated data channels.
 pub mod channel;
 mod driver;
 /// Released mono Opus codec for the WebRTC media owner.
 pub mod opus;
+/// Sample-timed receiver RF quality observations.
+pub mod quality;
 /// Connection-owned TURN allocation and relayed datagrams.
 pub mod relay;
+/// Relative clock intervals reported by authenticated RTCP sender feedback.
+pub mod reports;
 mod timing;
 pub use driver::{ConnectionState, RelaySocket, UdpDriver};
 pub use timing::{MediaAnchor, ReceiveGate, ReceiveLease, native_delta_ns};
 
 pub use str0m::change::{SdpAnswer, SdpOffer};
-pub use str0m::channel::ChannelId;
-pub use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Pt};
+pub use str0m::channel::{ChannelConfig, ChannelId, Reliability};
+pub use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Pt, SenderFeedback};
 pub use str0m::rtp::{RtpPacket, RtpWrite, SeqNo, Ssrc};
 pub use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError};
 

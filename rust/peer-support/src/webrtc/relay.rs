@@ -29,6 +29,7 @@ pub(super) const SERVER_CHUNK: usize = 16 * 1024 + 256;
 const PEER_DATAGRAM: usize = 4096;
 
 /// How the owner connects to the TURN service. The allocation itself relays UDP.
+#[derive(Clone)]
 pub enum RelayTransport {
     /// One connected datagram socket.
     Udp,
@@ -41,6 +42,19 @@ pub enum RelayTransport {
         /// Trust roots approved for this TURN service.
         roots: RootCertStore,
     },
+}
+
+impl RelayTransport {
+    /// Select the exact TLS server name and an explicitly trusted certificate issuer.
+    pub fn tls(
+        name: String,
+        issuer: rustls::pki_types::CertificateDer<'static>,
+    ) -> Result<Self, RelayError> {
+        let name = ServerName::try_from(name).map_err(|_| RelayError::Configuration)?;
+        let mut roots = RootCertStore::empty();
+        roots.add(issuer).map_err(|_| RelayError::Configuration)?;
+        Ok(Self::Tls { name, roots })
+    }
 }
 
 /// Failure categories carrying no credentials, packet data or addresses.

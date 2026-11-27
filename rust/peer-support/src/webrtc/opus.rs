@@ -120,6 +120,11 @@ pub struct OpusDecode {
 }
 
 impl OpusDecoder {
+    /// Whether this exact checked provider can attest decoded sample origin.
+    pub fn supports_provenance(&self) -> bool {
+        self.provenance
+    }
+
     /// Inspect the incoming duration without advancing the decoder history.
     pub fn inspect(&self, packet: &[u8]) -> Result<PacketInfo, Error> {
         self.decoder.inspect(packet)

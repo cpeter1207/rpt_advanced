@@ -77,24 +77,33 @@ pub fn load_systemd_tls(id: &KeyId) -> Result<Zeroizing<Vec<u8>>, KeyLoadError> 
 }
 
 fn read_tls(directory: Option<&Path>, id: &KeyId) -> Result<Zeroizing<Vec<u8>>, KeyLoadError> {
-    read_protected(
-        directory,
-        &format!("rpt-advanced.tls.{}", id.as_str()),
-        |file| {
-            const LIMIT: usize = 64 * 1024;
-            let size = file
-                .metadata()
-                .map_err(|_| KeyLoadError::Unavailable)?
-                .len();
-            if size == 0 || size > LIMIT as u64 {
-                return Err(KeyLoadError::Invalid);
-            }
-            let mut bytes = Zeroizing::new(vec![0; size as usize]);
-            file.read_exact(&mut bytes)
-                .map_err(|_| KeyLoadError::Unavailable)?;
-            Ok(bytes)
-        },
+    read_blob(directory, &format!("rpt-advanced.tls.{}", id.as_str()))
+}
+
+/// Load the short-lived WebRTC relay credential from the protected service namespace.
+pub fn load_systemd_turn(id: &KeyId) -> Result<Zeroizing<Vec<u8>>, KeyLoadError> {
+    let directory = std::env::var_os("CREDENTIALS_DIRECTORY");
+    read_blob(
+        directory.as_deref().map(Path::new),
+        &format!("rpt-advanced.turn.{}", id.as_str()),
     )
+}
+
+fn read_blob(directory: Option<&Path>, name: &str) -> Result<Zeroizing<Vec<u8>>, KeyLoadError> {
+    read_protected(directory, name, |file| {
+        const LIMIT: usize = 64 * 1024;
+        let size = file
+            .metadata()
+            .map_err(|_| KeyLoadError::Unavailable)?
+            .len();
+        if size == 0 || size > LIMIT as u64 {
+            return Err(KeyLoadError::Invalid);
+        }
+        let mut bytes = Zeroizing::new(vec![0; size as usize]);
+        file.read_exact(&mut bytes)
+            .map_err(|_| KeyLoadError::Unavailable)?;
+        Ok(bytes)
+    })
 }
 
 fn read_protected<T>(
