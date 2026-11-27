@@ -173,9 +173,9 @@ impl StatusPublisher {
         accepted
     }
 
-    /// Replace the pending meter batch, if the client selected meters.
+    /// Replace the pending meter batch, or retire it when the new capture has no readings.
     pub fn meters(&self, meters: Arc<[Arc<Value>]>) {
-        if !self.meters_enabled || meters.is_empty() {
+        if !self.meters_enabled {
             return;
         }
         let retired = {
@@ -184,12 +184,12 @@ impl StatusPublisher {
                 return;
             }
             inbox.meter_serial = inbox.meter_serial.saturating_add(1);
-            let batch = MeterBatch {
+            let batch = (!meters.is_empty()).then_some(MeterBatch {
                 records: meters,
                 serial: inbox.meter_serial,
                 offset: 0,
-            };
-            let retired = inbox.meters.replace(batch);
+            });
+            let retired = std::mem::replace(&mut inbox.meters, batch);
             if retired.is_some() {
                 inbox.superseded_meters = inbox.superseded_meters.saturating_add(1);
             }
@@ -636,6 +636,25 @@ pub(super) async fn run(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn empty_batch_retires_pending_measurements() {
+        let (publisher, mut stream) = StatusStream::new("boot".into(), Vec::new(), Some(20));
+        publisher.meters(Arc::from([Arc::new(json!({"signal":"old"}))]));
+        let Outgoing::Meters(old, _) = stream.next(false).await else {
+            panic!("expected a pending measurement");
+        };
+        publisher.meters(Arc::from([]));
+        assert!(!stream.admit_meter_chunk(&old, 1));
+
+        publisher.meters(Arc::from([Arc::new(json!({"signal":"current"}))]));
+        let Outgoing::Meters(current, superseded) = stream.next(false).await else {
+            panic!("expected current measurement");
+        };
+        assert_eq!(current.records[0]["signal"], "current");
+        assert_eq!(superseded, 1);
+        assert!(stream.admit_meter_chunk(&current, 1));
+    }
 
     #[tokio::test]
     async fn state_and_invalidation_can_preempt_the_next_meter_chunk() {
