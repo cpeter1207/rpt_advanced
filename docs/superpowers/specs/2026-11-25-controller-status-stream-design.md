@@ -126,6 +126,25 @@ One `meters` item can be embedded in a snapshot or supplied in `meters.data`. It
 
 In a meter item `signal` identifies the channel. Use `signal_state: "silence"` to distinguish an exactly silent signal. For a port-wide `local_rx` chain, the owning port in the enclosing record is sufficient. For per-link or per-call chains include the exact entity ID and generation in the record. Forward-compatible clients ignore new members and undisplayed event kinds. An unsupported subprotocol must fail negotiation. Outstanding reads and subscriptions require the same visibility for private call details, message text/identifiers and diagnostics. Exclude audio bytes, DTMF digits, caller telephone numbers, private prompt content, credentials, auth proofs, and telemetry text that would expose protected input. Preserve approved public node/callsign and mailbox policy from existing authorized views.
 
+## Media time and WebRTC playout
+
+A meter can include `audio_position` with its `source_generation`, exclusive
+`end_sample` and native `rate_hz`. The generation and sample position are
+decimal strings. The sample position addresses the measured owner's actual
+signal. It is absent when no source samples are available. Observation wall
+time and service monotonic time remain separate from the measured sample
+position. A 100 ms or 400 ms level describes the window ending at that
+position. It does not describe when a status frame was sent.
+
+A future WebRTC peer publishes its authorized media binding and sample-to-RTP
+anchors over the connection's own control channel. The matching status graph
+can expose that binding and its clock/graph epochs to an authorized viewer.
+An app can correlate the codec-input meter with received RTP playout. Upstream
+meter correlation depends on a known mapping through processing, resampling
+and presentation delay. Late or expired readings remain stale on the app.
+Sending audio and key signals never requires opening the status stream.
+[Shared adapters and WebRTC design](2026-11-26-connection-adapters-and-webrtc-design.md)
+
 ## Realtime boundaries and qualification
 
 Publish observed edges from the existing serialized owner or a bounded, non-blocking callback handoff. Reuse native meter observations and add shared PCM tap accumulators to the provider that owns each stage. Compute window aggregates with bounded state proportional to enabled graph taps and channel count. Keep formatting, socket writes, resource polling and large calculations off the audio callback. Prepare tap storage with the graph and compare measured CPU, memory and callback timing with metering disabled and enabled. Fast meter publication is shared across consumers. Additional subscribers do not add per-frame audio work. Use the same typed observation store for all projections, including the snapshot CLI path.
