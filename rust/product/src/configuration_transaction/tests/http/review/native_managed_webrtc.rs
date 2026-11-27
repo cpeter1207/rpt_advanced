@@ -75,7 +75,9 @@ pub(in super::super) fn run(scenario: &Scenario<'_>, transceive: bool) {
         .build()
         .unwrap();
     let session = if transceive {
-        executor.block_on(exercise_transceive(&client, collection, &carrier, &ptt))
+        executor.block_on(exercise_transceive(
+            &client, collection, &peers, &carrier, &ptt,
+        ))
     } else {
         executor.block_on(receive_only(
             &client, station, collection, &peers, &carrier, &ptt,
@@ -370,7 +372,11 @@ async fn receive_only(
         let _ = tokio::time::timeout(Duration::from_millis(20), driver.next_event()).await;
     }
 
-    let want_talk = Control::RequestTalk.encode().unwrap();
+    let want_talk = Control::RequestTalk {
+        ice_generation: Coordinate(1),
+    }
+    .encode()
+    .unwrap();
     assert!(
         driver
             .write_channel(ChannelKind::Control, false, &want_talk, 1024, 2048)
@@ -396,35 +402,124 @@ async fn receive_only(
     let opus_pt = browser_peer.payload;
     let mut pcm = [0.0; RECEIVE_FRAMES];
     let mut spans = [DecodeSpan::default(); 120];
-    tokio::time::timeout(Duration::from_secs(6), async {
-        loop {
-            match driver.next_event().await.unwrap() {
-                Event::RtpPacket(packet) => {
-                    assert_eq!(packet.header.payload_type, opus_pt);
-                    let result = decode
-                        .decode(packet.payload.as_ref(), &mut pcm, &mut spans)
-                        .unwrap();
-                    assert_eq!(result.frames, PACKET_FRAMES as usize);
-                    if marker(&pcm[..result.frames], 1000.0, 48_000.0) {
-                        break;
-                    }
-                }
-                Event::Closed => panic!("media ended without the RF marker"),
-                _ => {}
+    let snapshot = format!("/api/v1/status/snapshot/?port={station}&topics=meters");
+    let meter = format!(
+        "link:webrtc:{}:egress:opus_encoder_input:mono",
+        browser_peer.binding
+    );
+    let mut anchor: Option<Reference> = None;
+    let mut rtp_end = None;
+    let mut heard_marker = false;
+    let mut mapped_end = None;
+    let mut next_snapshot = Instant::now();
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < deadline {
+        if mapped_end.is_none() && anchor.is_some() && Instant::now() >= next_snapshot {
+            next_snapshot = Instant::now() + Duration::from_millis(60);
+            let reply = client.get(&snapshot);
+            assert_eq!(reply.code, 200);
+            let readings = &reply.body["status"]["ports"][station]["meters"];
+            let rf = &readings["local_rx:station_input:mono"];
+            let correlation = &readings[&meter]["media_correlation"];
+            // The exact anchor may advance ahead of status or vice versa.
+            if rf["quality"] == "valid"
+                && rf["peak_dbfs"].is_number()
+                && rf["rms_dbfs"].is_number()
+                && rf["lufs"].is_number()
+                && correlation["quality"] == "valid"
+                && let (Some(current), Ok(measured)) = (
+                    &anchor,
+                    serde_json::from_value::<Reference>(correlation["anchor"].clone()),
+                )
+                && *current == measured
+            {
+                let window = &correlation["window"];
+                let coordinate =
+                    |field: &str| window[field].as_str().unwrap().parse::<u64>().unwrap();
+                let first = coordinate("first_sample");
+                let end = coordinate("end_sample");
+                let first_rtp = coordinate("first_rtp_timestamp");
+                let end_rtp = coordinate("end_rtp_timestamp");
+                assert!(end > first);
+                assert_eq!(
+                    measured.positions().rtp_window(
+                        measured.source_generation.0,
+                        measured.epoch.0,
+                        first..end,
+                    ),
+                    Some(first_rtp..end_rtp),
+                );
+                mapped_end = Some(end_rtp);
             }
         }
-    })
-    .await
-    .expect("simulated 1 kHz RF reached the browser over Opus RTP");
+        if heard_marker
+            && mapped_end
+                .zip(rtp_end)
+                .is_some_and(|(meter, rtp)| meter <= rtp)
+        {
+            break;
+        }
+        let Ok(event) = tokio::time::timeout(Duration::from_millis(20), driver.next_event()).await
+        else {
+            continue;
+        };
+        match event.unwrap() {
+            Event::ChannelData(data) => {
+                if let Some(Control::Anchor { reference }) = Control::decode(&data.data) {
+                    assert_eq!(reference.binding, browser_peer.binding);
+                    if anchor.as_ref() != Some(&reference) {
+                        mapped_end = None;
+                        rtp_end = None;
+                        anchor = Some(reference);
+                    }
+                }
+            }
+            Event::RtpPacket(packet) => {
+                assert_eq!(packet.header.payload_type, opus_pt);
+                let result = decode
+                    .decode(&packet.payload, &mut pcm, &mut spans)
+                    .unwrap();
+                assert_eq!(result.frames, PACKET_FRAMES as usize);
+                if anchor
+                    .as_ref()
+                    .is_some_and(|a| a.ssrc == *packet.header.ssrc)
+                {
+                    let end = packet.time.numer() + u64::from(PACKET_FRAMES);
+                    rtp_end = Some(rtp_end.map_or(end, |latest: u64| latest.max(end)));
+                }
+                heard_marker |= marker(&pcm[..result.frames], 1000.0, 48_000.0);
+            }
+            Event::Closed => panic!("media ended before the RF marker and meter"),
+            _ => {}
+        }
+    }
+    assert!(
+        heard_marker,
+        "simulated 1 kHz RF reached the browser over Opus RTP"
+    );
+    assert!(
+        mapped_end
+            .zip(rtp_end)
+            .is_some_and(|(meter, rtp)| meter <= rtp),
+        "receiver RTP and authenticated HAL meter did not share the in-band anchor",
+    );
 
-    let meters = format!("/api/v1/status/snapshot/?port={station}&topics=meters");
-    assert!(live_status::wait_for(client, &meters, |doc| {
-        let meter = &doc["status"]["ports"][station]["meters"]["local_rx:station_input:mono"];
-        meter["quality"] == "valid"
-            && meter["peak_dbfs"].is_number()
-            && meter["rms_dbfs"].is_number()
-            && meter["lufs"].is_number()
-    }));
+    let status_root_url = href(&client.get("/api/v1/").body, "rpt:status").to_owned();
+    let status_root = client.get(&status_root_url);
+    let stream = href(&status_root.body, "rpt:status-stream");
+    let chain = format!("link:webrtc:{}:egress", browser_peer.binding);
+    let meter = first_status_stream_frame(
+        client,
+        &format!("{stream}?port={station}&topics=meters"),
+        Some(&chain),
+    );
+    let correlation = &meter["media_correlation"];
+    assert_eq!(correlation["binding"], browser_peer.binding);
+    assert_eq!(correlation["track"], "audio");
+    assert_eq!(
+        serde_json::from_value::<Reference>(correlation["anchor"].clone()).unwrap(),
+        anchor.unwrap(),
+    );
 
     fs::remove_file(carrier).unwrap();
     browser_peer.close(client)
@@ -539,12 +634,23 @@ async fn service(
 async fn exercise_transceive(
     client: &Client<'_>,
     collection: &str,
+    peers: &str,
     carrier: &Path,
     ptt: &Path,
 ) -> String {
     let mut listener = connect(client, collection, Direction::RecvOnly).await;
     let mut talker = connect(client, collection, Direction::SendRecv).await;
     assert_ne!(talker.binding, listener.binding);
+    let observed_key = |binding: &str| {
+        let reply = client.get(peers);
+        assert_eq!(reply.code, 200);
+        reply.body["_embedded"]["item"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|peer| peer["media_binding"] == binding)
+            .and_then(|peer| peer["transmit_keyed"].as_bool())
+    };
     let opus = OpusProvider::load().unwrap();
     let mut voice = TalkMedia::new(&opus);
     let mut listen_pcm = ListenerAudio::new(&opus);
@@ -557,7 +663,11 @@ async fn exercise_transceive(
     let ssrc = voice.send(&mut talker);
     talker.send(
         ChannelKind::Control,
-        &Control::RequestTalk.encode().unwrap(),
+        &Control::RequestTalk {
+            ice_generation: Coordinate(1),
+        }
+        .encode()
+        .unwrap(),
     );
     let mut granted = None;
     service(
@@ -677,6 +787,8 @@ async fn exercise_transceive(
         heard_monitor,
         "an independently attached browser heard real permitted talker RTP"
     );
+    assert_eq!(observed_key(&talker.binding), Some(true));
+    assert_eq!(observed_key(&listener.binding), None);
     let active = fs::read(ptt).unwrap();
     assert!(
         active[idle_trace.len()..].contains(&b'1'),
@@ -715,6 +827,7 @@ async fn exercise_transceive(
         "local lease expiry must release PTT"
     );
     assert_eq!(expired.get(idle_trace.len()..), Some(&b"10"[..]));
+    assert_eq!(observed_key(&talker.binding), Some(false));
 
     // A later sequence for a retired grant still cannot revive it.
     for _ in 0..7 {

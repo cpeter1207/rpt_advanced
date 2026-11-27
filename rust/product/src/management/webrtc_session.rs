@@ -89,6 +89,9 @@ pub(crate) trait Transport: Send {
         until: Instant,
     ) -> Result<(), Fault>;
 
+    /// Replace ICE credentials on the same authorized session and revoke its old media.
+    fn restart(&mut self, previous: WorkKey, work: OfferWork, until: Instant) -> Result<(), Fault>;
+
     fn candidate(&mut self, work: CandidateWork) -> Result<(), Fault>;
 
     fn renew(&mut self, key: WorkKey, until: Instant) -> Result<(), Fault>;

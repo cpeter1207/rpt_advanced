@@ -14,7 +14,7 @@ pub mod relay;
 /// Relative clock intervals reported by authenticated RTCP sender feedback.
 pub mod reports;
 mod timing;
-pub use driver::{ConnectionState, RelaySocket, UdpDriver};
+pub use driver::{ConnectionState, IceRestartBasis, RelaySocket, UdpDriver};
 pub use timing::{MediaAnchor, ReceiveGate, ReceiveLease, native_delta_ns};
 
 pub use str0m::change::{SdpAnswer, SdpOffer};

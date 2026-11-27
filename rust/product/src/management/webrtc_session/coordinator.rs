@@ -237,10 +237,14 @@ impl Signaling {
             })?;
         if let Some(sdp) = sdp {
             let next = self.book.restart(access, key, approval, sdp)?;
-            self.transport.close(key);
-            let key = next.key;
-            self.offer(next, revision, station, approval.until)?;
-            Ok(key)
+            let next_key = next.key;
+            self.transport
+                .restart(key, next, approval.until)
+                .inspect_err(|_| {
+                    self.transport.close(key);
+                    let _ = self.book.revoke(next_key);
+                })?;
+            Ok(next_key)
         } else {
             self.book.renew(access, key, approval)?;
             self.transport.renew(key, approval.until).inspect_err(|_| {

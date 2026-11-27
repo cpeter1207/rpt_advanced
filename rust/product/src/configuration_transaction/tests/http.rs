@@ -586,13 +586,18 @@ fn cert(dir: &Path, name: &str) -> CertificateDer<'static> {
     CertificateDer::from(result.stdout)
 }
 
-fn first_status_stream_page(client: &Client<'_>, target: &str) -> Value {
+fn first_status_stream_frame(
+    client: &Client<'_>,
+    target: &str,
+    meter_chain: Option<&str>,
+) -> Value {
     let output = Command::new("python3")
         .arg("-c")
         .arg(include_str!("status_websocket.py"))
         .arg(client.pki)
         .arg(client.port.to_string())
         .arg(target)
+        .args(meter_chain)
         .output()
         .unwrap();
     assert!(
@@ -885,7 +890,7 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         assert!(site_snapshot.body["status"]["site"]["identity"].is_object());
         assert!(site_snapshot.body["status"].get("ports").is_none());
         assert_eq!(site_snapshot.body["complete"], true);
-        let streamed = first_status_stream_page(&client, stream_link);
+        let streamed = first_status_stream_frame(&client, stream_link, None);
         assert_eq!(streamed["type"], "snapshot");
         assert_eq!(streamed["seq"], "1");
         assert_eq!(streamed["boot_id"], site_snapshot.body["boot_id"]);
@@ -926,7 +931,7 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
             thread::sleep(Duration::from_millis(25));
         };
         assert_eq!(recovered.body["status"], site_snapshot.body["status"]);
-        let reconnected = first_status_stream_page(&client, stream_link);
+        let reconnected = first_status_stream_frame(&client, stream_link, None);
         assert_eq!(
             reconnected["data"]["state_cursor"],
             recovered.body["state_cursor"]
@@ -1044,7 +1049,7 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
             assert!(snapshot.body["status"]["ports"][port_id]["identity"].is_object());
             assert_eq!(snapshot.body["status"].get("site").is_some(), site_expected);
             let stream_query = format!("{stream_link}{query}&meter_hz=2");
-            let page = first_status_stream_page(&client, &stream_query);
+            let page = first_status_stream_frame(&client, &stream_query, None);
             assert_eq!(page["data"]["selection"], snapshot.body["selection"]);
             assert_eq!(page["data"]["status"], snapshot.body["status"]);
         }

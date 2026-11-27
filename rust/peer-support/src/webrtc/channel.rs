@@ -74,8 +74,12 @@ pub enum Control {
         binding: String,
         ice_generation: Coordinate,
     },
-    RequestTalk,
-    RequestObservedTalk,
+    RequestTalk {
+        ice_generation: Coordinate,
+    },
+    RequestObservedTalk {
+        ice_generation: Coordinate,
+    },
     ObservedRtp {
         reference: Reference,
         received_at_ns: Coordinate,
@@ -184,8 +188,11 @@ mod tests {
             .is_none()
         );
 
-        let request = Control::RequestTalk.encode().unwrap();
-        assert_eq!(Control::decode(&request), Some(Control::RequestTalk));
+        let request = Control::RequestTalk {
+            ice_generation: Coordinate(2),
+        };
+        assert_eq!(Control::decode(&request.encode().unwrap()), Some(request));
+        assert!(Control::decode(br#"{"type":"request_talk"}"#).is_none());
         assert!(Control::decode(br#"{"type":"request_talk","type":"request_talk"}"#).is_none());
         assert!(Control::decode(&[b' '; MAX_CONTROL_BYTES + 1]).is_none());
     }

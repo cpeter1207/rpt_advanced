@@ -9,7 +9,9 @@ import sys
 from pathlib import Path
 
 
-def first_status_page(keys: Path, port: int, target: str) -> dict:
+def first_status_frame(
+    keys: Path, port: int, target: str, meter_chain: str | None = None
+) -> dict:
     tls = ssl.create_default_context(cafile=keys / "backend.pem")
     tls.load_cert_chain(keys / "cli.pem", keys / "cli.key")
     with (
@@ -34,15 +36,33 @@ def first_status_page(keys: Path, port: int, target: str) -> dict:
             for _ in range(32):
                 if source.readline(4096) == b"\r\n":
                     break
-            first, length = source.read(2)
-            assert first == 0x81 and length < 128
-            if length in (126, 127):
-                length = int.from_bytes(source.read(2 if length == 126 else 8), "big")
-            assert 0 < length <= 4 * 1024 * 1024
-            return json.loads(source.read(length))
+            for sequence in range(1, 101):
+                first, length = source.read(2)
+                assert first == 0x81 and length < 128
+                if length in (126, 127):
+                    length = int.from_bytes(
+                        source.read(2 if length == 126 else 8), "big"
+                    )
+                assert 0 < length <= 4 * 1024 * 1024
+                frame = json.loads(source.read(length))
+                assert frame["seq"] == str(sequence)
+                if meter_chain is None:
+                    return frame
+                if frame["type"] != "meters":
+                    continue
+                for meter in frame["data"]:
+                    correlation = meter.get("media_correlation", {})
+                    if (
+                        meter["chain_id"] == meter_chain
+                        and correlation.get("quality") == "valid"
+                    ):
+                        return meter
+    raise AssertionError("no current correlated meter in the fixture stream")
 
 
 if __name__ == "__main__":
     print(
-        json.dumps(first_status_page(Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]))
+        json.dumps(
+            first_status_frame(Path(sys.argv[1]), int(sys.argv[2]), *sys.argv[3:])
+        )
     )

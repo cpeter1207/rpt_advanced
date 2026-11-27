@@ -20,6 +20,12 @@ use tokio::net::{TcpStream, UdpSocket};
 use super::relay::{Relay, RelayDatagram, RelayError, RelayOutput, RelaySend, RelayTransport};
 use super::{ChannelKind, channel_kind};
 
+mod restart;
+pub use restart::IceRestartBasis;
+#[cfg(test)]
+#[path = "driver/restart_tests.rs"]
+mod restart_tests;
+
 const TURN_WRITE_TIME: Duration = Duration::from_secs(2);
 
 /// One connected socket for a TURN client. A TCP socket carries plain or TLS
@@ -269,7 +275,7 @@ impl ChannelKind {
     }
 }
 
-/// One RTC generation driven serially by its direct socket, its TURN socket,
+/// One RTC association driven serially by its direct socket, its TURN socket,
 /// or both. The station owner authorizes and consumes the resulting events.
 pub struct UdpDriver {
     rtc: Rtc,
@@ -277,6 +283,7 @@ pub struct UdpDriver {
     relay: Option<RelayLeg>,
     retired_relay: Option<(SocketAddr, String)>,
     connection: ConnectionState,
+    restart_remote_ufrag: Option<[u8; 32]>,
     channels: [Option<ChannelId>; 2],
 }
 
@@ -301,6 +308,7 @@ impl UdpDriver {
             relay: None,
             retired_relay: None,
             connection: ConnectionState::INITIAL,
+            restart_remote_ufrag: None,
             channels: [None; 2],
         })
     }
@@ -320,6 +328,7 @@ impl UdpDriver {
             relay: None,
             retired_relay: None,
             connection: ConnectionState::INITIAL,
+            restart_remote_ufrag: None,
             channels: [None; 2],
         };
         driver
@@ -376,9 +385,13 @@ impl UdpDriver {
 
     /// Apply already-authorized Trickle ICE input to the active transport.
     pub fn add_remote_candidate(&mut self, text: &str) -> io::Result<()> {
-        self.rtc.add_remote_candidate(
-            Candidate::from_sdp_string(text).map_err(|_| invalid_transport())?,
-        );
+        let candidate = Candidate::from_sdp_string(text).map_err(|_| invalid_transport())?;
+        if let (Some(expected), Some(ufrag)) = (self.restart_remote_ufrag, candidate.ufrag())
+            && crate::working_files::immutable::artifact_sha256(ufrag.as_bytes()) != expected
+        {
+            return Err(invalid_transport());
+        }
+        self.rtc.add_remote_candidate(candidate);
         Ok(())
     }
 

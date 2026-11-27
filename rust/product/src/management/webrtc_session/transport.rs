@@ -6,6 +6,7 @@ use super::{
 use crate::{
     host::webrtc::{MediaRoutes, PortAdmission},
     lifecycle::{Engine, MediaAdmission},
+    link::session::status::ReceiveStatus,
     management::live::WebRtcObservation,
 };
 use rptadv_jitter_client::{JITTER_LIBRARY_NAME, JitterProvider};
@@ -13,8 +14,8 @@ use rptadv_peer_support::{
     https::BrowserPrincipal,
     sealed_records::SecretBytes,
     webrtc::{
-        self, ChannelId, ChannelKind, Event, MediaKind, Mid, Pt, SdpOffer, UdpDriver,
-        opus::OpusProvider,
+        self, ChannelId, ChannelKind, Event, IceRestartBasis, MediaKind, Mid, Pt, SdpOffer,
+        UdpDriver, opus::OpusProvider,
     },
 };
 use std::{
@@ -23,7 +24,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -47,20 +48,35 @@ const DATA_MESSAGES_PER_SECOND: [u16; 2] = [128, 256];
 
 const READY: u8 = 6;
 const SETUP_STAGES: [&str; READY as usize] = [
-    "socket bind", "candidate exchange", "ICE and DTLS", "DCEP negotiation",
-    "station admission", "station audio attachment",
+    "socket bind",
+    "candidate exchange",
+    "ICE and DTLS",
+    "DCEP negotiation",
+    "station admission",
+    "station audio attachment",
 ];
+
+enum Command {
+    Candidate(CandidateWork),
+    Restart {
+        key: WorkKey,
+        offer: SdpOffer,
+        media_closed: Arc<AtomicBool>,
+    },
+}
 
 struct Running {
     key: WorkKey,
     closed: Arc<AtomicBool>,
+    media_closed: Arc<AtomicBool>,
     authorization: watch::Sender<Instant>,
-    candidates: mpsc::Sender<CandidateWork>,
+    commands: mpsc::Sender<Command>,
     receipts: mpsc::Receiver<Receipt>,
     worker: JoinHandle<()>,
 }
 impl Drop for Running {
     fn drop(&mut self) {
+        self.media_closed.store(true, Ordering::Release);
         self.closed.store(true, Ordering::Release);
     }
 }
@@ -158,6 +174,7 @@ impl Transport for Sessions {
             .ok_or(Fault::Unavailable)?;
         let text = std::str::from_utf8(work.sdp.expose_bytes()).map_err(|_| Fault::Invalid)?;
         let offer = SdpOffer::from_sdp_string(text).map_err(|_| Fault::Invalid)?;
+        let restart_basis = IceRestartBasis::from_offer(&offer).map_err(|_| Fault::Invalid)?;
         let (rtc, answer) =
             webrtc::accept_offer(Instant::now(), offer).map_err(|_| Fault::Invalid)?;
         let answer = SecretBytes::new(answer.to_sdp_string().into_bytes());
@@ -168,6 +185,7 @@ impl Transport for Sessions {
             .try_reserve(1)
             .map_err(|_| Fault::Unavailable)?;
         let closed = Arc::new(AtomicBool::new(false));
+        let media_closed = Arc::new(AtomicBool::new(false));
         let (authorization, grant) = watch::channel(until);
         let binding = work.binding;
         let progress = Arc::new(AtomicU8::new(0));
@@ -183,7 +201,7 @@ impl Transport for Sessions {
             sender_rate: None,
             receiver_quality: Vec::new(),
         }));
-        let (candidates, incoming) = mpsc::channel(16);
+        let (commands, incoming) = mpsc::channel(16);
         let (send_receipts, receipts) = mpsc::channel(16);
         let start = Start {
             key,
@@ -201,10 +219,12 @@ impl Transport for Sessions {
             binding,
             epochs: work.epochs,
             observation,
-            candidates: incoming,
+            commands: incoming,
             receipts: send_receipts,
             closed: Arc::clone(&closed),
+            media_closed: Arc::clone(&media_closed),
             progress: Arc::clone(&progress),
+            restart_basis,
         };
         let station = self.station.clone();
         let canceled = Arc::clone(&closed);
@@ -223,8 +243,9 @@ impl Transport for Sessions {
             Running {
                 key,
                 closed,
+                media_closed,
                 authorization,
-                candidates,
+                commands,
                 receipts,
                 worker,
             },
@@ -232,10 +253,32 @@ impl Transport for Sessions {
         Ok(())
     }
 
+    fn restart(&mut self, previous: WorkKey, work: OfferWork, until: Instant) -> Result<(), Fault> {
+        let text = std::str::from_utf8(work.sdp.expose_bytes()).map_err(|_| Fault::Invalid)?;
+        let offer = SdpOffer::from_sdp_string(text).map_err(|_| Fault::Invalid)?;
+        let running = self.current(previous)?;
+        let command = running
+            .commands
+            .try_reserve()
+            .map_err(|_| Fault::Unavailable)?;
+        running.authorization.send(until).map_err(|_| Fault::Gone)?;
+        let media_closed = Arc::new(AtomicBool::new(false));
+        // Retire the RF gate before the actor can process either the offer or more RTP.
+        running.media_closed.store(true, Ordering::Release);
+        running.media_closed = Arc::clone(&media_closed);
+        running.key = work.key;
+        command.send(Command::Restart {
+            key: work.key,
+            offer,
+            media_closed,
+        });
+        Ok(())
+    }
+
     fn candidate(&mut self, work: CandidateWork) -> Result<(), Fault> {
         self.current(work.key.offer)?
-            .candidates
-            .try_send(work)
+            .commands
+            .try_send(Command::Candidate(work))
             .map_err(|_| Fault::Unavailable)
     }
 
@@ -291,10 +334,12 @@ struct Start {
     binding: Id,
     epochs: Arc<AtomicU64>,
     observation: Arc<Mutex<WebRtcObservation>>,
-    candidates: mpsc::Receiver<CandidateWork>,
+    commands: mpsc::Receiver<Command>,
     receipts: mpsc::Sender<Receipt>,
     closed: Arc<AtomicBool>,
+    media_closed: Arc<AtomicBool>,
     progress: Arc<AtomicU8>,
+    restart_basis: IceRestartBasis,
 }
 
 fn report(outbox: &mpsc::Sender<Receipt>, receipt: Receipt) -> Result<(), ()> {
@@ -309,42 +354,23 @@ async fn serve(session: Start, rtc: webrtc::Rtc, answer: SecretBytes) -> Result<
     let mut driver = UdpDriver::new(rtc, socket).map_err(|_| ())?;
     session.progress.store(1, Ordering::Release);
     report(&session.receipts, Receipt::Answer { key, sdp: answer })?;
-    report(
-        &session.receipts,
-        Receipt::LocalCandidate {
-            key,
-            sequence: 0,
-            contents: Some(SecretBytes::new(driver.candidate().as_bytes().to_vec())),
-        },
-    )?;
-    let mut next_sequence = 1;
-    let mut relay_expiry = None;
-    if let Some(turn) = &session.turn
+    report_candidate(&session.receipts, key, 0, Some(driver.candidate()))?;
+    let relay_expiry = if let Some(turn) = &session.turn
         && turn
             .gather(&mut driver, session.listen_address)
             .await
             .is_ok()
-        && let Some(candidate) = driver.relay_candidate()
     {
-        report(
-            &session.receipts,
-            Receipt::LocalCandidate {
-                key,
-                sequence: next_sequence,
-                contents: Some(SecretBytes::new(candidate.as_bytes().to_vec())),
-            },
-        )?;
-        next_sequence += 1;
-        relay_expiry = Some(turn.expires());
+        Some(turn.expires())
+    } else {
+        None
+    };
+    let mut sequence = 1;
+    if let Some(relay) = driver.relay_candidate() {
+        report_candidate(&session.receipts, key, sequence, Some(relay))?;
+        sequence += 1;
     }
-    report(
-        &session.receipts,
-        Receipt::LocalCandidate {
-            key,
-            sequence: next_sequence,
-            contents: None,
-        },
-    )?;
+    report_candidate(&session.receipts, key, sequence, None)?;
     session.progress.store(2, Ordering::Release);
     let outcome = media(session, &mut driver, relay_expiry).await;
     let _ = driver
@@ -353,12 +379,53 @@ async fn serve(session: Start, rtc: webrtc::Rtc, answer: SecretBytes) -> Result<
     outcome
 }
 
+fn report_candidates(
+    outbox: &mpsc::Sender<Receipt>,
+    key: WorkKey,
+    driver: &UdpDriver,
+) -> Result<(), ()> {
+    let candidate = driver.candidate();
+    for (sequence, candidate) in std::iter::once(Some(candidate))
+        .chain(driver.relay_candidate().map(Some))
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
+        report_candidate(outbox, key, sequence, candidate)?;
+    }
+    Ok(())
+}
+
+fn report_candidate(
+    outbox: &mpsc::Sender<Receipt>,
+    key: WorkKey,
+    sequence: usize,
+    candidate: Option<&str>,
+) -> Result<(), ()> {
+    report(
+        outbox,
+        Receipt::LocalCandidate {
+            key,
+            sequence,
+            contents: candidate.map(|text| SecretBytes::new(text.as_bytes().to_vec())),
+        },
+    )
+}
+
+fn ready(binding: Id, key: WorkKey) -> Result<Vec<u8>, ()> {
+    webrtc::channel::Control::Ready {
+        binding: binding.to_string(),
+        ice_generation: webrtc::channel::Coordinate(key.ice_generation),
+    }
+    .encode()
+    .ok_or(())
+}
+
 async fn media(
     mut session: Start,
     driver: &mut UdpDriver,
     relay_expiry: Option<Instant>,
 ) -> Result<(), ()> {
-    let key = session.key;
+    let mut key = session.key;
     let mut channels = [None::<ChannelId>; 2];
     let mut message_window = Instant::now();
     let mut received_messages = [0; 2];
@@ -371,26 +438,25 @@ async fn media(
         Arc::clone(&session.epochs),
         Arc::clone(&session.observation),
     )?;
-    let ready = webrtc::channel::Control::Ready {
-        binding: session.binding.to_string(),
-        ice_generation: webrtc::channel::Coordinate(key.ice_generation),
-    }
-    .encode()
-    .ok_or(())?;
-    let mut input = if session.direction == Direction::Transceive {
+    let mut ready_frame = ready(session.binding, key)?;
+    let mut keys =
+        (session.direction == Direction::Transceive).then(|| Arc::new(ReceiveStatus::unkeyed()));
+    let mut input = if let Some(keys) = &keys {
         Some(receive::Receiver::new(
             &session.opus,
             session.jitter.as_ref().ok_or(())?,
             key,
             session.binding,
             Arc::clone(&session.observation),
+            Arc::clone(keys),
         )?)
     } else {
         None
     };
     let mut endpoint = None::<crate::host::webrtc::Endpoint>;
     let mut announced = false;
-    let start_deadline = Instant::now() + SETUP_LIFETIME;
+    let mut start_deadline = Instant::now() + SETUP_LIFETIME;
+    let mut ready_at = None;
     let mut pace = interval(Duration::from_millis(10));
     pace.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -405,7 +471,9 @@ async fn media(
             || session.authorization.has_changed().is_err()
             || session.closed.load(Ordering::Acquire)
             || !session.permit.current()
-            || (routes.is_some() && !driver.connection_state().secure_connected())
+            || (routes.is_some()
+                && !session.media_closed.load(Ordering::Acquire)
+                && !driver.connection_state().secure_connected())
             || session.inhibit.load(Ordering::Acquire)
         {
             return Ok(());
@@ -422,15 +490,51 @@ async fn media(
                 }
             }
             authorized = session.authorization.changed() => authorized.map_err(|_| ())?,
-            candidate = session.candidates.recv() => {
-                let candidate = candidate.ok_or(())?;
-                if let Some(contents) = candidate.contents {
-                    let text = std::str::from_utf8(contents.expose_bytes()).map_err(|_| ())?;
-                    driver.add_remote_candidate(text).map_err(|_| ())?;
+            command = session.commands.recv() => match command.ok_or(())? {
+                Command::Candidate(candidate) => {
+                    if candidate.key.offer == key && !session.media_closed.load(Ordering::Acquire) {
+                        if let Some(contents) = candidate.contents {
+                            let text = std::str::from_utf8(contents.expose_bytes()).map_err(|_| ())?;
+                            driver.add_remote_candidate(text).map_err(|_| ())?;
+                        }
+                        report(&session.receipts, Receipt::CandidateAccepted(candidate.key))?;
+                    }
                 }
-                report(&session.receipts, Receipt::CandidateAccepted(candidate.key))?;
-            }
-            _ = pace.tick() => {
+                Command::Restart { key: next, offer, media_closed } => {
+                    // The peer association stays alive. Replace only its media grant,
+                    // graph, sample eligibility, and generation-scoped signaling.
+                    routes = None;
+                    endpoint = None;
+                    playout.discontinue()?;
+                    if let Some(input) = &mut input {
+                        let next_keys = Arc::new(ReceiveStatus::unkeyed());
+                        input.restart(next, Arc::clone(&next_keys))?;
+                        keys = Some(next_keys);
+                    }
+                    {
+                        let mut view = session.observation.lock().unwrap_or_else(|error| error.into_inner());
+                        view.connection_generation = next.ice_generation;
+                        view.graph_generation = 0;
+                        view.anchor = None;
+                        view.codec_input = None;
+                        view.decoded = None;
+                        view.ingress = None;
+                    }
+                    session.progress.store(2, Ordering::Release);
+                    let answer = driver.accept_restart_offer(&mut session.restart_basis, offer).map_err(|_| ())?;
+                    key = next;
+                    session.media_closed = media_closed;
+                    start_deadline = Instant::now() + SETUP_LIFETIME;
+                    ready_frame = ready(session.binding, key)?;
+                    announced = false;
+                    ready_at = None;
+                    report(&session.receipts, Receipt::Answer {
+                        key, sdp: SecretBytes::new(answer.to_sdp_string().into_bytes()),
+                    })?;
+                    report_candidates(&session.receipts, key, driver)?;
+                }
+            },
+            _ = pace.tick(), if !session.media_closed.load(Ordering::Acquire) => {
                 if let Some(routes) = &mut routes {
                     if !routes.live() {
                         return Ok(());
@@ -447,13 +551,14 @@ async fn media(
                         && let Some(track) = track
                     {
                         if !announced {
-                            if !driver.write_channel(ChannelKind::Control, false, &ready, 4096, 4096)
+                            if !driver.write_channel(ChannelKind::Control, false, &ready_frame, 4096, 4096)
                                 .map_err(|_| ())?
                             {
                                 continue;
                             }
                             report(&session.receipts, Receipt::Attached(key))?;
                             announced = true;
+                            ready_at = Some(Instant::now());
                             session.progress.store(READY, Ordering::Release);
                         }
                         if Instant::now() >= wake
@@ -476,9 +581,10 @@ async fn media(
                     let revision = session.revision.clone();
                     let clock = engine.clock();
                     session.progress.store(4, Ordering::Release);
-                    let closed = Arc::clone(&session.closed);
+                    let closed = Arc::clone(&session.media_closed);
                     let observation = Arc::clone(&session.observation);
-                    routes = Some(tokio::task::spawn_blocking(move || {
+                    let keys = keys.clone();
+                    let result = tokio::task::spawn_blocking(move || {
                         engine.run(move |host| {
                             if closed.load(Ordering::Acquire) || Instant::now() >= wake {
                                 return Err(rpt_advanced_core::runtime::RuntimeError::Rejected);
@@ -494,12 +600,16 @@ async fn media(
                                 port: key.port,
                                 session: key.session,
                                 transceive: direction == Direction::Transceive,
+                                keys,
                                 closed,
                                 observation,
                             }, owner, clock)
                         })
-                    }).await.map_err(|_| ())?.map_err(|_| ())?);
-                    session.progress.store(5, Ordering::Release);
+                    }).await.map_err(|_| ())?;
+                    if !session.media_closed.load(Ordering::Acquire) {
+                        routes = Some(result.map_err(|_| ())?);
+                        session.progress.store(5, Ordering::Release);
+                    }
                 }
             }
             event = driver.next_event() => {
@@ -536,6 +646,8 @@ async fn media(
                                 return Err(());
                             }
                             if !message.binary
+                                && announced
+                                && !session.media_closed.load(Ordering::Acquire)
                                 && let Some(input) = &mut input
                                 && let Some(endpoint) = &endpoint
                             {
@@ -548,7 +660,9 @@ async fn media(
                         }
                     }
                     Event::RtpPacket(packet) => {
-                        if let Some(input) = &mut input
+                        if ready_at.is_some_and(|ready| packet.timestamp >= ready)
+                            && !session.media_closed.load(Ordering::Acquire)
+                            && let Some(input) = &mut input
                             && let Some(endpoint) = &endpoint
                             && let Some((mid, payload)) = track
                             && driver.receive_track(packet.header.ssrc) == Some(mid)
@@ -557,7 +671,9 @@ async fn media(
                         }
                     }
                     Event::SenderFeedback(report) => {
-                        if let Some(input) = &mut input
+                        if announced
+                            && !session.media_closed.load(Ordering::Acquire)
+                            && let Some(input) = &mut input
                             && track.is_some_and(|(mid, _)| mid == report.mid)
                         {
                             input.sender_feedback(&report);

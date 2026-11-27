@@ -312,7 +312,8 @@ impl Host {
                             app.port == *id && app.binding.uuid() == binding && app.live()
                         })?;
                         let status = application.status_observation()?;
-                        let peer = webrtc_peer(&status, rx.into());
+                        let keyed = application.keys.as_ref().and_then(|keys| keys.key());
+                        let peer = webrtc_peer(&status, rx.into(), keyed);
                         port.webrtc.insert(status.binding, status);
                         return Some(peer);
                     }
@@ -523,7 +524,7 @@ fn peer_value(
     }
 }
 
-fn webrtc_peer(status: &WebRtcObservation, receive: Receive) -> Peer {
+fn webrtc_peer(status: &WebRtcObservation, receive: Receive, keyed: Option<bool>) -> Peer {
     Peer {
         kind: "webrtc",
         node: None,
@@ -541,7 +542,7 @@ fn webrtc_peer(status: &WebRtcObservation, receive: Receive) -> Peer {
         group_selected: None,
         state: "connected",
         quality: "valid",
-        transmit_keyed: None,
+        transmit_keyed: keyed,
         media: (status.sender_rate.is_some() || !status.receiver_quality.is_empty()).then(|| {
             json!({
                 "sender_relative_clock": status.sender_rate,
@@ -619,6 +620,7 @@ impl Host {
 
     /// Preserve every accepted provider key transition before processing a disconnect.
     pub(super) fn collect_peer_status_edges(&mut self) {
+        self.collect_webrtc_status_edges();
         for peer in self
             .peers
             .iter()
@@ -672,6 +674,49 @@ impl Host {
                     payload: Payload::Peer {
                         id: id.clone(),
                         connection,
+                        kind: if keyed { "link.keyed" } else { "link.unkeyed" },
+                        value: Some(json!(status)),
+                    },
+                });
+            }
+        }
+    }
+
+    fn collect_webrtc_status_edges(&mut self) {
+        for app in self.applications.iter().filter(|app| app.live()) {
+            let Some(keys) = &app.keys else { continue };
+            if keys.lost() {
+                self.status_edges.mark_lost();
+            }
+            if !keys.pending() {
+                continue;
+            }
+            let Some(node) = self.runtime.node(&app.port.to_string()) else {
+                continue;
+            };
+            let Some(work) = node.command_work() else {
+                continue;
+            };
+            let Some((_, receive)) = node
+                .links()
+                .ingress_receive_status()
+                .find(|(id, _)| id.webrtc_binding() == Some(app.binding.uuid()))
+            else {
+                continue;
+            };
+            let Some(observation) = app.status_observation() else {
+                continue;
+            };
+            let id = format!("webrtc:{}", app.binding);
+            for (at_ms, keyed) in std::iter::from_fn(|| keys.next()).take(64) {
+                let status = webrtc_peer(&observation, receive.into(), Some(keyed));
+                self.status_edges.push(Edge {
+                    port: app.port,
+                    generation: work.id(),
+                    at_ms,
+                    payload: Payload::Peer {
+                        id: id.clone(),
+                        connection: observation.connection_generation,
                         kind: if keyed { "link.keyed" } else { "link.unkeyed" },
                         value: Some(json!(status)),
                     },

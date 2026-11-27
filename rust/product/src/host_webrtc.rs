@@ -1,7 +1,9 @@
 //! A WebRTC connection uses the existing generation-owned station ingress and egress.
 use super::*;
 use crate::link::{
-    ring::InboundObserver, source_clock::SourceClock,
+    ring::InboundObserver,
+    session::status::ReceiveStatus,
+    source_clock::SourceClock,
     status_audio::{PeerMeasurements, StageReading},
 };
 use crate::management::live::WebRtcObservation;
@@ -68,6 +70,7 @@ pub(super) struct Application {
     pub(super) port: ResourceId,
     session: ResourceId,
     pub(super) binding: ResourceId,
+    pub(super) keys: Option<Arc<ReceiveStatus>>,
     transceive: bool,
     owner: Arc<GenerationWork>,
     observation: Arc<Mutex<WebRtcObservation>>,
@@ -88,15 +91,21 @@ impl Application {
         if observed.graph_generation == 0 {
             return None;
         }
-        if self.transceive && let Some(observer) = &self.observer
+        if self.transceive
+            && let Some(observer) = &self.observer
             && !observer.signals().ended()
         {
             let graph = observed.graph_generation;
-            let absent = || StageReading { rate: 48_000, available: false, measurement: None };
+            let absent = || StageReading {
+                rate: 48_000,
+                available: false,
+                measurement: None,
+            };
             observed.ingress = Some(Arc::new(PeerMeasurements {
                 ingress_graph_generation: Some(graph),
                 decoded: StageReading {
-                    rate: 48_000, available: true,
+                    rate: 48_000,
+                    available: true,
                     measurement: observed.decoded.filter(|m| m.graph_generation == graph),
                 },
                 mix_minus: absent(),
@@ -225,10 +234,7 @@ impl Receipt {
         let route = self.observer.signals().reply_target();
         if !route.ended() {
             links
-                .attach_ingress(
-                    PeerIdentity::webrtc(self.binding.uuid()),
-                    route.clone(),
-                )
+                .attach_ingress(PeerIdentity::webrtc(self.binding.uuid()), route.clone())
                 .inspect_err(|_| route.close_webrtc_session())
                 .map_err(RuntimeError::Link)?;
             {
@@ -252,6 +258,7 @@ pub(crate) struct PortAdmission {
     pub(crate) port: ResourceId,
     pub(crate) session: ResourceId,
     pub(crate) transceive: bool,
+    pub(crate) keys: Option<Arc<ReceiveStatus>>,
     pub(crate) closed: Arc<AtomicBool>,
     pub(crate) observation: Arc<Mutex<WebRtcObservation>>,
 }
@@ -284,6 +291,7 @@ impl Host {
             port,
             session,
             transceive,
+            keys,
             closed,
             observation,
         } = request;
@@ -320,6 +328,7 @@ impl Host {
             session,
             binding,
             transceive,
+            keys,
             owner,
             observation,
             observer: None,

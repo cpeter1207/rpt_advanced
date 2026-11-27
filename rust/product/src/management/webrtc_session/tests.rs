@@ -494,6 +494,7 @@ struct AsyncFixture {
     submissions: usize,
     offers: Vec<WorkKey>,
     renewed: Vec<WorkKey>,
+    restarted: Vec<(WorkKey, WorkKey)>,
     closed: Vec<WorkKey>,
 }
 
@@ -545,6 +546,11 @@ impl Transport for FixtureTransport {
             },
         ]);
         Ok(())
+    }
+
+    fn restart(&mut self, previous: WorkKey, work: OfferWork, until: Instant) -> Result<(), Fault> {
+        self.0.lock().unwrap().restarted.push((previous, work.key));
+        self.offer(work, "active", 41, until)
     }
 
     fn candidate(&mut self, work: CandidateWork) -> Result<(), Fault> {
@@ -688,5 +694,9 @@ fn webrtc_hal_routes_isolate_browsers_and_drive_exact_async_work() {
     }
     let provider = fixture.lock().unwrap();
     assert_eq!(provider.renewed, provider.offers[..1]);
-    assert_eq!(provider.closed, provider.offers);
+    assert_eq!(
+        provider.restarted,
+        [(provider.offers[0], provider.offers[1])]
+    );
+    assert_eq!(provider.closed, provider.offers[1..]);
 }

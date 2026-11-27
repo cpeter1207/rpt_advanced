@@ -1,7 +1,10 @@
 //! Admit Opus only after the exact station grant and the receiver's timed sample lease.
 
 use super::*;
-use crate::{host::webrtc::Endpoint, status_meter::{Reader, Span, Tap}};
+use crate::{
+    host::webrtc::Endpoint,
+    status_meter::{Reader, Span, Tap},
+};
 use rptadv_jitter_client::{Admission, Jitter, JitterProvider, Kind};
 use webrtc::{
     Frequency, ReceiveGate, RtpPacket, SenderFeedback, Ssrc,
@@ -23,6 +26,7 @@ pub(super) struct Receiver {
     generation: u64,
     next_grant: u64,
     observation: Arc<Mutex<WebRtcObservation>>,
+    keys: Arc<ReceiveStatus>,
     decoded: Tap,
     decoded_reader: Reader,
     reports: SenderReports,
@@ -65,6 +69,7 @@ impl Receiver {
         key: WorkKey,
         binding: Id,
         observation: Arc<Mutex<WebRtcObservation>>,
+        keys: Arc<ReceiveStatus>,
     ) -> Result<Self, ()> {
         let decoder = provider.decoder(MAX_RTP_PAYLOAD).map_err(|_| ())?;
         if !decoder.supports_provenance() {
@@ -77,6 +82,7 @@ impl Receiver {
             generation: key.ice_generation,
             next_grant: 0,
             observation,
+            keys,
             decoded,
             decoded_reader,
             reports: SenderReports::default(),
@@ -102,6 +108,14 @@ impl Receiver {
         self.writer_frame = None;
     }
 
+    /// Keep the grant and RTP high-water marks while retiring the old ICE media.
+    pub(super) fn restart(&mut self, key: WorkKey, keys: Arc<ReceiveStatus>) -> Result<(), ()> {
+        self.generation = key.ice_generation;
+        self.keys = keys;
+        self.writer_frame = None;
+        self.reset()
+    }
+
     fn reset(&mut self) -> Result<(), ()> {
         self.talk = None;
         self.waiting = None;
@@ -123,6 +137,8 @@ impl Receiver {
 
     fn release(&mut self, endpoint: &Endpoint) -> Result<(), ()> {
         endpoint.ingress.signals().revoke_webrtc_receive();
+        self.keys
+            .observe(endpoint.clock.now_ns() / 1_000_000, false);
         self.reset()
     }
 
@@ -151,10 +167,13 @@ impl Receiver {
     ) -> Result<(), ()> {
         self.expire(now, endpoint)?;
         match Control::decode(bytes) {
-            Some(request @ (Control::RequestTalk | Control::RequestObservedTalk))
-                if self.talk.is_none()
-                    && endpoint.admitted()
-                    && !endpoint.ingress.signals().rx_muted() =>
+            Some(
+                ref request @ (Control::RequestTalk { ice_generation }
+                | Control::RequestObservedTalk { ice_generation }),
+            ) if ice_generation.0 == self.generation
+                && self.talk.is_none()
+                && endpoint.admitted()
+                && !endpoint.ingress.signals().rx_muted() =>
             {
                 let grant = self.next_grant.checked_add(1).ok_or(())?;
                 let bytes = Control::TalkGranted {
@@ -171,7 +190,7 @@ impl Receiver {
                     self.talk = Some(Talk {
                         id: grant,
                         start_deadline: now + INITIAL_KEY_WAIT,
-                        observed: request == Control::RequestObservedTalk,
+                        observed: matches!(request, Control::RequestObservedTalk { .. }),
                         watermark: None,
                         gate: ReceiveGate::new(grant, grant, KEY_LIFETIME),
                         reference: None,
@@ -492,14 +511,24 @@ impl Receiver {
                             .map_err(|_| ())?;
                         if accepted != 0 {
                             endpoint.ingress.signals().set_radio_keyed(true);
-                            let mut observed = self.observation.lock()
+                            self.keys
+                                .observe(endpoint.clock.at_ns(now) / 1_000_000, true);
+                            let mut observed = self
+                                .observation
+                                .lock()
                                 .unwrap_or_else(|error| error.into_inner());
-                            self.decoded.observe(Span {
-                                graph_generation: observed.graph_generation,
-                                source_generation: self.generation,
-                                first_sample: claim.rtp_start.checked_add(claim.skip as u64).ok_or(())?,
-                                end_ms: endpoint.clock.at_ns(claim.birth) / 1_000_000,
-                            }, &self.pcm[claim.skip..claim.skip+accepted]);
+                            self.decoded.observe(
+                                Span {
+                                    graph_generation: observed.graph_generation,
+                                    source_generation: self.generation,
+                                    first_sample: claim
+                                        .rtp_start
+                                        .checked_add(claim.skip as u64)
+                                        .ok_or(())?,
+                                    end_ms: endpoint.clock.at_ns(claim.birth) / 1_000_000,
+                                },
+                                &self.pcm[claim.skip..claim.skip + accepted],
+                            );
                             if let Some(reading) = self.decoded_reader.latest() {
                                 observed.decoded = Some(reading);
                             }
