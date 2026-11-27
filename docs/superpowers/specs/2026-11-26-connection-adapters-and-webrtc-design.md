@@ -1,6 +1,6 @@
 # Shared connection adapters and WebRTC
 
-**Status** — Proposed design, 2026-11-26.
+**Status** — Approved, 2026-11-26.
 
 This design defines a common connection, audio and control boundary for AllStarLink, EchoLink, SIP/IAX phone, and a future WebRTC endpoint. It covers provider parity, browser NAT traversal and timing, and how an authorized status viewer aligns meters with received audio. Existing station, configuration and status designs continue to own their respective policies.
 
