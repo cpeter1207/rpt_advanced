@@ -210,15 +210,48 @@ unsafe extern "C" fn radio_control(
         }
         // SAFETY: this control ABI supplies a readable size/version prefix.
         let header = unsafe { request.cast::<[u32; 2]>().read_unaligned() };
-        if header[0] as usize != size_of::<ffi::rptadv_radio_control_v1>() || header[1] != 1 {
+        if (header[0] as usize) < size_of::<ffi::rptadv_radio_control_v1>() || header[1] != 1 {
             return -1;
         }
-        let (reserved,request)=
-            // SAFETY: the caller retains the complete writable request and unique radio.
-            unsafe {(radio.cast::<ReservedRadio>().as_mut(),request.as_mut())};
-        let (Some(reserved), Some(request)) = (reserved, request) else {
+        // SAFETY: the caller lends this unique reservation and complete request prefix.
+        let Some(reserved) = (unsafe { radio.cast::<ReservedRadio>().as_mut() }) else {
             return -1;
         };
+        let operation = unsafe { ptr::addr_of!((*request).operation).read_unaligned() };
+        if operation == ffi::RPTADV_RADIO_CONTROL_BIND_FEEDBACK {
+            type Request = ffi::rptadv_radio_feedback_binding_v1;
+            if header[0] as usize != size_of::<Request>() {
+                return -1;
+            }
+            // SAFETY: the checked size/version advertises the complete feedback wrapper.
+            let wrapped = unsafe { &mut *request.cast::<Request>() };
+            if wrapped.reserved != 0
+                || wrapped.accepted_abi_version != 0
+                || wrapped.port.struct_size as usize != size_of_val(&wrapped.port)
+                || wrapped.port.abi_version != ffi::URP_RADIO_FEEDBACK_ABI_VERSION
+            {
+                return -1;
+            }
+            let Some(radio) = reserved.radio.as_mut() else {
+                return -7;
+            };
+            // SAFETY: Product retains the copied port's callback context through channel hangup.
+            let result = unsafe { radio.attach_feedback(wrapped.port) };
+            if result == 0 {
+                wrapped.accepted_abi_version = 1;
+            }
+            return result;
+        }
+        if operation == ffi::RPTADV_RADIO_CONTROL_PHYSICAL_STATUS {
+            // The released channel descriptor's status function takes its private provider
+            // handle, not this public Asterisk channel. No acknowledged typed option exists.
+            return -7;
+        }
+        if header[0] as usize != size_of::<ffi::rptadv_radio_control_v1>() {
+            return -1;
+        }
+        // SAFETY: ordinary operations access only the validated base record.
+        let request = unsafe { &mut *request };
         if request.operation != 7 {
             return -7;
         }

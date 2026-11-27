@@ -88,6 +88,7 @@ struct RadioHandle {
     active: Option<crate::radio_activation::ActiveRadio>,
     pending: Option<Selection>,
     metadata: crate::abi::rptadv_radio_metadata_v1,
+    feedback: Option<crate::abi::UrpRadioFeedbackPort>,
 }
 
 /// Stage/acknowledge, commit, or roll back a native radio configuration on its
@@ -147,11 +148,54 @@ pub unsafe extern "C" fn radio_control(
     {
         return -1;
     }
-    // SAFETY: this boundary borrows the caller's live handle and complete request.
-    let (handle, request) = unsafe { (radio.cast::<RadioHandle>().as_mut(), request.as_mut()) };
-    let (Some(handle), Some(request)) = (handle, request) else {
+    // SAFETY: the caller lends the unchanged prefix and exclusive native reservation.
+    let Some(handle) = (unsafe { radio.cast::<RadioHandle>().as_mut() }) else {
         return -1;
     };
+    let operation = unsafe { std::ptr::addr_of!((*request).operation).read_unaligned() };
+    if operation == crate::abi::RPTADV_RADIO_CONTROL_BIND_FEEDBACK {
+        type Request = crate::abi::rptadv_radio_feedback_binding_v1;
+        if header[0] as usize != std::mem::size_of::<Request>() || handle.active.is_some() {
+            return -1;
+        }
+        // SAFETY: the checked prefix advertises this complete writable wrapper.
+        let wrapped = unsafe { &mut *request.cast::<Request>() };
+        if wrapped.reserved != 0
+            || wrapped.accepted_abi_version != 0
+            || wrapped.port.struct_size as usize != std::mem::size_of_val(&wrapped.port)
+            || wrapped.port.abi_version != crate::abi::URP_RADIO_FEEDBACK_ABI_VERSION
+        {
+            return -1;
+        }
+        handle.feedback = Some(wrapped.port);
+        wrapped.accepted_abi_version = 1;
+        return 0;
+    }
+    if operation == crate::abi::RPTADV_RADIO_CONTROL_PHYSICAL_STATUS {
+        type Request = crate::abi::rptadv_radio_physical_status_v1;
+        if header[0] as usize != std::mem::size_of::<Request>() {
+            return -1;
+        }
+        // SAFETY: the checked prefix advertises this complete writable wrapper.
+        let wrapped = unsafe { &mut *request.cast::<Request>() };
+        if wrapped.reserved != 0
+            || wrapped.accepted_abi_version != 0
+            || wrapped.status.struct_size as usize != std::mem::size_of_val(&wrapped.status)
+            || wrapped.status.abi_version != 1
+        {
+            return -1;
+        }
+        let Some(active) = handle.active.as_mut() else {
+            return -7;
+        };
+        let code = active.physical_status(&mut wrapped.status);
+        if code == 0 {
+            wrapped.accepted_abi_version = 1;
+        }
+        return code;
+    }
+    // SAFETY: all other operations only access the already validated base request.
+    let request = unsafe { &mut *request };
     if request.operation == 7 {
         let command = &mut request.command;
         if command.struct_size as usize != std::mem::size_of_val(command)
@@ -301,6 +345,7 @@ pub unsafe extern "C" fn radio_activate(
             transmit,
             transmit_context,
             metadata: handle.metadata,
+            feedback: handle.feedback,
         },
     );
     finish_activation(handle, result)

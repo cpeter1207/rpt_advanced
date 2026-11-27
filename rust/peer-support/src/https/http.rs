@@ -1,6 +1,6 @@
 //! Bound HTTP/1 framing, TLS connection tasks and credential-bearing body ownership.
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Full};
@@ -12,23 +12,27 @@ use hyper::service::service_fn;
 use hyper::{HeaderMap, Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpStream;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::{Semaphore, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use zeroize::Zeroizing;
 
-use super::{CONNECTIONS, Chain, HANDSHAKES, RequestBody, Shared, TransportError, dispatch};
+use super::{
+    CONNECTIONS, Chain, CoordinatorReply, HANDSHAKES, HttpInput, RequestBody, ServiceId, Shared,
+    StatusStream, TransportError, dispatch, status,
+};
 
 const HEADERS: usize = 64;
 const HEADER_BYTES: usize = 16 * 1024;
 const TARGET_BYTES: usize = 2048;
 const BODY_BYTES: usize = 1024 * 1024;
-const RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const HANDSHAKE_TIME: Duration = Duration::from_secs(3);
 const HEADER_TIME: Duration = Duration::from_secs(8);
 const BODY_TIME: Duration = Duration::from_secs(5);
 const CONNECTION_TIME: Duration = Duration::from_secs(120);
+const SHUTDOWN_TIME: Duration = Duration::from_secs(3);
 
 /// Trusted backend authorities and browser origins from host provisioning.
 pub struct OriginPolicy {
@@ -84,7 +88,10 @@ impl OriginPolicy {
     }
 }
 
-fn single(headers: &HeaderMap, name: HeaderName) -> Result<Option<&HeaderValue>, StatusCode> {
+pub(super) fn single(
+    headers: &HeaderMap,
+    name: HeaderName,
+) -> Result<Option<&HeaderValue>, StatusCode> {
     let mut values = headers.get_all(name).iter();
     let value = values.next();
     if values.next().is_some() {
@@ -182,52 +189,121 @@ async fn read_body(mut input: Incoming, allowed: bool) -> Result<RequestBody, St
     Ok(RequestBody(body))
 }
 
-async fn handle(
-    request: Request<Incoming>,
+struct Upgrade {
+    offer: hyper::upgrade::OnUpgrade,
+    actor: ServiceId,
+    stream: StatusStream,
+}
+
+struct Connection {
     state: Shared,
     policy: Arc<OriginPolicy>,
     chain: Chain,
-    connection: super::ConnectionProof,
-) -> Result<Response<Vec<u8>>, StatusCode> {
-    let trust = state
-        .lock()
-        .expect("management state")
-        .trust()
-        .ok_or(StatusCode::FORBIDDEN)?;
-    let actor = trust
-        .identify(&chain, rustls::pki_types::UnixTime::now())
-        .ok_or(StatusCode::FORBIDDEN)?;
-    let (parts, body) = request.into_parts();
-    let target = target(&parts.uri)?;
-    policy.check(&parts.headers)?;
-    let allowed = media(&parts.method, &parts.headers)?;
-    let mut headers = HeaderMap::new();
-    for name in [
-        header::ACCEPT,
-        header::CONTENT_TYPE,
-        header::IF_MATCH,
-        header::IF_NONE_MATCH,
-    ] {
-        for value in parts.headers.get_all(&name) {
-            headers.append(
-                name.clone(),
-                HeaderValue::from_bytes(value.as_bytes()).map_err(|_| StatusCode::BAD_REQUEST)?,
-            );
+    proof: super::ConnectionProof,
+    upgrade: Mutex<Option<Upgrade>>,
+}
+
+impl Connection {
+    async fn handle(
+        &self,
+        mut request: Request<Incoming>,
+    ) -> Result<Response<Full<Bytes>>, StatusCode> {
+        let trust = self
+            .state
+            .lock()
+            .expect("management state")
+            .trust()
+            .ok_or(StatusCode::FORBIDDEN)?;
+        let actor = trust
+            .identify(&self.chain, rustls::pki_types::UnixTime::now())
+            .ok_or(StatusCode::FORBIDDEN)?;
+        let target = target(request.uri())?;
+        self.policy.check(request.headers())?;
+        let allowed = media(request.method(), request.headers())?;
+        let upgrade = status::accept_key(
+            target.path(),
+            request.method(),
+            request.version(),
+            request.headers(),
+        )?
+        .map(|key| (key, hyper::upgrade::on(&mut request)));
+        let (parts, body) = request.into_parts();
+        let mut headers = HeaderMap::new();
+        for name in [
+            header::ACCEPT,
+            header::CONTENT_TYPE,
+            header::IF_MATCH,
+            header::IF_NONE_MATCH,
+        ] {
+            for value in parts.headers.get_all(&name) {
+                headers.append(
+                    name.clone(),
+                    HeaderValue::from_bytes(value.as_bytes())
+                        .map_err(|_| StatusCode::BAD_REQUEST)?,
+                );
+            }
+        }
+        let body = timeout(BODY_TIME, read_body(body, allowed))
+            .await
+            .map_err(|_| StatusCode::REQUEST_TIMEOUT)??;
+        let reply = dispatch(
+            self.state.clone(),
+            self.chain.clone(),
+            (actor.clone(), self.proof.clone()),
+            HttpInput {
+                method: parts.method,
+                target,
+                headers,
+                body,
+                status_upgrade: upgrade.is_some(),
+            },
+        )
+        .await;
+        match reply {
+            CoordinatorReply::Http(reply) => Ok(encode(reply)),
+            CoordinatorReply::Status(stream) => {
+                let (key, offer) = upgrade.ok_or(StatusCode::BAD_REQUEST)?;
+                if !self.authorized(&actor) {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+                *self.upgrade.lock().expect("upgraded connection") = Some(Upgrade {
+                    offer,
+                    actor,
+                    stream,
+                });
+                Ok(status::switch(key))
+            }
         }
     }
-    let body = timeout(BODY_TIME, read_body(body, allowed))
-        .await
-        .map_err(|_| StatusCode::REQUEST_TIMEOUT)??;
-    Ok(dispatch(
-        state,
-        chain,
-        (actor, connection),
-        parts.method,
-        target,
-        headers,
-        body,
-    )
-    .await)
+
+    fn stream_authorization<'a>(&'a self, actor: &'a ServiceId) -> impl FnMut() -> bool + 'a {
+        let mut verified = None;
+        move || {
+            let Some(trust) = self.state.lock().expect("management state").trust() else {
+                return false;
+            };
+            let now = rustls::pki_types::UnixTime::now();
+            if verified
+                .as_ref()
+                .is_some_and(|(previous, second)| Arc::ptr_eq(previous, &trust) && *second == now)
+            {
+                return true;
+            }
+            if trust.identify(&self.chain, now).as_ref() != Some(actor) {
+                return false;
+            }
+            verified = Some((trust, now));
+            true
+        }
+    }
+
+    fn authorized(&self, actor: &ServiceId) -> bool {
+        let trust = self.state.lock().expect("management state").trust();
+        trust
+            .and_then(|trust| trust.identify(&self.chain, rustls::pki_types::UnixTime::now()))
+            .as_ref()
+            == Some(actor)
+    }
 }
 
 pub(super) fn encode(response: Response<Vec<u8>>) -> Response<Full<Bytes>> {
@@ -236,6 +312,11 @@ pub(super) fn encode(response: Response<Vec<u8>>) -> Response<Full<Bytes>> {
     let mut wire = Response::new(Full::new(Bytes::from(body)));
     *wire.status_mut() = parts.status;
     *wire.headers_mut() = parts.headers;
+    let advertise_upgrade = wire.status() == StatusCode::UPGRADE_REQUIRED
+        && wire
+            .headers()
+            .get(header::UPGRADE)
+            .is_some_and(|h| h == "websocket");
     let headers = wire.headers_mut();
     for name in [
         header::CONTENT_LENGTH,
@@ -245,13 +326,22 @@ pub(super) fn encode(response: Response<Vec<u8>>) -> Response<Full<Bytes>> {
     ] {
         headers.remove(name);
     }
+    if advertise_upgrade {
+        headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+    }
     let close = headers
         .get_all(header::CONNECTION)
         .iter()
         .any(|v| v.as_bytes().eq_ignore_ascii_case(b"close"));
     headers.remove(header::CONNECTION);
-    if close {
-        headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
+    let connection = match (advertise_upgrade, close) {
+        (true, true) => Some("Upgrade, close"),
+        (true, false) => Some("Upgrade"),
+        (false, true) => Some("close"),
+        (false, false) => None,
+    };
+    if let Some(connection) = connection {
+        headers.insert(header::CONNECTION, HeaderValue::from_static(connection));
     }
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     // Reserve space for the canonical status line, Date, framing, a generated
@@ -288,6 +378,8 @@ pub(super) async fn serve(
     let mut clients = JoinSet::new();
     let policy = Arc::new(policy);
     let handshakes = Arc::new(Semaphore::new(HANDSHAKES));
+    let http_slots = Arc::new(Semaphore::new(CONNECTIONS));
+    let (stopping, _) = watch::channel(false);
     loop {
         tokio::select! {
             biased;
@@ -300,12 +392,13 @@ pub(super) async fn serve(
                     tokio::time::sleep(Duration::from_millis(20)).await;
                     continue;
                 };
-                if clients.len() >= CONNECTIONS { continue; }
+                let Ok(http_slot) = http_slots.clone().try_acquire_owned() else { continue; };
                 let Ok(permit) = handshakes.clone().try_acquire_owned() else { continue; };
                 let config = state.lock().expect("management state").snapshot.as_ref().map(|s| s.config.clone());
                 let Some(config) = config else { break; };
                 let state = state.clone();
                 let policy = policy.clone();
+                let mut shutdown = stopping.subscribe();
                 clients.spawn(async move {
                     let tls = timeout(HANDSHAKE_TIME, TlsAcceptor::from(config).accept(socket)).await;
                     drop(permit);
@@ -313,18 +406,45 @@ pub(super) async fn serve(
                     let Some(certs) = stream.get_ref().1.peer_certificates() else { return; };
                     let chain: Chain = Arc::from(certs);
                     let owner = super::ConnectionOwner(super::ConnectionProof(Arc::new(true.into())));
-                    let proof = owner.0.clone();
+                    let connection = Arc::new(Connection {
+                        state, policy, chain, proof: owner.0.clone(), upgrade: Mutex::new(None),
+                    });
+                    let http_connection = connection.clone();
                     let service = service_fn(move |req| {
-                        let response = handle(req, state.clone(), policy.clone(), chain.clone(), proof.clone());
-                        async move { Ok::<_, Infallible>(encode(response.await.unwrap_or_else(empty))) }
+                        let http_connection = http_connection.clone();
+                        async move {
+                            Ok::<_, Infallible>(http_connection.handle(req).await
+                                .unwrap_or_else(|fault| encode(empty(fault))))
+                        }
                     });
                     let mut http = http1::Builder::new();
                     http.timer(TokioTimer::new()).header_read_timeout(HEADER_TIME)
                         .max_headers(HEADERS).max_header_size(HEADER_BYTES).max_buf_size(HEADER_BYTES);
-                    let _ = timeout(CONNECTION_TIME, http.serve_connection(TokioIo::new(stream), service)).await;
+                    let run = http.serve_connection(TokioIo::new(stream), service).with_upgrades();
+                    tokio::select! {
+                        _ = shutdown.wait_for(|stopping| *stopping) => return,
+                        _ = timeout(CONNECTION_TIME, run) => {}
+                    }
+                    let upgrade = connection.upgrade.lock().expect("upgraded connection").take();
+                    if let Some(Upgrade { offer, actor, stream }) = upgrade {
+                        // Return HTTP capacity at upgrade; the same task remains owned by
+                        // the listener's JoinSet with the TLS proof through stream shutdown.
+                        drop(http_slot);
+                        status::run(offer, stream, connection.stream_authorization(&actor), shutdown).await;
+                    }
                 });
             }
         }
     }
-    clients.shutdown().await;
+    stopping.send_replace(true);
+    if timeout(SHUTDOWN_TIME, async {
+        while let Some(result) = clients.join_next().await {
+            health.joined(result);
+        }
+    })
+    .await
+    .is_err()
+    {
+        clients.shutdown().await;
+    }
 }

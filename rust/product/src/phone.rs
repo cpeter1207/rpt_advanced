@@ -457,6 +457,7 @@ impl PhoneCalls {
                 return None;
             }
             let muted = reply.rx_muted();
+            let authenticated = reply.phone_authenticated();
             let attached = call.attachment == Attachment::Attached;
             Some((
                 call.local.as_str(),
@@ -471,15 +472,44 @@ impl PhoneCalls {
                     },
                     phase: if attached {
                         "attached"
-                    } else if reply.phone_authenticated() {
+                    } else if authenticated {
                         "authenticated"
                     } else {
                         "private"
                     },
+                    authenticated,
                     attached,
-                    muted: attached.then_some(muted),
+                    muted: (attached || authenticated).then_some(muted),
                     active: attached.then_some(!muted && reply.active()),
                 },
+            ))
+        })
+    }
+
+    /// Only confirmed, current call routes may publish their independently measured audio.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn attached_meters(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &str,
+            PhoneCallId,
+            u64,
+            crate::link::status_audio::PeerMeasurements,
+        ),
+    > {
+        self.calls.iter().filter_map(|call| {
+            let reply = call.signals.reply_target();
+            if call.attachment != Attachment::Attached || !reply.phone_media_allowed() {
+                return None;
+            }
+            let generation = call.source.call_generation();
+            let meters = call.transport.as_ref()?.status_meters(generation);
+            Some((
+                call.local.as_str(),
+                call.source.call_id(),
+                generation,
+                meters,
             ))
         })
     }

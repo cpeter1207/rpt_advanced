@@ -20,7 +20,16 @@ fn live_row_schema(target: Target) -> Value {
     let flag = json!({"type":"boolean"});
     if target == Target::Peers {
         let mut peer = object(json!({"type":{"enum":["allstarlink","echolink","phone"]},
-            "node":text,"call_id":text,"muted":flag,"active":flag}));
+            "node":text,"call_id":text,"muted":flag,"active":flag,
+            "connection_generation":status_decimal(false),
+            "direction":{"enum":["incoming","outgoing"]},
+            "mode":{"enum":["transceive","monitor","local-monitor"]},
+            "permanent":flag,"group_selected":flag,
+            "state":{"enum":["connected","paused","retrying","disconnected"]},
+            "quality":{"enum":["valid","stale","unavailable","fault","warming"]},
+            "transmit_keyed":{"type":["boolean","null"]},
+            "media":{"type":"object"}
+        }));
         peer["required"] = json!(["type", "muted", "active"]);
         peer["oneOf"] = json!([{"required":["node"]},{"required":["call_id"]}]);
         peer
@@ -29,7 +38,7 @@ fn live_row_schema(target: Target) -> Value {
         let mut call = object(
             json!({"call_id":text,"account":{"type":"string","format":"uuid"},
             "generation":{"type":"integer","minimum":1},"direction":{"enum":["incoming","outgoing"]},
-            "phase":{"enum":["private","authenticated","attached"]},"attached":flag,
+            "phase":{"enum":["private","authenticated","attached"]},"attached":flag,"authenticated":flag,
             "muted":optional,"active":optional}),
         );
         call["required"] = json!([
@@ -44,6 +53,59 @@ fn live_row_schema(target: Target) -> Value {
         ]);
         call
     }
+}
+
+fn status_decimal(nullable: bool) -> Value {
+    let types = if nullable {
+        json!(["string", "null"])
+    } else {
+        json!("string")
+    };
+    json!({"type":types,"pattern":"^[0-9]+$"})
+}
+
+fn site_resource_status() -> Value {
+    let quality = json!({"enum":["valid","warming","unavailable","stale","fault"]});
+    let timestamp = json!({"type":["string","null"],"format":"date-time"});
+    let count = json!({"type":["integer","null"],"minimum":0});
+    let decimal = status_decimal(true);
+    let cpu = object(json!({"percent":{"type":["number","null"],"minimum":0},
+        "window_ms":decimal,"quality":quality}));
+    let interface = object(json!({"ifindex":count,"rx_bps":decimal,"tx_bps":decimal,
+        "window_ms":decimal,"observed_at":timestamp,"quality":quality}));
+    object(json!({
+        "observed_at":timestamp,"monotonic_ms":status_decimal(false),
+        "cpu":object(json!({"online_count":count,"host":cpu,"process":cpu})),
+        "memory":object(json!({
+            "host":object(json!({"available_bytes":decimal,"total_bytes":decimal,"quality":quality})),
+            "process":object(json!({"resident_bytes":decimal,"quality":quality})),
+            "service":object(json!({"current_bytes":decimal,"limit_bytes":decimal,"quality":quality,"limit_quality":quality}))
+        })),
+        "network":object(json!({"quality":quality,"interfaces":{"type":"object","additionalProperties":interface}}))
+    }))
+}
+
+fn status_meter_schema() -> Value {
+    let decimal = status_decimal(false);
+    let level = json!({"type":["number","null"]});
+    let mut sample = object(json!({"source_generation":decimal,"end_sample":decimal,
+        "rate_hz":{"type":"integer","minimum":1}}));
+    sample["required"] = json!(["source_generation", "end_sample", "rate_hz"]);
+    object(json!({
+        "port_id":{"type":"string","format":"uuid"},
+        "chain_id":{"type":"string"},"stage_id":{"type":"string"},"signal":{"type":"string"},
+        "entity":object(json!({"type":{"enum":["link","call"]},"id":{"type":"string"},"generation":decimal})),
+        "graph_generation":decimal,"measurement_epoch":decimal,
+        "observed_at":{"type":["string","null"],"format":"date-time"},"monotonic_ms":decimal,
+        "audio_position":{"oneOf":[sample,{"type":"null"}]},
+        "quality":{"enum":["valid","warming","unavailable","stale","fault"]},
+        "signal_state":{"enum":["present","silence","unknown"]},
+        "freshness_ms":{"type":"integer","minimum":0},"valid_samples":decimal,
+        "clipped_samples":decimal,"dropped_snapshots":decimal,
+        "peak_dbfs":level,"rms_dbfs":level,"lufs":level,"peak_hold_dbfs":level,
+        "reason":{"type":"string"},"integrated_lufs":level,"true_peak_dbtp":level,
+        "processed_blocks":decimal,"bypassed_blocks":decimal,"failed_blocks":decimal
+    }))
 }
 
 fn status_schema(kind: Kind, port: bool) -> Value {
@@ -75,6 +137,7 @@ fn status_schema(kind: Kind, port: bool) -> Value {
                 "node":{"type":"string"},"attached":flag
             },"required":["node","attached"],"additionalProperties":false});
         }
+        Kind::Metadata if !port => p["resources"] = site_resource_status(),
         Kind::RxSignaling if port => p["receiver"] = receiver,
         Kind::TxSignaling if port => p["transmit_key_requested"] = boolean,
         Kind::RxAudio | Kind::TxAudio if port => {
@@ -305,7 +368,7 @@ pub(super) fn response_document(route: &Route) -> Value {
                 Target::Section(k) | Target::Member(k) => k,
                 _ => Kind::Metadata,
             };
-            properties["id"] = id;
+            properties["id"] = id.clone();
             properties["key"] = text;
             if route.view == Some(View::Status) {
                 properties["status"] = status_schema(kind, route.path.contains("{port}"));
@@ -382,16 +445,16 @@ pub(super) fn response_document(route: &Route) -> Value {
             properties["meta"] =
                 object(json!({"version":{"type":"integer"},"generation":{"type":"integer"}}));
         }
-        Target::Operations => properties["boot_id"] = id,
-        Target::Active => properties["active_revision"] = nullable_text,
-        Target::LastKnownGood => properties["last_known_good"] = nullable_text,
+        Target::Operations => properties["boot_id"] = id.clone(),
+        Target::Active => properties["active_revision"] = nullable_text.clone(),
+        Target::LastKnownGood => properties["last_known_good"] = nullable_text.clone(),
         Target::Desired => properties["desired_revision"] = text,
         Target::Storage => {
             properties["storage"] = text;
             properties["secrets_state"] = nullable_text.clone();
-            properties["working_fingerprint"] = nullable_text;
+            properties["working_fingerprint"] = nullable_text.clone();
         }
-        Target::Credentials(_) => properties["id"] = id,
+        Target::Credentials(_) => properties["id"] = id.clone(),
         Target::Owners => {
             properties["owners"] =
                 json!({"type":"object","additionalProperties":{"type":"integer"}})
@@ -399,8 +462,47 @@ pub(super) fn response_document(route: &Route) -> Value {
         Target::Health | Target::Changes => properties["status"] = json!({"type":"object"}),
         _ => {}
     }
+    if route.target == Target::StatusSnapshot {
+        properties["snapshot_id"] = id.clone();
+        properties["boot_id"] = id.clone();
+        properties["state_cursor"] = status_decimal(false);
+        properties["monotonic_ms"] = status_decimal(false);
+        properties["observed_at"] = json!({"type":["string","null"],"format":"date-time"});
+        properties["active_revision"] = nullable_text;
+        properties["page_index"] = json!({"type":"integer","minimum":0});
+        properties["complete"] = json!({"type":"boolean"});
+        properties["selection"] = object(json!({
+            "site":{"type":"boolean"},
+            "ports":{"type":"array","items":id,"uniqueItems":true},
+            "topics":{"type":"array","items":{"enum":["radio","links","phone_patch","telemetry","equipment","resources","diagnostics","meters"]},"uniqueItems":true}
+        }));
+        properties["status"] = object(json!({
+            "site":object(json!({"identity":{"type":"object"},"resources":site_resource_status(),"equipment":{"type":"object"}})),
+            "ports":{"type":"object","additionalProperties":object(json!({
+                "identity":{"type":"object"},"radio":{"type":"object"},"links":{"type":"object"},
+                "radio_signals":{"type":"object","additionalProperties":{"type":"object"}},
+                "link_registrations":{"type":"object"},"phone_patch":{"type":"object"},
+                "equipment":{"type":"object"},"telemetry":{"type":"object"},"diagnostics":{"type":"object"},
+                "graphs":{"type":"object"},"meters":{"type":"object","additionalProperties":status_meter_schema()}
+            }))}
+        }));
+        s["required"] = json!([
+            "_links",
+            "snapshot_id",
+            "boot_id",
+            "state_cursor",
+            "monotonic_ms",
+            "observed_at",
+            "active_revision",
+            "page_index",
+            "complete",
+            "selection",
+            "status"
+        ]);
+    } else {
+        s["required"] = json!(["_links"]);
+    }
     s["properties"] = properties;
-    s["required"] = json!(["_links"]);
     let mut defs = serde_json::Map::new();
     dependencies(&s, &mut defs);
     if route.view != Some(View::Effective) {

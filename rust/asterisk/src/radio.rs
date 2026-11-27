@@ -125,6 +125,35 @@ impl Radio {
         }
     }
 
+    /// Bind optional physical feedback on the reserved channel before call().
+    ///
+    /// # Safety
+    /// A provider accepting the operation retains callback/context through synchronous hangup.
+    pub(crate) unsafe fn attach_feedback(&mut self, port: ffi::UrpRadioFeedbackPort) -> i32 {
+        let mut binding = ffi::UrpAstFeedbackBinding {
+            struct_size: std::mem::size_of::<ffi::UrpAstFeedbackBinding>() as u32,
+            abi_version: ffi::URP_AST_FEEDBACK_OPTION_ABI_VERSION,
+            port,
+            accepted_abi_version: 0,
+            reserved: 0,
+        };
+        // SAFETY: owned channel and writable option are retained over this synchronous call.
+        let status = unsafe {
+            ffi::ast_channel_setoption(
+                self.connection.channel.pointer.as_ptr(),
+                ffi::URP_AST_OPTION_RADIO_FEEDBACK as i32,
+                std::ptr::from_mut(&mut binding).cast(),
+                std::mem::size_of_val(&binding) as i32,
+                0,
+            )
+        };
+        if status == 0 && binding.accepted_abi_version != ffi::URP_AST_FEEDBACK_OPTION_ABI_VERSION {
+            -7
+        } else {
+            status
+        }
+    }
+
     /// Attach both direct callbacks and require acknowledgment before channel start.
     ///
     /// # Safety

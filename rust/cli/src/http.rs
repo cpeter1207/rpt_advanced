@@ -47,6 +47,8 @@ pub fn bounded(reader: impl Read) -> Result<Vec<u8>> {
 pub struct Reply {
     pub body: Value,
     pub etag: Option<String>,
+    /// Transfer bytes reserved against the command's aggregate response budget.
+    pub body_bytes: usize,
 }
 
 /// This client never follows redirects, and connects only to loopback addresses.
@@ -137,6 +139,7 @@ impl Client {
         let etag = response.header("ETag").map(str::to_owned);
         let bytes = bounded(response.into_reader())?;
         Ok(Reply {
+            body_bytes: bytes.len(),
             body: if bytes.is_empty() {
                 Value::Null
             } else {

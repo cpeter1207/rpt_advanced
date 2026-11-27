@@ -50,6 +50,33 @@ fn review_reply_uses_transport_version_and_no_extensions() {
 }
 
 #[test]
+fn status_upgrade_required_advertises_only_the_transport_upgrade() {
+    for (code, upgrade, connection) in [
+        (StatusCode::UPGRADE_REQUIRED, "websocket", Some("Upgrade")),
+        (StatusCode::UPGRADE_REQUIRED, "other", None),
+        (StatusCode::OK, "websocket", None),
+    ] {
+        let response = Response::builder()
+            .status(code)
+            .header("upgrade", upgrade)
+            .header("connection", "untrusted")
+            .body(Vec::new())
+            .unwrap();
+        let wire = http::encode(response);
+        assert_eq!(
+            wire.headers()
+                .get("connection")
+                .map(|v| v.to_str().unwrap()),
+            connection
+        );
+        assert_eq!(
+            wire.headers().get("upgrade").map(|v| v.to_str().unwrap()),
+            connection.map(|_| "websocket")
+        );
+    }
+}
+
+#[test]
 fn review_accept_failure_is_coalesced_recovered_and_stoppable() {
     let shared = state();
     let health = Arc::new(Health::default());

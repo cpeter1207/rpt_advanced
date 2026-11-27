@@ -2,8 +2,10 @@
 mod http;
 #[cfg(test)]
 mod review_tests;
+mod status;
 mod trust;
 pub use self::http::OriginPolicy;
+pub use status::{StatusPublisher, StatusResyncReason, StatusStream};
 pub use trust::{ServerIdentity, ServiceId, ServiceTrust};
 
 use std::collections::VecDeque;
@@ -95,13 +97,35 @@ pub struct AdmittedRequest {
     pub headers: HeaderMap,
     /// Owned bounded input.
     pub body: RequestBody,
-    reply: oneshot::Sender<Response<Vec<u8>>>,
+    status_upgrade: bool,
+    reply: oneshot::Sender<CoordinatorReply>,
+}
+
+enum CoordinatorReply {
+    Http(Response<Vec<u8>>),
+    Status(StatusStream),
 }
 
 impl AdmittedRequest {
     /// Complete once. A client disconnect only discards the response.
     pub fn respond(self, response: Response<Vec<u8>>) {
-        let _ = self.reply.send(response);
+        let _ = self.reply.send(CoordinatorReply::Http(response));
+    }
+
+    /// Whether the request offered the authorized status WebSocket subprotocol.
+    pub fn is_status_upgrade(&self) -> bool {
+        self.status_upgrade
+    }
+
+    /// Upgrade this request after selection validation and capture registration.
+    pub fn respond_status_stream(self, stream: StatusStream) {
+        if !self.status_upgrade {
+            self.respond(http::empty(StatusCode::BAD_REQUEST));
+        } else if !stream.ready() {
+            self.respond(http::empty(StatusCode::SERVICE_UNAVAILABLE));
+        } else {
+            let _ = self.reply.send(CoordinatorReply::Status(stream));
+        }
     }
 }
 
@@ -438,32 +462,38 @@ fn refresh_pending(state: &Shared) {
     }
 }
 
-async fn dispatch(
-    state: Shared,
-    chain: Chain,
-    identity: (ServiceId, ConnectionProof),
+struct HttpInput {
     method: Method,
     target: PathAndQuery,
     headers: HeaderMap,
     body: RequestBody,
-) -> Response<Vec<u8>> {
+    status_upgrade: bool,
+}
+
+async fn dispatch(
+    state: Shared,
+    chain: Chain,
+    identity: (ServiceId, ConnectionProof),
+    input: HttpInput,
+) -> CoordinatorReply {
+    let error = |status| CoordinatorReply::Http(http::empty(status));
     let (actor, connection) = identity;
     let deadline = Instant::now() + ADMISSION;
     let trust = state.lock().expect("management state").trust();
     let Some(proof) = trust.and_then(|trust| ClaimProof::verify(trust, &chain, &actor)) else {
-        return http::empty(StatusCode::FORBIDDEN);
+        return error(StatusCode::FORBIDDEN);
     };
     let (reply, mut result) = oneshot::channel();
     let waiting = {
         let mut state_guard = state.lock().expect("management state");
         if !state_guard.uses(&proof.trust) {
-            return http::empty(StatusCode::SERVICE_UNAVAILABLE);
+            return error(StatusCode::SERVICE_UNAVAILABLE);
         }
         if state_guard.pending.len() >= QUEUE {
-            return http::empty(StatusCode::SERVICE_UNAVAILABLE);
+            return error(StatusCode::SERVICE_UNAVAILABLE);
         }
         let Some(next) = state_guard.last_id.checked_add(1) else {
-            return http::empty(StatusCode::SERVICE_UNAVAILABLE);
+            return error(StatusCode::SERVICE_UNAVAILABLE);
         };
         state_guard.last_id = next;
         let id = DeliveryId(next);
@@ -471,10 +501,11 @@ async fn dispatch(
             id,
             actor,
             connection,
-            method,
-            target,
-            headers,
-            body,
+            method: input.method,
+            target: input.target,
+            headers: input.headers,
+            body: input.body,
+            status_upgrade: input.status_upgrade,
             reply,
         };
         state_guard.pending.push_back(Pending {
@@ -490,11 +521,11 @@ async fn dispatch(
     };
     // The queue lock decides whether the host claimed before the admission deadline.
     match tokio::time::timeout(ADMISSION, &mut result).await {
-        Ok(reply) => reply.unwrap_or_else(|_| http::empty(StatusCode::SERVICE_UNAVAILABLE)),
-        Err(_) if waiting.cancel() => http::empty(StatusCode::SERVICE_UNAVAILABLE),
+        Ok(reply) => reply.unwrap_or_else(|_| error(StatusCode::SERVICE_UNAVAILABLE)),
+        Err(_) if waiting.cancel() => error(StatusCode::SERVICE_UNAVAILABLE),
         Err(_) => match tokio::time::timeout(REPLY, result).await {
             Ok(Ok(reply)) => reply,
-            _ => http::empty(StatusCode::GATEWAY_TIMEOUT),
+            _ => error(StatusCode::GATEWAY_TIMEOUT),
         },
     }
 }

@@ -147,13 +147,13 @@ impl MessagePreparation {
         &mut self,
         attempt: MessageAttemptId,
         result: Result<PreparedMedia, ControllerError>,
-    ) -> Result<(), MessageCompletion> {
+    ) -> Result<(), Box<MessageCompletion>> {
         let Some(port) = self
             .ports
             .iter_mut()
             .find(|port| port.waiting == Some(attempt))
         else {
-            return Err(MessageCompletion { attempt, result });
+            return Err(Box::new(MessageCompletion { attempt, result }));
         };
         // A matching waiting credit proves the previous completion was consumed.
         // Only control converts the envelope or drops any of its other fields.

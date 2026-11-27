@@ -14,6 +14,13 @@ use rptadv_peer_support::https::{
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::{
+    Message, WebSocket,
+    protocol::{Role, frame::coding::CloseCode},
+};
+
+use rptadv_peer_support::https::StatusStream;
 
 struct Pki(PathBuf);
 
@@ -141,6 +148,355 @@ fn claim(inbox: &mut CoordinatorInbox) -> rptadv_peer_support::https::AdmittedRe
         );
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+#[test]
+fn invalid_status_stream_upgrades_are_rejected_before_claim() {
+    let pki = Pki::new();
+    let (listener, mut inbox) = pki.start(pki.trust("client", &[("cli", "cli")]));
+    let config = pki.client("backend", Some("cli"));
+    for (version, protocol, origin, expected) in [
+        ("12", "rptadv.status.v1", "https://console.local", 400),
+        ("13", "other", "https://console.local", 400),
+        ("13", "rptadv.status.v1", "https://other.local", 403),
+    ] {
+        let mut conn = connect(listener.local_addr(), config.clone(), "localhost");
+        let request = format!(
+            "GET /api/v1/status/stream/ HTTP/1.1\r\nHost: localhost\r\nOrigin: {origin}\r\n\
+             Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: {version}\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {protocol}\r\n\r\n"
+        );
+        send(&mut conn, request.as_bytes()).unwrap();
+        assert_eq!(status(&mut conn).unwrap(), expected);
+        assert!(inbox.try_recv().is_none());
+    }
+}
+
+type StatusSocket = WebSocket<StreamOwned<ClientConnection, TcpStream>>;
+
+fn send_status(client: &mut Client, host: &str, other: &str) {
+    let request = format!(
+        "GET /api/v1/status/stream/?port=example HTTP/1.1\r\nHost: {host}\r\n{other}\
+         Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: rptadv.status.v1\r\n\r\n"
+    );
+    send(client, request.as_bytes()).unwrap();
+}
+
+fn status_socket(mut client: Client) -> StatusSocket {
+    let mut line = String::new();
+    client.read_line(&mut line).unwrap();
+    assert_eq!(line.split_whitespace().nth(1), Some("101"));
+    let mut found = false;
+    let mut negotiated = false;
+    loop {
+        line.clear();
+        assert!(client.read_line(&mut line).unwrap() > 0);
+        if line == "\r\n" {
+            break;
+        }
+        let (name, value) = line.split_once(':').unwrap();
+        if name.eq_ignore_ascii_case("sec-websocket-accept") {
+            assert_eq!(value.trim(), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+            found = true;
+        }
+        if name.eq_ignore_ascii_case("sec-websocket-protocol") {
+            assert_eq!(value.trim(), "rptadv.status.v1");
+            negotiated = true;
+        }
+    }
+    assert!(found && negotiated);
+    let initial = client.buffer().to_vec();
+    WebSocket::from_partially_read(client.into_inner(), initial, Role::Client, None)
+}
+
+fn status_frame(client: &mut StatusSocket) -> Value {
+    serde_json::from_str(client.read().unwrap().to_text().unwrap()).unwrap()
+}
+
+fn expect_close(client: &mut StatusSocket, expected: CloseCode) {
+    let Message::Close(Some(close)) = client.read().unwrap() else {
+        panic!("expected a WebSocket Close frame");
+    };
+    assert_eq!(close.code, expected);
+}
+
+#[test]
+fn status_stream_orders_snapshot_pages_state_and_latest_meters() {
+    let pki = Pki::new();
+    let (listener, mut inbox) = pki.start(pki.trust("client", &[("cli", "cli")]));
+    let mut conn = connect(
+        listener.local_addr(),
+        pki.client("backend", Some("cli")),
+        "localhost",
+    );
+    send_status(&mut conn, "localhost", "");
+    let admitted = claim(&mut inbox);
+    assert!(admitted.is_status_upgrade());
+    assert_eq!(admitted.actor.as_str(), "cli");
+    assert_eq!(admitted.target.query(), Some("port=example"));
+    let page =
+        |index, complete| json!({"state_cursor":"20","page_index":index,"complete":complete});
+    let (publisher, mut stream) = StatusStream::new("boot".into(), Vec::new(), Some(10));
+    assert!(publisher.event(Arc::new(json!({"state_cursor":"21","kind":"rx.keyed"}))));
+    assert!(publisher.event(Arc::new(json!({"state_cursor":"22","kind":"rx.unkeyed"}))));
+    publisher.meters(Arc::from([Arc::new(
+        json!({"epoch":"1","peak_dbfs":-12.0}),
+    )]));
+    publisher.invalidate_meters();
+    publisher.meters(Arc::from([Arc::new(json!({"epoch":"2","peak_dbfs":-6.0}))]));
+    publisher.meters(Arc::from([Arc::new(json!({"epoch":"2","peak_dbfs":-3.0}))]));
+    let pages = vec![page(0, false), page(1, true)];
+    stream.set_snapshot_pages(pages.clone());
+    admitted.respond_status_stream(stream);
+
+    let mut socket = status_socket(conn);
+    for (idx, expected) in pages.into_iter().enumerate() {
+        assert_eq!(
+            status_frame(&mut socket),
+            json!({"type":"snapshot","boot_id":"boot","seq":(idx+1).to_string(),"data":expected})
+        );
+    }
+    assert_eq!(
+        status_frame(&mut socket),
+        json!({"type":"event","boot_id":"boot","seq":"3","state_cursor":"21","kind":"rx.keyed"})
+    );
+    assert_eq!(
+        status_frame(&mut socket),
+        json!({"type":"event","boot_id":"boot","seq":"4","state_cursor":"22","kind":"rx.unkeyed"})
+    );
+    assert_eq!(
+        status_frame(&mut socket),
+        json!({"type":"meters","boot_id":"boot","seq":"5","superseded_meters":"1",
+               "data":[{"epoch":"2","peak_dbfs":-3.0}]})
+    );
+    socket
+        .send(Message::Ping(b"through-mtls".to_vec().into()))
+        .unwrap();
+    assert_eq!(
+        socket.read().unwrap(),
+        Message::Pong(b"through-mtls".to_vec().into())
+    );
+    socket
+        .send(Message::text(r#"{"action":"radio.key"}"#))
+        .unwrap();
+    expect_close(&mut socket, CloseCode::Policy);
+    assert!(
+        inbox.try_recv().is_none(),
+        "application frame reached the coordinator"
+    );
+}
+
+#[test]
+fn status_stream_divides_large_meter_batches_without_resync() {
+    let pki = Pki::new();
+    let (listener, mut inbox) = pki.start(pki.trust("client", &[("cli", "cli")]));
+    let mut connection = connect(
+        listener.local_addr(),
+        pki.client("backend", Some("cli")),
+        "localhost",
+    );
+    send_status(&mut connection, "localhost", "");
+    let admitted = claim(&mut inbox);
+    let (publisher, stream) =
+        StatusStream::new("boot".into(), vec![json!({"complete":true})], Some(20));
+    publisher.meters(Arc::from([
+        Arc::new(json!({"signal":"a","fixture":"a".repeat(2 * 1024 * 1024)})),
+        Arc::new(json!({"signal":"b","fixture":"b".repeat(2 * 1024 * 1024 + 8192)})),
+    ]));
+    admitted.respond_status_stream(stream);
+
+    let mut socket = status_socket(connection);
+    assert_eq!(status_frame(&mut socket)["type"], "snapshot");
+    for (seq, signal) in [("2", "a"), ("3", "b")] {
+        let message = socket.read().unwrap();
+        let text = message.to_text().unwrap();
+        assert!(text.len() <= 4 * 1024 * 1024);
+        let frame: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(frame["type"], "meters");
+        assert_eq!(frame["seq"], seq);
+        assert_eq!(frame["data"].as_array().unwrap().len(), 1);
+        assert_eq!(frame["data"][0]["signal"], signal);
+    }
+}
+
+#[test]
+fn status_stream_reports_overflow_while_regular_get_remains_available() {
+    let pki = Pki::new();
+    let (listener, mut inbox) = pki.start(pki.trust("client", &[("cli", "cli")]));
+    let config = pki.client("backend", Some("cli"));
+    let mut slow = connect(listener.local_addr(), config.clone(), "localhost");
+    send_status(&mut slow, "localhost", "");
+    let admitted = claim(&mut inbox);
+    let (publisher, stream) = StatusStream::new(
+        "boot".into(),
+        vec![json!({"complete":true,"fixture":"x".repeat(4 * 1024 * 1024 - 100)})],
+        None,
+    );
+    admitted.respond_status_stream(stream);
+    let mut slow = status_socket(slow);
+    let event = Arc::new(json!({"kind":"test"}));
+    assert!((0..2048).any(|_| !publisher.event(event.clone())));
+
+    let mut fast = connect(listener.local_addr(), config, "localhost");
+    send(&mut fast, GET).unwrap();
+    claim(&mut inbox).respond(
+        hyper::Response::builder()
+            .status(204)
+            .body(Vec::new())
+            .unwrap(),
+    );
+    assert_eq!(status(&mut fast).unwrap(), 204);
+
+    assert_eq!(status_frame(&mut slow)["type"], "snapshot");
+    assert_eq!(
+        status_frame(&mut slow),
+        json!({"type":"resync_required","boot_id":"boot","seq":"2","reason":"state_overflow"})
+    );
+    expect_close(&mut slow, CloseCode::Again);
+}
+
+#[test]
+fn status_stream_viewers_do_not_consume_regular_http_capacity() {
+    const VIEWERS: usize = 24;
+    let pki = Pki::new();
+    let (listener, mut inbox) = pki.start(pki.trust("client", &[("cli", "cli")]));
+    let config = pki.client("backend", Some("cli"));
+    let connect_local = || connect(listener.local_addr(), config.clone(), "localhost");
+    let open = |inbox: &mut CoordinatorInbox| {
+        let mut conn = connect_local();
+        send_status(&mut conn, "localhost", "");
+        let request = claim(inbox);
+        let proof = request.connection.clone();
+        let (publisher, stream) =
+            StatusStream::new("boot".into(), vec![json!({"complete":true})], None);
+        request.respond_status_stream(stream);
+        let mut socket = status_socket(conn);
+        assert_eq!(status_frame(&mut socket)["type"], "snapshot");
+        (socket, publisher, proof)
+    };
+    let mut viewers = (0..VIEWERS).map(|_| open(&mut inbox)).collect::<Vec<_>>();
+
+    let mut http = connect_local();
+    send(&mut http, GET).unwrap();
+    let ordinary = claim(&mut inbox);
+    assert!(!ordinary.is_status_upgrade());
+    ordinary.respond(
+        hyper::Response::builder()
+            .status(204)
+            .body(Vec::new())
+            .unwrap(),
+    );
+    assert_eq!(status(&mut http).unwrap(), 204);
+    assert!(viewers.iter().all(|(_, _, proof)| proof.is_alive()));
+
+    let (mut closed, publisher, proof) = viewers.pop().unwrap();
+    closed.close(None).unwrap();
+    assert!(closed.read().unwrap().is_close());
+    drop(closed);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while proof.is_alive() {
+        assert!(Instant::now() < deadline, "closed viewer was not drained");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!publisher.is_open());
+    viewers.push(open(&mut inbox));
+    drop(listener);
+    for (mut socket, publisher, proof) in viewers {
+        expect_close(&mut socket, CloseCode::Away);
+        assert!(!publisher.is_open());
+        assert!(!proof.is_alive());
+    }
+}
+
+#[test]
+fn status_stream_revalidates_trust_and_shuts_down_authenticated_connections() {
+    let pki = Pki::new();
+    let allow = &[("cli", "cli")];
+    let (mut listener, mut inbox) = pki.start(pki.trust("client", allow));
+    let config = pki.client("backend", Some("cli"));
+    let mut open = |listener: &Listener| {
+        let mut conn = connect(listener.local_addr(), config.clone(), "localhost");
+        send_status(&mut conn, "localhost", "");
+        let admitted = claim(&mut inbox);
+        let proof = admitted.connection.clone();
+        let (publisher, stream) =
+            StatusStream::new("boot".into(), vec![json!({"complete":true})], None);
+        admitted.respond_status_stream(stream);
+        let mut socket = status_socket(conn);
+        assert_eq!(status_frame(&mut socket)["type"], "snapshot");
+        (socket, publisher, proof)
+    };
+    let (mut revoked, publisher, proof) = open(&listener);
+    listener.replace_trust(pki.trust("client", &[])).unwrap();
+    publisher.event(Arc::new(
+        json!({"kind":"must_not_be_written_after_revocation"}),
+    ));
+    expect_close(&mut revoked, CloseCode::Policy);
+    listener.replace_trust(pki.trust("client", allow)).unwrap();
+    let (mut reconnected, new_publisher, new_proof) = open(&listener);
+    assert!(!proof.same_connection(&new_proof));
+    drop(listener);
+    expect_close(&mut reconnected, CloseCode::Away);
+    assert!(!publisher.is_open());
+    assert!(!new_publisher.is_open());
+    assert!(!proof.is_alive());
+    assert!(!new_proof.is_alive());
+}
+
+#[test]
+fn upgraded_status_stream_cannot_outlive_its_certificate() {
+    let pki = Pki::new();
+    let (listener, mut inbox) = pki.start(pki.trust("client", &[("short", "short")]));
+    let mut conn = connect(
+        listener.local_addr(),
+        pki.client("backend", Some("short")),
+        "localhost",
+    );
+    conn.get_mut()
+        .sock
+        .set_read_timeout(Some(Duration::from_secs(7)))
+        .unwrap();
+    send_status(&mut conn, "localhost", "");
+    let admitted = claim(&mut inbox);
+    let (_publisher, stream) =
+        StatusStream::new("boot".into(), vec![json!({"complete":true})], None);
+    admitted.respond_status_stream(stream);
+    let mut socket = status_socket(conn);
+    assert_eq!(status_frame(&mut socket)["type"], "snapshot");
+    expect_close(&mut socket, CloseCode::Policy);
+}
+
+#[test]
+#[ignore = "runs the real 15-second idle and Pong deadlines"]
+fn status_stream_requires_pong_for_server_idle_ping() {
+    let pki = Pki::new();
+    let (listener, mut inbox) = pki.start(pki.trust("client", &[("cli", "cli")]));
+    let mut conn = connect(
+        listener.local_addr(),
+        pki.client("backend", Some("cli")),
+        "localhost",
+    );
+    conn.get_mut()
+        .sock
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    send_status(&mut conn, "localhost", "");
+    let admitted = claim(&mut inbox);
+    let (_publisher, stream) =
+        StatusStream::new("boot".into(), vec![json!({"complete":true})], None);
+    admitted.respond_status_stream(stream);
+    let mut socket = status_socket(conn);
+    assert_eq!(status_frame(&mut socket)["type"], "snapshot");
+
+    let idle = Instant::now();
+    assert!(matches!(socket.read().unwrap(), Message::Ping(_)));
+    assert!(idle.elapsed() >= Duration::from_millis(14_950));
+    // Never flush tungstenite's automatically queued Pong. The server should close.
+    let sent = Instant::now();
+    std::thread::sleep(Duration::from_millis(15_100));
+    expect_close(&mut socket, CloseCode::Away);
+    assert!(sent.elapsed() < Duration::from_secs(18));
 }
 
 #[test]

@@ -1,6 +1,10 @@
 //! Single-owner media conversion, source-clock timestamps, and bounded retry storage.
 use super::{egress::Egress, source_clock::SourceClock};
-use crate::{Error, services::PeerIo};
+use crate::{
+    Error,
+    services::PeerIo,
+    status_meter::{Quality, Reader, Span, Tap},
+};
 use rpt_advanced_core::audio::{AudioSpan, LinkAudioConsumer};
 use std::sync::{
     Arc,
@@ -95,6 +99,11 @@ struct EncoderClock {
     drained: bool,
 }
 
+struct MeterWriters {
+    mixed: Tap,
+    codec: Option<Tap>,
+}
+
 /// One prepared packet at most; provider-committed reliable packets belong to IAX.
 pub(super) struct Outbound {
     pub(super) statistics: Arc<EgressStatistics>,
@@ -115,6 +124,8 @@ pub(super) struct Outbound {
     private_reply: Option<rpt_advanced_core::link::PeerReply>,
     media_isolation: Option<Arc<rpt_advanced_core::link::MediaIsolation>>,
     isolation_epoch: u64,
+    meters: Option<MeterWriters>,
+    meter_time_ms: u64,
     next_audio_ms: u64,
     unkey_ns: Option<u64>,
     idle_timestamp: u32,
@@ -146,6 +157,8 @@ impl Outbound {
             private_reply: None,
             media_isolation: None,
             isolation_epoch: 0,
+            meters: None,
+            meter_time_ms: 0,
             next_audio_ms: 0,
             unkey_ns: None,
             idle_timestamp: 0,
@@ -163,6 +176,17 @@ impl Outbound {
         sender.private_reply = Some(reply);
         Ok(sender)
     }
+    /// Arm meters only where the provider exposes source-authenticated prepared PCM.
+    pub(super) fn status_meters(&mut self, prepared: bool) -> (Option<Reader>, Option<Reader>) {
+        if !prepared {
+            return (None, None);
+        }
+        let (mixed, mixed_reader) = Tap::new();
+        let (codec, codec_reader) = Tap::at_rate(self.rate).unzip();
+        self.meters = Some(MeterWriters { mixed, codec });
+        (Some(mixed_reader), codec_reader)
+    }
+
     /// Select the provenance of the next private segment before feeding the encoder.
     /// A prompt belongs to the call; station programme additionally belongs to its live RF stream.
     pub(super) fn private_stream(&mut self, clock: Option<&Arc<SourceClock>>) -> Result<(), Error> {
@@ -228,6 +252,12 @@ impl Outbound {
     }
 
     fn discard(&mut self) -> Result<(), Error> {
+        if let Some(meters) = &mut self.meters {
+            meters.mixed.invalidate(Quality::Unavailable);
+            if let Some(codec) = &mut meters.codec {
+                codec.invalidate(Quality::Unavailable);
+            }
+        }
         if self.private_reply.is_some()
             && (self.pending.is_some()
                 || self.pcm_position < self.pcm_used
@@ -259,6 +289,7 @@ impl Outbound {
     }
     /// Return an absolute source/expiry wake. Each call handles at most one media item.
     pub(super) fn step(&mut self, io: &mut PeerIo, now_ms: u64) -> Result<Option<u64>, Error> {
+        self.meter_time_ms = now_ms;
         let epoch = self.media_isolation.as_ref().map_or(0, |gate| gate.epoch());
         if self.isolation_epoch != epoch {
             self.isolation_epoch = epoch;
@@ -461,6 +492,21 @@ impl Outbound {
         self.conversion.as_mut().expect("conversion origin").next =
             span.source_start.wrapping_add(count as u64);
         self.unkey_ns = Some(now.saturating_add(BLOCK_NS));
+        // The private owner uses no station clock for prompts and rejects retired calls
+        // before entering this converter. Neither its private PCM nor the codec copy is metered.
+        if (self.private_reply.is_none() || self.clock.is_some())
+            && let Some(meters) = &mut self.meters
+        {
+            meters.mixed.observe(
+                Span {
+                    graph_generation: span.generation,
+                    source_generation: span.stream,
+                    first_sample: span.source_start,
+                    end_ms: self.meter_time_ms,
+                },
+                &self.native[..count],
+            );
+        }
         let count = self
             .converter
             .process(&self.native[..count])
@@ -543,6 +589,24 @@ impl Outbound {
             || (result.consumed_frames == 0 && result.encoded_bytes == 0 && !flush)
         {
             return Err(Error::Translation);
+        }
+        if (self.private_reply.is_none() || self.clock.is_some())
+            && let Some(codec) = self
+                .meters
+                .as_mut()
+                .and_then(|meters| meters.codec.as_mut())
+            && let Some(conversion) = &self.conversion
+        {
+            codec.observe(
+                Span {
+                    graph_generation: conversion.span.generation,
+                    source_generation: conversion.span.stream,
+                    first_sample: encoder.input_frames,
+                    end_ms: self.meter_time_ms,
+                },
+                &self.converter.retained_output(self.pcm_used)
+                    [self.pcm_position..self.pcm_position + result.consumed_frames],
+            );
         }
         self.pcm_position += result.consumed_frames;
         let encoder = self.encoder.as_mut().expect("encoder origin");

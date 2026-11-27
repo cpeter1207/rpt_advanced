@@ -1,5 +1,8 @@
 //! Checked binding to the released F32 ring; no conversion implementation lives here.
+use super::status_audio::{NativeIngressMeasurements, NativeIngressReaders, NativeIngressWriter};
 use crate::abi as ffi;
+#[cfg(target_os = "linux")]
+use crate::configuration_radio::{PeerOutputObserver, ProviderOutput};
 use rpt_advanced_core::link::{
     PeerInput, PeerSignals, ReceivePolicy, RegenerationOrigin, SampleProvenance, SourceCoordinate,
     TimedPeerSample,
@@ -9,7 +12,7 @@ use std::{
     mem::{offset_of, size_of},
     ptr::{self, NonNull},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -108,6 +111,9 @@ struct Shared {
     played_epoch: AtomicU64,
     native_real: AtomicU64,
     signals: PeerSignals,
+    native_ingress: OnceLock<Mutex<NativeIngressReaders>>,
+    #[cfg(target_os = "linux")]
+    provider_output: OnceLock<PeerOutputObserver>,
 }
 // SAFETY: exactly one non-cloneable producer and one consumer call the released SPSC API.
 // Descriptor storage is process-lifetime immutable; Arc keeps the ring alive for both owners.
@@ -181,6 +187,22 @@ impl InboundObserver {
     pub fn signals(&self) -> &PeerSignals {
         &self.0.signals
     }
+    /// Read PCM meter windows belonging to this exact ring without borrowing audio.
+    pub(crate) fn native_ingress(&self) -> Option<NativeIngressMeasurements> {
+        self.0.native_ingress.get().map(|readers| {
+            readers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .readings()
+        })
+    }
+
+    /// Read the independent native graph observer for this exact admitted ring owner.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn provider_output(&self) -> Option<ProviderOutput> {
+        self.0.provider_output.get().map(PeerOutputObserver::output)
+    }
+
     /// Read the released ring's individually current counters without blocking audio.
     pub fn observe(&self) -> Result<Observation, RingError> {
         self.0.observe()
@@ -365,6 +387,9 @@ impl InboundRing {
                 played_epoch: AtomicU64::new(0),
                 native_real: AtomicU64::new(0),
                 signals,
+                #[cfg(target_os = "linux")]
+                provider_output: OnceLock::new(),
+                native_ingress: OnceLock::new(),
             });
             Ok((
                 InboundProducer(shared.clone()),
@@ -718,6 +743,19 @@ impl PeerInput for InboundConsumer {
     }
 }
 impl InboundConsumer {
+    /// Install a matched pair before either ring direction is published.
+    pub(crate) fn install_native_ingress(&self, has_dsp: bool) -> NativeIngressWriter {
+        let (writer, readers) = NativeIngressWriter::new(has_dsp);
+        assert!(self.0.native_ingress.set(Mutex::new(readers)).is_ok());
+        writer
+    }
+
+    /// Register the quiescent graph observer before publishing this ring to either owner.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn install_provider_observer(&self, observer: PeerOutputObserver) {
+        assert!(self.0.provider_output.set(observer).is_ok());
+    }
+
     pub(crate) fn local_epoch(&mut self, epoch: u64) {
         self.0.local_playout_epoch.store(epoch, Ordering::Relaxed);
     }

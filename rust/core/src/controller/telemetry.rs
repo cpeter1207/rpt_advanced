@@ -1,5 +1,6 @@
 //! Control-prepared playback and bounded status ownership transfer.
 
+use super::observation::{self, Observations, PlaybackTicket, Trace};
 use super::parrot::{
     CapturedParrot, ParrotAck, ParrotCapture, ParrotCaptureControl, ParrotRequest,
 };
@@ -119,6 +120,7 @@ pub struct PreparedMedia(
     pub(super) Option<Arc<MessageOccurrence>>,
     pub(super) Option<PlaybackPolicy>,
     pub(super) Option<usize>,
+    pub(super) Option<PlaybackTicket>,
 );
 
 /// One occurrence's race-free transition: pending (0), audible (1), or cancelled (2).
@@ -153,12 +155,53 @@ pub(super) enum MediaKind {
 }
 
 impl PreparedMedia {
+    pub(super) fn observe_queue(&mut self, trace: &mut Trace, now: u64, category: &'static str) {
+        if self.9.is_none() {
+            let audience = if self.3.is_some() {
+                "originating_peer"
+            } else {
+                match self.7.map(|policy| policy.destination) {
+                    Some(PlaybackDestination::Peers) => "peers",
+                    Some(PlaybackDestination::LocalAndLinks) => "local_and_peers",
+                    _ => "local",
+                }
+            };
+            self.9 = Some(trace.queue(now, category, audience, self.5.map(|entry| entry.0)));
+        }
+    }
+
+    pub(super) fn observe_completion(
+        &mut self,
+        trace: &mut Trace,
+        now: u64,
+        outcome: crate::audio::PlaybackOutcome,
+        reason: Option<&'static str>,
+    ) {
+        use super::TelemetryPhase;
+        use crate::audio::PlaybackOutcome;
+        let phase = match outcome {
+            PlaybackOutcome::Active => return,
+            PlaybackOutcome::Succeeded => TelemetryPhase::Finished,
+            PlaybackOutcome::Failed => TelemetryPhase::Failed,
+            PlaybackOutcome::Cancelled => TelemetryPhase::Cancelled,
+        };
+        if let Some(ticket) = self.9.take() {
+            trace.record(
+                ticket,
+                now,
+                phase,
+                reason.or((phase == TelemetryPhase::Failed).then_some("media_source")),
+            );
+        }
+    }
+
     /// Attach a producer-backed native PCM stream to controller playback.
     pub fn new_stream(stream: Box<dyn PcmStreamReader>) -> Result<Self, ControllerError> {
         Ok(Self(
             Playback::new_stream(stream),
             true,
             MediaKind::Status,
+            None,
             None,
             None,
             None,
@@ -259,6 +302,7 @@ impl PreparedMedia {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -303,6 +347,7 @@ impl PreparedMedia {
             })),
             available,
             MediaKind::Status,
+            None,
             None,
             None,
             None,
@@ -365,6 +410,7 @@ impl ActivitySnapshot {
 
 /// Sole status producer and completed-media reclaimer; retain until audio stops.
 pub struct ControllerControl {
+    observations: Observations,
     site_inhibit: Arc<AtomicBool>,
     rx_muted: Arc<AtomicU64>,
     rx_qualified: Arc<AtomicBool>,
@@ -389,6 +435,16 @@ pub struct ControllerControl {
 }
 
 impl ControllerControl {
+    /// Pop the next ordered public lifecycle observation of the transmit owner.
+    pub fn take_telemetry_observation(&mut self) -> Option<super::TelemetryObservation> {
+        self.observations.pop()
+    }
+
+    /// Whether the public observation lane missed a transition since its last drain.
+    pub fn telemetry_observations_lost(&self) -> bool {
+        self.observations.lost()
+    }
+
     pub(crate) fn qualified_receive(&self) -> bool {
         self.rx_qualified.load(Ordering::Acquire)
     }
@@ -440,10 +496,10 @@ impl ControllerControl {
         &mut self,
         attempt: super::MessageAttemptId,
         result: Result<PreparedMedia, ControllerError>,
-    ) -> Result<(), super::MessageCompletion> {
+    ) -> Result<(), Box<super::MessageCompletion>> {
         match &mut self.messages {
             Some(messages) => messages.complete(attempt, result),
-            None => Err(super::MessageCompletion { attempt, result }),
+            None => Err(Box::new(super::MessageCompletion { attempt, result })),
         }
     }
 
@@ -716,6 +772,7 @@ pub(super) enum Source {
 }
 
 pub(super) struct TelemetryPlanner {
+    pub(super) trace: Trace,
     pub site_inhibit: Arc<AtomicBool>,
     pub rx_muted: Arc<AtomicU64>,
     pub rx_qualified: Arc<AtomicBool>,
@@ -753,8 +810,10 @@ impl TelemetryPlanner {
         let rx_qualified = Arc::new(AtomicBool::new(false));
         let site_inhibit = Arc::new(AtomicBool::new(false));
         let cancel_message = Arc::new(AtomicBool::new(false));
+        let (trace, observations) = observation::channel();
         (
             Self {
+                trace,
                 site_inhibit: site_inhibit.clone(),
                 rx_muted: rx_muted.clone(),
                 rx_qualified: rx_qualified.clone(),
@@ -772,6 +831,7 @@ impl TelemetryPlanner {
                 duck_gain: 10_f32.powf(f32::from(duck_db) / 20.0),
             },
             ControllerControl {
+                observations,
                 rx_muted,
                 rx_qualified,
                 site_inhibit,
@@ -817,6 +877,7 @@ impl TelemetryPlanner {
             .expect("sole consumer retains its readable slots");
         let (first, second) = chunk.as_mut_slices();
         for media in first.iter_mut().chain(second) {
+            media.observe_queue(&mut self.trace, now, "message");
             media.expire(now, allowed, blocked, primary_ready);
             blocked |= !media.0.is_finished();
         }
@@ -827,10 +888,13 @@ impl TelemetryPlanner {
         self.status.as_ref().is_some_and(PreparedMedia::force_morse)
     }
     /// Skip ended endpoints and superseded notices, returning their ownership to control.
-    pub fn poll_status(&mut self) {
+    pub fn poll_status(&mut self, now: u64) {
         loop {
             if self.status.is_none() {
                 self.status = self.pending.pop().ok();
+            }
+            if let Some(media) = &mut self.status {
+                media.observe_queue(&mut self.trace, now, "message");
             }
             let Some(media) = self.status.as_mut().filter(|media| {
                 media.0.is_finished()
@@ -846,7 +910,15 @@ impl TelemetryPlanner {
             }) else {
                 break;
             };
+            let reason = if media.3.as_ref().is_some_and(|peer| peer.ended()) {
+                "audience_retired"
+            } else if media.5.is_some_and(|(deadline, _, _)| now >= deadline) {
+                "polite_deadline"
+            } else {
+                "cancelled"
+            };
             media.0.cancel();
+            media.observe_completion(&mut self.trace, now, media.0.outcome(), Some(reason));
             if self.active == Some(Source::Status) {
                 self.active = None;
             }
@@ -859,33 +931,41 @@ impl TelemetryPlanner {
     pub fn parrot_pending(&self) -> bool {
         self.parrot.is_some() || !self.parrot_pending.is_empty()
     }
-    pub fn start_parrot(&mut self) {
+    pub fn start_parrot(&mut self, now: u64) {
         if let Ok(QueuedParrot { mut media, epoch }) = self.parrot_pending.pop() {
+            media.observe_queue(&mut self.trace, now, "parrot");
             if epoch == self.parrot_epoch.load(Ordering::Relaxed) {
                 media.0.restart(false);
                 self.parrot = Some(media);
             } else {
-                self.cancel_parrot(media);
+                self.cancel_parrot(media, now);
             }
         }
     }
-    pub fn discard_pending_parrot(&mut self) {
+    pub fn discard_pending_parrot(&mut self, now: u64) {
         if let Ok(QueuedParrot { media, .. }) = self.parrot_pending.pop() {
-            self.cancel_parrot(media);
+            self.cancel_parrot(media, now);
         }
     }
     /// Interrupt live parrot playback and return queued media to control for reclamation.
-    pub fn disable_parrot(&mut self) {
-        self.discard_pending_parrot();
+    pub fn disable_parrot(&mut self, now: u64) {
+        self.discard_pending_parrot(now);
         if self.active == Some(Source::Parrot) {
             self.active = None;
             if let Some(media) = self.parrot.take() {
-                self.cancel_parrot(media);
+                self.cancel_parrot(media, now);
             }
         }
     }
-    fn cancel_parrot(&mut self, mut media: PreparedMedia) {
+    fn cancel_parrot(&mut self, mut media: PreparedMedia, now: u64) {
+        media.observe_queue(&mut self.trace, now, "parrot");
         media.0.cancel();
+        media.observe_completion(
+            &mut self.trace,
+            now,
+            media.0.outcome(),
+            Some("parrot_interrupted"),
+        );
         let _ = self.parrot_completed.push(media);
     }
     pub fn finish_parrot(&mut self) {
@@ -893,8 +973,8 @@ impl TelemetryPlanner {
             let _ = self.parrot_completed.push(media);
         }
     }
-    pub fn start_status(&mut self) {
-        self.poll_status();
+    pub fn start_status(&mut self, now: u64) {
+        self.poll_status(now);
         self.active = self.status.as_ref().map(|_| Source::Status);
         self.held_status = false;
     }

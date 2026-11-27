@@ -50,6 +50,8 @@ pub struct ProductRadioCallbacks {
     pub transmit_context: *mut c_void,
     /// Same serial transmit-owner policy/activity endpoint.
     pub metadata: abi::rptadv_radio_metadata_v1,
+    /// Optional pre-start feedback registration owned by the same caller.
+    pub feedback: Option<abi::UrpRadioFeedbackPort>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +157,7 @@ impl ActiveRadio {
         else {
             return Err(RadioActivationError::Product(-2));
         };
+        let feedback = callbacks.feedback;
         let callbacks = abi::UrpAstDirectCallbacks {
             struct_size: std::mem::size_of::<abi::UrpAstDirectCallbacks>() as u32,
             abi_version: abi::URP_AST_DIRECT_CALLBACKS_ABI_VERSION,
@@ -195,6 +198,11 @@ impl ActiveRadio {
             site_publish,
             site_snapshot,
         };
+        // SAFETY: the complete native owner is still stopped and the caller retains
+        // the callback context until this station is synchronously retired.
+        if let Some((bind, port)) = active.api.native_feedback_bind.zip(feedback) {
+            let _ = unsafe { bind(handle.as_ptr(), &port) };
+        }
         // SAFETY: successful create returns this stopped, uniquely owned station.
         let status = unsafe { start(handle.as_ptr()) };
         if status != 0 {
@@ -204,6 +212,15 @@ impl ActiveRadio {
             });
         }
         Ok(active)
+    }
+
+    /// Query the same native owner's typed physical status on serialized control.
+    pub(crate) fn physical_status(&mut self, output: &mut abi::UrpNativePhysicalStatus) -> i32 {
+        let Some((handle, read)) = self.handle.zip(self.api.native_get_status) else {
+            return -7;
+        };
+        // SAFETY: the retained exclusive owner lends the result for this synchronous read.
+        unsafe { read(handle.as_ptr(), output) }
     }
 
     /// Queue spare-pin ownership on the existing worker; snapshots confirm service.
@@ -537,6 +554,8 @@ fn retain_operations(api: &abi::UrpAstDescriptor) -> abi::UrpAstDescriptor {
     }
     complete!(
         native_status_text,
+        native_get_status,
+        native_feedback_bind,
         native_command,
         native_set_transmit,
         native_clear_manual,
@@ -1234,6 +1253,20 @@ pub(crate) mod tests {
         // SAFETY: these C records contain only nullable pointers and scalar values.
         let (mut api, mut providers): (abi::UrpAstDescriptor, abi::UrpAstProviderManifest) =
             unsafe { std::mem::zeroed() };
+        unsafe extern "C" fn publish_feedback(_: *mut c_void, _: *const abi::UrpRadioFeedback) {}
+        unsafe extern "C" fn bind_feedback(
+            _: *mut c_void,
+            port: *const abi::UrpRadioFeedbackPort,
+        ) -> i32 {
+            // SAFETY: the serial fixture receives the complete borrowed SDK port.
+            let port = unsafe { &*port };
+            assert!(port.publish.is_some());
+            assert_eq!(port.abi_version, abi::URP_RADIO_FEEDBACK_ABI_VERSION);
+            CALLS.with(|calls| calls.borrow_mut().push("feedback"));
+            0
+        }
+        api.struct_size = std::mem::size_of::<abi::UrpAstDescriptor>() as u32;
+        api.native_feedback_bind = Some(bind_feedback);
         api.native_start = Some(start);
         api.native_stop = Some(stop);
         api.native_destroy = Some(destroy);
@@ -1245,12 +1278,12 @@ pub(crate) mod tests {
             (
                 (0, true, 0),
                 None,
-                &["create", "start", "stop", "destroy"][..],
+                &["create", "feedback", "start", "stop", "destroy"][..],
             ),
             (
                 (0, true, -8),
                 Some(-8),
-                &["create", "start", "stop", "destroy"][..],
+                &["create", "feedback", "start", "stop", "destroy"][..],
             ),
             ((-7, true, 0), Some(-7), &["create", "destroy"][..]),
             ((-7, false, 0), Some(-7), &["create"][..]),
@@ -1264,6 +1297,12 @@ pub(crate) mod tests {
                 transmit: Some(transmit),
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 metadata: None,
+                feedback: Some(abi::UrpRadioFeedbackPort {
+                    struct_size: std::mem::size_of::<abi::UrpRadioFeedbackPort>() as u32,
+                    abi_version: abi::URP_RADIO_FEEDBACK_ABI_VERSION,
+                    context: std::ptr::null_mut(),
+                    publish: Some(publish_feedback),
+                }),
             };
             let result = fixture_open(&api, &providers, 128, callbacks);
             let status = result.as_ref().err().map(|error| match error {
@@ -1276,7 +1315,7 @@ pub(crate) mod tests {
                 CALLS.with(|calls| {
                     assert_eq!(
                         &*calls.borrow(),
-                        &["create", "start"],
+                        &["create", "feedback", "start"],
                         "a failed startup retains its callback owner until checked cleanup"
                     )
                 });
@@ -1304,6 +1343,7 @@ pub(crate) mod tests {
             transmit: Some(transmit),
             transmit_context: std::ptr::null_mut(),
             metadata: None,
+            feedback: None,
         };
         let mut missing_receive = callbacks();
         missing_receive.receive = None;

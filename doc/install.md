@@ -147,6 +147,20 @@ If a test fails, check the log and radio settings before changing audio gains.
 See [radio operation](implementation-status.md) and
 [link operation](allstarlink-status.md).
 
+## Read controller status
+
+Use the authenticated operator CLI to read a point-in-time snapshot.
+
+```sh
+rpt-advanced-cli status snapshot
+rpt-advanced-cli status snapshot --site --port PORT_ID --topics radio,meters
+```
+
+With no selectors, the command reads the site summary. Discover port resource IDs
+through the HAL status links. Repeat `--port` to select multiple ports. The
+command assembles all pages from one capture and writes one JSON document to
+stdout. If a capture expires, run the command again to take a fresh snapshot.
+
 ## Apply settings and upgrades
 
 To tune a standalone radio, install the tuner and select your node:

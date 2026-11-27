@@ -1438,3 +1438,53 @@ fn round2_untimed_sdk_preserves_ordinary_playback_but_refuses_mute_capable_ingre
         }
     }
 }
+
+#[test]
+fn direct_peer_ring_meter_follows_the_native_mixer_sample_clock() {
+    use crate::services::ProcessedPeer;
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode, SourcePosition},
+    };
+
+    let (mut producer, consumer) = InboundRing::open(8_000, InboundPolicy::Echo).unwrap();
+    let observer = producer.observer();
+    let input = ProcessedPeer::new(consumer).with_native_ingress();
+    let (outbound, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, input, outbound, 960, 0).unwrap();
+    let (mut links, _) = LinkAudio::new(vec![peer], 960).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    assert_eq!(producer.write(&[0.25; 1_280]), Ok(1_280));
+    producer.finish().unwrap();
+    for block in 0..5 {
+        links
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0; 960],
+                SourcePosition {
+                    generation: 19,
+                    sample: 96_000 + block * 960,
+                    stream: 4,
+                    born_ns: Some(3_000_000_000 + block * 20_000_000),
+                },
+            )
+            .unwrap();
+    }
+    let ingress = observer.native_ingress().unwrap();
+    assert_eq!(ingress.graph_generation, Some(19));
+    let meter = ingress.ring_output.measurement.unwrap();
+    assert!(!ingress.dsp_output.available);
+    assert_eq!((meter.source_generation, meter.end_sample), (4, 100_800));
+    assert_eq!(meter.monotonic_ms, 3_100);
+    assert_eq!(meter.valid_samples, 4_800);
+    assert!(meter.peak_dbfs.unwrap() > -20.0);
+}

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Exercise the Rust metadata loader in one isolated, test-owned Asterisk PID."""
 
+import json
 import os
 import re
 import socket
@@ -135,19 +136,30 @@ def main() -> None:
                     "full", "interface/", {"audio": {"device_identifier": "3-8"}}
                 )
                 cli("module reload app_rpt_advanced.so")
-                with ThreadPoolExecutor(max_workers=4) as pool:
-                    requests = [
-                        pool.submit(cli, f"rpt_advanced link status {full}")
-                        for _ in range(60)
-                    ]
-                    for _ in range(12):
-                        cli("module reload app_rpt_advanced.so")
-                    for request in requests:
-                        assert "rpt_advanced:" in request.result()
-                assert "RadioPlusAdvanced/network-full" in cli(
-                    "core show channels concise"
-                )
-                cli("module unload app_rpt_advanced.so")
+                with store.status_stream(full) as subscriber:
+                    opcode, payload = subscriber.frame()
+                    initial = json.loads(payload)
+                    assert opcode == 1 and initial["type"] == "snapshot"
+                    assert initial["seq"] == "1"
+                    assert full in initial["data"]["status"]["ports"]
+                    with ThreadPoolExecutor(max_workers=4) as pool:
+                        requests = [
+                            pool.submit(cli, f"rpt_advanced link status {full}")
+                            for _ in range(60)
+                        ]
+                        for _ in range(12):
+                            cli("module reload app_rpt_advanced.so")
+                            subscriber.ping()
+                        for request in requests:
+                            assert "rpt_advanced:" in request.result()
+                    assert "RadioPlusAdvanced/network-full" in cli(
+                        "core show channels concise"
+                    )
+                    assert process.pid == original_pid and process.poll() is None
+                    cli("module unload app_rpt_advanced.so")
+                    subscriber.assert_drained()
+                assert "0 modules loaded" in cli("module show like app_rpt_advanced")
+                assert process.pid == original_pid and process.poll() is None
                 assert "RadioPlusAdvanced/" not in cli("core show channels concise")
                 records = re.findall(
                     r"rpt_fixture RadioPlusAdvanced/network-full ticks=(\d+) writes=(\d+) "

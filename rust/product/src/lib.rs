@@ -30,6 +30,7 @@ pub mod link;
 pub mod management;
 pub mod media;
 pub mod phone;
+pub(crate) mod radio_feedback;
 mod remote_reply;
 pub mod schedule_zone;
 mod scheduler_health;
@@ -38,6 +39,7 @@ pub mod site;
 #[cfg(test)]
 #[path = "site/iio_tests.rs"]
 mod site_iio_tests;
+pub(crate) mod status_meter;
 pub(crate) mod status_post;
 pub mod worker;
 

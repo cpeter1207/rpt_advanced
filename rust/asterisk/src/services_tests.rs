@@ -14,6 +14,44 @@ const SITE_OPTION_FAILED: u8 = 49;
 const REMOTE_PENDING: u8 = 50;
 const REMOTE_ACK_MISSING: u8 = 51;
 const REMOTE_FAILED: u8 = 52;
+const FEEDBACK_ACK_MISSING: u8 = 60;
+const FEEDBACK_ACK_WRONG: u8 = 61;
+
+#[test]
+fn feedback_binding_requires_public_channel_ack_and_preserves_legacy_ownership() {
+    unsafe extern "C" fn publish(_: *mut c_void, _: *const ffi::UrpRadioFeedback) {}
+    reset();
+    let null = ptr::null_mut();
+    // SAFETY: the fixture owns the channel and the complete wrappers for each call.
+    unsafe {
+        let mut radio = null;
+        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+        for (failure, expected) in [(FEEDBACK_ACK_MISSING, -7), (FEEDBACK_ACK_WRONG, -7), (0, 0)] {
+            host(|state| state.failure = failure);
+            let mut binding: ffi::rptadv_radio_feedback_binding_v1 = std::mem::zeroed();
+            binding.request.struct_size = size_of_val(&binding) as u32;
+            binding.request.abi_version = 1;
+            binding.request.operation = ffi::RPTADV_RADIO_CONTROL_BIND_FEEDBACK;
+            binding.port.struct_size = size_of_val(&binding.port) as u32;
+            binding.port.abi_version = ffi::URP_RADIO_FEEDBACK_ABI_VERSION;
+            binding.port.publish = Some(publish);
+            let request = ptr::from_mut(&mut binding).cast();
+            assert_eq!(radio_control(null, radio, request, None, null), expected);
+            assert_eq!(binding.accepted_abi_version, u32::from(expected == 0));
+        }
+        let mut physical: ffi::rptadv_radio_physical_status_v1 = std::mem::zeroed();
+        physical.request.struct_size = size_of_val(&physical) as u32;
+        physical.request.abi_version = 1;
+        physical.request.operation = ffi::RPTADV_RADIO_CONTROL_PHYSICAL_STATUS;
+        assert_eq!(
+            radio_control(null, radio, ptr::from_mut(&mut physical).cast(), None, null),
+            -7
+        );
+        assert_eq!(physical.accepted_abi_version, 0);
+        radio_destroy(null, radio);
+    }
+    host(|state| state.clean());
+}
 
 #[test]
 fn remote_host_bridge_preserves_pending_owner_and_requires_acknowledgment() {
@@ -335,6 +373,23 @@ unsafe extern "C" fn ast_channel_setoption(
         if failure == 59 {
             command.target = 1;
         }
+        return 0;
+    }
+    if option == ffi::URP_AST_OPTION_RADIO_FEEDBACK as i32 {
+        assert_eq!(length as usize, size_of::<ffi::UrpAstFeedbackBinding>());
+        // SAFETY: this fixture receives the writable, full-sized option envelope.
+        let binding = unsafe { &mut *data.cast::<ffi::UrpAstFeedbackBinding>() };
+        assert_eq!(
+            binding.abi_version,
+            ffi::URP_AST_FEEDBACK_OPTION_ABI_VERSION
+        );
+        assert_eq!(binding.accepted_abi_version, 0);
+        assert!(binding.port.publish.is_some());
+        binding.accepted_abi_version = match host(|state| state.failure) {
+            FEEDBACK_ACK_MISSING => 0,
+            FEEDBACK_ACK_WRONG => 2,
+            _ => ffi::URP_AST_FEEDBACK_OPTION_ABI_VERSION,
+        };
         return 0;
     }
     if option == ffi::URP_AST_OPTION_REMOTE_CONTROL as i32 {

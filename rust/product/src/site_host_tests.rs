@@ -547,7 +547,7 @@ fn site_host_fan_reports_delivery_failure_and_recovery_only_for_its_node() {
 }
 
 #[test]
-fn site_host_reports_unavailable_actions_and_retired_notification_names() {
+fn site_host_reports_unavailable_actions_and_preserves_compiled_notices() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -584,7 +584,8 @@ fn site_host_reports_unavailable_actions_and_retired_notification_names() {
         .equipment
         .settings
         .clone();
-    // Reproduce a queued notification whose catalog identity has been retired.
+    // The compiled notice belongs to the active graph. A late mutable equipment
+    // label cannot re-resolve or replace that graph's existing alarm notice.
     settings.alarms[0].trip_message = "missing".into();
     host.runtime
         .node(LOCAL)
@@ -597,11 +598,11 @@ fn site_host_reports_unavailable_actions_and_retired_notification_names() {
         "alarm open active=true",
         "site-action external fault=Unavailable",
         "site-action alarm:open fault=Unavailable",
-        "site-action missing fault=Unavailable",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(!text.contains("site-action stop"), "{text}");
+    assert!(!text.contains("site-action missing"), "{text}");
     assert!(host.take_site_links().is_empty());
     for now in 3..12 {
         if host.stop(now) {

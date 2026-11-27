@@ -37,7 +37,7 @@ fn settle(engine: &Arc<Engine>, clock: RuntimeClock) {
         std::thread::sleep(Duration::from_millis(1));
     }
     engine.pump(clock, false).unwrap();
-    engine.refresh_domain();
+    engine.refresh_domain(None, true);
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn cached_calendar_handoff_reports_boundary_disconnect_and_dial_outcomes() {
         );
         std::thread::sleep(Duration::from_millis(1));
         engine.pump(start, false).unwrap();
-        engine.refresh_domain();
+        engine.refresh_domain(None, true);
     };
 
     engine.pump(warning, true).unwrap();
@@ -226,5 +226,28 @@ fn cached_calendar_handoff_reports_boundary_disconnect_and_dial_outcomes() {
             "failed_dial":{"node":"2000","attached":false}
         }),
         "cached calendar handoff status must carry actual boundary, disconnect, and dial outcomes"
+    );
+}
+
+#[test]
+fn site_resources_are_never_projected_on_a_radio_port() {
+    let sample = crate::management::resources::ResourceSampler::default()
+        .poll(1, || None)
+        .unwrap();
+    let expected = serde_json::to_value(&sample).unwrap();
+    let domain = crate::management::live::Domain {
+        site_resources: Some(Arc::new(sample)),
+        ..Default::default()
+    };
+    let id = LOCAL.parse().unwrap();
+    assert_eq!(
+        domain.fixture_status_fields(Scope::Site(id), None, Target::Metadata)["resources"],
+        expected
+    );
+    assert!(
+        domain
+            .fixture_status_fields(Scope::Port(id), None, Target::Metadata)
+            .get("resources")
+            .is_none()
     );
 }

@@ -169,6 +169,8 @@ pub trait PeerInput: Send {
     fn finite_playout(&self) -> Option<bool> {
         None
     }
+    /// Supply the exact native output-clock span before rendering this peer.
+    fn begin_observation_span(&mut self, _source: SourcePosition, _frames: usize) {}
     /// Render native F32, returning real samples (not concealment), or None on failure.
     fn render(&mut self, output: &mut [f32]) -> Option<usize>;
     /// Whether processed output belongs to the current operational receive epoch.
@@ -667,6 +669,19 @@ impl<P: PeerInput> LinkAudio<P> {
         audio: &mut [f32],
         source: SourcePosition,
     ) -> Result<bool, AdmissionError> {
+        self.process_with_branches(controller, receiving, audio, source, None)
+    }
+
+    /// Render normally and copy the admitted station and transmit branches into matching
+    /// callback-owned scratch spans when requested.
+    pub fn process_with_branches(
+        &mut self,
+        controller: &mut NodeController,
+        receiving: bool,
+        audio: &mut [f32],
+        source: SourcePosition,
+        branches: Option<crate::controller::LocalTransmitBranches<'_>>,
+    ) -> Result<bool, AdmissionError> {
         let count = audio.len();
         if count > self.local.len() {
             return Err(AdmissionError::Invalid);
@@ -675,8 +690,21 @@ impl<P: PeerInput> LinkAudio<P> {
         let isolation_epoch = self.media_isolation.as_ref().map_or(0, |gate| gate.epoch());
         let outgoing_isolation = isolation_epoch & 1 != 0;
         self.local[..count].copy_from_slice(audio);
+        let mut branches = branches.filter(|output| {
+            output.station_input.len() == count
+                && output.voice.len() == count
+                && output.public_telemetry.len() == count
+        });
+        if let Some(output) = &mut branches {
+            if receiving {
+                output.station_input.copy_from_slice(&self.local[..count]);
+            } else {
+                output.station_input.fill(0.0);
+            }
+        }
         self.mix[..count].fill(0.0);
         for peer in &mut self.peers {
+            peer.input.begin_observation_span(source, count);
             let mute_epoch = peer.input.signals().receive_epoch();
             let (pcm_epoch, available, ended) = {
                 let signal = peer.input.signals();
@@ -839,6 +867,7 @@ impl<P: PeerInput> LinkAudio<P> {
             &self.mix[..count],
             audio,
             ParrotOutput {
+                branches,
                 samples: &mut self.parrot_output[..count],
                 active: &mut parrot_active,
                 replies: Some(&mut self.reply_output[..count]),

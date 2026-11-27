@@ -564,6 +564,23 @@ fn cert(dir: &Path, name: &str) -> CertificateDer<'static> {
     CertificateDer::from(result.stdout)
 }
 
+fn first_status_stream_page(client: &Client<'_>, target: &str) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(include_str!("status_websocket.py"))
+        .arg(client.pki)
+        .arg(client.port.to_string())
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("public status stream JSON")
+}
+
 const TEST: &str = "configuration_transaction::tests::http::authenticated_edits_and_receipts_use_the_selected_store";
 #[test]
 fn authenticated_edits_and_receipts_use_the_selected_store() {
@@ -751,6 +768,14 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         return;
     }
     let runtime = Arc::new(RuntimeFixture::default());
+    runtime.observed.lock().unwrap().clock = Some(rpt_advanced_core::runtime::RuntimeClock {
+        now_ms: 45,
+        wall_seconds: 1_795_715_200,
+        wall_subsecond_ms: 40,
+        civil: None,
+    });
+    let status_edges = Arc::new(crate::management::status::edges::EdgeQueue::default());
+    runtime.observed.lock().unwrap().status_edges = Some(Arc::clone(&status_edges));
     let app = Coordinator::new(
         fixture.managed_store().unwrap(),
         key,
@@ -811,6 +836,103 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         assert!(event.body["properties"]["start"].is_object());
         assert!(event.body["properties"].get("configuration").is_none());
         assert!(client.get("/api/v1/schemas/json-patch/").body["items"]["oneOf"].is_array());
+        let status_root = client.get("/api/v1/status/");
+        let snapshot_link = status_root.body["_links"]["rpt:status-snapshot"]["href"]
+            .as_str()
+            .unwrap();
+        let stream_link = status_root.body["_links"]["rpt:status-stream"]["href"]
+            .as_str()
+            .unwrap();
+        let site_snapshot = client.get(snapshot_link);
+        assert_eq!(site_snapshot.code, 200);
+        assert_eq!(site_snapshot.headers["cache-control"], "no-store");
+        assert_eq!(site_snapshot.body["selection"]["site"], true);
+        assert!(site_snapshot.body["status"]["site"]["identity"].is_object());
+        assert!(site_snapshot.body["status"].get("ports").is_none());
+        assert_eq!(site_snapshot.body["complete"], true);
+        let streamed = first_status_stream_page(&client, stream_link);
+        assert_eq!(streamed["type"], "snapshot");
+        assert_eq!(streamed["seq"], "1");
+        assert_eq!(streamed["boot_id"], site_snapshot.body["boot_id"]);
+        for member in [
+            "selection",
+            "status",
+            "observed_at",
+            "monotonic_ms",
+            "state_cursor",
+        ] {
+            assert_eq!(
+                streamed["data"][member], site_snapshot.body[member],
+                "{member}"
+            );
+        }
+
+        let cursor = site_snapshot.body["state_cursor"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        status_edges.mark_lost();
+        let until = Instant::now() + Duration::from_secs(3);
+        let recovered = loop {
+            let snapshot = client.get(snapshot_link);
+            if snapshot.code == 200
+                && snapshot.body["state_cursor"]
+                    .as_str()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .is_some_and(|current| current > cursor)
+            {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < until,
+                "status did not recover on an idle source"
+            );
+            thread::sleep(Duration::from_millis(25));
+        };
+        assert_eq!(recovered.body["status"], site_snapshot.body["status"]);
+        let reconnected = first_status_stream_page(&client, stream_link);
+        assert_eq!(
+            reconnected["data"]["state_cursor"],
+            recovered.body["state_cursor"]
+        );
+
+        let boot = client.get("/api/v1/operations/");
+        assert_eq!(site_snapshot.body["boot_id"], boot.body["boot_id"]);
+        let upgrade = client.get(stream_link);
+        assert_eq!(upgrade.code, 426);
+        assert_eq!(
+            upgrade.body["_links"]["rpt:status-snapshot"]["href"],
+            "/api/v1/status/snapshot/?site=true"
+        );
+        assert_eq!(upgrade.headers["upgrade"], "websocket");
+        assert_eq!(
+            client.get(&format!("{snapshot_link}?topics=bogus")).code,
+            400
+        );
+        assert_eq!(
+            client
+                .get(&format!(
+                    "{snapshot_link}?port=361c602c-7664-4600-990d-6bd6cae4b32c"
+                ))
+                .code,
+            404
+        );
+        assert!(ops["/status/stream/"]["get"]["responses"]["101"].is_object());
+        assert!(ops["/status/snapshot/"]["get"]["responses"]["410"].is_object());
+        let response_schema =
+            ops["/status/snapshot/"]["get"]["responses"]["200"]["content"]["application/hal+json"]
+                ["schema"]["$ref"]
+                .as_str()
+                .unwrap();
+        let schema = client.get(response_schema);
+        assert_eq!(schema.code, 200);
+        assert_eq!(
+            schema.body["properties"]["status"]["properties"]["ports"]["additionalProperties"]["properties"]
+                ["radio_signals"]["type"],
+            "object"
+        );
+
         let site_radio = client.get("/api/v1/effective/site/radio/");
         assert_eq!(
             site_radio.code, 200,
@@ -874,6 +996,23 @@ fn authenticated_edits_and_receipts_use_the_selected_store() {
         runtime.observed.lock().unwrap().active_revision = Some(confirmed);
         terminal.send(AdoptionOutcome::Confirmed).unwrap();
         client.ready();
+        let port_id = port.trim_end_matches('/').rsplit('/').next().unwrap();
+        for (scope, site_expected) in [
+            (format!("port={port_id}"), false),
+            (format!("site=true&port={port_id}&port={port_id}"), true),
+        ] {
+            let query = format!("?{scope}&topics=resources,meters");
+            let snapshot = client.get(&format!("{snapshot_link}{query}"));
+            assert_eq!(snapshot.code, 200);
+            assert_eq!(snapshot.body["selection"]["site"], site_expected);
+            assert_eq!(snapshot.body["selection"]["ports"], json!([port_id]));
+            assert!(snapshot.body["status"]["ports"][port_id]["identity"].is_object());
+            assert_eq!(snapshot.body["status"].get("site").is_some(), site_expected);
+            let stream_query = format!("{stream_link}{query}&meter_hz=2");
+            let page = first_status_stream_page(&client, &stream_query);
+            assert_eq!(page["data"]["selection"], snapshot.body["selection"]);
+            assert_eq!(page["data"]["status"], snapshot.body["status"]);
+        }
         typed_profiles(&client, site, port);
         let commands = format!("{site}command/settings/");
         let warning_count = runtime.warnings.load(Ordering::Acquire);

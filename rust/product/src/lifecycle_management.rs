@@ -3,6 +3,7 @@ use super::*;
 use crate::management::{
     Adoption, AdoptionOutcome, Diagnostic, Effect, Fault, Observed, OperationOwner,
     native::Prepared,
+    resources::{ResourceSampler, Resources, utc_timestamp},
 };
 use rpt_advanced_core::{
     command_language::{Invocation, PreparedAction},
@@ -15,6 +16,7 @@ use std::sync::OnceLock;
 #[derive(Default)]
 pub(super) struct ManagementState {
     gate: OnceLock<Arc<AtomicBool>>,
+    pub(super) status_edges: OnceLock<Arc<crate::management::status::edges::EdgeQueue>>,
     state: Mutex<(u64, Observed)>,
     observing: AtomicBool,
     pub(super) reload: Mutex<Option<crate::management::HostReload>>,
@@ -66,25 +68,31 @@ impl Engine {
         // Storage trust is independent of the last observation confirmed by the physical owner.
     }
     pub(crate) fn modular_observed(&self) -> Observed {
-        let state = self
+        let mut observed = self
             .management_state
             .state
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut observed = state.1.clone();
-        if !self.accepting.load(Ordering::Acquire)
-            || self.reloading.load(Ordering::Acquire)
-            || self
+            .unwrap_or_else(|e| e.into_inner())
+            .1
+            .clone();
+        observed.status_edges = self.management_state.status_edges.get().cloned();
+        observed.clock = Some(self.clock());
+        observed.status_ready = self.accepting.load(Ordering::Acquire)
+            && !self.reloading.load(Ordering::Acquire)
+            && self
                 .management_state
                 .gate
                 .get()
-                .is_none_or(|g| g.load(Ordering::Acquire))
-        {
-            observed.domain = Default::default();
+                .is_some_and(|gate| !gate.load(Ordering::Acquire));
+        if !observed.status_ready {
+            observed.domain = Arc::new(crate::management::live::Domain {
+                site_resources: observed.domain.site_resources.clone(),
+                ..Default::default()
+            });
         }
         observed
     }
-    fn start_domain_observer(self: &Arc<Self>) {
+    pub(super) fn start_domain_observer(self: &Arc<Self>) {
         if self.management_state.observing.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -92,13 +100,50 @@ impl Engine {
         let job = std::thread::Builder::new()
             .name("rpt-status".into())
             .spawn(move || {
+                let mut sampler = ResourceSampler::default();
+                let mut resources = None;
+                let mut registrations_at = None;
                 while let Some(engine) = owner.upgrade() {
+                    let started = Instant::now();
                     if !engine.accepting.load(Ordering::Acquire) {
                         break;
                     }
-                    engine.refresh_domain();
+                    let sample = sampler.poll(engine.elapsed_ms(), || {
+                        let clock = engine.clock();
+                        utc_timestamp(clock.wall_seconds, clock.wall_subsecond_ms)
+                    });
+                    if let Some(sample) = sample {
+                        let sample = Arc::new(sample);
+                        resources = Some(Arc::clone(&sample));
+                        let mut state = engine
+                            .management_state
+                            .state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if state.1.active_revision.is_none()
+                            || engine
+                                .management_state
+                                .gate
+                                .get()
+                                .is_none_or(|gate| gate.load(Ordering::Acquire))
+                        {
+                            state.1.domain = Arc::new(crate::management::live::Domain {
+                                site_resources: Some(sample),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                    let now = engine.elapsed_ms();
+                    let refresh_registrations =
+                        registrations_at.is_none_or(|last| now.saturating_sub(last) >= 250);
+                    if refresh_registrations {
+                        registrations_at = Some(now);
+                    }
+                    engine.refresh_domain(resources.clone(), refresh_registrations);
                     drop(engine);
-                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    std::thread::sleep(
+                        std::time::Duration::from_millis(50).saturating_sub(started.elapsed()),
+                    );
                 }
             });
         match job {
@@ -114,7 +159,11 @@ impl Engine {
         }
     }
 
-    fn refresh_domain(self: &Arc<Self>) {
+    fn refresh_domain(
+        self: &Arc<Self>,
+        resources: Option<Arc<Resources>>,
+        refresh_registrations: bool,
+    ) {
         let Ok(_call) = self.enter() else { return };
         let generation = self.revision.load(Ordering::Acquire);
         let (fault_epoch, revision, owners) = {
@@ -140,21 +189,23 @@ impl Engine {
             return;
         };
         // Provider locks and directory observations may wait. Only this observer is occupied.
-        let registrations = selection
-            .iter()
-            .filter_map(|(&(port, account), query)| {
-                query
-                    .observe(self.services, port, account)
-                    .map(|result| ((port, account), result))
-            })
-            .collect();
+        let registrations = refresh_registrations.then(|| {
+            selection
+                .iter()
+                .filter_map(|(&(port, account), query)| {
+                    query
+                        .observe(self.services, port, account)
+                        .map(|result| ((port, account), result))
+                })
+                .collect()
+        });
         let engine = Arc::clone(self);
         let _ = self.run(move |host| {
             if host.status_selection() != selection {
                 return Ok(None);
             }
             let mut domain = host.live_domain(&owners, engine.elapsed_ms())?;
-            domain.registrations = registrations;
+            domain.site_resources = resources;
             let mut state = engine
                 .management_state
                 .state
@@ -170,6 +221,8 @@ impl Engine {
                     .get()
                     .is_some_and(|g| !g.load(Ordering::Acquire))
             {
+                domain.registrations =
+                    registrations.unwrap_or_else(|| state.1.domain.registrations.clone());
                 return Ok(Some(std::mem::replace(
                     &mut state.1.domain,
                     Arc::new(domain),

@@ -97,6 +97,7 @@ fn echo_source_never_detects_a_new_burst_before_the_previous_finite_token_retire
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             outbound,
             dtmf_muting: true,
         })
@@ -177,6 +178,7 @@ fn echo_source_never_joins_detector_qualification_across_loss_or_codec_plc() {
         control
             .send(Command::Redirect {
                 inbound,
+                ingress_graph_generation: 0,
                 outbound,
                 dtmf_muting: true,
             })
@@ -233,6 +235,7 @@ fn echo_source_decodes_dtmf_and_retains_mute_spans_but_never_decodes_codec_plc()
         control
             .send(Command::Redirect {
                 inbound,
+                ingress_graph_generation: 0,
                 dtmf_muting: muting,
                 outbound,
             })
@@ -301,6 +304,7 @@ fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound,
         })
@@ -368,6 +372,7 @@ fn echo_source_returns_ring_credit_without_copying_the_provider_owned_suffix() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound,
         })
@@ -423,6 +428,7 @@ fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
         control
             .send(Command::Redirect {
                 inbound,
+                ingress_graph_generation: 0,
                 dtmf_muting: true,
                 outbound,
             })
@@ -450,6 +456,7 @@ fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
             control
                 .send(Command::Redirect {
                     inbound,
+                    ingress_graph_generation: 0,
                     dtmf_muting: true,
                     outbound,
                 })
@@ -792,6 +799,7 @@ fn echo_source_metadata_backpressure_delays_finish_and_errors_do_not_acknowledge
         control
             .send(Command::Redirect {
                 inbound,
+                ingress_graph_generation: 0,
                 outbound,
                 dtmf_muting: true,
             })
@@ -1124,6 +1132,27 @@ fn radio_key_control_waits_for_peer_negotiation() {
     state.lock().unwrap().input.push_back(Input::RadioKey);
     session.step(3).unwrap();
     assert!(session.inbound.signals().radio_keyed());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_keeps_an_entire_received_key_pulse_between_control_polls() {
+    let (mut session, control, state, _) = make_session("1000");
+    state.lock().unwrap().input.extend([
+        Input::Text(b"!NEWKEY!"),
+        Input::RadioKey,
+        Input::RadioKey,
+        Input::RadioUnkey,
+    ]);
+    for at in 10..14 {
+        session.step(at).unwrap();
+    }
+
+    assert_eq!(control.take_receive_status_edge(), Some((11, true)));
+    assert_eq!(control.take_receive_status_edge(), Some((13, false)));
+    assert_eq!(control.take_receive_status_edge(), None);
+    assert_eq!(control.receive_status_key(), Some(false));
+    assert!(!control.receive_status_lost());
 }
 
 #[test]
@@ -2414,6 +2443,7 @@ fn egress_future_reopen_and_redirect_discard_uncommitted_media() {
         control
             .send(Command::Redirect {
                 inbound,
+                ingress_graph_generation: 0,
                 dtmf_muting: true,
                 outbound
             })
@@ -2970,6 +3000,75 @@ fn missing_sync_queue_and_spawn_failure_return_unconsumed_sessions() {
 }
 
 #[test]
+fn peer_meter_pcm_keeps_the_installed_graph_until_redirect() {
+    let (mut session, mut control, state, _) = make_session("1000");
+    let endpoints = || {
+        let (inbound, input) = InboundRing::open(48_000, InboundPolicy::Peer).unwrap();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+            .unwrap()
+            .into_endpoints();
+        (inbound, input, outbound)
+    };
+    let offer = |at, session: &mut PeerSession| {
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.25; 2_400]));
+        session.step(at).unwrap();
+    };
+    assert_eq!(control.status_meters().ingress_graph_generation, None);
+    control.bind_text_generation(92);
+    let (inbound, _input, outbound) = endpoints();
+    control
+        .send(Command::Redirect {
+            inbound,
+            ingress_graph_generation: 92,
+            outbound,
+            dtmf_muting: false,
+        })
+        .ok()
+        .unwrap();
+    offer(50, &mut session);
+    let installed = control.status_meters();
+    assert_eq!(installed.ingress_graph_generation, Some(92));
+    let first = installed.decoded.measurement.unwrap();
+    assert_eq!(first.graph_generation, 92);
+
+    control.bind_text_generation(7);
+    offer(100, &mut session);
+    let pending = control.status_meters();
+    assert_eq!(pending.ingress_graph_generation, Some(92));
+    let still_installed = pending.decoded.measurement.unwrap();
+    assert_eq!(still_installed.graph_generation, 92);
+    assert_eq!(still_installed.valid_samples, 4_800);
+
+    let (inbound, _input, outbound) = endpoints();
+    control
+        .send(Command::Redirect {
+            inbound,
+            outbound,
+            ingress_graph_generation: 7,
+            dtmf_muting: false,
+        })
+        .ok()
+        .unwrap();
+    session.step(101).unwrap();
+    let warming = control.status_meters();
+    assert_eq!(warming.ingress_graph_generation, Some(7));
+    assert!(
+        warming
+            .decoded
+            .measurement
+            .is_none_or(|reading| reading.graph_generation != 7)
+    );
+    offer(150, &mut session);
+    let first = control.status_meters().decoded.measurement.unwrap();
+    assert_eq!(first.graph_generation, 7);
+    assert_eq!(first.valid_samples, 2_400);
+}
+
+#[test]
 fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     let (mut session, mut control, state, mut output) = make_session("1000");
     assert_eq!(state.lock().unwrap().texts, [b"!NEWKEY1!".to_vec()]);
@@ -3044,6 +3143,7 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound,
         })
@@ -3092,6 +3192,7 @@ fn failed_or_overreported_ring_admission_ends_audio_and_gap_ingress() {
             control
                 .send(Command::Redirect {
                     inbound,
+                    ingress_graph_generation: 0,
                     dtmf_muting: true,
                     outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                         .unwrap()
@@ -3119,6 +3220,7 @@ fn pending_gap_rejects_a_ring_that_overreports_its_next_acceptance() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
@@ -3142,6 +3244,7 @@ fn counted_gap_is_staged_before_following_peer_events_when_ring_is_full() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
@@ -3197,6 +3300,7 @@ fn partial_pcm_is_staged_before_a_following_counted_gap() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
@@ -3463,6 +3567,7 @@ fn registered_ordinary_resident_pcm_pending_suffix_and_first_signal_lose_muted_e
                 inbound: input,
                 outbound: output(),
                 dtmf_muting: false,
+                ingress_graph_generation: 1,
             })
             .ok()
             .unwrap();
@@ -3569,6 +3674,7 @@ fn round2_echo(
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: false,
             outbound: output(),
         })

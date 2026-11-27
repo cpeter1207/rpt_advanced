@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Managed configuration of one isolated Asterisk integration process."""
 
+import base64
 import http.client
 import json
 import os
@@ -9,9 +10,11 @@ import ssl
 import subprocess
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 PORTS = "/api/v1/configuration/ports/"
+STATUS_PROTOCOL = "rptadv.status.v1"
 CHANNELS = (
     "full",
     "half",
@@ -23,6 +26,54 @@ CHANNELS = (
     "network-full",
     "network-replacement",
 )
+
+
+class StatusSubscriber:
+    """Read the status server's bounded frames in the test-owned TLS session."""
+
+    def __init__(self, socket, source):
+        self.socket = socket
+        self.source = source
+
+    def read_exact(self, size):
+        payload = self.source.read(size)
+        assert len(payload) == size, (len(payload), size)
+        return payload
+
+    def frame(self):
+        first, size = self.read_exact(2)
+        assert first in (0x81, 0x88, 0x89, 0x8A) and size < 128, (first, size)
+        if size in (126, 127):
+            size = int.from_bytes(self.read_exact(2 if size == 126 else 8), "big")
+        assert size <= (4 * 1024 * 1024 if first == 0x81 else 125), (first, size)
+        return first & 0x0F, self.read_exact(size)
+
+    def send_control(self, opcode, payload):
+        mask = os.urandom(4)
+        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        self.socket.sendall(bytes((0x80 | opcode, 0x80 | len(payload))) + mask + masked)
+
+    def await_control(self, wanted):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            opcode, payload = self.frame()
+            if opcode == wanted:
+                return payload
+            if opcode == 9:
+                self.send_control(10, payload)
+            else:
+                assert opcode == 1, (wanted, opcode)
+        raise AssertionError(f"status stream did not send control opcode {wanted}")
+
+    def ping(self):
+        payload = os.urandom(8)
+        self.send_control(9, payload)
+        assert self.await_control(10) == payload
+
+    def assert_drained(self):
+        payload = self.await_control(8)
+        assert int.from_bytes(payload[:2], "big") == 1001, payload
+        assert self.source.read(1) == b""
 
 
 class WorkingStore:
@@ -133,6 +184,31 @@ class WorkingStore:
             )
         finally:
             connection.close()
+
+    @contextmanager
+    def status_stream(self, port_id):
+        nonce = base64.b64encode(os.urandom(16)).decode("ascii")
+        with (
+            socket.create_connection(("127.0.0.1", self.port), timeout=5) as raw,
+            self.context.wrap_socket(raw, server_hostname="localhost") as client,
+            client.makefile("rb") as source,
+        ):
+            client.sendall(
+                (
+                    f"GET /api/v1/status/stream/?port={port_id}&topics=radio HTTP/1.1\r\n"
+                    f"Host: localhost:{self.port}\r\n"
+                    "Connection: Upgrade\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Sec-WebSocket-Version: 13\r\n"
+                    f"Sec-WebSocket-Key: {nonce}\r\n"
+                    f"Sec-WebSocket-Protocol: {STATUS_PROTOCOL}\r\n\r\n"
+                ).encode("ascii")
+            )
+            response = source.readline(4096)
+            assert response.startswith(b"HTTP/1.1 101 "), response
+            headers = http.client.parse_headers(source)
+            assert headers["Sec-WebSocket-Protocol"] == STATUS_PROTOCOL
+            yield StatusSubscriber(client, source)
 
     def start(self):
         deadline = time.monotonic() + 25

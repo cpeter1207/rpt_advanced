@@ -55,6 +55,9 @@ mod native;
 #[path = "host_status.rs"]
 pub(crate) mod status;
 #[cfg(target_os = "linux")]
+#[path = "host_telemetry_status.rs"]
+mod telemetry_status;
+#[cfg(target_os = "linux")]
 pub(crate) use native::RadioTicket;
 pub(crate) use site::SiteBasis;
 
@@ -333,6 +336,8 @@ struct PeerOwner {
 #[derive(Default)]
 pub(crate) struct PendingLinkDial {
     #[cfg(target_os = "linux")]
+    pub(crate) outgoing: bool,
+    #[cfg(target_os = "linux")]
     pub(crate) asl: Option<status::PendingAslDial>,
     pub(crate) phone: Option<PhoneLinkReply>,
     pub(crate) receiver: Option<Arc<GenerationWork>>,
@@ -382,6 +387,10 @@ pub struct Host {
         rpt_advanced_core::config::resources::candidate::ResourceId,
         status::Handoff,
     >,
+    #[cfg(target_os = "linux")]
+    pub(crate) status_edges: Arc<crate::management::status::edges::EdgeQueue>,
+    #[cfg(target_os = "linux")]
+    phone_status: status::PhoneObservations,
     pending_link_dials: std::collections::BTreeMap<u64, PendingLinkDial>,
     site_acquisition: crate::site::acquisition::Acquisition,
     site_radio: crate::site::radio::RadioSite,
@@ -453,11 +462,13 @@ fn prepared(
                     .incoming
                     .prepare_peer(snapshot.input_rate, MAXIMUM_FRAMES as u32)
                     .map_err(|_| RuntimeError::Preparation)?;
+                input.install_provider_observer(graph.output_observer());
                 ProcessedPeer::modular(input, graph, MAXIMUM_FRAMES)
             }
             #[cfg(target_os = "linux")]
             StationAudio::Modular(_) => ProcessedPeer::new(input),
-        };
+        }
+        .with_native_ingress();
         let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
@@ -481,6 +492,7 @@ fn prepared(
             PeerCommand::Redirect {
                 inbound,
                 outbound,
+                ingress_graph_generation: text_generation,
                 dtmf_muting: settings.dtmf_muting,
             },
         ));
@@ -709,6 +721,10 @@ impl Host {
             status_post: StatusPostService::default(),
             #[cfg(target_os = "linux")]
             handoff_status: Default::default(),
+            #[cfg(target_os = "linux")]
+            status_edges: Default::default(),
+            #[cfg(target_os = "linux")]
+            phone_status: Default::default(),
             pending_link_dials: Default::default(),
             site_acquisition: Default::default(),
             site_delivery: Default::default(),
@@ -951,6 +967,8 @@ impl Host {
                 self.retire_phone(&source);
                 return Err(error);
             }
+            #[cfg(target_os = "linux")]
+            self.collect_phone_status_edges(clock.now_ms);
             return Ok(());
         }
         let remote = io
@@ -1078,18 +1096,32 @@ impl Host {
             session.stop();
             return Err(RuntimeError::Rejected);
         }
+        #[cfg(target_os = "linux")]
+        let control = control.with_status_direction(dial.outgoing);
         let connection = control.connection_generation();
+        #[cfg(target_os = "linux")]
+        self.collect_peer_status_edges();
+        #[cfg(target_os = "linux")]
+        let mut superseded = Vec::new();
         for old in self
             .peers
             .iter_mut()
             .filter(|p| p.local == local && p.remote == remote && !p.superseded)
         {
             old.superseded = true;
+            #[cfg(target_os = "linux")]
+            if std::mem::take(&mut old.control.status_connected) {
+                superseded.push(old.control.connection_generation());
+            }
             self.runtime
                 .node(local)
                 .expect("running port")
                 .links()
                 .retire_source(&old.control.reply_target());
+        }
+        #[cfg(target_os = "linux")]
+        for retired in superseded {
+            self.peer_status_disconnected(local, remote, retired, clock.now_ms);
         }
         self.peers.push(PeerOwner {
             superseded: false,
@@ -1202,6 +1234,8 @@ impl Host {
         now_ms: u64,
         reply: Option<&PeerReply>,
     ) -> (bool, bool) {
+        #[cfg(target_os = "linux")]
+        self.collect_peer_status_edges();
         let match_at = self.peers.iter().position(|peer| {
             peer.local == local
                 && peer.remote == remote
@@ -1211,6 +1245,15 @@ impl Host {
         });
         let announced = if let Some(index) = match_at {
             let peer = self.peers.remove(index);
+            #[cfg(target_os = "linux")]
+            if peer.control.status_connected {
+                self.peer_status_disconnected(
+                    local,
+                    remote,
+                    peer.control.connection_generation(),
+                    now_ms,
+                );
+            }
             self.finish_link_dial(peer.control.connection_generation(), local, remote, false);
             self.text.cancel(&peer.control.text_origin());
             let announced = peer.announced.then(|| {
@@ -1761,6 +1804,8 @@ impl Host {
                     {
                         self.defer_link(local, effect);
                     }
+                    #[cfg(target_os = "linux")]
+                    self.collect_phone_status_edges(clock.now_ms);
                 } else if let DigitOutcome::RemoteCandidate(operation) = outcome {
                     // Selection changes collection of the very next queued digit.
                     let _ = self.command(local, operation, clock);
@@ -2000,12 +2045,16 @@ impl Host {
         for reply in self.phone_calls.expire_authentication(clock.now_ms) {
             self.retire_phone_source(&reply);
         }
+        #[cfg(target_os = "linux")]
+        self.collect_peer_status_edges();
         if let Err(error) = self.advance_reload(clock) {
             self.reload_failure = Some(error);
             self.reload_text = None;
             self.prune_leases();
         }
         self.poll_phone_attachments(clock);
+        #[cfg(target_os = "linux")]
+        self.collect_phone_status_edges(clock.now_ms);
         #[cfg(target_os = "linux")]
         self.poll_target_selections(clock)?;
         self.pump_remote(clock);
@@ -2024,6 +2073,15 @@ impl Host {
                 let _ = worker.service_remote();
                 worker.report_faults(local, clock.now_ms);
                 worker.collect_snapshots();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let generation = self
+                    .runtime
+                    .node(local)
+                    .and_then(|node| node.command_work())
+                    .map(|work| work.id());
+                self.collect_radio_status(local, generation, &lease.status);
             }
         }
         let mut events = Vec::new();
@@ -2055,6 +2113,8 @@ impl Host {
                 ));
             }
         }
+        #[cfg(target_os = "linux")]
+        self.collect_peer_status_edges();
         for (local, remote, connection) in ended {
             self.detach_connection(&local, &remote, Some(connection), clock.now_ms);
         }
@@ -2114,6 +2174,10 @@ impl Host {
                         let id = PeerIdentity::from_operator(&remote)
                             .map_err(|_| RuntimeError::Rejected)?;
                         let attached = node.links().attach_ingress(id, target);
+                        #[cfg(target_os = "linux")]
+                        if attached.is_ok() {
+                            self.peer_status_connected(&local, connection, clock.now_ms);
+                        }
                         self.finish_link_dial(connection, &local, &remote, attached.is_ok());
                         attached.map_err(RuntimeError::Link)?;
                     }
@@ -2184,6 +2248,8 @@ impl Host {
                     self.immediate(&local, LinkEffect::Digit(outcome), clock)?;
                 }
             }
+            #[cfg(target_os = "linux")]
+            self.collect_telemetry_status(&local, clock.now_ms);
             if let Some(node) = self.runtime.node(&local) {
                 let keyed = self
                     .leases
@@ -2304,6 +2370,8 @@ impl Host {
                     .attach_ingress(id, reply.clone())
                     .map_err(RuntimeError::Link)?;
                 self.phone_calls.confirm_radio_attachment(&reply);
+                #[cfg(target_os = "linux")]
+                self.collect_phone_status_edges(clock.now_ms);
             }
             if let Some(old) = status.retiring {
                 let retired = self
@@ -2435,6 +2503,10 @@ impl Host {
                 node.links().retire_source(reply);
             }
         }
+        #[cfg(target_os = "linux")]
+        self.collect_phone_status_edges(
+            self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+        );
     }
     fn retire_phones(&mut self) {
         for reply in self.phone_calls.retire_all() {

@@ -5,7 +5,9 @@ use crate::{
         InboundConsumer, InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation,
         RingError,
     },
+    radio_feedback::{self, PhysicalReceive, PhysicalTransmit},
     services::{PeerIo, ProcessedPeer, Radio},
+    status_meter::{self, Measurement, Quality, Span, Tap},
 };
 use rpt_advanced_core::{
     link::LinkAudio,
@@ -216,6 +218,16 @@ type TransmitOwner = OwnedTransmitOwner<DtmfWorker, RuntimeTransmit<Audio>>;
 pub struct RadioStatus {
     pub(crate) source_clock: Arc<crate::link::source_clock::SourceClock>,
     carrier: Arc<AtomicU64>,
+    physical_feedback: Arc<AtomicU64>,
+    receive_sample_ms: Arc<AtomicU64>,
+    #[cfg(target_os = "linux")]
+    pub(crate) edges: Arc<crate::management::status::edges::RadioEdges>,
+    #[cfg(target_os = "linux")]
+    rx_detail: Arc<AtomicU32>,
+    #[cfg(target_os = "linux")]
+    qualified_detail: Arc<AtomicU64>,
+    #[cfg(target_os = "linux")]
+    tx_detail: Arc<AtomicU32>,
     dtmf: Arc<AtomicBool>,
     transmit_keyed: Arc<AtomicU64>,
     // The control owner publishes monotonic time. The audio callback only copies its stamp.
@@ -361,6 +373,18 @@ impl RadioStatus {
             ..Self::default()
         }
     }
+    /// Latest admitted independent TX observations, subject to source freshness.
+    /// Last valid RX callback sample, in the controller's monotonic time domain.
+    pub(crate) fn receive_sample_time(&self) -> Option<u64> {
+        self.receive_sample_ms
+            .load(Ordering::Acquire)
+            .checked_sub(1)
+    }
+
+    pub(crate) fn physical_transmit(&self, now_ms: u64) -> Option<PhysicalTransmit> {
+        PhysicalTransmit::from_word(self.physical_feedback.load(Ordering::Acquire), now_ms)
+    }
+
     /// Current receive state and original transition time.
     pub fn snapshot(&self) -> (bool, u64) {
         let value = self.carrier.load(Ordering::Acquire);
@@ -414,10 +438,57 @@ impl RadioStatus {
         }
     }
     fn update_carrier(&self, receiving: bool, now_ms: u64) {
-        if self.carrier.load(Ordering::Relaxed) & 1 != u64::from(receiving) {
+        let previous = self.carrier.load(Ordering::Relaxed);
+        if previous & 1 != u64::from(receiving) {
             self.carrier.store(
                 (now_ms.min(u64::MAX >> 1) << 1) | u64::from(receiving),
                 Ordering::Release,
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn observe_qualified(&self, receiving: Option<bool>, now_ms: u64) {
+        use crate::management::status::edges::RadioSignal;
+        let state = receiving.map_or(0, |active| 1 + u64::from(active));
+        let previous = self.qualified_detail.load(Ordering::Relaxed);
+        let prior = previous & 3;
+        if state == prior {
+            return;
+        }
+        self.qualified_detail
+            .store((now_ms.min(u64::MAX >> 2) << 2) | state, Ordering::Release);
+        let signal = match receiving {
+            Some(qualified) => RadioSignal::Receive {
+                qualified,
+                duration_ms: (!qualified && prior == 2)
+                    .then(|| now_ms.saturating_sub(previous >> 2)),
+            },
+            None => RadioSignal::ReceiveUnknown,
+        };
+        self.record_radio_edge(now_ms, signal);
+    }
+    #[cfg(target_os = "linux")]
+    fn record_radio_edge(&self, at_ms: u64, signal: crate::management::status::edges::RadioSignal) {
+        self.edges
+            .push(crate::management::status::edges::RadioEdge { at_ms, signal });
+    }
+    #[cfg(target_os = "linux")]
+    fn record_rx_detail(&self, metadata: &crate::abi::UrpNativeReceiveMetadata, at_ms: u64) {
+        let detail = 1
+            | metadata.raw_receiver_keyed << 1
+            | metadata.receiver_keyed << 2
+            | metadata.vad_mode << 3
+            | metadata.vad_voice_active << 5;
+        if self.rx_detail.swap(detail, Ordering::AcqRel) != detail {
+            self.record_radio_edge(
+                at_ms,
+                crate::management::status::edges::RadioSignal::Source {
+                    raw: metadata.raw_receiver_keyed != 0,
+                    carrier: metadata.receiver_keyed != 0,
+                    vad_mode: metadata.vad_mode,
+                    voice: metadata.vad_voice_active != 0,
+                },
             );
         }
     }
@@ -437,6 +508,7 @@ struct ReceiveState {
     voice_after: u64,
     discontinuous: bool,
     meter: MeterPublisher,
+    status_taps: [Tap; 2],
 }
 struct ReceiveContext {
     active: Arc<AtomicBool>,
@@ -453,6 +525,9 @@ struct TransmitContext {
     maximum: usize,
     status: RadioStatus,
     meter: UnsafeCell<MeterPublisher>,
+    status_taps: UnsafeCell<[Tap; 5]>,
+    /// Borrowed only while measuring the serial TX callback's three programme inputs.
+    status_pcm: UnsafeCell<[Box<[f32]>; 3]>,
     remote_controls: UnsafeCell<u32>,
     linked_active: UnsafeCell<bool>,
 }
@@ -531,12 +606,27 @@ fn cancel_receive(context: &ReceiveContext) {
             .update_qualification(false, &state.ring.current.handoff);
     }
     state.ring.current.tagged_end = None;
+    context.status.receive_sample_ms.store(0, Ordering::Release);
     state.source_generation = 0;
     state.discontinuous = true;
-    context.status.update_carrier(
-        false,
-        context.origin_ms.saturating_add(state.elapsed_samples / 48),
-    );
+    let now_ms = context.origin_ms.saturating_add(state.elapsed_samples / 48);
+    #[cfg(target_os = "linux")]
+    if context.status.rx_detail.swap(0, Ordering::AcqRel) != 0 {
+        context
+            .status
+            .record_radio_edge(now_ms, crate::management::status::edges::RadioSignal::Fault);
+    }
+    // The controller's internal key gate closes on source failure. A failure
+    // does not qualify as a normal on-air unkey in the published status.
+    let previous = context.status.carrier.load(Ordering::Relaxed);
+    if previous & 1 != 0 {
+        context
+            .status
+            .carrier
+            .store(now_ms.min(u64::MAX >> 1) << 1, Ordering::Release);
+    }
+    #[cfg(target_os = "linux")]
+    context.status.observe_qualified(None, now_ms);
     context.status.set_dtmf_muted(false);
 }
 unsafe extern "C" fn receive_callback(
@@ -561,12 +651,14 @@ unsafe extern "C" fn receive_callback(
         };
     if !prefix_valid {
         cancel_receive(context);
+        invalidate_receive_meters(context, Quality::Fault);
         return -1;
     }
     // SAFETY: the validated prefix promises this complete current record.
     let metadata = unsafe { &*metadata };
     if metadata.status < 0 {
         cancel_receive(context);
+        invalidate_receive_meters(context, Quality::Unavailable);
         return 0;
     }
     if count == 0 || count as usize > context.maximum || pointer.is_null() {
@@ -574,6 +666,7 @@ unsafe extern "C" fn receive_callback(
             samples.fill(0.0);
         }
         cancel_receive(context);
+        invalidate_receive_meters(context, Quality::Fault);
         return -1;
     }
     // SAFETY: the host lends the validated writable PCM span for this callback.
@@ -597,6 +690,7 @@ unsafe extern "C" fn receive_callback(
     {
         samples.fill(0.0);
         cancel_receive(context);
+        invalidate_receive_meters(context, Quality::Fault);
         return -1;
     }
     let result = match catch_unwind(AssertUnwindSafe(|| receive(context, metadata, samples))) {
@@ -604,6 +698,7 @@ unsafe extern "C" fn receive_callback(
         Err(_) => {
             samples.fill(0.0);
             cancel_receive(context);
+            invalidate_receive_meters(context, Quality::Fault);
             -1
         }
     };
@@ -613,6 +708,13 @@ unsafe extern "C" fn receive_callback(
         .publish(samples, None);
     result
 }
+fn invalidate_receive_meters(context: &ReceiveContext, quality: Quality) {
+    // SAFETY: only the serial RX callback reads or writes these endpoints.
+    for tap in &mut unsafe { &mut *context.state.get() }.status_taps {
+        tap.invalidate(quality);
+    }
+}
+
 fn receive(
     context: &ReceiveContext,
     metadata: &crate::abi::UrpNativeReceiveMetadata,
@@ -627,6 +729,7 @@ fn receive(
     if !context.active.load(Ordering::Acquire) {
         samples.fill(0.0);
         cancel_receive(context);
+        invalidate_receive_meters(context, Quality::Unavailable);
         return 0;
     }
     // SAFETY: only this serialized receive endpoint accesses these cells while active.
@@ -636,6 +739,13 @@ fn receive(
     state.elapsed_samples = state.elapsed_samples.saturating_add(count);
     let now_ms = context.origin_ms.saturating_add(state.elapsed_samples / 48);
     let raw = metadata.raw_receiver_keyed != 0;
+    let sample_ms = now_ms.max(context.status.transmit_control_ms.load(Ordering::Acquire));
+    context
+        .status
+        .receive_sample_ms
+        .store(sample_ms.saturating_add(1), Ordering::Release);
+    #[cfg(target_os = "linux")]
+    context.status.record_rx_detail(metadata, now_ms);
     context
         .status
         .update_carrier(metadata.receiver_keyed != 0, now_ms);
@@ -651,8 +761,20 @@ fn receive(
             .admission
             .store(0, Ordering::Release);
         state.discontinuous = true;
+        #[cfg(target_os = "linux")]
+        context.status.observe_qualified(None, now_ms);
+        for tap in &mut state.status_taps {
+            tap.invalidate(Quality::Unavailable);
+        }
         return 0;
     };
+    let span = Span {
+        graph_generation: generation.id(),
+        source_generation: metadata.generation_id,
+        first_sample: metadata.first_sample_index,
+        end_ms: now_ms.max(context.status.transmit_control_ms.load(Ordering::Acquire)),
+    };
+    state.status_taps[0].observe(span, samples);
     state
         .meter
         .window
@@ -681,7 +803,10 @@ fn receive(
         invalidate(&ring.handoff);
         ring.tagged_end = None;
         state.voice_after = end;
+        state.status_taps[1].invalidate(Quality::Unavailable);
         context.status.update_carrier(false, now_ms);
+        #[cfg(target_os = "linux")]
+        context.status.observe_qualified(None, now_ms);
         samples.fill(0.0);
         return 0;
     }
@@ -693,7 +818,10 @@ fn receive(
         ring.tagged_end = None;
         state.voice_after = end;
         state.discontinuous = true;
+        state.status_taps[1].invalidate(Quality::Unavailable);
         context.status.update_carrier(false, now_ms);
+        #[cfg(target_os = "linux")]
+        context.status.observe_qualified(None, now_ms);
         samples.fill(0.0);
         return 0;
     }
@@ -710,7 +838,10 @@ fn receive(
     if !raw {
         samples.fill(0.0);
     }
+    state.status_taps[1].observe(span, samples);
     if !vad && !raw {
+        #[cfg(target_os = "linux")]
+        context.status.observe_qualified(Some(false), now_ms);
         return 0;
     }
     let token = ring.handoff.token.load(Ordering::Acquire);
@@ -724,6 +855,8 @@ fn receive(
         ring.handoff.admission.store(0, Ordering::Release);
         state.voice_after = end;
         context.status.update_carrier(false, now_ms);
+        #[cfg(target_os = "linux")]
+        context.status.observe_qualified(None, now_ms);
         return 0;
     }
     let result = if vad {
@@ -742,6 +875,8 @@ fn receive(
                 .admission
                 .store(if admitted { token } else { 0 }, Ordering::Release);
             context.status.update_carrier(admitted, now_ms);
+            #[cfg(target_os = "linux")]
+            context.status.observe_qualified(Some(admitted), now_ms);
         }
         _ => {
             handoff
@@ -752,6 +887,8 @@ fn receive(
             state.voice_after = end;
             context.status.update_qualification(raw, handoff);
             context.status.update_carrier(false, now_ms);
+            #[cfg(target_os = "linux")]
+            context.status.observe_qualified(None, now_ms);
         }
     }
     0
@@ -788,6 +925,37 @@ fn write_vad_pcm(
     }
     Ok(accepted)
 }
+/// The vendor invokes this on the same serial TX owner, immediately before rendering.
+unsafe extern "C" fn feedback_callback(
+    context: *mut c_void,
+    feedback: *const crate::abi::UrpRadioFeedback,
+) {
+    // SAFETY: the retained product transmit box lives through synchronous radio retirement.
+    let Some(context) = (unsafe { context.cast::<TransmitContext>().as_ref() }) else {
+        return;
+    };
+    if !context.active.load(Ordering::Acquire) {
+        return;
+    }
+    let status = &context.status;
+    let at_ms = status.transmit_control_ms.load(Ordering::Acquire);
+    // SAFETY: each provider call lends the sized physical prefix until this return.
+    let snapshot = unsafe { PhysicalTransmit::read(feedback, at_ms) };
+    let word = snapshot.map_or(0, PhysicalTransmit::word);
+    let previous = status.physical_feedback.swap(word, Ordering::AcqRel);
+    #[cfg(target_os = "linux")]
+    if previous & 63 != word & 63 {
+        status.record_radio_edge(
+            at_ms,
+            crate::management::status::edges::RadioSignal::PhysicalTransmit {
+                rendered: snapshot.and_then(|value| value.rendered),
+                serviced: snapshot.and_then(|value| value.serviced),
+                observed: snapshot.and_then(|value| value.observed),
+            },
+        );
+    }
+}
+
 unsafe extern "C" fn transmit_callback(
     context: *mut c_void,
     pointer: *mut f32,
@@ -810,7 +978,8 @@ unsafe extern "C" fn transmit_callback(
         if let Some(ctcss_enabled) = ctcss_enabled {
             *ctcss_enabled = 0;
         }
-        publish_transmit_keyed(status, None);
+        publish_transmit_keyed(status, None, None);
+        invalidate_transmit_meters(callback_context, Quality::Fault);
         return -1;
     };
     if keyed.is_none() || ctcss_enabled.is_none() {
@@ -821,7 +990,8 @@ unsafe extern "C" fn transmit_callback(
         if let Some(ctcss_enabled) = ctcss_enabled {
             *ctcss_enabled = 0;
         }
-        publish_transmit_keyed(status, None);
+        publish_transmit_keyed(status, None, None);
+        invalidate_transmit_meters(callback_context, Quality::Fault);
         publish_transmit_samples(callback_context, samples);
         return -1;
     }
@@ -840,9 +1010,24 @@ unsafe extern "C" fn transmit_callback(
             -1
         }
     };
-    publish_transmit_keyed(status, (result == 0).then_some(*keyed != 0));
+    publish_transmit_keyed(
+        status,
+        (result == 0).then_some(*keyed != 0),
+        (result == 0).then_some(*ctcss_enabled != 0),
+    );
+    if result != 0 {
+        invalidate_transmit_meters(callback_context, Quality::Fault);
+    }
     publish_transmit_samples(callback_context, samples);
     result
+}
+fn invalidate_transmit_meters(context: Option<&TransmitContext>, quality: Quality) {
+    if let Some(context) = context {
+        // SAFETY: the serial TX callback owns these endpoints.
+        for tap in unsafe { &mut *context.status_taps.get() } {
+            tap.invalidate(quality);
+        }
+    }
 }
 fn publish_transmit_samples(context: Option<&TransmitContext>, samples: &[f32]) {
     if let Some(context) = context {
@@ -851,13 +1036,26 @@ fn publish_transmit_samples(context: Option<&TransmitContext>, samples: &[f32]) 
         unsafe { &mut *context.meter.get() }.publish(samples, Some(&ring.current.observer));
     }
 }
-fn publish_transmit_keyed(status: Option<&RadioStatus>, keyed: Option<bool>) {
+fn publish_transmit_keyed(status: Option<&RadioStatus>, keyed: Option<bool>, _ctcss: Option<bool>) {
     if let Some(status) = status {
         let stamp = status.transmit_control_ms.load(Ordering::Acquire);
         let state = keyed.map_or(0, |value| 1 + u64::from(value));
         status
             .transmit_keyed
             .store(stamp << 2 | state, Ordering::Release);
+        #[cfg(target_os = "linux")]
+        {
+            let detail = state as u32 | _ctcss.map_or(0, |value| 1 + u32::from(value)) << 2;
+            if status.tx_detail.swap(detail, Ordering::AcqRel) != detail {
+                status.record_radio_edge(
+                    stamp,
+                    crate::management::status::edges::RadioSignal::Transmit {
+                        requested: keyed,
+                        ctcss_requested: _ctcss,
+                    },
+                );
+            }
+        }
     }
 }
 unsafe fn transmit(
@@ -881,6 +1079,7 @@ unsafe fn transmit(
     }
     let stamp = context.status.source_clock.advance(samples.len());
     if !context.active.load(Ordering::Acquire) {
+        invalidate_transmit_meters(Some(context), Quality::Unavailable);
         samples.fill(0.0);
         *keyed = 0;
         *ctcss_enabled = 0;
@@ -890,12 +1089,18 @@ unsafe fn transmit(
     let (owner, endpoint) = unsafe { (&mut *context.owner.get(), &mut *context.ring.get()) };
     samples.fill(0.0);
     let Some(mut generation) = owner.as_mut().expect("active transmit owner").acquire() else {
+        invalidate_transmit_meters(Some(context), Quality::Unavailable);
         return 0;
     };
     // SAFETY: this serial TX callback exclusively owns its meter window.
-    unsafe { &mut *context.meter.get() }
-        .window
-        .configure(generation.settings().status_snapshot_interval_ms);
+    let meter_window = &mut unsafe { &mut *context.meter.get() }.window;
+    meter_window.configure(generation.settings().status_snapshot_interval_ms);
+    let callback_end_ms = meter_window.origin_ms.saturating_add(
+        meter_window
+            .elapsed_samples
+            .saturating_add(samples.len() as u64)
+            / 48,
+    );
     endpoint.adopt(generation.id());
     let ring = &mut endpoint.current;
     if ring.delay_ms
@@ -904,6 +1109,7 @@ unsafe fn transmit(
             .squelch_delay_ms
             .max(context.status.vad_delay_ms.load(Ordering::Acquire))
     {
+        invalidate_transmit_meters(Some(context), Quality::Unavailable);
         return 0;
     }
     let receive_epoch = generation.state().controller.receive_epoch();
@@ -946,6 +1152,34 @@ unsafe fn transmit(
     if !receiving || context.status.dtmf_muted() {
         samples.fill(0.0);
     }
+    let span = Span {
+        graph_generation: generation.id(),
+        source_generation: stamp.stream,
+        first_sample: stamp.sample,
+        end_ms: stamp
+            .born_ns
+            .map_or(callback_end_ms, |ns| {
+                ns / 1_000_000 + samples.len() as u64 / 48
+            })
+            .max(context.status.transmit_control_ms.load(Ordering::Acquire)),
+    };
+    // SAFETY: this serial TX callback is the sole writer of its metering endpoints.
+    let [
+        local_ring,
+        transmit_program,
+        voice_level,
+        telemetry_level,
+        station_level,
+    ] = unsafe { &mut *context.status_taps.get() };
+    // SAFETY: these buffers are allocated before publication and shared only by this TX turn.
+    let [station_input, voice, public_telemetry] = unsafe { &mut *context.status_pcm.get() };
+    let count = samples.len();
+    let (station_input, voice, public_telemetry) = (
+        &mut station_input[..count],
+        &mut voice[..count],
+        &mut public_telemetry[..count],
+    );
+    local_ring.observe(span, samples);
     let source = rpt_advanced_core::link::SourcePosition {
         generation: generation.id(),
         sample: stamp.sample,
@@ -963,15 +1197,27 @@ unsafe fn transmit(
     if take_test_failure(TestFailure::TransmitPanic) {
         panic!("injected transmit processing panic");
     }
-    let result = transmit
-        .adapter
-        .process(&mut transmit.controller, receiving, samples, source);
+    let result = transmit.adapter.process_with_branches(
+        &mut transmit.controller,
+        receiving,
+        samples,
+        source,
+        Some(rpt_advanced_core::controller::LocalTransmitBranches {
+            station_input,
+            voice,
+            public_telemetry,
+        }),
+    );
     // SAFETY: this callback owns both adapter and metadata state.
     unsafe {
         *context.linked_active.get() = result.is_ok() && transmit.adapter.peer_source_active();
     }
     match result {
         Ok(value) => {
+            transmit_program.observe(span, samples);
+            voice_level.observe(span, voice);
+            telemetry_level.observe(span, public_telemetry);
+            station_level.observe(span, station_input);
             *keyed = u32::from(value);
             *ctcss_enabled = u32::from(transmit.controller.ctcss_enabled());
             0
@@ -1006,6 +1252,8 @@ pub struct RadioWorker {
     transmit_snapshots: Consumer<MeterSnapshot>,
     latest_receive: Option<MeterSnapshot>,
     latest_transmit: Option<MeterSnapshot>,
+    status_meters: [status_meter::Reader; status_meter::LOCAL_TAP_COUNT],
+    last_physical_receive: Option<(u64, Option<PhysicalReceive>)>,
     reported_faults: [u64; 6],
     last_report_ms: u64,
 }
@@ -1221,8 +1469,19 @@ impl RadioWorker {
         status.set_dtmf_muted(false);
         let (receive_publisher, receive_snapshots) = RingBuffer::new(SNAPSHOT_QUEUE_CAPACITY);
         let (transmit_publisher, transmit_snapshots) = RingBuffer::new(SNAPSHOT_QUEUE_CAPACITY);
+        let [
+            (rx_provider, rx_provider_reader),
+            (rx_gate, rx_gate_reader),
+            (rx_ring, rx_ring_reader),
+            (tx_program, tx_program_reader),
+            (tx_voice, tx_voice_reader),
+            (tx_telemetry, tx_telemetry_reader),
+            (rx_station, rx_station_reader),
+        ] = std::array::from_fn(|_| Tap::new());
         let active = Arc::new(AtomicBool::new(false));
         status.source_clock.restart();
+        status.physical_feedback.store(0, Ordering::Release);
+        status.receive_sample_ms.store(0, Ordering::Release);
         let receive = Box::new(ReceiveContext {
             active: active.clone(),
             owner: UnsafeCell::new(None),
@@ -1239,6 +1498,7 @@ impl RadioWorker {
                     snapshots: receive_publisher,
                     dropped_snapshots: 0,
                 },
+                status_taps: [rx_provider, rx_gate],
             }),
             maximum,
             origin_ms,
@@ -1255,6 +1515,10 @@ impl RadioWorker {
                 snapshots: transmit_publisher,
                 dropped_snapshots: 0,
             }),
+            status_taps: UnsafeCell::new([rx_ring, tx_program, tx_voice, tx_telemetry, rx_station]),
+            status_pcm: UnsafeCell::new(std::array::from_fn(|_| {
+                vec![0.0; maximum].into_boxed_slice()
+            })),
             remote_controls: UnsafeCell::new(0),
             linked_active: UnsafeCell::new(false),
         });
@@ -1278,13 +1542,31 @@ impl RadioWorker {
             transmit_snapshots,
             latest_receive: None,
             latest_transmit: None,
+            status_meters: [
+                rx_provider_reader,
+                rx_gate_reader,
+                rx_ring_reader,
+                tx_program_reader,
+                tx_voice_reader,
+                tx_telemetry_reader,
+                rx_station_reader,
+            ],
+            last_physical_receive: None,
             reported_faults: [0; 6],
             last_report_ms: 0,
         };
         // SAFETY: the complete owner retains both stable callback boxes on success
         // and failure. Only checked retirement may release them after activation.
         let activated = unsafe {
-            worker.radio.as_mut().unwrap().activate(
+            let radio = worker.radio.as_mut().unwrap();
+            let port = crate::abi::UrpRadioFeedbackPort {
+                struct_size: std::mem::size_of::<crate::abi::UrpRadioFeedbackPort>() as u32,
+                abi_version: crate::abi::URP_RADIO_FEEDBACK_ABI_VERSION,
+                context: std::ptr::from_ref(&*worker.transmit).cast_mut().cast(),
+                publish: Some(feedback_callback),
+            };
+            radio.bind_feedback(port);
+            radio.activate(
                 Some(receive_callback),
                 std::ptr::from_ref(&*worker.receive).cast_mut().cast(),
                 Some(transmit_callback),
@@ -1391,6 +1673,37 @@ impl RadioWorker {
         })
     }
 
+    /// Collect the native owner's optional receive snapshot at most four times per second.
+    pub(crate) fn physical_receive(&mut self, now_ms: u64) -> Option<PhysicalReceive> {
+        let sample = self
+            .receive
+            .status
+            .receive_sample_ms
+            .load(Ordering::Acquire);
+        if sample == 0 || now_ms.saturating_sub(sample - 1) > radio_feedback::FRESH_MS {
+            self.last_physical_receive = None;
+            return None;
+        }
+        if let Some((at, cached)) = self.last_physical_receive
+            && now_ms.saturating_sub(at) < 250
+        {
+            return cached;
+        }
+        let status = self
+            .radio
+            .as_mut()
+            .and_then(|radio| radio.physical_receive(now_ms));
+        self.last_physical_receive = Some((now_ms, status));
+        status
+    }
+
+    /// Return the most recent local measurements without polling either provider callback.
+    pub(crate) fn status_meters(&self) -> [Option<Measurement>; status_meter::LOCAL_TAP_COUNT] {
+        self.status_meters
+            .each_ref()
+            .map(status_meter::Reader::current)
+    }
+
     /// Drain bounded callback snapshots and retain only each direction's latest window.
     pub(crate) fn collect_snapshots(&mut self) {
         while let Ok(snapshot) = self.receive_snapshots.pop() {
@@ -1398,6 +1711,9 @@ impl RadioWorker {
         }
         while let Ok(snapshot) = self.transmit_snapshots.pop() {
             self.latest_transmit = Some(snapshot);
+        }
+        for reader in &mut self.status_meters {
+            let _ = reader.latest();
         }
     }
     /// Record changed fault counters at most every five seconds, never from audio.
@@ -1456,7 +1772,15 @@ impl RadioWorker {
         }
         drop(self.radio.take());
         self.receive.active.store(false, Ordering::Release);
-        publish_transmit_keyed(Some(&self.transmit.status), None);
+        self.receive
+            .status
+            .physical_feedback
+            .store(0, Ordering::Release);
+        self.receive
+            .status
+            .receive_sample_ms
+            .store(0, Ordering::Release);
+        publish_transmit_keyed(Some(&self.transmit.status), None, None);
         Ok(true)
     }
 
@@ -1476,7 +1800,7 @@ impl Drop for RadioWorker {
     fn drop(&mut self) {
         // Must precede automatic field destruction, including partially activated setup.
         drop(self.radio.take());
-        publish_transmit_keyed(Some(&self.transmit.status), None);
+        publish_transmit_keyed(Some(&self.transmit.status), None, None);
     }
 }
 #[cfg(test)]

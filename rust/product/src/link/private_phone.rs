@@ -1,7 +1,12 @@
 //! Private call transport on its native registered executor. Only its exact
 //! reply queue reaches this encoder. Authentication and command execution own
 //! the other endpoints on ordinary product control.
-use super::{dispatcher::PeerWake, outbound::Outbound, private_radio::Radio};
+use super::{
+    dispatcher::PeerWake,
+    outbound::Outbound,
+    private_radio::Radio,
+    status_audio::{DecodedMeter, PeerMeasurements, PeerReaders},
+};
 use crate::{Error, phone::PrivatePhoneReply, services::PeerIo};
 use rpt_advanced_core::{
     audio::{AudioSpan, LinkAudioProducer, LinkAudioQueue, PlaybackOutcome},
@@ -44,8 +49,13 @@ pub(crate) struct Control {
     settled: Arc<AtomicU64>,
     pub(crate) wake: PeerWake,
     stop: Arc<AtomicBool>,
+    meters: PeerReaders,
 }
 impl Control {
+    pub(crate) fn status_meters(&self, call_generation: u64) -> PeerMeasurements {
+        self.meters.readings(Some(call_generation))
+    }
+
     pub(crate) fn send(&mut self, reply: PrivatePhoneReply) -> Result<(), Error> {
         self.replies.push(reply).map_err(|_| Error::Allocation)?;
         self.wake.notify();
@@ -89,6 +99,7 @@ pub(super) struct Session {
     playing_revision: Option<u64>,
     prompt_losses: Option<u64>,
     receive: Receive,
+    decoded_meter: DecodedMeter,
     output: LinkAudioProducer,
     outbound: Outbound,
     samples: [f32; GENERATED_FRAMES],
@@ -112,7 +123,10 @@ impl Session {
         let (output, input) = LinkAudioQueue::new(GENERATED_FRAMES, 1)
             .map_err(|_| Error::Allocation)?
             .into_endpoints();
-        let outbound = Outbound::private(io.rate(), input, reply.clone())?;
+        let rate = io.rate();
+        let mut outbound = Outbound::private(rate, input, reply.clone())?;
+        let egress_meters = outbound.status_meters(io.prepared_media());
+        let (decoded_meter, decoded_reader) = DecodedMeter::new(rate);
         let (replies, incoming) = RingBuffer::new(capacity);
         let (digits, received) = RingBuffer::new(64);
         let settled = Arc::new(AtomicU64::new(0));
@@ -134,6 +148,7 @@ impl Session {
             settled,
             wake: wake.clone(),
             stop: Arc::clone(&stop),
+            meters: PeerReaders::new(rate, decoded_reader, egress_meters),
         };
         Ok((
             Self {
@@ -149,6 +164,7 @@ impl Session {
                 playing_revision: None,
                 prompt_losses: None,
                 receive,
+                decoded_meter,
                 output,
                 outbound,
                 samples: [0.; GENERATED_FRAMES],
@@ -197,6 +213,7 @@ impl Session {
         }
         let now_ms = self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         if let Some(new) = self.redirect.lock().map_err(|_| Error::Operation)?.take() {
+            self.decoded_meter.discontinuity();
             new.activate();
             self.radio = Some(new);
         }
@@ -211,6 +228,14 @@ impl Session {
                 return 0;
             }
             use crate::services::phone_media::Input;
+            let offered = match &input {
+                Input::Audio { start, pcm, .. } => Some((*start, *pcm)),
+                Input::Discontinuity | Input::Gap { .. } => {
+                    self.decoded_meter.discontinuity();
+                    None
+                }
+                _ => None,
+            };
             let accepted = if outgoing {
                 match (radio.as_mut(), input) {
                     (_, Input::Digit(_)) => Ok(1),
@@ -223,8 +248,19 @@ impl Session {
                 self.receive
                     .input(input, radio.as_mut(), now, receipt, now_ms)
             };
+            let meter_credit = radio.as_mut().and_then(Radio::take_meter_credit);
             match accepted {
-                Ok(credit) => credit,
+                Ok(credit) => {
+                    if let Some(((start, pcm), (metered_start, graph, source))) =
+                        offered.zip(meter_credit)
+                        && start == metered_start
+                        && let Some(consumed) = pcm.get(..credit)
+                    {
+                        self.decoded_meter
+                            .accept(graph, source, Some(start), now_ms, consumed);
+                    }
+                    credit
+                }
                 Err(error) => {
                     failure = Some(error);
                     0

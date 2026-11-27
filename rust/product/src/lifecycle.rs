@@ -220,6 +220,13 @@ impl Engine {
                 let gate = host.runtime.configuration_gate();
                 gate.store(true, Ordering::Release);
                 target.management_state.install_gate(gate);
+                assert!(
+                    target
+                        .management_state
+                        .status_edges
+                        .set(Arc::clone(&host.status_edges))
+                        .is_ok()
+                );
                 *target
                     .host
                     .lock()
@@ -507,6 +514,8 @@ impl Engine {
                 None
             };
             let mut dial = PendingLinkDial {
+                #[cfg(target_os = "linux")]
+                outgoing: true,
                 #[cfg(target_os = "linux")]
                 asl: observed_asl,
                 phone,

@@ -181,6 +181,16 @@ request body. Its coordinator claim is nonblocking and rechecks current
 identity authorization and expiry. Hosts consume coalesced listener faults.
 This component is staged independently of HAL routing and runtime adoption.
 
+The status API extends the same mTLS and origin policy to the read-only
+`rptadv.status.v1` WebSocket and HAL snapshots. Both use Product's public
+observation capture. Snapshot selection and subscription registration share one
+publication boundary. Keep ordered state changes and replaceable measurements
+in separate bounded lanes. On lost state, close the stream and require a fresh
+capture. Retain only bounded reader-bound REST pages. Audio callbacks publish
+only bounded observations and never wait for a reader. The CLI reads point-in-time
+snapshots through HAL discovery. See the
+[status-stream design](../../../docs/superpowers/specs/2026-11-25-controller-status-stream-design.md).
+
 Ship the operator client as the separately installable `rpt-advanced-cli`
 Debian package. It has no Product or radio-library dependency. Members of
 `rpt-advanced-admin` may use the separately provisioned CLI credential. The

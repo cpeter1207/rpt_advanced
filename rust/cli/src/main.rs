@@ -1,6 +1,7 @@
 //! Authenticated local operator client for controller HAL resources.
 mod http;
 mod operation;
+mod snapshot;
 mod tuning;
 use http::{Client, Reply};
 use serde_json::Value;
@@ -12,6 +13,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 const HELP: &str = "Usage: rpt-advanced-cli [--url URL] [--ca FILE] [--cert FILE] [--key FILE] COMMAND
   discover [REL|HREF] | get [REL|HREF] | status [REL]
+  status snapshot [--site] [--port ID]... [--topics LIST]
   put|patch|post REL|HREF --if-match ETAG FILE|-
   delete REL|HREF --if-match ETAG
   operation draft [--request UUID] | operation submit-draft HREF --if-match ETAG
@@ -61,6 +63,7 @@ fn execute(client: &Client, args: &[&str]) -> Result<Value> {
                 doc
             });
         }
+        ["status", "snapshot", tail @ ..] => return snapshot::read(client, tail),
         ["status", tail @ ..] if tail.len() <= 1 => {
             let root = client.get(&client.target(Some("rpt:status"))?)?;
             if let Some(part) = tail.first() {

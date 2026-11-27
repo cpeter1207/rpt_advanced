@@ -13,7 +13,9 @@ mod projections;
 pub(crate) static FULL_PREPARATIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 mod representation;
+pub(crate) mod resources;
 mod schema;
+pub(crate) mod status;
 
 use crate::{
     configuration_private::CredentialEdit,
@@ -125,6 +127,9 @@ impl From<TransactionError> for Fault {
 #[derive(Clone, Default)]
 pub struct Observed {
     pub(crate) domain: Arc<live::Domain>,
+    pub(crate) status_edges: Option<Arc<status::edges::EdgeQueue>>,
+    pub(crate) clock: Option<rpt_advanced_core::runtime::RuntimeClock>,
+    pub(crate) status_ready: bool,
     /// Actually adopted revision, absent in management-only recovery.
     pub active_revision: Option<String>,
     /// Generation observed for each actual resource owner.
@@ -1093,8 +1098,79 @@ impl HostReload {
     }
 }
 
+/// Status pages may scan and serialize a full capture. Keep that work off the
+/// request admission and status publication loop.
+struct StatusProjection {
+    send: Option<SyncSender<AdmittedRequest>>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl StatusProjection {
+    fn start<R: Runtime>(
+        status: Arc<status::StatusApi>,
+        backend: Arc<Backend<R>>,
+    ) -> Result<Self, Fault> {
+        let (send, recv) = mpsc::sync_channel::<AdmittedRequest>(2);
+        let worker = thread::Builder::new()
+            .name("rpt-status-read".into())
+            .spawn(move || {
+                while let Ok(req) = recv.recv() {
+                    if backend.stopping.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    if !req.connection.is_alive() {
+                        continue;
+                    }
+                    let api = &backend.api;
+                    let path = req.target.path();
+                    let Ok((route, _)) = api.lookup(path) else {
+                        req.respond(error_response(api, "/", "api", Fault::Missing, None));
+                        continue;
+                    };
+                    let output = status.handle(&req, route, api, backend.boot);
+                    if backend.stopping.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    if !req.connection.is_alive() {
+                        continue;
+                    }
+                    match output {
+                        Ok(status::Output::Http(reply)) => req.respond(reply),
+                        Ok(status::Output::Stream(stream)) => req.respond_status_stream(stream),
+                        Err(fault) => {
+                            let rel = &path[api.mount.len()..];
+                            let reply =
+                                error_response(api, rel, &route.profile, fault, Some(route));
+                            req.respond(reply);
+                        }
+                    }
+                }
+            })
+            .map_err(|_| Fault::Unavailable)?;
+        Ok(Self {
+            send: Some(send),
+            worker: Some(worker),
+        })
+    }
+
+    fn stop(&mut self) {
+        self.send.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for StatusProjection {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// Bounded authenticated request consumer. Call from a management thread.
 pub struct Coordinator<R> {
+    status: Arc<status::StatusApi>,
+    status_projection: StatusProjection,
     backend: Arc<Backend<R>>,
     boot: Id,
     busy: Arc<std::sync::atomic::AtomicBool>,
@@ -1172,6 +1248,8 @@ impl<R: Runtime> Coordinator<R> {
                 .expect("store writer lifetime")
                 .take_if(|held| held.provisional);
         }
+        let status = Arc::new(status::StatusApi::new());
+        let status_projection = StatusProjection::start(Arc::clone(&status), Arc::clone(&backend))?;
         let busy = Arc::new(std::sync::atomic::AtomicBool::new(cold_start));
         let pending = busy.clone();
         let (send, recv) = mpsc::sync_channel(1);
@@ -1197,6 +1275,8 @@ impl<R: Runtime> Coordinator<R> {
             })
             .map_err(|_| Fault::Unavailable)?;
         Ok(Self {
+            status,
+            status_projection,
             backend,
             boot,
             busy,
@@ -1230,6 +1310,10 @@ impl<R: Runtime> Coordinator<R> {
 
     /// Claim at most one authenticated request. GET uses only the published read snapshot.
     pub fn poll(&self, inbox: &mut CoordinatorInbox) -> bool {
+        self.status.tick(|| {
+            let saved = self.cached.read().expect("management snapshot").clone()?;
+            Some((self.runtime.observed(), saved))
+        });
         let Some(req) = inbox.try_recv() else {
             return false;
         };
@@ -1249,6 +1333,41 @@ impl<R: Runtime> Coordinator<R> {
         let rel = &path[self.api.mount.len()..];
         let media = openapi::media(route);
         let send_error = |fault| error_response(&self.api, rel, &route.profile, fault, Some(route));
+        if matches!(route.target, Target::StatusSnapshot | Target::StatusStream) {
+            if route.target == Target::StatusSnapshot && !accepts(&req.headers, media) {
+                let reply = send_error(Fault::Accept);
+                req.respond(reply);
+                return;
+            }
+            if req.method != Method::GET {
+                let reply = send_error(Fault::Method);
+                req.respond(reply);
+                return;
+            }
+            if let Err(TrySendError::Full(req) | TrySendError::Disconnected(req)) = self
+                .status_projection
+                .send
+                .as_ref()
+                .expect("running status projection")
+                .try_send(req)
+            {
+                let rel = &req.target.path()[self.api.mount.len()..];
+                let reply = error_response(
+                    &self.api,
+                    rel,
+                    &route.profile,
+                    Fault::Unavailable,
+                    Some(route),
+                );
+                req.respond(reply);
+            }
+            return;
+        }
+        if req.is_status_upgrade() {
+            let reply = send_error(Fault::Malformed);
+            req.respond(reply);
+            return;
+        }
         let result = (|| {
             if !route.methods.contains(&req.method.as_str()) {
                 return Err(Fault::Method);
@@ -1358,6 +1477,7 @@ impl<R> Drop for Coordinator<R> {
         self.backend
             .stopping
             .store(true, std::sync::atomic::Ordering::Release);
+        self.status_projection.stop();
         self.send.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();

@@ -4,7 +4,11 @@ use crate::{
     Error, abi,
     directory::{Backend, BackendError, DirectoryResolver},
 };
-use rpt_advanced_core::link::{PeerIdentity, PhoneAccountId, ProtocolId};
+use crate::{
+    link::status_audio::NativeIngressWriter,
+    status_meter::{NATIVE_RATE, Span},
+};
+use rpt_advanced_core::link::{PeerIdentity, PhoneAccountId, ProtocolId, SourcePosition};
 use rpt_advanced_core::schedule::{CivilTime, Weekday};
 use std::{
     ffi::{CStr, c_void},
@@ -113,6 +117,8 @@ mod peer_processor;
 /// Idle native blocks advance only the graph with silence, retaining its gain history.
 pub struct ProcessedPeer<P> {
     input: P,
+    native_ingress: Option<Box<NativeIngressWriter>>,
+    observation_span: Option<Span>,
     #[cfg(target_os = "linux")]
     processor: Option<peer_processor::Processor>,
 }
@@ -121,6 +127,8 @@ impl<P> ProcessedPeer<P> {
     pub fn new(input: P) -> Self {
         Self {
             input,
+            native_ingress: None,
+            observation_span: None,
             #[cfg(target_os = "linux")]
             processor: None,
         }
@@ -133,6 +141,8 @@ impl<P> ProcessedPeer<P> {
     ) -> Self {
         Self {
             input,
+            native_ingress: None,
+            observation_span: None,
             processor: Some(peer_processor::Processor {
                 graph,
                 samples: vec![0; maximum].into_boxed_slice(),
@@ -164,6 +174,15 @@ impl<P> ProcessedPeer<P> {
         }
     }
 }
+impl ProcessedPeer<crate::link::ring::InboundConsumer> {
+    pub(crate) fn with_native_ingress(mut self) -> Self {
+        self.native_ingress = Some(Box::new(
+            self.input.install_native_ingress(self.has_graph()),
+        ));
+        self
+    }
+}
+
 impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     for ProcessedPeer<P>
 {
@@ -209,21 +228,50 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     fn finite_playout(&self) -> Option<bool> {
         self.input.finite_playout()
     }
-    fn render(&mut self, output: &mut [f32]) -> Option<usize> {
-        match self.input.render(output) {
-            Some(real) if self.process(output) => {
-                if self.input.signals().dtmf_muted() {
-                    output.fill(0.0);
-                }
-                Some(real)
-            }
-            _ => {
-                output.fill(0.0);
-                None
-            }
+    fn begin_observation_span(&mut self, source: SourcePosition, frames: usize) {
+        if self.native_ingress.is_some() {
+            self.observation_span = source.born_ns.map(|born_ns| Span {
+                graph_generation: source.generation,
+                source_generation: source.stream,
+                first_sample: source.sample,
+                end_ms: born_ns
+                    .saturating_add(frames as u64 * 1_000_000_000 / u64::from(NATIVE_RATE))
+                    / 1_000_000,
+            });
         }
     }
+    fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+        let span = self.observation_span.take();
+        let Some(real) = self.input.render(output) else {
+            if let Some(meters) = &mut self.native_ingress {
+                meters.unavailable();
+            }
+            output.fill(0.0);
+            return None;
+        };
+        if let Some(meters) = &mut self.native_ingress {
+            meters.ring(span, output);
+        }
+        if !self.process(output) {
+            if let Some(meters) = &mut self.native_ingress {
+                meters.dsp_failed();
+            }
+            output.fill(0.0);
+            return None;
+        }
+        if let Some(meters) = &mut self.native_ingress {
+            meters.dsp(span, output);
+        }
+        if self.input.signals().dtmf_muted() {
+            output.fill(0.0);
+        }
+        Some(real)
+    }
     fn silence(&mut self, scratch: &mut [f32]) {
+        self.observation_span = None;
+        if let Some(meters) = &mut self.native_ingress {
+            meters.unavailable();
+        }
         scratch.fill(0.0);
         self.process(scratch);
         scratch.fill(0.0);
@@ -1104,6 +1152,69 @@ impl Radio {
         let code = unsafe { bind(self.services.0.context, self.handle.as_ptr(), metadata) };
         (code == 0).then_some(()).ok_or(Error::Operation)
     }
+    /// Offer the optional physical observation callback before station start.
+    ///
+    /// # Safety
+    /// A successful host may retain the borrowed callback and context until radio destruction.
+    pub(crate) unsafe fn bind_feedback(&mut self, port: abi::UrpRadioFeedbackPort) {
+        let Some(control) = self.services.0.radio_control else {
+            return;
+        };
+        // SAFETY: the additive flat wrapper starts with the unchanged radio-control prefix.
+        let mut result: abi::rptadv_radio_feedback_binding_v1 = unsafe { std::mem::zeroed() };
+        result.request.struct_size = size_of_val(&result) as u32;
+        result.request.abi_version = 1;
+        result.request.operation = abi::RPTADV_RADIO_CONTROL_BIND_FEEDBACK;
+        result.port = port;
+        // SAFETY: the caller retains the radio and callback beyond this synchronous offer.
+        // Missing support has no effect on ordinary radio operation.
+        unsafe {
+            control(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                ptr::from_mut(&mut result).cast(),
+                None,
+                ptr::null_mut(),
+            )
+        };
+    }
+
+    /// Read a typed physical status copy from the existing native control owner.
+    pub(crate) fn physical_receive(
+        &mut self,
+        now_ms: u64,
+    ) -> Option<crate::radio_feedback::PhysicalReceive> {
+        let control = self.services.0.radio_control?;
+        // SAFETY: the flat wrapper holds only initialized scalar/control fields.
+        let mut result: abi::rptadv_radio_physical_status_v1 = unsafe { std::mem::zeroed() };
+        result.request.struct_size = size_of_val(&result) as u32;
+        result.request.abi_version = 1;
+        result.request.operation = abi::RPTADV_RADIO_CONTROL_PHYSICAL_STATUS;
+        result.status.struct_size = size_of_val(&result.status) as u32;
+        result.status.abi_version = 1;
+        // SAFETY: the exclusive existing radio and full response remain live for the call.
+        let code = unsafe {
+            control(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                ptr::from_mut(&mut result).cast(),
+                None,
+                ptr::null_mut(),
+            )
+        };
+        if code != 0
+            || result.accepted_abi_version != 1
+            || result.request.struct_size as usize != size_of_val(&result)
+            || result.request.abi_version != 1
+            || result.request.operation != abi::RPTADV_RADIO_CONTROL_PHYSICAL_STATUS
+            || result.status.struct_size as usize != size_of_val(&result.status)
+            || result.status.abi_version != 1
+        {
+            return None;
+        }
+        crate::radio_feedback::PhysicalReceive::from_status(&result.status, now_ms)
+    }
+
     /// Attach both stable endpoints and start the channel.
     ///
     /// # Safety

@@ -313,6 +313,29 @@ struct rptadv_radio_control_v1 {
     uint32_t forced_ctcss_tenths_hz;     /**< Optional manual transmit tone. */
 };
 
+/** Optional stopped-only physical-feedback registration, with explicit acknowledgment. */
+#define RPTADV_RADIO_CONTROL_BIND_FEEDBACK 8U
+/** Optional native control-owner status copy. It never changes radio settings. */
+#define RPTADV_RADIO_CONTROL_PHYSICAL_STATUS 9U
+
+/** Additive radio_control request; the common prefix advertises this whole record's size.
+ * The radio retains the binding only through successful synchronous retirement.
+ * Acknowledgment accepts the binding; a missing optional hardware source reports no data. */
+struct rptadv_radio_feedback_binding_v1 {
+    struct rptadv_radio_control_v1 request; /**< Operation BIND_FEEDBACK, ABI one. */
+    struct UrpRadioFeedbackPort port;       /**< Borrowed registration copied by the host. */
+    uint32_t accepted_abi_version;          /**< Initialize zero, require one on acceptance. */
+    uint32_t reserved;                      /**< Zero. */
+};
+
+/** Additive radio_control request; only the native station owns the process status. */
+struct rptadv_radio_physical_status_v1 {
+    struct rptadv_radio_control_v1 request; /**< Operation PHYSICAL_STATUS, ABI one. */
+    struct UrpNativePhysicalStatus status;  /**< Caller-initialized writable SDK record. */
+    uint32_t accepted_abi_version;          /**< Initialize zero, require one on success. */
+    uint32_t reserved;                      /**< Zero. */
+};
+
 /** Borrowed UTF-8 result emitted synchronously by a remote operation ticket. */
 typedef void (*rptadv_remote_sink_v1)(void *context, const uint8_t *text, uint32_t length);
 /** One uniquely owned asynchronous operation. Functions and context stay live

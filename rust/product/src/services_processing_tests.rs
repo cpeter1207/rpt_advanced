@@ -381,3 +381,39 @@ fn typed_station_preparation_selects_the_peer_graph_for_the_actual_port() {
     assert_eq!(dry, [0.5; 160]);
     assert!(wet[120] > 0.0 && wet[120] < dry[120]);
 }
+
+#[test]
+fn native_link_observer_outlives_its_matching_rate_graph_and_exposes_no_mismatched_values() {
+    use crate::configuration_radio::{ProviderOutputState, RadioPreparationApi};
+
+    let role = RadioPreparationApi::open()
+        .unwrap()
+        .prepare_link(None)
+        .unwrap();
+    let mismatch = role.prepare_peer(8_000, 960).unwrap().output_observer();
+    assert!(matches!(
+        mismatch.output().state,
+        ProviderOutputState::RateMismatch
+    ));
+
+    let mut graph = role.prepare_peer(48_000, 960).unwrap();
+    let observer = graph.output_observer();
+    for _ in 0..60 {
+        let mut pcm: [i16; 960] = std::array::from_fn(|i| {
+            (3650.0 * (std::f64::consts::TAU * (i % 48) as f64 / 48.0).sin()) as i16
+        });
+        graph.process(&mut pcm).unwrap();
+    }
+    let ProviderOutputState::Observed(first) = observer.output().state else {
+        panic!("expected the native 48 kHz output observer");
+    };
+    assert_ne!(first.loudness_epoch, 0);
+    assert!(first.valid_samples >= 19_200);
+    assert!(first.processed_blocks > 0);
+    assert!(first.integrated_lufs.is_some() && first.true_peak_dbtp.is_some());
+    drop(graph);
+    let ProviderOutputState::Observed(retained) = observer.output().state else {
+        panic!("the released observer must survive graph destruction");
+    };
+    assert_eq!(retained, first);
+}

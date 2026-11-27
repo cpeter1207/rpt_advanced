@@ -318,6 +318,11 @@ impl Input {
 }
 
 impl State {
+    /// Boot-scoped opaque identity of the accepted outgoing attempt.
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+
     fn current(&self) -> bool {
         let now = self
             .base_ms

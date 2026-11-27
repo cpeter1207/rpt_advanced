@@ -121,6 +121,7 @@ unsafe extern "C" fn open(
         active: None,
         pending: None,
         metadata: None,
+        feedback: None,
     }))
     .cast();
     0

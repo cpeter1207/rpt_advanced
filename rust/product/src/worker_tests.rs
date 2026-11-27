@@ -159,9 +159,9 @@ fn worker_with_interval(status: RadioStatus, interval_ms: u64) -> RadioWorker {
 fn transmit_callback_publishes_ptt_state_for_control_snapshot() {
     let status = RadioStatus::default();
     assert_eq!(status.transmit_observation(10), None);
-    super::publish_transmit_keyed(Some(&status), Some(true));
+    super::publish_transmit_keyed(Some(&status), Some(true), None);
     assert_eq!(status.transmit_observation(10), Some(true));
-    super::publish_transmit_keyed(Some(&status), Some(false));
+    super::publish_transmit_keyed(Some(&status), Some(false), None);
     assert_eq!(status.transmit_observation(10), Some(false));
 }
 
@@ -767,6 +767,36 @@ fn callback_meter_snapshots_are_bounded_and_control_keeps_latest() {
     assert!(status.contains("transmit-audio: at="));
     assert!(status.contains("dropped-snapshots=2"));
     drop(worker.stop());
+}
+
+#[test]
+fn local_status_taps_measure_before_and_after_the_receive_gate() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut runtime, owners) = audio_owners();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    for _ in 0..8 {
+        for _ in 0..300 {
+            assert_eq!(rx(&worker, false, &mut [0.25; 8]), 0);
+            assert_eq!(tx(&worker, &mut [0.0; 8]).0, 0);
+        }
+        worker.collect_snapshots();
+    }
+    let [provider, gated, ring, programme, voice, telemetry, station] =
+        worker.status_meters().map(Option::unwrap);
+    assert!((provider.peak_dbfs.unwrap() + 12.0412).abs() < 0.001);
+    for meter in [gated, ring, programme, voice, telemetry, station] {
+        assert_eq!(meter.quality, crate::status_meter::Quality::Valid);
+        assert_eq!(
+            meter.signal_state,
+            crate::status_meter::SignalState::Silence
+        );
+        assert_eq!(meter.valid_samples, 19_200);
+    }
+    drop(worker.stop());
+    assert!(runtime.stop(0));
 }
 
 #[test]

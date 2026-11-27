@@ -395,6 +395,19 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
     pub fn detached(&mut self, generation: u64) -> bool {
         self.host.control().mark_detached(generation).is_ok()
     }
+    /// Drain ordered lifecycle records and the current transmit sample epoch on control.
+    pub fn drain_telemetry_observations(
+        &mut self,
+    ) -> (Vec<crate::controller::TelemetryObservation>, bool, u64) {
+        let telemetry = &mut self.control.telemetry;
+        let events = std::iter::from_fn(|| telemetry.take_telemetry_observation()).collect();
+        (
+            events,
+            telemetry.telemetry_observations_lost(),
+            self.control.activity.current_sample(),
+        )
+    }
+
     /// Reclaim completed telemetry and safely detached generation state only on control.
     pub fn reclaim(&mut self) -> bool {
         self.control.telemetry.reclaim().for_each(drop);

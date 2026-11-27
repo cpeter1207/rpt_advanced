@@ -1,6 +1,11 @@
 //! Selected registration, exact-attempt PCM isolation and outgoing media ownership.
 use super::*;
-use crate::{lifecycle::Engine, phone::accounts::DialAccount, services::PhoneDial};
+use crate::{
+    lifecycle::Engine,
+    management::status::edges::{Edge, Payload},
+    phone::accounts::DialAccount,
+    services::PhoneDial,
+};
 use rpt_advanced_core::{link::MediaIsolationClaim, runtime::dtmf::ActionPermit};
 use std::{sync::Weak, time::Duration};
 
@@ -22,6 +27,8 @@ pub(super) struct Pending {
     phase: Phase,
     presentation: Arc<super::phone_progress::State>,
     failure_status: u32,
+    observed_generation: Option<u64>,
+    observed_phase: &'static str,
 }
 
 pub(super) struct Failure {
@@ -34,6 +41,23 @@ pub(super) struct Failure {
 }
 
 impl Pending {
+    /// Reuse the same sanitized progress in latest captures and edge events.
+    pub(super) fn status_observation(
+        &self,
+    ) -> (
+        rpt_advanced_core::config::resources::candidate::ResourceId,
+        Option<u64>,
+        u64,
+        serde_json::Value,
+    ) {
+        (
+            self.account.port,
+            self.observed_generation,
+            self.presentation.id(),
+            serde_json::json!({"direction":"outgoing", "phase":self.observed_phase}),
+        )
+    }
+
     fn authorized(&self) -> bool {
         self.engine.upgrade().is_some_and(|engine| {
             engine.current(self.revision) && self.permit.current(Some(engine.elapsed_ms()))
@@ -76,6 +100,13 @@ impl Pending {
                 if progress.final_status != 0 {
                     self.presentation.end();
                 } else {
+                    self.observed_phase = if progress.frames > 0 {
+                        "early_media"
+                    } else if progress.ringing != 0 {
+                        "ringing"
+                    } else {
+                        self.observed_phase
+                    };
                     self.presentation.update(
                         progress.ringing != 0,
                         &pcm[..progress.frames],
@@ -90,6 +121,7 @@ impl Pending {
                 return Err(RuntimeError::Rejected);
             }
             self.phase = Phase::Answered(Some(peer));
+            self.observed_phase = "answered";
             self.deadline = Some(Instant::now() + Duration::from_secs(2));
         }
         let Phase::Answered(Some(peer)) = &mut self.phase else {
@@ -210,6 +242,14 @@ impl Host {
     }
 
     fn finish_pending(&mut self, attempt: Pending, completed: bool) {
+        let terminal = if completed {
+            "phone_patch.dial_connected"
+        } else if attempt.authorized() {
+            "phone_patch.dial_failed"
+        } else {
+            "phone_patch.dial_cancelled"
+        };
+        self.record_phone_progress(&attempt, Some(terminal));
         if !completed && let Phase::Publishing(source, _) = &attempt.phase {
             self.retire_phone(source);
         }
@@ -252,6 +292,7 @@ impl Host {
                     .phone_dials
                     .remove(index)
                     .expect("selected outgoing attempt");
+                self.record_phone_progress(&attempt, Some("phone_patch.dial_cancelled"));
                 if attempt.report {
                     self.services.command_notice(local, false);
                 }
@@ -282,6 +323,7 @@ impl Host {
             self.enqueue_phone_failure(&local, 0, &permit, &engine, revision, None);
             return Err(RuntimeError::Rejected);
         };
+        let observed_generation = self.handoff_owner(&local);
         let plan = self.radio_preparation.active_plan(&local)?;
         let policy = plan
             .phone
@@ -309,7 +351,7 @@ impl Host {
                 return Err(RuntimeError::Rejected);
             }
         };
-        self.phone_dials.push_back(Pending {
+        let pending = Pending {
             local,
             account,
             engine,
@@ -319,10 +361,32 @@ impl Host {
             isolation,
             presentation,
             failure_status: 0,
+            observed_generation,
+            observed_phase: "dialing",
             deadline: Some(Instant::now() + Duration::from_secs(35)),
             phase: Phase::Dialing(dial),
-        });
+        };
+        self.record_phone_progress(&pending, None);
+        self.phone_dials.push_back(pending);
         Ok(())
+    }
+
+    /// Publish only the attempt identity and proven progress phase.
+    fn record_phone_progress(&self, attempt: &Pending, terminal: Option<&'static str>) {
+        let (port, station, id, value) = attempt.status_observation();
+        if let Some(generation) = station {
+            self.status_edges.push(Edge {
+                port,
+                generation,
+                at_ms: self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                payload: Payload::PhoneProgress {
+                    id: id.to_string(),
+                    generation: id,
+                    kind: terminal.unwrap_or("phone_patch.dial_progress"),
+                    value: terminal.is_none().then_some(value),
+                },
+            });
+        }
     }
 
     /// Poll each signaling handle once and advance at most one expensive station route per tick.
@@ -337,7 +401,12 @@ impl Host {
                 self.finish_pending(attempt, false);
                 continue;
             }
-            match attempt.ready() {
+            let phase = attempt.observed_phase;
+            let ready = attempt.ready();
+            if attempt.observed_phase != phase {
+                self.record_phone_progress(&attempt, None);
+            }
+            match ready {
                 Err(_) => {
                     self.report_phone_failure(&attempt, attempt.failure_status);
                     self.finish_pending(attempt, false);
@@ -408,6 +477,8 @@ impl Host {
                 .admit_outgoing(io, clock.now_ms, attempt.isolation.take())
                 .map_err(|_| RuntimeError::Rejected)?;
             attempt.phase = Phase::Publishing(source.clone(), 100);
+            attempt.observed_phase = "publishing";
+            self.record_phone_progress(attempt, None);
             let reply = self
                 .phone_calls
                 .reply(&source)
@@ -415,6 +486,7 @@ impl Host {
             self.phone_calls
                 .start_transport(&source, &reply, &mut self.peer_io)
                 .map_err(|_| RuntimeError::Rejected)?;
+            self.collect_phone_status_edges(clock.now_ms);
         }
         let Phase::Publishing(source, remaining) = &mut attempt.phase else {
             return Err(RuntimeError::Rejected);

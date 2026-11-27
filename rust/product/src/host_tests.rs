@@ -3283,6 +3283,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
         .control
         .send(PeerCommand::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound,
         })
@@ -3565,5 +3566,53 @@ pub(crate) fn with_ingress_mute(
     });
     run(&signals, &mut host, port, clock(), received);
     host.runtime.peer_detached(LOCAL, "2000", clock().now_ms);
+    assert!(host.fixture_stop(20));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_keeps_network_connect_and_disconnect_between_captures() {
+    use crate::management::status::edges::Payload;
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    host.runtime.incoming(LOCAL, "2000", true).unwrap();
+    host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, peer(8000).0, clock())
+        .unwrap();
+    pump_until(&mut host, |host| {
+        host.peers
+            .first()
+            .is_some_and(|peer| peer.control.status_connected)
+    });
+    let connection = host.peers[0].control.connection_generation();
+    host.detach(LOCAL, "2000", clock().now_ms);
+    let (lost, edges) = host.status_edges.drain();
+    assert!(!lost);
+    let observed: Vec<_> = edges
+        .into_iter()
+        .filter_map(|edge| match edge.payload {
+            Payload::Peer {
+                id,
+                connection: generation,
+                kind,
+                value,
+            } => {
+                assert_eq!(id, "allstarlink:2000");
+                assert_eq!(generation, connection);
+                Some((kind, value))
+            }
+            _ => None,
+        })
+        .collect();
+    let [(connected, Some(status)), (disconnected, None)] = observed.as_slice() else {
+        panic!("expected one exact connect and disconnect");
+    };
+    assert_eq!(*connected, "link.connected");
+    assert_eq!(*disconnected, "link.disconnected");
+    assert_eq!(status["state"], "connected");
+    assert_eq!(status["direction"], "incoming");
+    assert_eq!(status["connection_generation"], connection.to_string());
     assert!(host.fixture_stop(20));
 }

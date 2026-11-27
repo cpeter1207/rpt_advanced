@@ -9,9 +9,14 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+from snapshot import SNAPSHOT, check_snapshots
+
 ROOT = "/fixture/v2/"
 STATUS = "/fixture/current/observation/"
-RESPONSE = {"status": {"active_revision": "observed-revision"}}
+RESPONSE = {
+    "status": {"active_revision": "observed-revision"},
+    "_links": {"rpt:status-snapshot": {"href": SNAPSHOT}},
+}
 
 
 def check(binary):
@@ -21,6 +26,10 @@ def check(binary):
         tmp = Path(directory)
         subprocess.run(["sh", str(pki), directory], check=True, capture_output=True)
         calls = []
+        documents = {
+            ROOT: {"_links": {"rpt:status": {"href": STATUS}}},
+            STATUS: RESPONSE,
+        }
 
         class Hal(BaseHTTPRequestHandler):
             """Serve an independently selected link and record the peer credential."""
@@ -32,14 +41,11 @@ def check(binary):
                     "commonName"
                 ]
                 calls.append((self.path, common_name))
-                documents = {
-                    ROOT: {"_links": {"rpt:status": {"href": STATUS}}},
-                    STATUS: RESPONSE,
-                }
-                if self.path not in documents:
-                    self.send_error(404)
+                document = documents.get(self.path, 404)
+                if isinstance(document, int):
+                    self.send_error(document)
                     return
-                body = json.dumps(documents[self.path]).encode()
+                body = json.dumps(document).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/hal+json")
                 self.send_header("Content-Length", str(len(body)))
@@ -98,15 +104,16 @@ def check(binary):
                     check=False,
                 )
                 assert foreign.returncode and not foreign.stdout and calls == before
+                assert result.returncode == 0, result.stderr.decode(errors="replace")
+                assert calls == [(ROOT, "cli"), (STATUS, "cli")], (
+                    "expected authenticated GET of root and advertised status link",
+                    calls,
+                )
+                assert json.loads(result.stdout) == RESPONSE
+                check_snapshots(cli, calls, documents, ROOT, STATUS)
             finally:
                 server.shutdown()
                 worker.join()
-        assert result.returncode == 0, result.stderr.decode(errors="replace")
-        assert calls == [(ROOT, "cli"), (STATUS, "cli")], (
-            "expected authenticated GET of root and advertised status link",
-            calls,
-        )
-        assert json.loads(result.stdout) == RESPONSE
 
 
 if __name__ == "__main__":

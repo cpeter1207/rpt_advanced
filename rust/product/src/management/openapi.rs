@@ -135,7 +135,10 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
         }
         for &name in route.methods {
             let mut op = OperationBuilder::new().summary(Some(format!("{name} {}", route.profile)));
+            let status_capture =
+                matches!(route.target, Target::StatusSnapshot | Target::StatusStream);
             let success = match (name, route.target) {
+                ("GET", Target::StatusStream) => "101",
                 ("GET", _) | (_, Target::Operation | Target::MaintenanceLease) => "200",
                 ("POST", _) => "201",
                 _ => "202",
@@ -155,8 +158,80 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
             } else {
                 Content::new(Some(Object::with_type(Type::Object)))
             };
-            result = result.content(media(route), read);
-            if name == "GET" {
+            if route.target == Target::StatusStream {
+                result = result
+                    .description("RFC 6455 read-only status. Negotiate rptadv.status.v1 over the authenticated loopback HTTPS listener.")
+                    .header("Sec-WebSocket-Protocol", Header::new(Object::with_type(Type::String)));
+                op = op.response(
+                    "426",
+                    ResponseBuilder::new()
+                        .description(
+                            "Upgrade required. The HAL response links to the scoped snapshot.",
+                        )
+                        .content(
+                            "application/hal+json",
+                            Content::new(Some(Ref::from_schema_name("ManagementError"))),
+                        )
+                        .build(),
+                );
+                op = op.parameter(parameter(
+                    "meter_hz",
+                    ParameterIn::Query,
+                    false,
+                    "Delivery rate for meters. 1, 2, 5, 10 or 20. Default is 20.",
+                    Type::Integer,
+                ));
+            } else {
+                result = result.content(media(route), read);
+            }
+            if status_capture {
+                for (name, desc, ty) in [
+                    (
+                        "site",
+                        "Use true to include the site. The site is the default when no scope is supplied.",
+                        Type::Boolean,
+                    ),
+                    (
+                        "port",
+                        "Repeat once per selected canonical resource UUID.",
+                        Type::String,
+                    ),
+                    (
+                        "topics",
+                        "Comma-separated topic names. Default includes applicable state. meters is opt-in.",
+                        Type::String,
+                    ),
+                ] {
+                    op = op.parameter(parameter(name, ParameterIn::Query, false, desc, ty));
+                }
+            }
+            if route.target == Target::StatusSnapshot {
+                for (name, desc, ty) in [
+                    (
+                        "cursor",
+                        "Opaque snapshot continuation from the next HAL link.",
+                        Type::String,
+                    ),
+                    (
+                        "page",
+                        "Continuation page from the next HAL link.",
+                        Type::Integer,
+                    ),
+                ] {
+                    op = op.parameter(parameter(name, ParameterIn::Query, false, desc, ty));
+                }
+                op = op.response(
+                    "410",
+                    ResponseBuilder::new()
+                        .description("Snapshot expired. The HAL response links to a fresh capture.")
+                        .content(
+                            "application/hal+json",
+                            Content::new(Some(Ref::from_schema_name("ManagementError"))),
+                        )
+                        .build(),
+                );
+            }
+            if name == "GET" && !status_capture {
                 result = result.header("ETag", Header::new(Object::with_type(Type::String)));
             }
             if name == "POST" {
@@ -241,5 +316,7 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
         paths = paths.path(&route.path, item.build());
     }
     api.paths = paths.build();
-    serde_json::to_value(api).expect("serializable OpenAPI document")
+    let mut document = serde_json::to_value(api).expect("serializable OpenAPI document");
+    document["x-rptadv-status-stream"] = super::status::profile(true);
+    document
 }

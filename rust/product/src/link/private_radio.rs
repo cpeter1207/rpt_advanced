@@ -39,6 +39,7 @@ pub(crate) struct Radio {
     native_origin: Option<u64>,
     ring_origin: u64,
     retry: Option<(u64, u64, u64, bool)>,
+    meter_credit: Option<(u64, u64, u64)>,
 }
 impl Radio {
     pub(crate) fn new(
@@ -78,6 +79,7 @@ impl Radio {
             native_origin: Some(0),
             ring_origin: 0,
             retry: None,
+            meter_credit: None,
         })
     }
     pub(crate) fn bind(&mut self, clock: Arc<SourceClock>) {
@@ -144,12 +146,17 @@ impl Radio {
             .and_then(|offset| self.ring_origin.checked_add(offset))
             .ok_or(Error::InvalidFrame)
     }
+    pub(super) fn take_meter_credit(&mut self) -> Option<(u64, u64, u64)> {
+        self.meter_credit.take()
+    }
+
     pub(super) fn input(
         &mut self,
         input: Input<'_>,
         now: u64,
         receipt: u64,
     ) -> Result<usize, Error> {
+        self.meter_credit = None;
         let generation = self
             .call
             .phone_source()
@@ -224,6 +231,15 @@ impl Radio {
                         credit_epoch,
                     )
                     .map_err(|_| Error::Write)?;
+                // A decoder may offer old material accepted as a zero for the RF ring.
+                // The public tap starts only after the confirmed route's freshness floor.
+                if accepted != 0
+                    && live_birth
+                    && self.confirmed.load(Ordering::Acquire)
+                    && self.call.phone_media_allowed()
+                {
+                    self.meter_credit = Some((start, generation, credit_epoch));
+                }
                 #[cfg(test)]
                 self.record_credit("audio", start, presented, accepted);
                 #[cfg(test)]
@@ -495,6 +511,7 @@ mod tests {
                     .unwrap(),
                 160
             );
+            assert!(radio.take_meter_credit().is_none());
             assert!(!radio.incoming.signals().output_radio_keyed(pending));
             assert!(
                 !graph
@@ -512,6 +529,7 @@ mod tests {
                 concealed: false,
             };
             assert_eq!(radio.input(before_grant, now, receipt).unwrap(), 160);
+            assert!(radio.take_meter_credit().is_none());
             assert!(
                 !graph
                     .process(&mut controller, false, &mut rf, SourcePosition::default())
@@ -528,6 +546,7 @@ mod tests {
                     concealed: false,
                 };
                 assert_eq!(radio.input(input, now, receipt).unwrap(), 160);
+                assert_eq!(radio.take_meter_credit(), Some((160 * (i + 2), 5, receipt)));
                 now += 20_000_000;
             }
             assert_eq!(
@@ -557,6 +576,7 @@ mod tests {
                 concealed: false,
             };
             assert_eq!(radio.input(stale, now, receipt).unwrap(), 160);
+            assert!(radio.take_meter_credit().is_none());
             assert!(
                 !graph
                     .process(&mut controller, false, &mut rf, SourcePosition::default())

@@ -591,6 +591,89 @@ fn phone_commands_confirm_mute_and_report_failures_privately() {
     );
 }
 
+#[test]
+fn phone_status_keeps_private_authentication_and_both_mute_edges() {
+    use crate::management::status::edges::Payload;
+    use crate::phone::PhoneLogin;
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = mailbox_host();
+    let (phone, _) = crate::link::session::tests::phone_peer_on(LOCAL);
+    let source = host.phone_calls.admit(phone, clock().now_ms).unwrap();
+    let reply = host.phone_reply(&source).unwrap();
+    let id = source.call_id().to_string();
+    let mut now = clock();
+    host.collect_phone_status_edges(now.now_ms);
+    let port = ResourceScope::Port(LOCAL.parse().unwrap());
+    let mailboxes = &host.runtime.modular_configuration().unwrap().scopes[&port].mailboxes;
+    let credentials = host.radio_preparation.credentials.as_ref().unwrap();
+    assert_eq!(
+        host.phone_calls
+            .authenticate_scoped(
+                &source,
+                &reply,
+                mailboxes,
+                |mailbox| credentials.get(mailbox.binding.id, CredentialSlot::Pin),
+                ("100", "1234"),
+                now.now_ms,
+            )
+            .unwrap(),
+        PhoneLogin::Authenticated
+    );
+    host.collect_phone_status_edges(now.now_ms);
+    for digit in "*99#*99#".chars() {
+        now.now_ms += 1;
+        let outcome = host.runtime.node(LOCAL).unwrap().links().phone_digit(
+            &source,
+            digit,
+            now.now_ms,
+            reply.clone(),
+        );
+        if let Some(outcome) = outcome {
+            host.immediate(LOCAL, LinkEffect::Digit(outcome), now)
+                .unwrap();
+        }
+    }
+    assert!(host.retire_phone(&source));
+    let (lost, edges) = host.status_edges.drain();
+    assert!(!lost);
+    let observed: Vec<_> = edges
+        .into_iter()
+        .filter_map(|edge| match edge.payload {
+            Payload::Phone {
+                id: actual,
+                call_generation,
+                kind,
+                value,
+            } => {
+                assert_eq!(actual, id);
+                assert_eq!(call_generation, source.call_generation());
+                if let Some(value) = &value {
+                    assert!(value.get("pin").is_none());
+                    assert!(value.get("mailbox").is_none());
+                    assert!(value.get("number").is_none());
+                    assert_eq!(value["attached"], false);
+                }
+                Some((kind, value.and_then(|state| state["muted"].as_bool())))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        observed,
+        [
+            ("phone_patch.call_private", None),
+            ("phone_patch.call_authenticated", Some(true)),
+            ("phone_patch.call_unmuted", Some(false)),
+            ("phone_patch.call_muted", Some(true)),
+            ("phone_patch.call_disconnected", None),
+        ]
+    );
+    assert!(host.fixture_stop(now.now_ms));
+}
+
 fn stage_link_peer(host: &mut Host, remote: &str, io: PeerIo) -> (u64, PeerSession) {
     let (_, outgoing) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
     let (session, control) = PeerSession::prepare(io, outgoing, "1000", remote, true).unwrap();

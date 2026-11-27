@@ -1,7 +1,9 @@
 //! Distinct hardware-free roles and negotiated-rate peer graphs.
 use super::{
     PreparationError, Product, RadioPreparationApi, Result, abi, diagnostic, equivalent, named,
-    owned, succeeded,
+    owned,
+    peer_observation::{ProviderOutput, ProviderOutputMeasurement, ProviderOutputState},
+    succeeded,
 };
 use libloading::Library;
 use rpt_advanced_core::config::resources::profiles::radio::ProcessingProfile;
@@ -117,6 +119,37 @@ impl PreparedPeer {
             _ffmpeg: ffmpeg,
         })
     }
+    /// Acquire the released observer before moving the graph to its PCM owner.
+    pub(crate) fn output_observer(&self) -> PeerOutputObserver {
+        let observer = if self.rate == crate::status_meter::NATIVE_RATE {
+            self.link_observer()
+        } else {
+            None
+        };
+        PeerOutputObserver {
+            observer,
+            rate: self.rate,
+        }
+    }
+
+    fn link_observer(&self) -> Option<NativeLinkObserver> {
+        let api = self.product.ordinary();
+        let create = api.link_observer_create?;
+        let read = api.link_observer_read?;
+        let destroy = api.link_observer_destroy?;
+        let mut observer = ptr::null_mut();
+        // SAFETY: preparation exclusively holds this quiescent graph before PCM publication.
+        if unsafe { create(self.peer.as_ptr(), &mut observer) } != 0 {
+            return None;
+        }
+        Some(NativeLinkObserver {
+            observer: NonNull::new(observer)?,
+            read,
+            destroy,
+            _product: self.product.clone(),
+        })
+    }
+
     /// Process one incoming mono PCM block. Mutable access serializes graph calls.
     pub fn process(&mut self, samples: &mut [i16]) -> Result<()> {
         let count = u32::try_from(samples.len()).map_err(|_| PreparationError::Limit)?;
@@ -136,5 +169,59 @@ impl Drop for PreparedPeer {
     fn drop(&mut self) {
         // SAFETY: destruction runs before either retained library is released.
         unsafe { (self.product.ordinary().link_destroy.expect("validated"))(self.peer.as_ptr()) }
+    }
+}
+
+type NativeRead = unsafe extern "C" fn(*const c_void, *mut abi::UrpAstLinkObservation) -> i32;
+struct NativeLinkObserver {
+    observer: NonNull<c_void>,
+    read: NativeRead,
+    destroy: unsafe extern "C" fn(*mut c_void),
+    _product: Arc<Product>,
+}
+// SAFETY: the SDK gives this independent lease immutable reads concurrent with processing,
+// graph destruction and other reads. The owned lease and DSO outlive each read.
+unsafe impl Send for NativeLinkObserver {}
+unsafe impl Sync for NativeLinkObserver {}
+
+impl Drop for NativeLinkObserver {
+    fn drop(&mut self) {
+        // SAFETY: releasing the sole SDK observer lease cannot race a surviving borrow.
+        unsafe { (self.destroy)(self.observer.as_ptr()) };
+    }
+}
+
+pub(crate) struct PeerOutputObserver {
+    observer: Option<NativeLinkObserver>,
+    rate: u32,
+}
+
+impl PeerOutputObserver {
+    pub(crate) fn output(&self) -> ProviderOutput {
+        let state = if self.rate != crate::status_meter::NATIVE_RATE {
+            // The graph was prepared at decoder rate, but its input here is native 48 kHz.
+            // Report the actual discrepancy, not a loudness value from the wrong weighting.
+            ProviderOutputState::RateMismatch
+        } else if let Some(observer) = &self.observer {
+            // SAFETY: the SDK record is flat and caller-initialized with scalar fields.
+            let mut wire: abi::UrpAstLinkObservation = unsafe { std::mem::zeroed() };
+            wire.struct_size = std::mem::size_of_val(&wire) as u32;
+            wire.abi_version = 1;
+            // SAFETY: the independent lease outlives this synchronous, read-only call.
+            if unsafe { (observer.read)(observer.observer.as_ptr(), &mut wire) } == 0 {
+                ProviderOutputMeasurement::from_wire(&wire).map_or(
+                    ProviderOutputState::ReadFailed,
+                    ProviderOutputState::Observed,
+                )
+            } else {
+                ProviderOutputState::ReadFailed
+            }
+        } else {
+            ProviderOutputState::ObserverUnavailable
+        };
+        ProviderOutput {
+            rate: self.rate,
+            state,
+        }
     }
 }

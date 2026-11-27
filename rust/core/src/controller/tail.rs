@@ -1,6 +1,6 @@
 //! Release opportunities use traffic time, never telemetry's transmitter hang clock.
 
-use super::{ControllerError, PreparedMedia, samples};
+use super::{ControllerError, PreparedMedia, observation::Trace, samples};
 
 /// One configured release message prepared on control, with an explicit audience.
 pub struct Tail {
@@ -60,12 +60,20 @@ impl TailPlanner {
         hang: u64,
         suppressed: bool,
         playback_allowed: bool,
+        trace: &mut Trace,
     ) {
         if active {
             self.hang_until = None;
             for item in &mut self.items {
                 if item.pending && !item.started {
                     item.tail.media.0.cancel();
+                    let outcome = item.tail.media.0.outcome();
+                    item.tail.media.observe_completion(
+                        trace,
+                        now,
+                        outcome,
+                        Some("receive_resumed"),
+                    );
                     item.pending = false;
                     item.deadline = None;
                 } else if item.suspended && playback_allowed {
@@ -82,6 +90,7 @@ impl TailPlanner {
                         now.saturating_sub(last) >= samples(item.tail.interval_ms)
                     })
                 {
+                    item.tail.media.observe_queue(trace, now, "tail");
                     item.pending = true;
                     item.deadline = None;
                 }
@@ -133,6 +142,9 @@ impl TailPlanner {
                 .find(|item| item.pending)
                 .expect("waiting for unkey requires a pending tail");
             item.deadline = Some(now.saturating_add(samples(item.tail.delay_ms)));
+            if let Some(ticket) = &mut item.tail.media.9 {
+                ticket.deadline_sample = item.deadline;
+            }
         }
     }
 

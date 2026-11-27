@@ -213,6 +213,65 @@ fn real_proxies_enforce_frontend_policy_and_verified_upstream_mtls() {
     }
 }
 
+#[test]
+#[ignore = "staged Debian nginx and apache2-bin packages required"]
+fn real_proxies_keep_status_websocket_under_frontend_and_backend_policy() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let pki = Pki::new();
+    for service in ["nginx", "apache"] {
+        let (listener, mut inbox) = backend(&pki, service, "server");
+        let proxy = Proxy::start(
+            service,
+            &pki.0,
+            listener.local_addr(),
+            "backend",
+            "localhost",
+        );
+        let config = pki.client("backend", None);
+        let addr = SocketAddr::from(([127, 0, 0, 1], proxy.port));
+        let host = format!("localhost:{}", proxy.port);
+        let auth = format!(
+            "Authorization: Basic {}\r\n",
+            STANDARD.encode("user:fixture-password")
+        );
+
+        let mut unadmitted = connect(addr, config.clone(), "localhost");
+        send_status(&mut unadmitted, &host, &format!("Origin: {ORIGIN}\r\n"));
+        assert_eq!(status(&mut unadmitted).unwrap(), 401);
+        assert!(inbox.try_recv().is_none());
+
+        let mut wrong_origin = connect(addr, config.clone(), "localhost");
+        send_status(
+            &mut wrong_origin,
+            &host,
+            &format!("{auth}Origin: https://other.local\r\n"),
+        );
+        assert_eq!(status(&mut wrong_origin).unwrap(), 403);
+        assert!(inbox.try_recv().is_none());
+
+        let mut connection = connect(addr, config, "localhost");
+        send_status(
+            &mut connection,
+            &host,
+            &format!("{auth}Origin: {ORIGIN}\r\n"),
+        );
+        let admitted = claim(&mut inbox);
+        assert!(admitted.is_status_upgrade());
+        assert_eq!(admitted.actor.as_str(), service);
+        assert_eq!(admitted.target.query(), Some("port=example"));
+        assert!(admitted.headers.get("authorization").is_none());
+        let page =
+            json!({"state_cursor":"42","complete":true,"status":{"site":{"quality":"valid"}}});
+        let (_publisher, stream) =
+            StatusStream::new("proxy-fixture".into(), vec![page.clone()], None);
+        admitted.respond_status_stream(stream);
+        let mut connection = status_socket(connection);
+        assert_eq!(status_frame(&mut connection)["data"], page);
+        connection.send(Message::Close(None)).unwrap();
+    }
+}
+
 fn log_without_marker(path: &std::path::Path) -> io::Result<bool> {
     let log = fs::read(path)?;
     Ok(!log

@@ -65,7 +65,7 @@ impl Api {
             .ok_or(Fault::Missing)
     }
 
-    fn href(&self, path: &str) -> Value {
+    pub(super) fn href(&self, path: &str) -> Value {
         json!({"href":format!("{}{path}",self.mount)})
     }
 
@@ -126,6 +126,12 @@ impl Api {
             "curies":[{"name":"rpt","href":format!("{}/rels/{{rel}}/",self.mount),"templated":true}]})
     }
 
+    fn link_status_views(&self, links: &mut Value, query: &str) {
+        use super::status::{SNAPSHOT, STREAM, scoped_view};
+        links["rpt:status-snapshot"] = self.href(&scoped_view(SNAPSHOT, query));
+        links["rpt:status-stream"] = self.href(&scoped_view(STREAM, query));
+    }
+
     pub fn read(
         &self,
         r: &Route,
@@ -169,6 +175,15 @@ impl Api {
                 }
                 links["describedby"] = self.href(&format!("/schemas/{name}/"));
                 body["profile"] = json!(name);
+                if matches!(
+                    subject.target,
+                    Target::StatusSnapshot | Target::StatusStream
+                ) {
+                    body["status_selection"] =
+                        super::status::profile(subject.target == Target::StatusStream);
+                    links["describedby"] = self.href("/schemas/status-snapshot-response/");
+                    self.link_status_views(&mut links, "");
+                }
             }
             Target::Relation => {
                 let name = p.name.ok_or(Fault::Missing)?;
@@ -519,6 +534,16 @@ impl Api {
                         Value::Array(event.warnings.iter().map(macro_link).collect());
                 }
                 self.children(r, p, relative, snapshot, &mut links);
+            }
+        }
+        if r.view == Some(View::Status) {
+            if r.path == "/status/" {
+                self.link_status_views(&mut links, "");
+            } else if r.target == Target::Metadata {
+                let query = p
+                    .port
+                    .map_or_else(|| "site=true".to_owned(), |port| format!("port={port}"));
+                self.link_status_views(&mut links, &query);
             }
         }
         body["_links"] = links;

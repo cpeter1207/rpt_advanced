@@ -7,6 +7,7 @@ use super::{
         RingError,
     },
     source_clock::SourceClock,
+    status_audio::{DecodedMeter, PeerMeasurements, PeerReaders},
 };
 use crate::{
     Error,
@@ -56,6 +57,8 @@ pub enum Command {
         inbound: InboundProducer,
         /// Unique replacement native outbound consumer.
         outbound: LinkAudioConsumer,
+        /// Prepared peer ingress graph identity, installed with these endpoints.
+        ingress_graph_generation: u64,
         /// Resolved node setting, applied before this generation admits source PCM.
         dtmf_muting: bool,
     },
@@ -141,6 +144,8 @@ pub struct MediaSnapshot {
 pub type PeerObservation = crate::abi::rptadv_peer_observation_v1;
 
 mod observation;
+#[cfg(target_os = "linux")]
+mod status;
 use observation::PeerObservationCache;
 pub(crate) use observation::describe as describe_peer_observation;
 /// Single control producer/event consumer; never borrowed by audio callbacks.
@@ -154,7 +159,15 @@ pub struct PeerControl {
     stop: Arc<AtomicBool>,
     wake: PeerWake,
     observer: InboundObserver,
+    meters: PeerReaders,
+    ingress_graph_generation: Arc<AtomicU64>,
     peer_observation: Arc<PeerObservationCache>,
+    #[cfg(target_os = "linux")]
+    receive_status: Arc<status::ReceiveStatus>,
+    #[cfg(target_os = "linux")]
+    pub(crate) status_connected: bool,
+    #[cfg(target_os = "linux")]
+    pub(crate) status_outgoing: bool,
     #[cfg(test)]
     owner_thread: Arc<std::sync::Mutex<Option<thread::ThreadId>>>,
 }
@@ -241,6 +254,48 @@ impl PeerControl {
         }
         Some(event)
     }
+    /// Bind control attribution before the first connection publication.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_status_direction(mut self, outgoing: bool) -> Self {
+        self.status_outgoing = outgoing;
+        self
+    }
+
+    /// Take one recorded transport transition without polling the latest key state.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_receive_status_edge(&self) -> Option<(u64, bool)> {
+        self.receive_status.next()
+    }
+
+    /// Bind the connection to public status without replaying pre-publication edges.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn discard_receive_status_edges(&self) {
+        self.receive_status.discard();
+    }
+
+    /// Last provider key observation, or unknown before any observation.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn receive_status_key(&self) -> Option<bool> {
+        self.receive_status.key()
+    }
+
+    /// A saturated status reader requires resynchronization without stopping peer media.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn receive_status_lost(&self) -> bool {
+        self.receive_status.lost()
+    }
+
+    /// Read the current direct-peer PCM stages without borrowing its media owner.
+    pub(crate) fn status_meters(&self) -> PeerMeasurements {
+        let graph = self.ingress_graph_generation.load(Ordering::Acquire);
+        PeerMeasurements {
+            native_ingress: self.observer.native_ingress(),
+            #[cfg(target_os = "linux")]
+            provider_output: self.observer.provider_output(),
+            ..self.meters.readings((graph != 0).then_some(graph))
+        }
+    }
+
     /// Copy diagnostics on control without formatting or allocating on audio workers.
     pub fn snapshot(&self) -> Result<MediaSnapshot, RingError> {
         let signal = self.observer.signals();
@@ -298,7 +353,11 @@ pub struct PeerSession {
     text_identity: Arc<TextIdentity>,
     io: PeerIo,
     inbound: InboundProducer,
+    decoded_meter: DecodedMeter,
+    ingress_graph_generation: Arc<AtomicU64>,
     peer_observation: Arc<PeerObservationCache>,
+    #[cfg(target_os = "linux")]
+    receive_status: Arc<status::ReceiveStatus>,
     pending_input: Option<PendingInput>,
     pending_pcm: [f32; MAX_PEER_INPUT_SAMPLES],
     source_finish: Option<u64>,
@@ -653,7 +712,11 @@ impl PeerSession {
         if rpt_advanced_core::config::NodeId::new(local).is_err() || local.contains('\0') {
             return Err(Error::Reservation);
         }
-        let outbound = Outbound::new(io.rate(), outbound)?;
+        let rate = io.rate();
+        let mut outbound = Outbound::new(rate, outbound)?;
+        let egress_meters = outbound.status_meters(io.prepared_media());
+        let (decoded_meter, decoded_reader) = DecodedMeter::new(rate);
+        let ingress_graph_generation = Arc::new(AtomicU64::new(0));
         let source = io.source_media();
         if source && io.rate() != 8000 {
             return Err(Error::UnsupportedFormat);
@@ -675,6 +738,8 @@ impl PeerSession {
         let stop = Arc::new(AtomicBool::new(false));
         let wake = PeerWake::default();
         let peer_observation = Arc::new(PeerObservationCache::new());
+        #[cfg(target_os = "linux")]
+        let receive_status = Arc::new(status::ReceiveStatus::default());
         let text_identity = Arc::new(TextIdentity {
             station: AtomicU64::new(0),
             connection: NEXT_TEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
@@ -695,7 +760,15 @@ impl PeerSession {
             stop: stop.clone(),
             wake: wake.clone(),
             observer,
+            meters: PeerReaders::new(rate, decoded_reader, egress_meters),
+            ingress_graph_generation: Arc::clone(&ingress_graph_generation),
             peer_observation: Arc::clone(&peer_observation),
+            #[cfg(target_os = "linux")]
+            receive_status: Arc::clone(&receive_status),
+            #[cfg(target_os = "linux")]
+            status_connected: false,
+            #[cfg(target_os = "linux")]
+            status_outgoing: false,
             #[cfg(test)]
             owner_thread: Arc::clone(&owner_thread),
         };
@@ -704,7 +777,11 @@ impl PeerSession {
                 text_identity,
                 io,
                 inbound,
+                decoded_meter,
+                ingress_graph_generation,
                 peer_observation,
+                #[cfg(target_os = "linux")]
+                receive_status,
                 pending_input: None,
                 pending_pcm: [0.0; MAX_PEER_INPUT_SAMPLES],
                 source_finish: None,
@@ -794,6 +871,10 @@ impl PeerSession {
             // NEWKEY1 disables separate radio-key controls; PCM remains the fallback.
             Protocol::NewKey1 => {
                 self.radio_control = RadioControlState::Disabled;
+                #[cfg(target_os = "linux")]
+                if self.inbound.signals().radio_keyed() {
+                    self.receive_status.observe(receipt.at, false);
+                }
                 self.inbound.signals().set_radio_keyed(false);
             }
             Protocol::IaxKey => {
@@ -834,13 +915,22 @@ impl PeerSession {
         }
         Ok(())
     }
-    fn flush_pending_input(&mut self) -> Result<(), Error> {
+    fn flush_pending_input(&mut self, now_ms: u64) -> Result<(), Error> {
         let finished = match self.pending_input.as_mut() {
             Some(PendingInput::Audio { next, len, epoch }) => {
                 let accepted = self
                     .inbound
                     .write_received(&self.pending_pcm[*next..*len], *epoch)
                     .map_err(|_| Error::Write)?;
+                if let Some(consumed) = self.pending_pcm.get(*next..*next + accepted) {
+                    self.decoded_meter.accept(
+                        self.ingress_graph_generation.load(Ordering::Relaxed),
+                        self.text_identity.connection,
+                        None,
+                        now_ms,
+                        consumed,
+                    );
+                }
                 *next += accepted;
                 *next == *len
             }
@@ -887,6 +977,7 @@ impl PeerSession {
             let inbound = &mut self.inbound;
             let events = &mut self.events;
             let identity = &self.text_identity;
+            let meter = &mut self.decoded_meter;
             let source = self.source.as_mut().ok_or(Error::Operation)?;
             let scratch = &mut self.pending_pcm;
             let peer = &mut self.peer;
@@ -934,14 +1025,24 @@ impl PeerSession {
                                 }
                             },
                         );
-                        if let Ok(n) = credit
-                            && n < samples.len()
-                        {
-                            self.deferred_source = Some((start + n as u64, receipt.clone()));
+                        if let Ok(n) = credit {
+                            if let Some(consumed) = samples.get(..n) {
+                                meter.accept(
+                                    self.ingress_graph_generation.load(Ordering::Relaxed),
+                                    identity.connection,
+                                    Some(start),
+                                    now_ms,
+                                    consumed,
+                                );
+                            }
+                            if n < samples.len() {
+                                self.deferred_source = Some((start + n as u64, receipt.clone()));
+                            }
                         }
                         credit
                     }
                     SourceInput::Gap { start, count } => {
+                        meter.discontinuity();
                         source.gap(inbound, start, count, |digit| {
                             peer.digit(digit, now_ms);
                             if events
@@ -991,6 +1092,7 @@ impl PeerSession {
                 self.source_finish = None;
                 self.source_completion = SourceCompletion::Pending;
                 self.source_dirty = false;
+                self.decoded_meter.discontinuity();
                 source.reset()?;
             }
             self.source_dirty |= accepted;
@@ -1002,6 +1104,8 @@ impl PeerSession {
                     .or_else(|| self.deferred_source.as_ref().map(|(_, first)| first.epoch))
                     .unwrap_or(receipt.epoch);
                 self.inbound.signals().set_radio_keyed_at(keyed, epoch);
+                #[cfg(target_os = "linux")]
+                self.receive_status.observe(receipt.at, keyed);
             }
             if !flush_remote_unkey(&mut self.events, &mut self.pending_remote_unkey) {
                 return Ok(true);
@@ -1107,6 +1211,7 @@ impl PeerSession {
                 Command::Redirect {
                     inbound,
                     outbound,
+                    ingress_graph_generation,
                     dtmf_muting,
                 } => {
                     if self.source_dirty {
@@ -1118,9 +1223,12 @@ impl PeerSession {
                         source.reset()?;
                         source.set_muting(dtmf_muting);
                     }
+                    self.decoded_meter.discontinuity();
                     self.inbound = inbound;
                     self.pending_input = None;
                     self.outbound.redirect(outbound)?;
+                    self.ingress_graph_generation
+                        .store(ingress_graph_generation, Ordering::Release);
                     self.peer.activity(false, now_ms);
                     self.edge = 0;
                     self.query_epoch = None;
@@ -1157,7 +1265,7 @@ impl PeerSession {
             if !flush_remote_unkey(&mut self.events, &mut self.pending_remote_unkey) {
                 break;
             }
-            self.flush_pending_input()?;
+            self.flush_pending_input(now_ms)?;
             if self.pending_input.is_some() || !self.io.ready()? {
                 break;
             }
@@ -1173,6 +1281,8 @@ impl PeerSession {
             let receive_epoch = receipt.epoch;
             let pending_input = &mut self.pending_input;
             let pending_pcm = &mut self.pending_pcm;
+            let meter = &mut self.decoded_meter;
+            let identity = &self.text_identity;
             let seen = self.io.read(|input| match input {
                 PeerInput::Text(bytes) => event = Some(Event::Text(bytes.into())),
                 PeerInput::Digit(digit) => event = Some(Event::Digit(digit)),
@@ -1182,6 +1292,13 @@ impl PeerSession {
                     } else {
                         match inbound.write_received(samples, receive_epoch) {
                             Ok(accepted) if accepted <= samples.len() => {
+                                meter.accept(
+                                    self.ingress_graph_generation.load(Ordering::Relaxed),
+                                    identity.connection,
+                                    None,
+                                    now_ms,
+                                    &samples[..accepted],
+                                );
                                 if accepted < samples.len() {
                                     pending_pcm[..samples.len()].copy_from_slice(samples);
                                     *pending_input = Some(PendingInput::Audio {
@@ -1196,6 +1313,7 @@ impl PeerSession {
                     }
                 }
                 PeerInput::Gap(samples) => {
+                    meter.discontinuity();
                     let chunk = samples.min(MAX_PEER_INPUT_SAMPLES) as u64;
                     match inbound.gap(chunk) {
                         Ok(accepted) if accepted <= chunk => {
@@ -1221,6 +1339,8 @@ impl PeerSession {
                     self.inbound
                         .signals()
                         .set_radio_keyed_at(keyed, receive_epoch);
+                    #[cfg(target_os = "linux")]
+                    self.receive_status.observe(receipt.at, keyed);
                 }
             }
             match event {

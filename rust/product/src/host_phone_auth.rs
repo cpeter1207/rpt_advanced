@@ -454,6 +454,8 @@ impl Host {
             };
             count.fetch_add(1, Ordering::Relaxed);
         }
+        #[cfg(target_os = "linux")]
+        self.collect_phone_status_edges(clock.now_ms);
         let prompt = match result {
             PhoneLogin::Authenticated => PhoneAuthenticationPrompt::Authenticated,
             PhoneLogin::Retry => PhoneAuthenticationPrompt::Retry,

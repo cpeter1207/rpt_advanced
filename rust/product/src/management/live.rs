@@ -8,10 +8,11 @@ use rpt_advanced_core::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Default)]
 pub(crate) struct Domain {
+    pub(crate) site_resources: Option<Arc<super::resources::Resources>>,
     pub(crate) ports: BTreeMap<Id, Port>,
     pub(crate) registrations: BTreeMap<(Id, Id), Registration>,
     pub(crate) resources: BTreeMap<(Scope, Id), Value>,
@@ -20,10 +21,20 @@ pub(crate) struct Domain {
 #[derive(Default)]
 pub(crate) struct Port {
     pub(crate) receiver: Option<Receive>,
+    pub(crate) receive_sample_ms: Option<u64>,
     pub(crate) transmit_key_requested: Option<bool>,
+    pub(crate) physical_transmit: Option<crate::radio_feedback::PhysicalTransmit>,
+    pub(crate) physical_receive: Option<crate::radio_feedback::PhysicalReceive>,
     pub(crate) meters: [Option<Meter>; 2],
+    pub(crate) audio_generation: Option<u64>,
+    pub(crate) link_meters: BTreeMap<(String, u64), crate::link::status_audio::PeerMeasurements>,
+    pub(crate) call_meters: BTreeMap<(String, u64), crate::link::status_audio::PeerMeasurements>,
+    pub(crate) status_meters:
+        [Option<crate::status_meter::Measurement>; crate::status_meter::LOCAL_TAP_COUNT],
     pub(crate) peers: Vec<Peer>,
+    pub(crate) link_retries: Vec<Peer>,
     pub(crate) calls: Vec<Call>,
+    pub(crate) phone_progress: BTreeMap<String, (u64, Value)>,
     pub(crate) calendar: Option<CalendarObservation>,
     pub(crate) last_disconnect: Option<Disconnect>,
     pub(crate) last_dial: Option<Dial>,
@@ -78,23 +89,41 @@ pub(crate) struct Peer {
     pub node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
+    #[serde(skip)]
+    pub connection: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permanent: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_selected: Option<bool>,
+    pub state: &'static str,
+    pub quality: &'static str,
+    pub transmit_keyed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<Value>,
     #[serde(flatten)]
     pub receive: Receive,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Call {
     pub call_id: String,
     pub account: String,
     pub generation: u64,
     pub direction: &'static str,
     pub phase: &'static str,
+    pub authenticated: bool,
     pub attached: bool,
     pub muted: Option<bool>,
     pub active: Option<bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct Registration {
     pub state: &'static str,
     pub generation: u64,
@@ -131,10 +160,16 @@ impl Domain {
             _ => Kind::Metadata,
         };
         let Scope::Port(port_id) = scope else {
-            return id
+            let mut fields = id
                 .and_then(|id| self.resources.get(&(scope, id)))
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            if target == Target::Metadata
+                && let Some(resources) = self.site_resources.as_deref()
+            {
+                fields["resources"] = json!(resources);
+            }
+            return fields;
         };
         if matches!(
             target,

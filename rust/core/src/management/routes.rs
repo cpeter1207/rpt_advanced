@@ -61,6 +61,10 @@ pub enum Target {
     Active,
     /// Durable last-known-good revision.
     LastKnownGood,
+    /// Immutable scoped controller status capture.
+    StatusSnapshot,
+    /// Read-only WebSocket upgrade for scoped controller status.
+    StatusStream,
     /// Current storage/working state.
     Storage,
     /// Observed active owner generations.
@@ -306,6 +310,12 @@ pub fn inventory() -> BTreeMap<String, Route> {
             Target::LastKnownGood,
             "last-known-good",
         ),
+        (
+            "/status/snapshot/",
+            Target::StatusSnapshot,
+            "status-snapshot",
+        ),
+        ("/status/stream/", Target::StatusStream, "status-stream"),
         ("/status/storage/", Target::Storage, "storage"),
         ("/status/owners/", Target::Owners, "owners"),
         ("/docs", Target::Docs, "docs"),

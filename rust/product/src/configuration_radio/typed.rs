@@ -6,6 +6,9 @@ pub use lifecycle::{NativeBindings, NativeStation, PreparedUpdate, UpdateStatus}
 mod policy;
 pub use policy::ControllerRadioPolicy;
 mod peer;
+mod peer_observation;
+pub(crate) use peer::PeerOutputObserver;
+pub(crate) use peer_observation::{ProviderOutput, ProviderOutputState};
 mod station;
 mod template;
 use crate::abi;

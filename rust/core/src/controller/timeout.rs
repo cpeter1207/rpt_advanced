@@ -79,7 +79,8 @@ impl NodeController {
         input: Option<f32>,
         output: Option<ProgramSample<'_>>,
     ) -> f32 {
-        let _ = self.courtesy.pop();
+        self.courtesy
+            .cancel_waiting(self.now, &mut self.telemetry.trace, "transmit_timeout");
         if matches!(self.timeout.phase, Phase::Waiting) && !activity {
             self.timeout.phase = Phase::Cleared;
         }
@@ -93,12 +94,23 @@ impl NodeController {
         let mut continuing = false;
         if let Some(index) = index {
             if let Some(media) = &mut self.timeout_media {
-                let playback = &mut media[index].0;
+                let media = &mut media[index];
+                media.observe_queue(&mut self.telemetry.trace, self.now, "timeout");
+                let playback = &mut media.0;
+                let first_output = !playback.has_output();
                 if !inhibited && input.is_some() {
                     made = playback.render(false, &mut sample);
                 }
+                if first_output
+                    && made != 0
+                    && let Some(ticket) = &mut media.9
+                {
+                    self.telemetry.trace.started(ticket, self.now);
+                }
                 continuing = playback.has_output() && !playback.is_finished();
                 if playback.is_finished() {
+                    let outcome = playback.outcome();
+                    media.observe_completion(&mut self.telemetry.trace, self.now, outcome, None);
                     self.timeout.phase = if index == 0 {
                         Phase::Waiting
                     } else {
@@ -133,6 +145,10 @@ impl NodeController {
             self.tails.unkeyed(self.now);
         }
         if let Some(output) = output {
+            if let Some((voice, public_telemetry)) = output.branches {
+                *voice = 0.0;
+                *public_telemetry = sample[0];
+            }
             *output.parrot = 0.0;
             if let Some(reply) = output.reply {
                 *reply = PeerReplySample::default();

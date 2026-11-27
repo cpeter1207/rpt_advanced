@@ -80,6 +80,24 @@ linked executable client. State retains explicit bounded recovery manifests at
 its existing commit point, and normal transactions preserve those roots.
 Maintenance never copies delivered key material or marks a runtime active.
 
+## Controller status publication
+
+The [status-stream design](../../docs/superpowers/specs/2026-11-25-controller-status-stream-design.md)
+extends the management surface in [ADR 0045](decisions/0045-modular-json-and-hal-management.md).
+Product projects public observations into a shared capture for HAL GET and
+WebSocket subscription. One publication boundary orders snapshot cuts, state
+edges and graph retirement. Bounded callback handoffs deliver source events and
+completed measurements. Capture preparation, serialization, authentication,
+resource sampling and network I/O run outside radio callbacks.
+
+REST retains bounded reader-bound pages from a single cut. WebSocket frames
+prioritize state changes over replaceable meter updates and require a fresh
+snapshot if state delivery is lost. The separate CLI follows HAL links to fetch
+a snapshot. Provider-owned stages without an observation interface remain
+explicitly unavailable. See the
+[implementation checklist](../../docs/superpowers/plans/2026-11-26-controller-status-stream-implementation.md)
+for provider and qualification work.
+
 ## System boundary
 
 [ADR 0044](decisions/0044-phone-peers-and-rf-presentation-pacing.md) records the

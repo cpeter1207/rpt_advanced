@@ -200,6 +200,7 @@ unsafe extern "C" fn start_management(
             unsafe { Engine::start_management(Arc::clone(&store), host, control, file, speech)? };
         let service: Result<(), RuntimeError> = (|| {
             engine.start_ticker()?;
+            engine.start_domain_observer();
             let coordinator = Coordinator::for_service(
                 store,
                 key,
