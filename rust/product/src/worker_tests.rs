@@ -200,6 +200,41 @@ fn transmit_policy_edges_and_snapshots_share_checked_callback_state() {
     assert_eq!(unavailable.signal, RadioSignal::TransmitPolicy(None));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn authoritative_unkey_requires_confirmed_fresh_inactive_input() {
+    use crate::management::status::edges::RadioSignal;
+    use rpt_advanced_core::controller::LocalReceiveRelease;
+    let status = RadioStatus::default();
+    let release = LocalReceiveRelease {
+        duration_samples: 48,
+        kerchunk: true,
+    };
+
+    status.receive_sample_ms.store(101, Ordering::Release);
+    status.observe_qualified(Some(true), 100);
+    assert!(status.edges.pop().is_some());
+    status.publish_local_receive_release(release, 120);
+    assert!(status.edges.pop().is_none());
+
+    status.observe_qualified(None, 120);
+    assert_eq!(
+        status.edges.pop().unwrap().signal,
+        RadioSignal::ReceiveUnknown
+    );
+    status.publish_local_receive_release(release, 120);
+    assert!(status.edges.pop().is_none());
+
+    status.observe_qualified(Some(false), 120);
+    assert!(status.edges.pop().is_some());
+    status.publish_local_receive_release(release, 601);
+    assert!(status.edges.pop().is_none());
+    status.publish_local_receive_release(release, 120);
+    let edge = status.edges.pop().unwrap();
+    assert_eq!(edge.at_ms, 120);
+    assert_eq!(edge.signal, RadioSignal::ReceiveRelease(release));
+}
+
 #[test]
 fn remote_metadata_applies_non_fm_on_the_serial_transmit_owner() {
     let _serial = crate::fixture::LIFECYCLE
@@ -828,8 +863,12 @@ fn local_status_taps_measure_before_and_after_the_receive_gate() {
         telemetry,
         station,
         telemetry_input,
-    ] = worker.status_meters().map(Option::unwrap);
-    assert!((provider.peak_dbfs.unwrap() + 12.0412).abs() < 0.001);
+        incoming_text,
+        regeneration,
+    ] = worker.status_meters();
+    assert!(incoming_text.is_none());
+    assert!(regeneration.is_none());
+    assert!((provider.unwrap().peak_dbfs.unwrap() + 12.0412).abs() < 0.001);
     for meter in [
         gated,
         ring,
@@ -839,6 +878,7 @@ fn local_status_taps_measure_before_and_after_the_receive_gate() {
         station,
         telemetry_input,
     ] {
+        let meter = meter.unwrap();
         assert_eq!(meter.quality, crate::status_meter::Quality::Valid);
         assert_eq!(
             meter.signal_state,

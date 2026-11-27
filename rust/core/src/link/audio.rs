@@ -444,7 +444,10 @@ pub struct LinkAudio<P: PeerInput> {
 /// Prepared local incoming speech, never a peer source or telemetry command.
 pub trait LocalTextInput: Send {
     /// Add available PCM without blocking/allocating; pending synthesis is inactive.
-    fn render(&mut self, pcm: &mut [f32]) -> bool;
+    /// When supplied, add only the public incoming text contribution to the same-sized scratch.
+    fn render(&mut self, pcm: &mut [f32], public_text: Option<&mut [f32]>) -> bool;
+    /// Whether this generation has a public speech input.
+    fn public_text_available(&self) -> bool;
 }
 /// Local-only media and its playable-output demand under normal RF safety gates.
 #[derive(Clone, Copy, Default)]
@@ -711,6 +714,16 @@ impl<P: PeerInput> LinkAudio<P> {
     pub fn active_count(&self) -> usize {
         self.peers.iter().filter(|peer| peer.active).count()
     }
+    /// Presence of the public incoming text and regeneration inputs, in that order.
+    pub fn local_transmit_media(&self) -> (bool, bool) {
+        (
+            self.text
+                .as_ref()
+                .is_some_and(|input| input.public_text_available()),
+            self.regeneration.is_some(),
+        )
+    }
+
     /// Current frame's peer/text activity before controller muting and RF admission.
     pub fn peer_source_active(&self) -> bool {
         self.peer_source_active
@@ -749,8 +762,12 @@ impl<P: PeerInput> LinkAudio<P> {
             output.station_input.len() == count
                 && output.voice.len() == count
                 && output.public_telemetry.len() == count
+                && output.incoming_text.len() == count
+                && output.regeneration.len() == count
+                && output.public_telemetry_input.len() == count
         });
         if let Some(output) = &mut branches {
+            output.incoming_text.fill(0.0);
             if receiving {
                 output.station_input.copy_from_slice(&self.local[..count]);
             } else {
@@ -924,10 +941,12 @@ impl<P: PeerInput> LinkAudio<P> {
                 .and_then(PeerInput::render_sample);
         }
         self.text_samples[..count].fill(0.0);
-        let text_active = self
-            .text
-            .as_mut()
-            .is_some_and(|input| input.render(&mut self.text_samples[..count]));
+        let text_active = self.text.as_mut().is_some_and(|input| {
+            input.render(
+                &mut self.text_samples[..count],
+                branches.as_mut().map(|output| &mut *output.incoming_text),
+            )
+        });
         self.peer_source_active = any_peer_active || text_active;
         controller.set_nonlocal_source_activity(self.peer_source_active);
         let keyed = controller.process_audio_with_parrot(

@@ -326,7 +326,14 @@ fn text_admission_full_ring_obeys_process_budget_and_releases_quota_after_retire
         executor.admit(message(1, "B recovered".into()), speech()),
         Admission::Accepted
     );
-    until(|| reader.render(&mut output));
+    let mut observed = [0.0; 16];
+    // Existing private progress audio in the sum must never enter the public tap.
+    output.fill(0.25);
+    until(|| reader.render_observed(&mut output, Some(&mut observed)));
+    assert!(observed.iter().any(|sample| *sample != 0.0));
+    for (sum, public) in output.into_iter().zip(observed) {
+        assert_eq!(sum, 0.25 + public);
+    }
     executor.cancel(reader.origin());
     assert!(!reader.render(&mut [0.0; 16]));
     executor.stop();

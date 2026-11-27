@@ -149,6 +149,8 @@ impl NodeController {
                 *branches.voice = 0.0;
                 *branches.public_telemetry_input = sample[0];
                 *branches.public_telemetry = sample[0];
+                *branches.incoming_text = 0.0;
+                *branches.regeneration = 0.0;
             }
             *output.parrot = 0.0;
             if let Some(reply) = output.reply {

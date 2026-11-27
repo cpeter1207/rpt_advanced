@@ -99,6 +99,10 @@ pub struct LocalTransmitBranches<'a> {
     pub public_telemetry_input: &'a mut [f32],
     /// Locally routed public telemetry immediately before the final combine.
     pub public_telemetry: &'a mut [f32],
+    /// Public text scratch filled by the local media producer and gated before combine.
+    pub incoming_text: &'a mut [f32],
+    /// Actual local signaling replacement after the transmit gate.
+    pub regeneration: &'a mut [f32],
 }
 
 /// Callback-owned parrot fanout and per-sample addressed command replies.
@@ -137,6 +141,8 @@ struct TransmitBranchSample<'a> {
     voice: &'a mut f32,
     public_telemetry_input: &'a mut f32,
     public_telemetry: &'a mut f32,
+    incoming_text: &'a mut f32,
+    regeneration: &'a mut f32,
 }
 
 /// Current policy state from the last completed transmit render.
@@ -148,6 +154,15 @@ pub struct TransmitPolicyStatus {
     pub timed_out: bool,
     /// Ordinary traffic PTT remains asserted on hang with no new demand.
     pub traffic_holding: bool,
+}
+
+/// Release decision for the serial controller's qualified local receiver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalReceiveRelease {
+    /// Number of admitted 48 kHz sample ticks from key to unkey.
+    pub duration_samples: u64,
+    /// The existing controller rule suppressed traffic hang and courtesy.
+    pub kerchunk: bool,
 }
 
 /// Single audio-owner node aggregate; construction and media preparation belong to control.
@@ -178,6 +193,7 @@ pub struct NodeController {
     linked: bool,
     receiver_key: u64,
     receiver_unkey: u64,
+    local_receive_release: Option<LocalReceiveRelease>,
     last_activity: u64,
     key_idle: u64,
     keyed: bool,
@@ -335,6 +351,7 @@ impl NodeController {
                 linked: false,
                 receiver_key: 0,
                 receiver_unkey: 0,
+                local_receive_release: None,
                 last_activity: 0,
                 key_idle: 0,
                 keyed: false,
@@ -478,6 +495,11 @@ impl NodeController {
         !self.settings.transmit_disabled && self.ctcss_enabled
     }
 
+    /// Take the most recent local unkey decision on the serial transmit owner.
+    pub fn take_local_receive_release(&mut self) -> Option<LocalReceiveRelease> {
+        self.local_receive_release.take()
+    }
+
     /// Observe the policy already applied by this serial transmit owner.
     pub fn transmit_policy_status(&self) -> TransmitPolicyStatus {
         TransmitPolicyStatus {
@@ -579,12 +601,16 @@ impl NodeController {
                 branch.voice.len() == audio.len()
                     && branch.public_telemetry_input.len() == audio.len()
                     && branch.public_telemetry.len() == audio.len()
+                    && branch.incoming_text.len() == audio.len()
+                    && branch.regeneration.len() == audio.len()
             });
         for (offset, sample) in audio.iter_mut().enumerate() {
             let observed = branches.as_mut().map(|branch| TransmitBranchSample {
                 voice: &mut branch.voice[offset],
                 public_telemetry_input: &mut branch.public_telemetry_input[offset],
                 public_telemetry: &mut branch.public_telemetry[offset],
+                incoming_text: &mut branch.incoming_text[offset],
+                regeneration: &mut branch.regeneration[offset],
             });
             let parrot_sample = parrot_output.as_mut().map(|output| ProgramSample {
                 branches: observed,
@@ -898,9 +924,13 @@ impl NodeController {
         }
         if !receiving && self.receiver {
             self.receiver_unkey = self.now;
+            let duration_samples = self.now.saturating_sub(self.receiver_key);
             let kerchunk = self.settings.kerchunk_max_ms != 0
-                && self.now.saturating_sub(self.receiver_key)
-                    <= samples(self.settings.kerchunk_max_ms);
+                && duration_samples <= samples(self.settings.kerchunk_max_ms);
+            self.local_receive_release = Some(LocalReceiveRelease {
+                duration_samples,
+                kerchunk,
+            });
             self.receive_unkeyed(kerchunk);
             if !kerchunk {
                 self.courtesy.schedule(
@@ -1355,9 +1385,19 @@ impl NodeController {
             0.0
         };
         let telemetry = telemetry_input * gain;
+        let regeneration_output = regeneration.filter(|_| may_transmit).unwrap_or(0.0);
+        let text_admitted = regeneration.is_none()
+            && !inhibited
+            && may_transmit
+            && self.traffic_keyed
+            && !suppress_repeat;
         if let Some(output) = parrot_output {
             if let Some(branches) = output.branches {
                 *branches.public_telemetry_input = telemetry_input;
+                *branches.regeneration = regeneration_output;
+                if !text_admitted {
+                    *branches.incoming_text = 0.0;
+                }
                 if regeneration.is_none() && !inhibited {
                     *branches.voice = local + link;
                     *branches.public_telemetry = telemetry;
@@ -1393,12 +1433,12 @@ impl NodeController {
                 }
             }
         }
-        if let Some(sample) = regeneration {
-            if may_transmit { sample } else { 0.0 }
+        if regeneration.is_some() {
+            regeneration_output
         } else if inhibited {
             0.0
         } else {
-            let incoming_text = if may_transmit && self.traffic_keyed && !suppress_repeat {
+            let incoming_text = if text_admitted {
                 local_media.unwrap_or(0.0)
             } else {
                 0.0

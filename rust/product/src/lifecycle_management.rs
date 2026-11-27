@@ -244,7 +244,8 @@ impl Engine {
     }
 
     pub(crate) fn webrtc_setup_notice(&self, stage: &'static str) {
-        self.services.scheduler_notice(&format!("WebRTC setup ended during {stage}"));
+        self.services
+            .scheduler_notice(&format!("WebRTC setup ended during {stage}"));
     }
 
     pub(crate) fn management_diagnostic(&self, event: Diagnostic) {

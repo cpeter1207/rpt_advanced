@@ -514,6 +514,26 @@ impl RadioStatus {
         self.record_radio_edge(now_ms, signal);
     }
     #[cfg(target_os = "linux")]
+    fn publish_local_receive_release(
+        &self,
+        release: rpt_advanced_core::controller::LocalReceiveRelease,
+        at_ms: u64,
+    ) {
+        // A closed internal gate can also come from fault, mute, or a pending
+        // receive reset. Only a confirmed inactive input is an on-air unkey.
+        if self.qualified_detail.load(Ordering::Acquire) & 3 == 1
+            && self.receive_sample_time().is_some_and(|sample| {
+                at_ms.saturating_sub(sample) <= crate::radio_feedback::FRESH_MS
+            })
+        {
+            self.record_radio_edge(
+                at_ms,
+                crate::management::status::edges::RadioSignal::ReceiveRelease(release),
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     fn record_radio_edge(&self, at_ms: u64, signal: crate::management::status::edges::RadioSignal) {
         self.edges
             .push(crate::management::status::edges::RadioEdge { at_ms, signal });
@@ -570,9 +590,9 @@ struct TransmitContext {
     maximum: usize,
     status: RadioStatus,
     meter: UnsafeCell<MeterPublisher>,
-    status_taps: UnsafeCell<[Tap; 6]>,
+    status_taps: UnsafeCell<[Tap; 8]>,
     /// Borrowed only while measuring the serial TX callback's programme inputs.
-    status_pcm: UnsafeCell<[Box<[f32]>; 4]>,
+    status_pcm: UnsafeCell<[Box<[f32]>; 6]>,
     remote_controls: UnsafeCell<u32>,
     linked_active: UnsafeCell<bool>,
 }
@@ -1227,6 +1247,8 @@ unsafe fn transmit(
         telemetry_level,
         station_level,
         telemetry_input_level,
+        text_level,
+        regeneration_level,
     ] = unsafe { &mut *context.status_taps.get() };
     // SAFETY: these buffers are allocated before publication and shared only by this TX turn.
     let [
@@ -1234,13 +1256,24 @@ unsafe fn transmit(
         voice,
         public_telemetry_input,
         public_telemetry,
+        incoming_text,
+        regeneration,
     ] = unsafe { &mut *context.status_pcm.get() };
     let count = samples.len();
-    let (station_input, voice, public_telemetry_input, public_telemetry) = (
+    let (
+        station_input,
+        voice,
+        public_telemetry_input,
+        public_telemetry,
+        incoming_text,
+        regeneration,
+    ) = (
         &mut station_input[..count],
         &mut voice[..count],
         &mut public_telemetry_input[..count],
         &mut public_telemetry[..count],
+        &mut incoming_text[..count],
+        &mut regeneration[..count],
     );
     local_ring.observe(span, samples);
     let source = rpt_advanced_core::link::SourcePosition {
@@ -1270,6 +1303,8 @@ unsafe fn transmit(
             voice,
             public_telemetry_input,
             public_telemetry,
+            incoming_text,
+            regeneration,
         }),
     );
     // SAFETY: this callback owns both adapter and metadata state.
@@ -1283,9 +1318,26 @@ unsafe fn transmit(
             telemetry_level.observe(span, public_telemetry);
             station_level.observe(span, station_input);
             telemetry_input_level.observe(span, public_telemetry_input);
+            let (text_available, regeneration_available) = transmit.adapter.local_transmit_media();
+            for (available, level, pcm) in [
+                (text_available, text_level, incoming_text),
+                (regeneration_available, regeneration_level, regeneration),
+            ] {
+                if available {
+                    level.observe(span, pcm);
+                } else {
+                    level.invalidate(Quality::Unavailable);
+                }
+            }
             *keyed = u32::from(value);
             *ctcss_enabled = u32::from(transmit.controller.ctcss_enabled());
             *policy = Some(transmit.controller.transmit_policy_status());
+            #[cfg(target_os = "linux")]
+            if let Some(release) = transmit.controller.take_local_receive_release() {
+                context
+                    .status
+                    .publish_local_receive_release(release, span.end_ms);
+            }
             0
         }
         Err(_) => {
@@ -1544,6 +1596,8 @@ impl RadioWorker {
             (tx_telemetry, tx_telemetry_reader),
             (rx_station, rx_station_reader),
             (tx_telemetry_input, tx_telemetry_input_reader),
+            (tx_text, tx_text_reader),
+            (tx_regeneration, tx_regeneration_reader),
         ] = std::array::from_fn(|_| Tap::new());
         let active = Arc::new(AtomicBool::new(false));
         status.source_clock.restart();
@@ -1589,6 +1643,8 @@ impl RadioWorker {
                 tx_telemetry,
                 rx_station,
                 tx_telemetry_input,
+                tx_text,
+                tx_regeneration,
             ]),
             status_pcm: UnsafeCell::new(std::array::from_fn(|_| {
                 vec![0.0; maximum].into_boxed_slice()
@@ -1625,6 +1681,8 @@ impl RadioWorker {
                 tx_telemetry_reader,
                 rx_station_reader,
                 tx_telemetry_input_reader,
+                tx_text_reader,
+                tx_regeneration_reader,
             ],
             last_physical_receive: None,
             reported_faults: [0; 6],

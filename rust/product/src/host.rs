@@ -684,16 +684,20 @@ struct TextMix {
     progress: Vec<phone_progress::Reader>,
 }
 impl LocalTextInput for TextMix {
-    fn render(&mut self, pcm: &mut [f32]) -> bool {
+    fn render(&mut self, pcm: &mut [f32], mut public_text: Option<&mut [f32]>) -> bool {
         let mut active = false;
         #[cfg(target_os = "linux")]
         for reader in &mut self.progress {
             active |= reader.render(pcm);
         }
         for reader in &mut self.text {
-            active |= reader.render(pcm);
+            active |= reader.render_observed(pcm, public_text.as_deref_mut());
         }
         active
+    }
+
+    fn public_text_available(&self) -> bool {
+        !self.text.is_empty()
     }
 }
 fn bind_text_origins(
@@ -2482,7 +2486,10 @@ impl Host {
                     generation,
                 )?;
                 if let Some((binding, observer)) = observed
-                    && let Some(app) = self.applications.iter_mut().find(|app| app.binding == binding && app.live())
+                    && let Some(app) = self
+                        .applications
+                        .iter_mut()
+                        .find(|app| app.binding == binding && app.live())
                 {
                     app.observe_ingress(observer);
                 }

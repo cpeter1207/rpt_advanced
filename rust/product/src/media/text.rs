@@ -413,9 +413,19 @@ impl TextReader {
             .expect("reserved text retirement slot");
     }
     /// Add available speech to this local-only bus; pending synthesis is not activity.
+    #[cfg(test)]
     pub fn render(&mut self, output: &mut [f32]) -> bool {
+        self.render_observed(output, None)
+    }
+
+    /// Add the rendered contribution to the observation scratch before the station combines it.
+    pub fn render_observed(
+        &mut self,
+        output: &mut [f32],
+        mut public_text: Option<&mut [f32]>,
+    ) -> bool {
         let mut active = false;
-        for sample in output {
+        for (offset, sample) in output.iter_mut().enumerate() {
             loop {
                 if self.current.is_none() {
                     self.current = self.ready.pop().ok();
@@ -438,6 +448,9 @@ impl TextReader {
                 match item.reader.render_sample() {
                     Ok(Some(value)) if item.delay == 0 => {
                         *sample += value;
+                        if let Some(text) = public_text.as_deref_mut() {
+                            text[offset] += value;
+                        }
                         active = true;
                         break;
                     }

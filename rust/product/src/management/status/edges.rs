@@ -19,6 +19,7 @@ pub(crate) enum RadioSignal {
         qualified: bool,
         duration_ms: Option<u64>,
     },
+    ReceiveRelease(rpt_advanced_core::controller::LocalReceiveRelease),
     PhysicalTransmit {
         rendered: Option<bool>,
         serviced: Option<bool>,
@@ -149,11 +150,21 @@ impl Edge {
                         if qualified {
                             "radio.rx.keyed"
                         } else if duration_ms.is_some() {
-                            "radio.rx.unkeyed"
+                            "radio.rx.input_unkeyed"
                         } else {
                             "radio.rx.observed"
                         },
                         json!({"quality":"valid","qualified":qualified,"duration_ms":duration_ms.map(|ms|ms.to_string())}),
+                    ),
+                    RadioSignal::ReceiveRelease(release) => (
+                        "last_release",
+                        "radio.rx.unkeyed",
+                        json!({
+                            "quality":"valid","qualified":false,
+                            "duration_ms":(release.duration_samples / 48).to_string(),
+                            "duration_samples":release.duration_samples.to_string(),
+                            "suppression_reason":release.kerchunk.then_some("kerchunk")
+                        }),
                     ),
                     RadioSignal::ReceiveUnknown => (
                         "admission",

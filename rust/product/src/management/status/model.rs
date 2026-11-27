@@ -336,11 +336,20 @@ impl Capture {
             };
             for chain in crate::status_meter::LOCAL_CHAINS {
                 let graph_generation = port.audio_generation;
-                let stages = chain.stages.iter().enumerate().map(|(position, stage)| json!({
-                    "id":stage.id,"purpose":stage.purpose,"position":position,"inputs":stage.inputs,
-                    "state":if stage.tap.is_some() {"active"} else {"unavailable"},
-                    "signals":if stage.tap.is_some() {json!(["mono"])} else {json!([])},
-                })).collect::<Vec<_>>();
+                let stages = chain.stages.iter().enumerate().map(|(position, stage)| {
+                    let available = stage.tap.is_some_and(|tap| {
+                        !matches!(stage.id, "incoming_text" | "regeneration")
+                            || port.status_meters[tap].is_some_and(|meter| {
+                                Some(meter.graph_generation) == graph_generation
+                                    && meter.quality != crate::status_meter::Quality::Unavailable
+                            })
+                    });
+                    json!({
+                        "id":stage.id,"purpose":stage.purpose,"position":position,"inputs":stage.inputs,
+                        "state":if available {"active"} else {"unavailable"},
+                        "signals":if available {json!(["mono"])} else {json!([])},
+                    })
+                }).collect::<Vec<_>>();
                 put(
                     RecordKey::new(
                         owner,

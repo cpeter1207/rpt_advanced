@@ -2,9 +2,16 @@ use super::*;
 
 struct Text(bool);
 impl crate::link::LocalTextInput for Text {
-    fn render(&mut self, pcm: &mut [f32]) -> bool {
+    fn render(&mut self, pcm: &mut [f32], public_text: Option<&mut [f32]>) -> bool {
         pcm.fill(if self.0 { 0.125 } else { 0.0 });
+        if let Some(public_text) = public_text {
+            public_text.copy_from_slice(pcm);
+        }
         self.0
+    }
+
+    fn public_text_available(&self) -> bool {
+        true
     }
 }
 fn active_peer(name: &str, value: f32) -> (AudioPeer<FiniteInput>, LinkAudioConsumer) {

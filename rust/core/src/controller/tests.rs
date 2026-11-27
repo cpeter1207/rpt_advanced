@@ -1081,6 +1081,8 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
         let mut active = false;
         let mut replies = [PeerReplySample::default()];
         let [mut station, mut voice, mut telemetry_input, mut telemetry] = [[f32::NAN]; 4];
+        let mut incoming_text = [0.0];
+        let mut regeneration = [f32::NAN];
         AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
         let keyed = node.process_audio_with_parrot(
             false,
@@ -1094,6 +1096,8 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
                     voice: &mut voice,
                     public_telemetry_input: &mut telemetry_input,
                     public_telemetry: &mut telemetry,
+                    incoming_text: &mut incoming_text,
+                    regeneration: &mut regeneration,
                 }),
                 samples: &mut parrot,
                 active: &mut active,
@@ -1108,6 +1112,7 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
         assert!(!node.ctcss_enabled());
         assert_eq!(radio, [0.0]);
         assert_eq!((telemetry_input, telemetry), ([0.0], [0.0]));
+        assert_eq!((incoming_text, regeneration), ([0.0], [0.0]));
         assert_eq!(replies[0].sample, if ended { 0.0 } else { 0.4 });
         assert_eq!(control.reclaim().count(), 1);
     }
@@ -3102,9 +3107,24 @@ fn local_courtesy_delay_cancellation_and_short_receive_suppression() {
     node.process_audio(true, false, &[], &mut [0.0; 48]);
     node.process_audio(false, false, &[], &mut [0.0; 96]);
     assert!(!node.courtesy.pending());
+    assert_eq!(
+        node.take_local_receive_release(),
+        Some(LocalReceiveRelease {
+            duration_samples: 48,
+            kerchunk: true,
+        })
+    );
+    assert_eq!(node.take_local_receive_release(), None);
     node.process_audio(true, false, &[], &mut [0.0; 49]);
     node.process_event(false, false);
     assert!(node.courtesy.pending());
+    assert_eq!(
+        node.take_local_receive_release(),
+        Some(LocalReceiveRelease {
+            duration_samples: 49,
+            kerchunk: false,
+        })
+    );
     node.process_event(true, false);
     assert!(!node.courtesy.pending());
     node.process_audio(true, false, &[], &mut [0.0; 49]);
@@ -3907,12 +3927,14 @@ fn transmit_branch_taps_report_public_audio_before_the_sum() {
     node.process_audio(false, false, &[], &mut opening);
     assert_eq!(opening, [0.125]);
 
-    for regeneration in [None, Some(0.25)] {
+    for replacement in [None, Some(0.0), Some(0.25)] {
         let mut audio = [0.1875];
         let mut voice = [f32::NAN];
         let mut telemetry = [f32::NAN];
         let mut telemetry_input = [f32::NAN];
         let mut station = [0.0];
+        let mut incoming_text = [0.03125];
+        let mut regeneration = [f32::NAN];
         node.process_audio_with_parrot(
             true,
             true,
@@ -3923,7 +3945,7 @@ fn transmit_branch_taps_report_public_audio_before_the_sum() {
                 samples: &mut [0.0],
                 active: &mut false,
                 replies: None,
-                regeneration: Some(&[regeneration]),
+                regeneration: Some(&[replacement]),
                 local_media: crate::link::LocalMedia {
                     samples: &[0.0625],
                     active: true,
@@ -3933,13 +3955,17 @@ fn transmit_branch_taps_report_public_audio_before_the_sum() {
                     voice: &mut voice,
                     public_telemetry_input: &mut telemetry_input,
                     public_telemetry: &mut telemetry,
+                    incoming_text: &mut incoming_text,
+                    regeneration: &mut regeneration,
                 }),
             },
         );
         assert_eq!(telemetry_input, [0.125]);
-        if let Some(replacement) = regeneration {
+        if let Some(replacement) = replacement {
             assert_eq!((audio, voice, telemetry), ([replacement], [0.0], [0.0]));
+            assert_eq!((incoming_text, regeneration), ([0.0], [replacement]));
         } else {
+            assert_eq!((incoming_text, regeneration), ([0.03125], [0.0]));
             assert_eq!(voice, [0.25]);
             assert!(telemetry[0] > 0.124 && telemetry[0] < telemetry_input[0]);
             assert_eq!(audio, [voice[0] + telemetry[0] + 0.0625]);

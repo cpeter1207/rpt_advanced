@@ -777,6 +777,32 @@ mod tests {
     }
 
     #[test]
+    fn unkey_status_carries_authoritative_duration_and_suppression() {
+        let port: Id = PORT.parse().unwrap();
+        for (kerchunk, expected) in [(true, Some("kerchunk")), (false, None)] {
+            let (key, kind, value, terminal) = Edge {
+                port,
+                generation: 7,
+                at_ms: 101,
+                payload: Payload::Radio(RadioSignal::ReceiveRelease(
+                    rpt_advanced_core::controller::LocalReceiveRelease {
+                        duration_samples: 63,
+                        kerchunk,
+                    },
+                )),
+            }
+            .record();
+            assert_eq!(kind, "radio.rx.unkeyed");
+            assert_eq!(key.path, ["radio_signals", "last_release"]);
+            assert!(terminal.is_none());
+            let value = value.unwrap();
+            assert_eq!(value["duration_ms"], "1");
+            assert_eq!(value["duration_samples"], "63");
+            assert_eq!(value["suppression_reason"].as_str(), expected);
+        }
+    }
+
+    #[test]
     fn peer_diagnostics_keep_cadence_without_replacing_fast_key_state() {
         let port: Id = PORT.parse().unwrap();
         let owners = BTreeMap::from([(port, 7)]);
