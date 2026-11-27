@@ -99,8 +99,15 @@ The ARM64 coturn fixture verified bidirectional datagrams and connected
 two relay-only RTC endpoints with protected RTP over TURN/UDP, TURN/TCP
 and TURN/TLS. It used time-limited credentials and normal certificate
 validation. Direct ICE on owned UDP sockets and the simulated DCEP and RTP
-fixture passed in the same run. Browser, consent loss and restart fixtures
-remain part of qualification.
+fixture passed in the same run. The selected ICE stack still needs a
+way to confirm consent responses on the selected pair. The pinned is 0.11.1 can
+retain a path while it receives Binding requests without replies to its
+outbound consent checks. The published str0m 0.26.0 and is 0.12.1 have the
+same observation gap and str0m 0.26.0 requires Rust 1.89.0. Preserve the
+qualified Rust 1.88.0 pin until a provider supplies the checked selected-pair
+response time. Add a one-way response-loss case alongside total peer silence.
+[RFC 7675 §5.1](https://www.rfc-editor.org/rfc/rfc7675.html#section-5.1) ·
+[str0m 0.26.0](https://docs.rs/crate/str0m/0.26.0)
 
 The ARM64 release Opus adapter passed negotiation, encoding, variable packet
 duration, decoding, and explicit concealment. It reports normal PCM origin as
@@ -117,6 +124,14 @@ certificate, denial of spoofed assertions, and revocation at request claim.
 The existing proxy owns OIDC. WebRTC session creation must bind the typed
 frontend identity to the port and runtime owner before admitting media.
 
+The ARM64 foreground controller at ccd6323c passed both isolated station
+fixtures. Receive-only delivered the simulated receiver marker over Opus and
+rejected talk. Transceive keyed the simulated transmitter and reached another
+listener, excluded the source from its own return mix, released on lease
+expiry without key-off, and rejected delayed lease renewals. The separate
+listener remained connected. The fixture used the qualified unpublished Opus
+provider to obtain decode provenance. The running controller was untouched.
+
 ## 5. Implement timed keying and receiver observations
 
 Reuse the existing admission fences, source timeline, station gating, and negotiated capability checks. Follow the design's keying, clock model and receiver-quality sections.
@@ -129,16 +144,25 @@ Reuse the existing admission fences, source timeline, station gating, and negoti
 
 Reuse the status graph, meter `audio_position`, capture/stream visibility and generation fences. Follow the design's **Correlating meters with what the listener hears** section.
 
-- [ ] Publish the opaque session media binding, media epoch, selected track/direction, RTP source and anchor over WebRTC control. Project the same binding and epoch for authorized meter viewers. Anchor the actual egress codec-input samples to the encoded RTP timestamp. Carry stage/signal, graph generation, rate, the end-exclusive meter window and relevant anchor. Report estimated or unavailable upstream correlation where measured delay or a common mix cannot be established.
+- [x] Publish the opaque session media binding, media epoch, selected track/direction, RTP source and anchor over WebRTC control. Project the same binding and epoch for authorized meter viewers. Anchor the actual egress codec-input samples to the encoded RTP timestamp. Carry stage/signal, graph generation, rate, the end-exclusive meter window and relevant anchor. Report estimated or unavailable upstream correlation where measured delay or a common mix cannot be established.
 - [ ] Use a known audio marker and a browser fixture with `RTCRtpReceiver.getSynchronizationSources()` to align a meter window at track delivery. Verify early and late frames, missing anchors, concealed spans, different mixes, source/graph changes, ICE or SSRC restart, and the supported receiver fallback. Retire pending old-epoch display data. Measure hardware output delay separately if making hardware-playout claims. Verify audio and key handling with status absent or disconnected.
+
+The isolated ARM64 standalone fixture verified a 1 kHz receiver marker
+through Opus RTP. The authorized HAL snapshot and the next authenticated
+WebSocket meter batch used the in-band anchor and the actual codec-input
+sample span. A separate transceive fixture verified the admitted key state
+and local lease expiry alongside a receive-only client. The tests used the
+compiled foreground controller with simulated device input and output.
 
 The browser loopback fixture passed three consecutive Edge 158 runs. Its
 1 kHz marker crossed a real 32-bit RTP wrap. The receiver held an early meter
 until track delivery, discarded a late meter and retired the old SSRC and
 epoch. A new track continued with no status traffic. The fixture uses
 simulated status records and a browser test flag to place the timestamp near
-the wrap. Live controller and status-stream interoperability remain part of
-qualification.
+the wrap. The follow-up at 040a76e1 also renewed ICE credentials with
+standard browser restart, kept the same fingerprint and media contract, and
+delivered protected data on the original channel. The fixture connected two browser peers. The controller-to-browser and real status-stream display test
+remains part of qualification.
 
 ## 7. Review and qualify the combined implementation
 

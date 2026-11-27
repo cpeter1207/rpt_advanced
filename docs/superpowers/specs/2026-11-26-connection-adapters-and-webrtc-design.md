@@ -56,6 +56,13 @@ Expose an authenticated runtime session collection through a relation on the sel
 | Observe or renew | Retrieve current signaling state and new server candidates through session-scoped authenticated reads. A restart replaces the ICE generation on that session after a fresh authorization check and gives candidate updates a new fence. |
 | Close | End the session explicitly or expire it after cancellation, credential revocation, consent failure, setup timeout or loss of its owner. Revoke key and source admission before retiring provider resources. Closure is safe to retry. |
 
+An ICE-only restart keeps the authenticated DTLS association, Opus track and
+DCEP channels. Both ICE credentials change. The controller revokes the old
+station and sample grants before accepting new media, then waits for a new
+nominated pair and a usable station attachment. The next Ready message carries
+the new ICE generation. A talk request names that generation and requires a
+fresh sample grant and anchor.
+
 Signaling resources are runtime-owned. Keep SDP, candidate addresses, ICE passwords and TURN credentials out of the public status and logs. The operational status WebSocket remains a read-only observer. The signaling ingress must be reachable through the approved reverse proxy or
 deployment path. A site behind CGNAT can reach a publicly available authorized
 management relay or existing overlay through an outbound authenticated

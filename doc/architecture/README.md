@@ -92,11 +92,22 @@ resource sampling and network I/O run outside radio callbacks.
 
 REST retains bounded reader-bound pages from a single cut. WebSocket frames
 prioritize state changes over replaceable meter updates and require a fresh
-snapshot if state delivery is lost. The separate CLI follows HAL links to fetch
-a snapshot. Provider-owned stages without an observation interface remain
+snapshot if state delivery is lost. Each subscriber owns bounded delivery
+storage. Established subscriptions have no fixed subscriber count. The
+separate CLI follows HAL links to fetch a snapshot. Provider-owned stages without an observation interface remain
 explicitly unavailable. See the
 [implementation checklist](../../docs/superpowers/plans/2026-11-26-controller-status-stream-implementation.md)
 for provider and qualification work.
+
+## Shared connection admission
+
+[ADR 0046](decisions/0046-connection-admission-and-webrtc.md) extends the
+existing station link boundary. Providers own their transport, codec and
+source timing. Product acknowledges a usable station endpoint, applies mix-minus
+and the ordinary policy, and fences it with the current owner. WebRTC uses the
+existing HTTPS ingress for signaling and its own protected media and data
+channels. Status clients can correlate an egress measurement with a track
+using the exact shared RTP and sample anchor.
 
 ## System boundary
 

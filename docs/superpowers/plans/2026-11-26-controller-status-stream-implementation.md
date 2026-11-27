@@ -37,7 +37,7 @@ Before starting **each checklist item**, review `WISHLIST.md`, `doc/architecture
 | Local RX/TX | USBRadioPlus receive metadata, Product worker admission and TX callback, optional shared hardware feedback | RX detail and qualified key transitions use independent bounded callback records. Legacy logical PTT remains a boolean or null. Physical PTT is timestamped independently. Typed standalone RX adds provider-selected carrier and decoder state. Asterisk's provider still needs a typed RX accessor. |
 | Peers and calls | Product peer/media owner and private call lifecycle, protocol-qualified public identity, connection generation and exact opaque call identity | Current peers, retained retry and separate phone attempt/call rows. Decoded/egress meters follow exact ownership. Legacy PCM-only key/egress feedback still needs its deciding mixer/provider tap. |
 | Local audio | Device/provider boundary, receive callback, local gate and station presentation path | Measure actual exposed signals and their sample positions. USBRadioPlus and its DSP chain own device channels, detector inputs, intermediate RX/TX processing and signaling injection. Provider interiors without a PCM/measurement contract are descriptors marked unavailable. |
-| Peer audio | Accepted provider PCM, station mix-minus and codec-input sample positions | Exact controller boundaries retain source/graph epochs. Protocol decoder internals, jitter and codec/PLC trace points, opaque peer processing, and the admitted station-mix input require their owners' additional observation contracts. |
+| Peer audio | Accepted provider PCM, admitted station mix input, mix-minus and codec-input sample positions | Exact controller boundaries retain source and graph epochs. PCM within providers requires their own observation contracts. |
 | Telemetry and equipment | Core playback queue and callback, site controller/acquisition and serialized output owner | Public playback lifecycle and scoped sensor/alarm/output status. Private playback has no public event or meter. Equipment observations retain their existing quality and timing where supplied. |
 | Resources | 1 Hz Linux sampler on the observer owner | Host/service/process CPU and memory, plus per-interface non-loopback ingress and egress rates with monotonic windows. |
 
@@ -165,11 +165,28 @@ telemetry input before ducking. The output retains the existing telemetry
 meter identity. The callback tests covered downstream replacement and
 private reply exclusion without adding audio-thread allocation.
 
+ARM64 Core and Product at 18bdb9dd passed the authoritative unkey,
+kerchunk suppression, TX protection and hang observations. The waveform tests
+verified separate public incoming-text and regeneration branches and kept
+phone progress out of the text meter. The CLI at a7016d30 passed the
+authenticated null wall-clock case and continued to reject missing, malformed
+or inconsistent pagination timestamps.
+
 The isolated Asterisk run completed the 12 same-process reloads with a
 subscriber, delivered close code `1001` and EOF at unload, and retired the
 radio channel. The subsequent ordinary load/unload stress loop hit a module
 unload refusal and retained a fixture channel. Full lifecycle qualification
-remains open.
+remains open. A later isolated run cleared the initial unload and reached
+direct EchoLink media. Its account deletion timed out before the edit receipt.
+The instrumented ARM64 follow-up at 7182e958 completed the same-process
+lifecycle, including EchoLink account changes, on that run. Repeat coverage
+remains in qualification. The running service kept its original process and
+systemd invocation.
+
+At ec6c1680, the ARM64 native meter and group-selection regressions verified
+the PCM admitted from each peer and the mute/selection boundary. A real
+authenticated stream and HAL snapshot agreed with the actual WebRTC Opus RTP
+anchor in the isolated controller fixture.
 
 The audio meter, radio feedback, station-input, peer ring and provider PCM
 fixtures passed. The pinned Debian 13 amd64 CPU benchmark observed 6.35–7.18
