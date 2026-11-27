@@ -8,14 +8,17 @@ use std::{
 };
 
 use str0m::{
-    Candidate, Event, Input, Output, Rtc,
-    media::Mid,
+    Candidate, Event, IceConnectionState, Input, Output, Rtc,
+    channel::ChannelId,
+    format::Codec,
+    media::{Frequency, MediaKind, Mid, Pt},
     net::{Protocol, Receive, Transmit},
     rtp::{RtpWrite, Ssrc},
 };
 use tokio::net::{TcpStream, UdpSocket};
 
 use super::relay::{Relay, RelayDatagram, RelayError, RelayOutput, RelaySend, RelayTransport};
+use super::{ChannelKind, channel_kind};
 
 const TURN_WRITE_TIME: Duration = Duration::from_secs(2);
 
@@ -231,6 +234,41 @@ impl RelayLeg {
     }
 }
 
+/// Connectivity facts observed for the current transport generation.
+#[derive(Clone, Copy)]
+pub struct ConnectionState {
+    /// ICE state reported by the transport, including nomination and loss.
+    pub ice: IceConnectionState,
+    /// DTLS was established and validated against the signaled fingerprint.
+    pub dtls_authenticated: bool,
+}
+
+impl ConnectionState {
+    /// The browser and controller share a nominated authenticated transport.
+    pub fn secure_connected(&self) -> bool {
+        self.ice.is_connected() && self.dtls_authenticated
+    }
+
+    const INITIAL: Self = Self {
+        ice: IceConnectionState::New,
+        dtls_authenticated: false,
+    };
+
+    const LOST: Self = Self {
+        ice: IceConnectionState::Disconnected,
+        dtls_authenticated: false,
+    };
+}
+
+impl ChannelKind {
+    fn slot(self) -> usize {
+        match self {
+            Self::Control => 0,
+            Self::Timing => 1,
+        }
+    }
+}
+
 /// One RTC generation driven serially by its direct socket, its TURN socket,
 /// or both. The station owner authorizes and consumes the resulting events.
 pub struct UdpDriver {
@@ -238,6 +276,8 @@ pub struct UdpDriver {
     direct: Option<DirectLeg>,
     relay: Option<RelayLeg>,
     retired_relay: Option<(SocketAddr, String)>,
+    connection: ConnectionState,
+    channels: [Option<ChannelId>; 2],
 }
 
 impl UdpDriver {
@@ -260,6 +300,8 @@ impl UdpDriver {
             }),
             relay: None,
             retired_relay: None,
+            connection: ConnectionState::INITIAL,
+            channels: [None; 2],
         })
     }
 
@@ -277,6 +319,8 @@ impl UdpDriver {
             direct: None,
             relay: None,
             retired_relay: None,
+            connection: ConnectionState::INITIAL,
+            channels: [None; 2],
         };
         driver
             .add_relay(socket, transport, username, password, deadline)
@@ -336,6 +380,99 @@ impl UdpDriver {
             Candidate::from_sdp_string(text).map_err(|_| invalid_transport())?,
         );
         Ok(())
+    }
+
+    /// Snapshot the latest provider-observed ICE and DTLS connectivity.
+    pub fn connection_state(&self) -> ConnectionState {
+        self.connection
+    }
+
+    /// Admit one DCEP channel per purpose using the verified peer descriptor.
+    /// Close unsupported or duplicate openings while preserving the first binding.
+    pub fn bind_channel(
+        &mut self,
+        id: ChannelId,
+        max_timing_lifetime_ms: u16,
+    ) -> Option<ChannelKind> {
+        let kind = self.rtc.channel(id).and_then(|channel| {
+            channel
+                .config()
+                .and_then(|config| channel_kind(config, max_timing_lifetime_ms))
+        });
+        if let Some(kind) = kind {
+            let slot = &mut self.channels[kind.slot()];
+            if slot.is_none_or(|current| current == id) {
+                *slot = Some(id);
+                return Some(kind);
+            }
+        }
+        self.close_channel(id);
+        None
+    }
+
+    /// Find the validated purpose of a channel on an incoming data event.
+    pub fn bound_channel_kind(&self, id: ChannelId) -> Option<ChannelKind> {
+        [ChannelKind::Control, ChannelKind::Timing]
+            .into_iter()
+            .find(|kind| self.channels[kind.slot()] == Some(id))
+    }
+
+    /// Enqueue one bounded message on the validated channel for a purpose.
+    /// A false result means the caller retains ownership under backpressure.
+    pub fn write_channel(
+        &mut self,
+        kind: ChannelKind,
+        binary: bool,
+        bytes: &[u8],
+        maximum_message_bytes: usize,
+        maximum_buffered_bytes: usize,
+    ) -> io::Result<bool> {
+        if bytes.is_empty() || bytes.len() > maximum_message_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid WebRTC channel message size",
+            ));
+        }
+        let mut channel = self.channels[kind.slot()]
+            .filter(|_| self.connection.secure_connected())
+            .and_then(|id| self.rtc.channel(id))
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "WebRTC channel is unavailable")
+            })?;
+        let available = maximum_buffered_bytes.saturating_sub(channel.buffered_amount());
+        if bytes.len() > available {
+            return Ok(false);
+        }
+        channel
+            .write(binary, bytes)
+            .map_err(|_| invalid_transport())
+    }
+
+    fn forget_channel(&mut self, id: ChannelId) {
+        if let Some(kind) = self.bound_channel_kind(id) {
+            self.channels[kind.slot()] = None;
+        }
+    }
+
+    /// Retire the channel and request SCTP stream reset.
+    pub fn close_channel(&mut self, id: ChannelId) {
+        self.forget_channel(id);
+        self.rtc.direct_api().close_data_channel(id);
+    }
+
+    /// Exact Opus payload type accepted on the negotiated audio media track.
+    pub fn opus_payload(&self, mid: Mid) -> Option<Pt> {
+        let media = self.rtc.media(mid)?;
+        if media.kind() != MediaKind::Audio {
+            return None;
+        }
+        media.remote_pts().iter().copied().find(|pt| {
+            self.rtc.codec_config().params().iter().any(|payload| {
+                payload.pt() == *pt
+                    && payload.spec().codec == Codec::Opus
+                    && payload.spec().clock_rate == Frequency::FORTY_EIGHT_KHZ
+            })
+        })
     }
 
     /// Queue prepared RTP for a negotiated track and return its actual SSRC.
@@ -415,6 +552,21 @@ impl UdpDriver {
     /// Run network I/O and monotonic timers until one transport event.
     /// Cancelling the wait preserves an owned datagram and any partial TURN write.
     pub async fn next_event(&mut self) -> io::Result<Event> {
+        let result = self.next_transport_event().await;
+        match &result {
+            Ok(Event::IceConnectionStateChange(state)) => self.connection.ice = *state,
+            Ok(Event::Connected) => self.connection.dtls_authenticated = true,
+            Ok(Event::ChannelClose(id)) => self.forget_channel(*id),
+            Ok(Event::Closed) | Err(_) => {
+                self.connection = ConnectionState::LOST;
+                self.channels = [None; 2];
+            }
+            _ => {}
+        }
+        result
+    }
+
+    async fn next_transport_event(&mut self) -> io::Result<Event> {
         loop {
             if let Some(leg) = &mut self.direct
                 && let Some(packet) = &leg.pending

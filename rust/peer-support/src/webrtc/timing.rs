@@ -25,11 +25,36 @@ impl MediaAnchor {
         {
             return None;
         }
-        let coordinate = |sample| {
-            let offset = i128::from(sample) - i128::from(self.source_sample);
-            u64::try_from(i128::from(self.rtp_timestamp) + offset).ok()
+        Self::window(native, self.source_sample, self.rtp_timestamp)
+    }
+
+    /// Map a packet's extended RTP positions back to the owned source epoch.
+    /// Expand the result by the established uncertainty before testing a lease.
+    pub fn possible_source_window(
+        self,
+        media_epoch: u64,
+        rtp: Range<u64>,
+        uncertainty_frames: u64,
+    ) -> Option<Range<u64>> {
+        if media_epoch != self.media_epoch {
+            return None;
+        }
+        let source = Self::window(rtp, self.rtp_timestamp, self.source_sample)?;
+        Some(
+            source.start.checked_sub(uncertainty_frames)?
+                ..source.end.checked_add(uncertainty_frames)?,
+        )
+    }
+
+    fn window(range: Range<u64>, from: u64, to: u64) -> Option<Range<u64>> {
+        if range.is_empty() {
+            return None;
+        }
+        let coordinate = |position| {
+            let offset = i128::from(position) - i128::from(from);
+            u64::try_from(i128::from(to) + offset).ok()
         };
-        Some(coordinate(native.start)?..coordinate(native.end)?)
+        Some(coordinate(range.start)?..coordinate(range.end)?)
     }
 }
 
@@ -106,6 +131,17 @@ impl ReceiveGate {
             })
     }
 
+    /// The receiver's timer must be able to release without waiting for media.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.accepted.as_ref().map(|lease| lease.expires_at)
+    }
+
+    /// Process the receiver-local deadline and return whether this grant is open.
+    pub fn current(&mut self, now: Instant) -> bool {
+        self.expire(now);
+        !self.revoked && self.accepted.is_some()
+    }
+
     pub fn revoke(&mut self) {
         self.accepted = None;
         self.revoked = true;
@@ -125,6 +161,37 @@ impl ReceiveGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wrapped_packet_must_fit_the_entire_uncertain_source_window() {
+        let now = Instant::now();
+        let expires_at = now + Duration::from_millis(20);
+        let first_rtp = u64::from(u32::MAX) - 119;
+        let anchor = MediaAnchor {
+            source_generation: 1,
+            media_epoch: 3,
+            source_sample: 2000,
+            rtp_timestamp: first_rtp,
+        };
+        let packet = first_rtp..first_rtp + 960;
+        let mut gate = ReceiveGate::new(10, 3, Duration::from_millis(20));
+        assert!(gate.update(
+            now,
+            ReceiveLease {
+                grant: 10,
+                media_epoch: 3,
+                sequence: 1,
+                samples: 1999..2961,
+                expires_at,
+            }
+        ));
+        assert_eq!(gate.deadline(), Some(expires_at));
+        assert!(gate.permits(now, anchor.possible_source_window(3, packet.clone(), 1)));
+        assert!(!gate.permits(now, anchor.possible_source_window(3, packet.clone(), 2)));
+        assert!(!gate.permits(now, anchor.possible_source_window(2, packet, 0)));
+        assert!(!gate.current(expires_at));
+        assert_eq!(gate.deadline(), None);
+    }
 
     #[test]
     fn only_a_current_grant_can_admit_an_entire_known_sample_span() {

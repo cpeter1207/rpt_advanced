@@ -1456,6 +1456,7 @@ dependencies = [
  "libc",
  "libloading",
  "ring",
+ "rptadv-codec-client",
  "rptadv-control-standalone-adapter",
  "rptadv-json",
  "rustix",

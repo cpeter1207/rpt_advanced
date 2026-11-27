@@ -65,9 +65,11 @@ attachment from the exact media acknowledgment. Both continue to use the
 existing station link hub and serialized peer worker. The ARM64 standalone
 fixtures passed SIP dial, hangup, RTP handover and three-party mix-minus, plus
 AllStarLink originate. The phone receive fixture recorded a qualified key and
-unkey between status reads. The reverse IAX and managed EchoLink cases still
-need their explicit SDK/provider fixture inputs. The managed Proxy timing
-extension has its own provider qualification.
+unkey between status reads. Managed EchoLink direct and private reverse IAX passed on ARM64 with their
+explicit SDK and provider paths. The application mix-minus tests passed with
+receive-only and timed keyed sources, exact session registration, and
+immediate revocation of previous ingress epochs. Managed Proxy and repeated
+same-process lifecycle qualification remain separate.
 
 ## 3. Migrate one existing provider at a time
 
@@ -99,6 +101,15 @@ and TURN/TLS. It used time-limited credentials and normal certificate
 validation. Direct ICE on owned UDP sockets and the simulated DCEP and RTP
 fixture passed in the same run. Browser, consent loss and restart fixtures
 remain part of qualification.
+
+The ARM64 release Opus adapter passed negotiation, encoding, variable packet
+duration, decoding, and explicit concealment. It reports normal PCM origin as
+unavailable because its checked descriptor has no provenance support. A
+separate Opus candidate with the existing optional provenance ABI passed the
+AMD64 codec-native reference tests. ARM64 and browser transmit qualification
+remain open. The direct transport fixture also verified DCEP role admission,
+backpressure, closure, and protected RTP. The bounded wire tests verified
+decimal clock coordinates and sample range containment through RTP wrap.
 
 The ARM64 mTLS handoff fixture verified two browser identities on one proxy
 certificate, denial of spoofed assertions, and revocation at request claim.

@@ -287,30 +287,104 @@ fn driver_exchanges_direct_ice_on_owned_udp_sockets() {
         let mut caller = webrtc::transport(now);
         let mut change = caller.sdp_api();
         let media = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        for (label, protocol, ordered, reliability) in [
+            ("control", CHANNEL_PROTOCOL, true, Reliability::Reliable),
+            ("control", CHANNEL_PROTOCOL, true, Reliability::Reliable),
+            (
+                "timing",
+                CHANNEL_PROTOCOL,
+                false,
+                Reliability::MaxPacketLifetime {
+                    lifetime: TIMING_LIFETIME_MS,
+                },
+            ),
+            ("timing", "unrecognized.version", true, Reliability::Reliable),
+        ] {
+            change.add_channel_with_config(ChannelConfig {
+                label: label.into(),
+                protocol: protocol.into(),
+                ordered,
+                reliability,
+                negotiated: None,
+            });
+        }
         let (offer, pending) = change.apply().unwrap();
         let (remote, answer) = webrtc::accept_offer(now, offer).unwrap();
         caller.sdp_api().accept_answer(pending, answer).unwrap();
-        let opus = caller.codec_config().params()[0].pt();
         let socket = || tokio::net::UdpSocket::bind(("127.0.0.1", 0));
         let mut caller = webrtc::UdpDriver::new(caller, socket().await.unwrap()).unwrap();
         let mut remote = webrtc::UdpDriver::new(remote, socket().await.unwrap()).unwrap();
+        let opus = caller.opus_payload(media).unwrap();
+        assert_eq!(remote.opus_payload(media), Some(opus));
+        assert!(!remote.connection_state().secure_connected());
+
         caller.add_remote_candidate(remote.candidate()).unwrap();
         remote.add_remote_candidate(caller.candidate()).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut connected = [false; 2];
-            while !connected.iter().all(|value| *value) {
+        let control = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut control = None;
+            let mut timing = None;
+            let mut rejected = 0;
+            while !caller.connection_state().secure_connected()
+                || !remote.connection_state().secure_connected()
+                || control.is_none()
+                || timing.is_none()
+                || rejected < 2
+            {
                 tokio::select! {
-                    event = caller.next_event() => {
-                        connected[0] |= matches!(event.unwrap(), Event::Connected);
-                    }
+                    event = caller.next_event() => { event.unwrap(); }
                     event = remote.next_event() => {
-                        connected[1] |= matches!(event.unwrap(), Event::Connected);
+                        if let Event::ChannelOpen(id, _) = event.unwrap() {
+                            match remote.bind_channel(id, TIMING_LIFETIME_MS) {
+                                Some(ChannelKind::Control) => assert!(control.replace(id).is_none()),
+                                Some(ChannelKind::Timing) => assert!(timing.replace(id).is_none()),
+                                None => {
+                                    assert_eq!(remote.bound_channel_kind(id), None);
+                                    rejected += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(rejected, 2);
+            assert_eq!(
+                remote.bound_channel_kind(timing.unwrap()),
+                Some(ChannelKind::Timing),
+            );
+            control.unwrap()
+        })
+        .await
+        .expect("both nominated authenticated paths and the two validated DCEP channels");
+        assert!(remote.connection_state().ice.is_connected());
+        assert_eq!(remote.bound_channel_kind(control), Some(ChannelKind::Control));
+        assert_eq!(
+            remote
+                .write_channel(ChannelKind::Control, false, b"too long", 4, 8)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput,
+        );
+        assert!(!remote.write_channel(ChannelKind::Control, false, b"ready", 8, 4).unwrap());
+        assert!(remote.write_channel(ChannelKind::Control, false, b"ready", 8, 8).unwrap());
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                tokio::select! {
+                    event = remote.next_event() => { event.unwrap(); }
+                    event = caller.next_event() => {
+                        if let Event::ChannelData(message) = event.unwrap() {
+                            assert!(!message.binary);
+                            assert_eq!(message.data.as_slice(), b"ready");
+                            break;
+                        }
                     }
                 }
             }
         })
         .await
-        .expect("both DTLS sessions connected");
+        .expect("bounded data reached the accepted peer channel");
+        remote.close_channel(control);
+        assert_eq!(remote.bound_channel_kind(control), None);
 
         let frame = RtpWrite::new(opus, SeqNo::from(5), 9_600, Instant::now(), &[0xf8, 0xff, 0xfe][..]);
         let source = caller.write_rtp(media, frame).unwrap();

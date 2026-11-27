@@ -3,15 +3,22 @@
 use std::time::Instant;
 use str0m::channel::{ChannelConfig, Reliability};
 
+/// Versioned controller records for the negotiated data channels.
+pub mod channel;
 mod driver;
+/// Released mono Opus codec for the WebRTC media owner.
+pub mod opus;
 /// Connection-owned TURN allocation and relayed datagrams.
 pub mod relay;
 mod timing;
-pub use driver::{RelaySocket, UdpDriver};
+pub use driver::{ConnectionState, RelaySocket, UdpDriver};
 pub use timing::{MediaAnchor, ReceiveGate, ReceiveLease, native_delta_ns};
 
 pub use str0m::change::{SdpAnswer, SdpOffer};
-pub use str0m::{Candidate, Event, Input, Output, Rtc, RtcError};
+pub use str0m::channel::ChannelId;
+pub use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Pt};
+pub use str0m::rtp::{RtpPacket, RtpWrite, SeqNo, Ssrc};
+pub use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError};
 
 /// Protocol announced in both DCEP channel descriptors.
 pub const CHANNEL_PROTOCOL: &str = "rptadv.webrtc.v1";
