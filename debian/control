@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13), cargo (>= 1.88), rustc (>= 1.88),
  libsofia-sip-ua-dev (>= 1.13.19),
- libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, pkg-config, dh-sequence-asterisk <!standalone>,
+ libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, libssl-dev, pkg-config, dh-sequence-asterisk <!standalone>,
  librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha3),
  librptadv-codec-dev (>= 0.1.0~alpha1),
