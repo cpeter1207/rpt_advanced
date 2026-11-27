@@ -105,7 +105,10 @@ retain a path while it receives Binding requests without replies to its
 outbound consent checks. The published str0m 0.26.0 and is 0.12.1 have the
 same observation gap and str0m 0.26.0 requires Rust 1.89.0. Preserve the
 qualified Rust 1.88.0 pin until a provider supplies the checked selected-pair
-response time. Add a one-way response-loss case alongside total peer silence.
+response time. A local provider prototype verifies the exact path and uses
+the first accepted response for a transaction. Its 106 ICE tests passed,
+including the one-way response-loss case. The str0m integration, transport
+expiry behavior, and released dependency still need qualification.
 [RFC 7675 §5.1](https://www.rfc-editor.org/rfc/rfc7675.html#section-5.1) ·
 [str0m 0.26.0](https://docs.rs/crate/str0m/0.26.0)
 
@@ -131,6 +134,32 @@ listener, excluded the source from its own return mix, released on lease
 expiry without key-off, and rejected delayed lease renewals. The separate
 listener remained connected. The fixture used the qualified unpublished Opus
 provider to obtain decode provenance. The running controller was untouched.
+
+The follow-up at 3085b843 used the real standalone controller and the
+authenticated HAL session. It renewed ICE on the existing DTLS/DCEP
+association, refused a candidate for the retired generation, and resumed
+the receiver marker on a fresh in-band anchor. The same-RTC driver tests
+verified both channels and RTP after restart. Total peer silence caused
+disconnect and closed further protected-channel writes in 21.5 seconds
+in the isolated ARM64 test.
+
+The mixed TURN fixture reproduced a passive endpoint that never started
+ICE checks while direct traffic was unavailable. The driver now supplies
+the initial ICE timer input. At b26aad42, the ARM64 coturn tests passed
+for both symmetric relay peers and the mixed UDP/TLS path. At 3857a1ed,
+the isolated controller used its systemd-supplied short-lived TURN/TLS
+credential and a relay-only UDP peer. The received Opus radio marker and
+the RTP, HAL and WebSocket correlation matched in two runs. Both runs used
+private loopback addresses. Deployment through independently hosted CGNAT
+and port 443 remains part of release qualification.
+
+The optional WebRTC path currently revokes sessions at configuration
+activation. Comparable graph redirects during ordinary link attachment
+preserve the transport. A configuration save replaces the command owner
+for each enabled port. A future compatible handoff needs an acknowledged
+successor station and current authorization, old lease retirement, and a
+fresh media anchor. Test an edit to another port and a verified rollback,
+followed by explicit withdrawal of the selected port.
 
 ## 5. Implement timed keying and receiver observations
 

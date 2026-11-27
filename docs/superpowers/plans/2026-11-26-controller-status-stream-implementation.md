@@ -170,7 +170,10 @@ kerchunk suppression, TX protection and hang observations. The waveform tests
 verified separate public incoming-text and regeneration branches and kept
 phone progress out of the text meter. The CLI at a7016d30 passed the
 authenticated null wall-clock case and continued to reject missing, malformed
-or inconsistent pagination timestamps.
+or inconsistent pagination timestamps. The later callback test at
+49ab545f verified an RX release arriving between the physical handoff and
+the RX status update, followed by a rapid rekey. The native stream test at
+31ac8c19 confirmed an empty capture retires an older queued meter batch.
 
 The isolated Asterisk run completed the 12 same-process reloads with a
 subscriber, delivered close code `1001` and EOF at unload, and retired the
@@ -178,15 +181,20 @@ radio channel. The subsequent ordinary load/unload stress loop hit a module
 unload refusal and retained a fixture channel. Full lifecycle qualification
 remains open. A later isolated run cleared the initial unload and reached
 direct EchoLink media. Its account deletion timed out before the edit receipt.
-The instrumented ARM64 follow-up at 7182e958 completed the same-process
-lifecycle, including EchoLink account changes, on that run. Repeat coverage
-remains in qualification. The running service kept its original process and
-systemd invocation.
+The instrumented ARM64 follow-ups at 7182e958 and 3085b843 both completed
+the same-process lifecycle, including EchoLink account changes. Keep the
+earlier timeout in the release stress history. The running service kept its
+original process and systemd invocation.
 
 At ec6c1680, the ARM64 native meter and group-selection regressions verified
 the PCM admitted from each peer and the mute/selection boundary. A real
 authenticated stream and HAL snapshot agreed with the actual WebRTC Opus RTP
 anchor in the isolated controller fixture.
+
+At 9ee77fd5, the native callback test held the private phone redirect lock,
+verified the incumbent audio continued, and observed the replacement's meter
+graph after activation. The isolated standalone incoming SIP and reverse IAX
+fixtures passed with the same source.
 
 The audio meter, radio feedback, station-input, peer ring and provider PCM
 fixtures passed. The pinned Debian 13 amd64 CPU benchmark observed 6.35–7.18
