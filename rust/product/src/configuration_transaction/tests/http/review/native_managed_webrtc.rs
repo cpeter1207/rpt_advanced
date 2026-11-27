@@ -3,18 +3,31 @@ use super::*;
 use rpt_advanced_core::config::resources::candidate::ResourceId;
 use rptadv_peer_support::webrtc::{
     self as rtc, CHANNEL_PROTOCOL, ChannelConfig, ChannelKind, Direction, Event, MediaKind, Mid,
-    Pt, Reliability, RtpWrite, SdpAnswer, SeqNo, Ssrc, UdpDriver,
+    Pt, RelaySocket, Reliability, RtpWrite, SdpAnswer, SeqNo, Ssrc, UdpDriver,
     channel::{Control, Coordinate, Lease, Reference},
     opus::{DecodeSpan, Encoder, OpusDecoder, OpusProvider, PACKET_FRAMES, RECEIVE_FRAMES},
+    relay::RelayTransport,
 };
-use std::{f64::consts::TAU, path::PathBuf};
+use std::{
+    f64::consts::TAU,
+    path::{Path, PathBuf},
+};
 
 const SUBJECT: &str = "webrtc-fixture-browser";
 const TIMING_LIFETIME_MS: u16 = 100;
+const RELAY_FIXTURE_HOST: &str = "127.0.0.2";
 
 pub(in super::super) fn run(scenario: &Scenario<'_>, transceive: bool) {
     let (mut provision, address) = provisioning_with_browser(scenario, true);
     provision["webrtc_bind_address"] = json!("127.0.0.1");
+    let turn = if transceive {
+        None
+    } else {
+        std::env::var_os("RPTADV_TURN_FIXTURE_DIR").map(PathBuf::from)
+    };
+    if let Some(directory) = turn.as_deref() {
+        provision_turn(&mut provision, directory);
+    }
     let document = scenario.client.pki.join("managed-webrtc.json");
     fs::write(&document, serde_json::to_vec(&provision).unwrap()).unwrap();
     fs::set_permissions(&document, fs::Permissions::from_mode(0o600)).unwrap();
@@ -80,7 +93,13 @@ pub(in super::super) fn run(scenario: &Scenario<'_>, transceive: bool) {
         ))
     } else {
         executor.block_on(receive_only(
-            &client, station, collection, &peers, &carrier, &ptt,
+            &client,
+            station,
+            collection,
+            &peers,
+            &carrier,
+            &ptt,
+            turn.as_deref(),
         ))
     };
     assert!(live_status::wait_for(&client, &peers, |doc| !webrtc_peer(
@@ -98,6 +117,67 @@ pub(in super::super) fn run(scenario: &Scenario<'_>, transceive: bool) {
             .try_writer_lease()
             .is_ok()
     );
+}
+
+/// Load the fixture's TLS relay through the normal protected service credential.
+fn provision_turn(provision: &mut Value, fixture: &Path) {
+    let keys = PathBuf::from(std::env::var_os("CREDENTIALS_DIRECTORY").unwrap());
+    fs::set_permissions(&keys, fs::Permissions::from_mode(0o700)).unwrap();
+    let put = |name: &str, bytes: &[u8]| {
+        let path = keys.join(name);
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+    };
+    let credentials = fs::read_to_string(fixture.join("tls.credentials")).unwrap();
+    let mut credentials = credentials.lines();
+    let username = credentials.next().unwrap();
+    let password = credentials.next().unwrap();
+    let expiry = username.split_once(':').unwrap().0.parse::<u64>().unwrap();
+    let configuration = json!({
+        "server":"127.0.0.1:5349","transport":"tls","expires_unix":expiry,
+        "username":username,"password":password,
+        "tls_name":"localhost","tls_issuer":"turn-fixture-ca"
+    });
+    put(
+        "rpt-advanced.turn.fixture",
+        &serde_json::to_vec(&configuration).unwrap(),
+    );
+    put(
+        "rpt-advanced.tls.turn-fixture-ca",
+        &fs::read(fixture.join("ca.der")).unwrap(),
+    );
+    fs::set_permissions(keys, fs::Permissions::from_mode(0o500)).unwrap();
+    // TURN permissions are scoped by IP. The browser only allows the relay
+    // address 127.0.0.1, so it cannot learn this host as a peer-reflexive path.
+    provision["webrtc_bind_address"] = json!(RELAY_FIXTURE_HOST);
+    provision["webrtc_turn_credential"] = json!("fixture");
+}
+
+fn check_relay_candidate(candidate: &str) {
+    let candidate = rtc::Candidate::from_sdp_string(candidate)
+        .ok()
+        .expect("fixture relay candidate parses");
+    assert_eq!(candidate.kind().to_string(), "relay");
+    assert_eq!(candidate.addr().ip(), std::net::Ipv4Addr::LOCALHOST);
+}
+
+async fn relay_browser(rtc: rtc::Rtc, fixture: &Path) -> UdpDriver {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect("127.0.0.1:3478").await.unwrap();
+    let credentials = fs::read_to_string(fixture.join("udp.credentials")).unwrap();
+    let mut credentials = credentials.lines();
+    let driver = UdpDriver::new_relay(
+        rtc,
+        RelaySocket::Udp(socket),
+        RelayTransport::Udp,
+        credentials.next().unwrap(),
+        credentials.next().unwrap(),
+        Instant::now() + Duration::from_secs(5),
+    )
+    .await
+    .expect("browser relay allocated");
+    check_relay_candidate(driver.candidate());
+    driver
 }
 
 /// The published active revision can precede release of the cold-start writer.
@@ -251,7 +331,12 @@ impl Browser {
     }
 }
 
-async fn connect(client: &Client<'_>, collection: &str, direction: Direction) -> Browser {
+async fn connect(
+    client: &Client<'_>,
+    collection: &str,
+    direction: Direction,
+    turn: Option<&Path>,
+) -> Browser {
     assert_eq!(browser(client, "GET", collection, None).code, 200);
     let preference = match direction {
         Direction::RecvOnly => "receive_only",
@@ -309,12 +394,26 @@ async fn connect(client: &Client<'_>, collection: &str, direction: Direction) ->
         assert_eq!(remote.code, 200);
         assert_eq!(reply.body["phase"], "pending");
         if let Some(sdp) = reply.body["answer"].as_str()
-            && let Some(candidate) = remote.body["candidates"][0]["candidate"].as_str()
-            && remote.body["candidates"][1]["sequence"] == 1
+            && let Some(rows) = remote.body["candidates"].as_array()
+            && rows
+                .last()
+                .is_some_and(|row| row.get("candidate") == Some(&Value::Null))
         {
-            assert!(remote.body["candidates"][1]["candidate"].is_null());
+            let relay = usize::from(turn.is_some());
+            assert_eq!(rows.len(), relay + 2, "unexpected number of ICE candidates");
+            assert_eq!(rows[relay + 1]["sequence"], relay + 1);
+            let candidate = rows[relay]["candidate"].as_str().unwrap();
+            if turn.is_some() {
+                let host = rtc::Candidate::from_sdp_string(rows[0]["candidate"].as_str().unwrap())
+                    .ok()
+                    .expect("fixture host candidate parses");
+                assert_eq!(host.addr().ip().to_string(), RELAY_FIXTURE_HOST);
+                check_relay_candidate(candidate);
+            }
             break (
-                SdpAnswer::from_sdp_string(sdp).unwrap(),
+                SdpAnswer::from_sdp_string(sdp)
+                    .ok()
+                    .expect("fixture answer parses"),
                 candidate.to_owned(),
             );
         }
@@ -332,8 +431,12 @@ async fn connect(client: &Client<'_>, collection: &str, direction: Direction) ->
     let negotiated = browser_rtc
         .media(media)
         .is_some_and(|track| track.kind() == MediaKind::Audio && track.direction() == direction);
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let mut driver = UdpDriver::new(browser_rtc, socket).unwrap();
+    let mut driver = if let Some(fixture) = turn {
+        relay_browser(browser_rtc, fixture).await
+    } else {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        UdpDriver::new(browser_rtc, socket).unwrap()
+    };
     driver.add_remote_candidate(&remote_candidate).unwrap();
     for (sequence, candidate) in [Some(driver.candidate()), None].into_iter().enumerate() {
         let reply = browser(
@@ -431,10 +534,11 @@ async fn receive_only(
     peers: &str,
     carrier: &Path,
     ptt: &Path,
+    turn: Option<&Path>,
 ) -> String {
     let idle_trace = fs::read(ptt).unwrap();
     assert_eq!(idle_trace.last(), Some(&b'0'));
-    let mut browser_peer = connect(client, collection, Direction::RecvOnly).await;
+    let mut browser_peer = connect(client, collection, Direction::RecvOnly, turn).await;
     let driver = &mut browser_peer.driver;
     assert!(live_status::wait_for(client, peers, webrtc_peer));
     let attached = Instant::now() + Duration::from_secs(3);
@@ -597,6 +701,9 @@ async fn receive_only(
     );
 
     fs::remove_file(carrier).unwrap();
+    if turn.is_some() {
+        return browser_peer.close(client);
+    }
     browser_peer.restart(client).await;
     fs::write(carrier, b"").unwrap();
     tokio::time::timeout(Duration::from_secs(6), async {
@@ -742,8 +849,8 @@ async fn exercise_transceive(
     carrier: &Path,
     ptt: &Path,
 ) -> String {
-    let mut listener = connect(client, collection, Direction::RecvOnly).await;
-    let mut talker = connect(client, collection, Direction::SendRecv).await;
+    let mut listener = connect(client, collection, Direction::RecvOnly, None).await;
+    let mut talker = connect(client, collection, Direction::SendRecv, None).await;
     assert_ne!(talker.binding, listener.binding);
     let observed_key = |binding: &str| {
         let reply = client.get(peers);

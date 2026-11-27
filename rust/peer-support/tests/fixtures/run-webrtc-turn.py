@@ -202,7 +202,7 @@ def inside(turnserver, test):
                     [test, "--ignored", "--nocapture"],
                     env={**os.environ, "RPTADV_TURN_FIXTURE_DIR": str(directory)},
                     check=True,
-                    timeout=30,
+                    timeout=60,
                 )
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 report_failure(log_path)
@@ -240,7 +240,7 @@ def main():
             test,
         ],
         check=True,
-        timeout=45,
+        timeout=75,
     )
 
 
