@@ -105,6 +105,14 @@ addressed replies, and one-copy delivery for each configured message audience.
 The decoded two-peer Opus fixture includes a distinct local telemetry marker.
 Its matching native Product3 verification remains open.
 
+A bounded Debian 13 amd64 check passed with the current Core dispatcher,
+pinned codec client, and provenance-capable Opus provider. Independent
+recipient encoders and decoders preserved the 1450 Hz courtesy marker
+for both recipients. Only the listening recipient recovered the 1000 Hz
+operator voice. After courtesy playback ended, that recipient continued
+to receive the operator's voice. The full Product3 and RTP transport
+fixture remains the end-to-end qualification gate.
+
 A live linked-audio sample reached full scale at the decode and native ring
 observations. The active WebRTC encoder input peaked near minus 2 dBFS.
 A native alpha6 ring experiment reproduced full-scale truncation when
