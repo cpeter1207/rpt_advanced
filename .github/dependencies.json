@@ -16,7 +16,7 @@
   },
   {
     "repository": "rptadv-codec-adapters",
-    "sha": "47e397a5c8ca2136d7b86baa4c80fafd435ac6a5",
+    "sha": "d6f7e5b3a99a340f64b1ab503f5127b170497b28",
     "packages": [
       "librptadv-codec-dev", "librptadv-codec-g7111", "librptadv-codec-pcm1",
       "librptadv-codec-gsm1", "librptadv-codec-speex1", "librptadv-codec-opus1",
@@ -40,7 +40,7 @@
   },
   {
     "repository": "rptadv-ffmpeg-adapter",
-    "sha": "b3accbe01ed5c864a6b569ae0cbd52313f65a43d",
+    "sha": "60b06f6f7341fb4032e63156fee998aa9702eb0c",
     "packages": ["librptadv-ffmpeg-adapter1", "librptadv-ffmpeg-adapter-dev"]
   },
   {

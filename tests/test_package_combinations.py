@@ -104,7 +104,11 @@ def test_radio_product_dependency_does_not_require_the_asterisk_integration() ->
             "libusbradioplus-product1", ""
         )
         assert "librptadv-resolver-adapter1" not in depends(stanzas[package])
-        assert "librptadv-jitter-adapter1" not in depends(stanzas[package])
+    assert "librptadv-jitter-adapter1" not in depends(stanzas["app-rpt-advanced"])
+    # Product3 owns WebRTC playout in both entrypoints.
+    assert "librptadv-jitter-adapter1 (= ${binary:version})" in depends(
+        stanzas["librptadv-product3"]
+    )
     assert "libusbradioplus-product1 (>= 0.1.0~alpha38-1)" in depends(
         stanzas["librptadv-product3"]
     )
