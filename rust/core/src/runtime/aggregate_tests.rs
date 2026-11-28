@@ -5370,8 +5370,10 @@ fn device_reload_rejects_outstanding_work_and_drains_in_flight_callbacks() {
         );
         if reason == 0 {
             assert_eq!(result, Err(RuntimeError::Busy));
+            assert!(runtime.reload_rollback_confirmed());
         } else {
             assert_eq!(result, Ok(()));
+            assert!(!runtime.reload_rollback_confirmed());
             assert!(runtime.reload_pending());
             assert_eq!(runtime.poll_reload(clock()), Ok(false));
         }

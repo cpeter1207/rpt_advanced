@@ -297,7 +297,8 @@ impl Host {
 
     pub(super) fn core_adoption_error(&mut self, error: &RuntimeError) {
         if let Some(Adopting { revision, .. }) = &self.radio_preparation.adopting {
-            if *error == RuntimeError::Device
+            if (*error == RuntimeError::Device
+                || *error == RuntimeError::Busy && self.runtime.reload_rollback_confirmed())
                 && !self.runtime.reload_pending()
                 && self.runtime.revision() == self.activated_revision
             {

@@ -385,6 +385,7 @@ impl<A: Send, C: Send> ReloadTransaction<A, C> {
             return Ok(false);
         }
         Err(if self.restored {
+            runtime.completed_reload_rollback = true;
             self.failure.take().expect("rollback cause")
         } else {
             RuntimeError::Restore

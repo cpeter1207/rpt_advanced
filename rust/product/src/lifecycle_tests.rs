@@ -375,6 +375,40 @@ fn activation_reload_poll_stays_admitted_until_commit_or_safe_rollback() {
 }
 
 #[test]
+fn busy_rx_audio_handoff_keeps_the_confirmed_incumbent() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(fixture_stop(), 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(active_configuration(&[])) }, 0);
+    let (engine, call) = selected().unwrap();
+    let before = engine.modular_observed();
+    // This radio requests a handoff. The outstanding station work rejects it before close.
+    let held = engine
+        .run(|host| {
+            host.runtime
+                .node(LOCAL)
+                .and_then(|node| node.work())
+                .ok_or(RuntimeError::MissingNode)
+        })
+        .unwrap();
+    let candidate =
+        active_configuration(&[(LOCAL, Kind::RxAudio, "", json!({"output_gain_db": -6}))]);
+    let outcome = reload(&engine, candidate);
+    let after = engine.modular_observed();
+    let current = held.is_current();
+    drop(held);
+    drop(call);
+    assert_eq!(fixture_stop(), 0);
+    assert_eq!(outcome, Ok(AdoptionOutcome::RolledBack));
+    assert!(current && after.status_ready);
+    assert!(before.active_revision.is_some() && !before.owners.is_empty());
+    assert_eq!(after.active_revision, before.active_revision);
+    assert_eq!(after.owners, before.owners);
+}
+
+#[test]
 fn rejected_rx_audio_commit_reports_station_phase_and_keeps_tx_inhibited() {
     unsafe extern "C" fn staged(_: *mut c_void, _: *mut c_void, _: *const c_void) -> i32 {
         0

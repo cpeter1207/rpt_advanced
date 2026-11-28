@@ -356,6 +356,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         mut staged: PreparedConfigurationTransition<A, C>,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        self.completed_reload_rollback = false;
         if self.revision != staged.previous_revision
             || self.generation != staged.previous_generation
         {

@@ -510,6 +510,7 @@ pub struct Runtime<A: Send = (), C: Send = ()> {
     disconnect_notices: Vec<DisconnectNotice>,
     stopping: bool,
     pending_reload: Option<ReloadTransaction<A, C>>,
+    completed_reload_rollback: bool,
 }
 impl<A: Send, C: Send> Runtime<A, C> {
     /// Start with no selected configuration, active generation or radio.
@@ -528,6 +529,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             disconnect_notices: Vec::new(),
             stopping: false,
             pending_reload: None,
+            completed_reload_rollback: false,
         }
     }
 
@@ -731,6 +733,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
     /// A prepared configuration still owns opening or rolling-back leases.
     pub fn reload_pending(&self) -> bool {
         self.pending_reload.is_some()
+    }
+
+    /// Whether the last adoption completed every physical rollback step and kept the incumbent.
+    /// Starting an adoption invalidates this receipt before checking its preconditions.
+    pub fn reload_rollback_confirmed(&self) -> bool {
+        self.completed_reload_rollback && !self.stopping
     }
 
     /// Advance every device without waiting for its physical worker. A failed
