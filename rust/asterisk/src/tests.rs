@@ -351,7 +351,7 @@ fn rejected_frames_do_not_advance_controller_and_ptt_failures_retry_before_write
         });
         assert_eq!(
             radio.exchange(|_, pcm| {
-                pcm.fill(2.0);
+                pcm.copy_from_slice(&[2.0, -0.5]);
                 true
             }),
             expected
@@ -359,7 +359,7 @@ fn rejected_frames_do_not_advance_controller_and_ptt_failures_retry_before_write
     }
     host(|s| {
         assert_eq!(s.indications, vec![12, 12]);
-        assert_eq!(s.writes, vec![vec![32767; 2]; 2]);
+        assert_eq!(s.writes, vec![vec![29491, -7373]; 2]);
         assert_eq!(s.freed, 10);
     });
     drop(radio);

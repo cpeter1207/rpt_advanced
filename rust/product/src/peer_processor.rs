@@ -1,8 +1,12 @@
 //! One receive-path DSP graph with a preallocated buffer for signed-PCM-only providers.
 
+use rpt_advanced_core::audio::{PeakGuard, signed_pcm16};
+
 pub(super) struct Processor {
     pub(super) graph: crate::configuration_radio::PreparedPeer,
     pub(super) samples: Box<[i16]>,
+    pub(super) signed_input: PeakGuard,
+    pub(super) float_output: PeakGuard,
 }
 
 impl Processor {
@@ -11,10 +15,15 @@ impl Processor {
             return false;
         };
         if let Some(result) = self.graph.process_f32(pcm) {
-            return result.is_ok();
+            if result.is_err() {
+                return false;
+            }
+            self.float_output.apply(pcm);
+            return true;
         }
+        self.signed_input.apply(pcm);
         for (target, source) in block.iter_mut().zip(pcm.iter()) {
-            *target = (*source * 32768.0).round() as i16;
+            *target = signed_pcm16(*source);
         }
         if self.graph.process(block).is_err() {
             return false;

@@ -945,9 +945,6 @@ impl<P: PeerInput> LinkAudio<P> {
                 }
             }
         }
-        for sample in &mut self.parrot_mix[..count] {
-            *sample = sample.clamp(-1.0, 1.0);
-        }
         controller.observe_parrot_at_epoch(
             receiving || any_peer_active,
             &self.parrot_mix[..count],

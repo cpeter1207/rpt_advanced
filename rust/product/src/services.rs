@@ -146,6 +146,8 @@ impl<P> ProcessedPeer<P> {
             processor: Some(peer_processor::Processor {
                 graph,
                 samples: vec![0; maximum].into_boxed_slice(),
+                signed_input: rpt_advanced_core::audio::PeakGuard::new(NATIVE_RATE),
+                float_output: rpt_advanced_core::audio::PeakGuard::new(NATIVE_RATE),
             }),
         }
     }

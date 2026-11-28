@@ -79,6 +79,33 @@ fn remote_base_non_fm_allows_link_transmit_without_repeating_open_receive() {
 }
 
 #[test]
+fn transmit_programme_applies_one_gain_to_an_overloaded_mix() {
+    let (mut node, _control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    let mut local = [0.5, 0.75, -0.75, -0.5, 0.125];
+    let link = [0.625, 0.75, -0.75, -0.625, 0.125];
+    assert!(node.process_audio(true, true, &link, &mut local));
+    for (actual, mixed) in local.iter().zip([1.125, 1.5, -1.5, -1.125, 0.25]) {
+        assert!((actual - mixed * 0.6).abs() < 1e-6, "{local:?}");
+    }
+
+    // Clean programme stays bit-identical after the preceding overload releases.
+    node.process_audio(true, false, &[], &mut [0.0; 4_800]);
+    let mut low = [0.375, -0.3125];
+    node.process_audio(true, false, &[], &mut low);
+    assert_eq!(low, [0.375, -0.3125]);
+}
+
+#[test]
 fn incoming_text_interrupts_voice_telemetry_with_its_morse_fallback() {
     for peer_reply in [false, true] {
         let (mut node, mut control) = NodeController::new(

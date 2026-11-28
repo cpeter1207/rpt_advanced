@@ -1,12 +1,14 @@
 //! Bounded, allocation-free real-time audio primitives.
 
 mod dtmf;
+mod headroom;
 mod link_queue;
 mod morse;
 mod playback;
 mod tone;
 
 pub use dtmf::{DtmfDetector, DtmfError, DtmfGenerator};
+pub use headroom::{PeakGuard, signed_pcm16};
 pub use link_queue::{
     AudioSpan, LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue, LinkQueueError, ReadSpan,
 };

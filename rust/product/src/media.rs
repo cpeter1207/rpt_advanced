@@ -563,13 +563,27 @@ unsafe fn native_with_descriptor(
         .checked_add(delay)
         .and_then(|frames| frames.checked_add(512))
         .ok_or(MediaError::InvalidOutput)?;
-    let mut accepted = 0;
-    if unsafe {
-        api.ring_producer_push.unwrap()(ring.1.as_ptr(), source.as_ptr(), count, &mut accepted)
-    } != 0
-        || accepted != count
-    {
-        return Err(MediaError::InvalidOutput);
+    // Leave room inside the provider's normalized ring for interpolation peaks.
+    // Its startup context is still trimmed in the original sample coordinates.
+    const HEADROOM: f32 = 4.0;
+    let mut scaled = [0.0; 512];
+    for block in source.chunks(scaled.len()) {
+        if cancellation.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        for (output, input) in scaled.iter_mut().zip(block) {
+            *output = *input / HEADROOM;
+        }
+        let count = block.len() as u64;
+        let mut accepted = 0;
+        // SAFETY: the private ring and the complete encoded prefix are live.
+        if unsafe {
+            api.ring_producer_push.unwrap()(ring.1.as_ptr(), scaled.as_ptr(), count, &mut accepted)
+        } != 0
+            || accepted != count
+        {
+            return Err(MediaError::InvalidOutput);
+        }
     }
     let mut output = Vec::new();
     output
@@ -616,6 +630,13 @@ unsafe fn native_with_descriptor(
             }
         }
         if output.len() as u64 == output_count {
+            let mut peak = rpt_advanced_core::audio::PeakGuard::new(48_000);
+            for block in output.chunks_mut(960) {
+                for sample in block.iter_mut() {
+                    *sample *= HEADROOM;
+                }
+                peak.apply(block);
+            }
             return PreparedAudio::new(48000, output);
         }
     }

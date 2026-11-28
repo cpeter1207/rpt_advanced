@@ -160,6 +160,6 @@ impl NodeController {
                 };
             }
         }
-        sample[0].clamp(-1.0, 1.0)
+        sample[0]
     }
 }

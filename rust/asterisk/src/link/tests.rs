@@ -28,7 +28,7 @@ fn peer_frame_owner_publishes_voice_and_frees_every_frame_and_channel() {
     peer.read(|_| panic!("empty voice must not publish activity"))
         .unwrap();
     peer.write(&[-2.0, 0.5, 2.0]).unwrap();
-    host(|state| assert_eq!(state.writes.last().unwrap(), &[-32768, 16384, 32767]));
+    host(|state| assert_eq!(state.writes.last().unwrap(), &[-29491, 7373, 29491]));
     peer.write(&[]).unwrap();
     host(|state| {
         assert_eq!(

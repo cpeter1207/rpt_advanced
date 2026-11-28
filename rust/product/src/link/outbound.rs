@@ -440,7 +440,6 @@ impl Outbound {
         // jitter. Wait one additional native handoff period before starting
         // finite drain, without extending any original provider deadline.
         if queue_empty
-            && self.private_reply.is_some()
             && self.clock.is_some()
             && !self.converter.finishing()
             && let Some(conversion) = self.conversion.as_ref()

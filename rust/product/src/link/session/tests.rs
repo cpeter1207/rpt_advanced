@@ -2225,6 +2225,68 @@ fn egress_late_wake_keeps_absolute_cadence() {
 }
 
 #[test]
+fn late_public_station_handoff_keeps_the_codec_and_fir_contiguous() {
+    for (rate, unit, blocks) in [(8000, 160, 2), (16000, 320, 2), (8000, 640, 4)] {
+        let tone: Vec<_> = (0..960 * blocks)
+            .map(|i| 0.5 + 0.4 * (std::f32::consts::TAU * 375.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let run = |delay_ms: u64| {
+            let (io, state) = peer_with_egress(rate, true, true);
+            state.lock().unwrap().encode_unit = Some(unit);
+            let (mut input, queue) = rpt_advanced_core::audio::LinkAudioQueue::new(1920, 2)
+                .unwrap()
+                .into_endpoints();
+            let (mut session, _control) =
+                PeerSession::prepare(io, queue, "1000", "2000", true).unwrap();
+            let clock = Arc::new(SourceClock::new(std::time::Instant::now()));
+            clock.restart();
+            let stream = clock.stream();
+            session.bind_clock(clock);
+            for (block, pcm) in tone.chunks_exact(960).enumerate() {
+                let born = 1000 + 20 * block as u64;
+                if block != 0 && delay_ms != 0 {
+                    // The executor sees an empty handoff before the radio callback.
+                    session.step(born).unwrap();
+                    if block == 1 {
+                        assert!(
+                            state.lock().unwrap().prepared.is_empty(),
+                            "an empty handoff must not flush a partial station packet"
+                        );
+                    }
+                }
+                let mut span = timed_span(960 * block as u64, born);
+                span.stream = stream;
+                assert_eq!(input.write(span, pcm), 0);
+                let arrival = born + if block == 0 { 0 } else { delay_ms };
+                session.step(arrival).unwrap();
+                session.step(arrival + 1).unwrap();
+            }
+            let end = 1000 + 20 * blocks as u64;
+            for now in end..end + 200 {
+                session.step(now).unwrap();
+            }
+            let state = state.lock().unwrap();
+            let media = rate as usize / 50 * blocks / unit;
+            assert_eq!(state.prepared.len(), media + 1);
+            assert_eq!(state.prepared_frames[..media], vec![unit as u32; media]);
+            assert_eq!(state.prepared_frames[media], 0);
+            assert!(state.prepared[media].0.is_empty());
+            let duration = (unit * 1000 / rate as usize) as u32;
+            for pair in state.prepared.windows(2) {
+                assert_eq!(pair[1].1.wrapping_sub(pair[0].1), duration);
+            }
+            state.prepared[..media]
+                .iter()
+                .map(|(pcm, _)| pcm.clone())
+                .collect::<Vec<_>>()
+        };
+        let on_time = run(0);
+        assert!(on_time[0].windows(2).any(|s| s[0] != s[1]));
+        assert_eq!(run(3), on_time);
+    }
+}
+
+#[test]
 fn egress_fir_output_keeps_sample_time_across_small_partitions_and_a_gap() {
     let (io, state) = peer_with_egress(8000, true, true);
     state.lock().unwrap().call_elapsed = 2000;

@@ -5,7 +5,7 @@ use crate::{
     host::webrtc::Endpoint,
     status_meter::{Measurement, Reader, Span, Tap},
 };
-use rpt_advanced_core::audio::AudioSpan;
+use rpt_advanced_core::audio::{AudioSpan, PeakGuard};
 use webrtc::{
     RtpWrite, SeqNo, Ssrc,
     channel::{Control, Coordinate, Reference, TimeBasis},
@@ -16,8 +16,6 @@ const FRAMES: usize = PACKET_FRAMES as usize;
 const EXPIRY_NS: u64 = 200_000_000;
 const FRAME_NS: u64 = 20_000_000;
 const CONTROL_BYTES: usize = 4096;
-const OVERLOAD_PEAK: f32 = 0.9;
-const GAIN_RELEASE_STEP: f32 = 1.0 / 4_800.0;
 
 pub(super) struct Playout {
     binding: String,
@@ -48,7 +46,7 @@ struct Run {
     first_packet: bool,
     rtp_start: u64,
     last_end_ns: u64,
-    gain: f32,
+    peak_guard: PeakGuard,
 }
 
 impl Playout {
@@ -264,30 +262,12 @@ impl Playout {
                 wire_position: 0,
                 first_packet: true,
                 last_end_ns: span.born_ns.ok_or(())?,
-                gain: 1.0,
+                peak_guard: PeakGuard::new(48_000),
             });
         }
         let run = self.run.as_mut().ok_or(())?;
         let pcm = &mut self.pcm[..frames];
-        if !pcm.is_empty() {
-            // The float mix can exceed full scale when voice and telemetry overlap.
-            // Scale the packet together to preserve its waveform and RTP timing.
-            let peak = pcm
-                .iter()
-                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-            let ceiling = if peak >= 1.0 {
-                OVERLOAD_PEAK / peak
-            } else {
-                1.0
-            };
-            run.gain = run.gain.min(ceiling);
-            if run.gain < 1.0 {
-                for sample in pcm.iter_mut() {
-                    *sample *= run.gain;
-                    run.gain = (run.gain + GAIN_RELEASE_STEP).min(ceiling);
-                }
-            }
-        }
+        run.peak_guard.apply(pcm);
         let result = self
             .encoder
             .encode(pcm, &mut self.encoded, flush)

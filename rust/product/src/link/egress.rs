@@ -1,5 +1,6 @@
 //! Persistent native-to-codec conversion through the released shared adapter.
 use crate::abi as ffi;
+use rpt_advanced_core::audio::PeakGuard;
 use std::{
     ffi::CStr,
     mem::offset_of,
@@ -15,6 +16,7 @@ pub struct Egress {
     api: ffi::rptadv_samplerate_adapter_descriptor,
     converter: NonNull<ffi::rptadv_samplerate_converter>,
     rate: u32,
+    peak_guard: PeakGuard,
     maximum: usize,
     pending: Vec<f32>,
     used: usize,
@@ -92,6 +94,7 @@ impl Egress {
                 api,
                 converter: NonNull::new(converter).ok_or(EgressError)?,
                 rate,
+                peak_guard: PeakGuard::new(rate),
                 maximum,
                 pending: vec![0.0; maximum * 2],
                 used: 0,
@@ -131,8 +134,7 @@ impl Egress {
             .ok_or(EgressError)?;
         if self.rate == 48000 {
             self.output[..input.len()].copy_from_slice(input);
-            self.output_frames += input.len() as u64;
-            return Ok(&self.output[..input.len()]);
+            return Ok(self.finish_output(input.len()));
         }
         self.pending[self.used..self.used + input.len()].copy_from_slice(input);
         self.used += input.len();
@@ -162,8 +164,16 @@ impl Egress {
         self.skip -= skip;
         let count = (generated as usize - skip).min(limit);
         self.output.copy_within(skip..skip + count, 0);
+        Ok(self.finish_output(count))
+    }
+
+    // Protect only newly generated frames. A partial codec write may reborrow
+    // the same samples without advancing release or applying gain again.
+    fn finish_output(&mut self, count: usize) -> &[f32] {
         self.output_frames += count as u64;
-        Ok(&self.output[..count])
+        let pcm = &mut self.output[..count];
+        self.peak_guard.apply(pcm);
+        pcm
     }
     /// Drain the finite source, trimming startup history and zero padding. One
     /// bounded step returns real source-rate output and whether its budget ended.
@@ -200,6 +210,7 @@ impl Egress {
         self.used = 0;
         self.input_frames = 0;
         self.output_frames = 0;
+        self.peak_guard.reset();
         self.skip = self.delay;
         self.finishing = false;
         // SAFETY: this owner exclusively holds the validated converter.

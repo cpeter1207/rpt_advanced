@@ -31,16 +31,18 @@ fn parrot_capture_mixes_one_burst_until_all_sources_unkey() {
 }
 
 #[test]
-fn parrot_capture_clamps_mix_and_retains_only_thirty_seconds() {
+fn parrot_capture_limits_peaks_proportionally_and_only_retains_thirty_seconds() {
     let (mut capture, mut control) = ParrotCapture::new();
-    capture.observe(true, &[1.5, -1.5]);
+    capture.observe(true, &[0.5, 1.5, -1.125, -0.375]);
     capture.observe(true, &vec![0.5; super::MAX_PARROT_SAMPLES]);
     capture.observe(true, &[0.75, 0.75]);
     capture.observe(false, &[]);
 
     let clip = control.take_completed().unwrap();
     assert_eq!(clip.samples().len(), super::MAX_PARROT_SAMPLES);
-    assert_eq!(clip.samples()[..2], [1.0, -1.0]);
+    for (actual, expected) in clip.samples().iter().zip([0.3, 0.9, -0.675, -0.225]) {
+        assert!((actual - expected).abs() < 1e-6);
+    }
     assert_eq!(*clip.samples().last().unwrap(), 0.5);
 }
 
@@ -90,6 +92,7 @@ fn parrot_capture_returns_a_clip_buffer_when_the_completion_queue_is_full() {
     let mut capture = ParrotCapture {
         active: true,
         recording: true,
+        peak: super::PeakGuard::new(crate::NATIVE_SAMPLE_RATE_HZ),
         current: Some(vec![0.25]),
         free: Vec::new(),
         completed,

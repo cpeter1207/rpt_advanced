@@ -3,6 +3,7 @@ use super::status_audio::{NativeIngressMeasurements, NativeIngressReaders, Nativ
 use crate::abi as ffi;
 #[cfg(target_os = "linux")]
 use crate::configuration_radio::{PeerOutputObserver, ProviderOutput};
+use rpt_advanced_core::audio::PeakGuard;
 use rpt_advanced_core::link::{
     PeerInput, PeerSignals, ReceivePolicy, RegenerationOrigin, SampleProvenance, SourceCoordinate,
     TimedPeerSample,
@@ -130,9 +131,14 @@ impl Drop for Shared {
 /// Ring constructor assigning exactly one owner to each endpoint.
 pub struct InboundRing;
 /// Unique network producer; its owner serializes every publish operation.
-pub struct InboundProducer(Arc<Shared>, Option<Box<[f32]>>);
+pub struct InboundProducer(Arc<Shared>, Box<[f32]>);
 /// Unique native 48 kHz consumer, independent of producer progress.
-pub struct InboundConsumer(Arc<Shared>, Option<Box<MarkerReader>>);
+pub struct InboundConsumer(Arc<Shared>, Option<Box<MarkerReader>>, PeakGuard);
+
+// The released ring requires normalized float PCM on both sides of its SRC.
+// Internal headroom preserves finite decoder and interpolation peaks until
+// the unique consumer can choose one gain for the complete delivered block.
+pub(crate) const RING_HEADROOM: f32 = 8.0;
 struct OriginMarker {
     start: u64,
     origin: Option<RegenerationOrigin>,
@@ -391,12 +397,10 @@ impl InboundRing {
                 provider_output: OnceLock::new(),
                 native_ingress: OnceLock::new(),
             });
-            let scratch = shared
-                .link_headroom()
-                .then(|| vec![0.0; config.max_producer_samples as usize].into_boxed_slice());
+            let scratch = vec![0.0; config.max_producer_samples as usize].into_boxed_slice();
             Ok((
                 InboundProducer(shared.clone(), scratch),
-                InboundConsumer(shared, None),
+                InboundConsumer(shared, None, PeakGuard::new(config.output_rate_hz)),
             ))
         }
     }
@@ -473,17 +477,22 @@ impl InboundProducer {
     }
     // Keep the caller's decoded PCM intact for detectors, metering and prefix retries.
     // Both tagged and untagged offers use the same normalized provider boundary.
-    fn ring_input<'a>(
-        scratch: &'a mut Option<Box<[f32]>>,
-        samples: &'a [f32],
-    ) -> Result<&'a [f32], RingError> {
-        let Some(scratch) = scratch else {
-            return Ok(samples);
-        };
+    fn ring_input<'a>(scratch: &'a mut [f32], samples: &[f32]) -> Result<&'a [f32], RingError> {
         let output = scratch.get_mut(..samples.len()).ok_or(RingError)?;
+        // A provider can accept only a prefix. Encode each sample independently
+        // so the same source frame has the same bytes when its tail is retried.
+        // Preserve linear PCM through two full-scale units, and leave space for
+        // interpolation by smoothly approaching half scale in the ring.
+        const KNEE: f32 = 0.25;
         for (target, &source) in output.iter_mut().zip(samples) {
             *target = if source.is_finite() {
-                source.clamp(-1.0, 1.0) * 0.5
+                let input = source / RING_HEADROOM;
+                let excess = input.abs() - KNEE;
+                if excess > 0.0 {
+                    (KNEE + KNEE * (excess / (KNEE + excess))).copysign(input)
+                } else {
+                    input
+                }
             } else {
                 0.0
             };
@@ -491,14 +500,15 @@ impl InboundProducer {
         Ok(output)
     }
     fn push(&mut self, samples: &[f32]) -> Result<usize, RingError> {
-        let samples = Self::ring_input(&mut self.1, samples)?;
+        let offered = self.0.producer_prefix(samples.len() as u64);
+        let samples = Self::ring_input(&mut self.1, &samples[..offered as usize])?;
         let mut accepted = 0;
         // SAFETY: this noncloneable endpoint is the only producer; the slice is live.
         let code = unsafe {
             (self.0.api.ring_producer_push.unwrap())(
                 self.0.handle.as_ptr(),
                 samples.as_ptr(),
-                self.0.producer_prefix(samples.len() as u64),
+                offered,
                 &mut accepted,
             )
         };
@@ -598,7 +608,7 @@ impl InboundProducer {
         } else {
             spans
         };
-        let samples = Self::ring_input(&mut self.1, samples)?;
+        let samples = Self::ring_input(&mut self.1, &samples[..offered as usize])?;
         let mut accepted = 0;
         let code = unsafe {
             operation(
@@ -803,6 +813,14 @@ impl InboundConsumer {
     /// Render one actual source-timed sample. Missing capability is an explicit
     /// error without consumption; no source age or wall-clock value is invented.
     pub fn render_timed_sample(&mut self) -> Result<TimedPeerSample, RingError> {
+        let mut timed = self.read_timed()?;
+        timed.sample = self.finish_scalar(timed.sample);
+        Ok(timed)
+    }
+
+    // Preserve coordinates and mute boundaries while collecting a block for
+    // a single gain decision. Scalar callers retain the same causal gain.
+    fn read_timed(&mut self) -> Result<TimedPeerSample, RingError> {
         let render = self
             .0
             .api
@@ -879,7 +897,6 @@ impl InboundConsumer {
             provenance.real = false;
             provenance.muted = true;
         }
-        self.0.restore_link_level(std::slice::from_mut(&mut sample));
         Ok(TimedPeerSample {
             sample,
             provenance: Some(provenance),
@@ -895,7 +912,7 @@ impl InboundConsumer {
             let mut real = 0;
             let mut native = 0;
             for output in samples.iter_mut() {
-                let timed = self.render_timed_sample()?;
+                let timed = self.read_timed()?;
                 *output = timed.sample;
                 native += self.0.native_real.load(Ordering::Relaxed);
                 real += usize::from(timed.provenance.is_some_and(|p| p.real));
@@ -905,6 +922,7 @@ impl InboundConsumer {
                 samples.fill(0.);
                 return Ok(0);
             }
+            self.finish_output(samples);
             return Ok(real);
         }
         let mut real = 0;
@@ -926,7 +944,7 @@ impl InboundConsumer {
             if self.0.signals.dtmf_muted() {
                 samples.fill(0.0);
             } else {
-                self.0.restore_link_level(samples);
+                self.finish_output(samples);
             }
             Ok(real as usize)
         } else {
@@ -963,7 +981,7 @@ impl InboundConsumer {
             if self.0.signals.dtmf_muted() {
                 sample = 0.0;
             } else {
-                self.0.restore_link_level(std::slice::from_mut(&mut sample));
+                sample = self.finish_scalar(sample);
             }
             Ok(real.then_some(sample))
         } else {
@@ -974,28 +992,35 @@ impl InboundConsumer {
     pub fn observe(&self) -> Result<Observation, RingError> {
         self.0.observe()
     }
+    fn finish_output(&mut self, samples: &mut [f32]) {
+        for sample in &mut *samples {
+            *sample *= RING_HEADROOM;
+        }
+        self.2.apply(samples);
+    }
+
+    fn finish_scalar(&mut self, mut sample: f32) -> f32 {
+        sample *= RING_HEADROOM;
+        // A scalar read cannot look ahead without changing its source position.
+        // Join unity gain at the knee with a slope of one, then approach full
+        // scale monotonically so successive rising peaks remain distinct.
+        const KNEE: f32 = 0.95;
+        const WIDTH: f32 = 1.0 - KNEE;
+        let excess = sample.abs() - KNEE;
+        if excess > 0.0 {
+            sample = (KNEE + WIDTH * (excess / (WIDTH + excess))).copysign(sample);
+        }
+        self.2.apply(std::slice::from_mut(&mut sample));
+        sample
+    }
+
     /// End a receive burst so the next one must refill its reserve.
     pub fn reset(&mut self) -> Result<(), RingError> {
         let code = unsafe { (self.0.api.ring_consumer_reset.unwrap())(self.0.handle.as_ptr()) };
-        (code == 0).then_some(()).ok_or(RingError)
+        (code == 0).then(|| self.2.reset()).ok_or(RingError)
     }
 }
 impl Shared {
-    // The released ring clips its resampler output to normalized PCM. Half-level
-    // input leaves room for intersample peaks. Restore unity before metering or DSP.
-    fn link_headroom(&self) -> bool {
-        matches!(self.policy, InboundPolicy::Peer | InboundPolicy::Echo)
-            && matches!(self.input_rate, 8_000 | 16_000)
-    }
-
-    fn restore_link_level(&self, output: &mut [f32]) {
-        if self.link_headroom() {
-            for sample in output {
-                *sample *= 2.0;
-            }
-        }
-    }
-
     fn producer_prefix(&self, samples: u64) -> u64 {
         if matches!(self.policy, InboundPolicy::Phone) {
             samples.min(u64::from(self.input_rate) / 50)

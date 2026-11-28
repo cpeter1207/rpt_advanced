@@ -1,5 +1,6 @@
 //! Bounded parrot-burst measurement primitives shared by control and media owners.
 
+use crate::audio::PeakGuard;
 use rtrb::{Consumer, Producer, RingBuffer};
 
 /// Fixed retained audio bound: thirty seconds at the native 48 kHz rate.
@@ -58,6 +59,7 @@ impl CapturedParrot {
 pub(crate) struct ParrotCapture {
     active: bool,
     recording: bool,
+    peak: PeakGuard,
     current: Option<Vec<f32>>,
     free: Vec<Vec<f32>>,
     completed: Producer<CapturedParrot>,
@@ -105,6 +107,7 @@ impl ParrotCapture {
             Self {
                 active: false,
                 recording: false,
+                peak: PeakGuard::new(crate::NATIVE_SAMPLE_RATE_HZ),
                 current: None,
                 free,
                 completed,
@@ -149,18 +152,15 @@ impl ParrotCapture {
 
         if active && !self.active {
             self.current = self.free.pop();
+            self.peak.reset();
             self.recording = self.current.is_some();
         }
         if active && self.recording {
             let current = self.current.as_mut().expect("recording owns a buffer");
             let count = samples.len().min(MAX_PARROT_SAMPLES - current.len());
-            current.extend(samples[..count].iter().map(|sample| {
-                if sample.is_finite() {
-                    sample.clamp(-1.0, 1.0)
-                } else {
-                    0.0
-                }
-            }));
+            let previous = current.len();
+            current.extend_from_slice(&samples[..count]);
+            self.peak.apply(&mut current[previous..]);
         }
         if !active && self.active && self.recording {
             let mut buffer = self.current.take().expect("recording owns a buffer");

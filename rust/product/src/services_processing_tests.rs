@@ -473,3 +473,25 @@ fn native_link_observer_outlives_its_matching_rate_graph_and_exposes_no_mismatch
     };
     assert_eq!(retained, first);
 }
+
+#[test]
+fn peer_dsp_protects_signed_input_and_float_output_at_their_own_boundaries() {
+    for float in [false, true] {
+        let (_, graph) = fixture_with_float(0, float);
+        let mut peer = ProcessedPeer::modular(Source::new(Some(4)), graph.unwrap(), 4);
+        // The fixture graph halves its input. The float graph can consume the
+        // original headroom, while the signed graph must first preserve shape.
+        let mut pcm = [-3.0, -2.0, 1.0, 3.0];
+        assert!(peer.process(&mut pcm));
+        let level = if float { 0.9 } else { 0.45 };
+        for (actual, ratio) in pcm.iter().zip([-1.0, -2.0 / 3.0, 1.0 / 3.0, 1.0]) {
+            assert!((actual - ratio * level).abs() <= 1.0 / 32768.0);
+        }
+    }
+    // A fresh signed graph must distinguish the legal asymmetric extrema.
+    let (_, graph) = fixture(0);
+    let mut peer = ProcessedPeer::modular(Source::new(Some(2)), graph.unwrap(), 2);
+    let mut extrema = [-1.0, 1.0];
+    assert!(peer.process(&mut extrema));
+    assert_eq!(extrema, [-0.5, 16383.0 / 32768.0]);
+}

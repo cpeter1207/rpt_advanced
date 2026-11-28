@@ -21,7 +21,7 @@ unsafe extern "C" fn malformed_timed_sample(
 ) -> i32 {
     // SAFETY: the consumer supplies complete writable stack records.
     let (sample, timing) = unsafe { (&mut *sample, &mut *timing) };
-    *sample = 0.75;
+    *sample = 0.75 / RING_HEADROOM;
     match TIMED_RESULT_MODE.get() {
         0 => return -3,
         1 => timing.struct_size = 8,
@@ -972,7 +972,7 @@ unsafe extern "C" fn sample_then_fail_render(
 ) -> i32 {
     if SAMPLE_THEN_FAIL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
         unsafe {
-            *sample = 0.25;
+            *sample = 0.25 / RING_HEADROOM;
             *real = true;
         }
         0
@@ -1375,7 +1375,7 @@ fn peer_input_single_sample_maps_real_pcm_and_provider_error() {
         real: *mut bool,
     ) -> i32 {
         unsafe {
-            *sample = 0.25;
+            *sample = 0.25 / RING_HEADROOM;
             *real = true;
         }
         0
@@ -1490,54 +1490,150 @@ fn direct_peer_ring_meter_follows_the_native_mixer_sample_clock() {
 }
 
 #[test]
-fn linked_resampling_preserves_intersample_peaks_at_unity_across_native_read_paths() {
-    for (rate, policy) in [(8_000, InboundPolicy::Peer), (16_000, InboundPolicy::Echo)] {
+fn resampled_peaks_are_bounded_without_flattening_the_waveform() {
+    for (rate, policy) in [
+        (8_000, InboundPolicy::Peer),
+        (16_000, InboundPolicy::Peer),
+        (48_000, InboundPolicy::Peer),
+        (8_000, InboundPolicy::Echo),
+        (8_000, InboundPolicy::Phone),
+        (
+            48_000,
+            InboundPolicy::Local {
+                squelch_delay_ms: 0,
+            },
+        ),
+        (22_050, InboundPolicy::Media),
+        (44_100, InboundPolicy::Media),
+    ] {
         let (mut full, mut high) = InboundRing::open(rate, policy).unwrap();
-        let (mut half, mut low) = InboundRing::open(rate, policy).unwrap();
-        // Sub-rail, band-limited by the actual linked SRC at playout. Its step
-        // response has peaks above unity that a normalised ring would flatten.
-        let wave: Vec<_> = (0..5120)
-            .map(|i| if i % 16 < 8 { 0.9375 } else { -0.9375 })
+        let (mut quiet, mut reference) = InboundRing::open(rate, policy).unwrap();
+        // Float Opus can exceed unity before conversion. Integer-decoded speech
+        // can have sub-rail source samples and over-unity interpolated peaks.
+        let amplitude = if rate == 48_000 { 1.25 } else { 0.9375 };
+        let frames = if matches!(policy, InboundPolicy::Phone) {
+            1920
+        } else {
+            5120
+        };
+        let wave: Vec<_> = (0..frames)
+            .map(|i| if i % 16 < 8 { amplitude } else { -amplitude })
             .collect();
-        let reference: Vec<_> = wave.iter().map(|v| v * 0.5).collect();
-        for (producer, pcm) in [(&mut full, &wave), (&mut half, &reference)] {
-            for (i, block) in pcm.chunks(2560).enumerate() {
-                let written = match policy {
-                    InboundPolicy::Echo => producer.write_tagged(block, 1, (i * 2560) as u64, &[]),
-                    _ => producer.write(block),
-                };
-                assert_eq!(written, Ok(block.len()));
+        let low: Vec<_> = wave.iter().map(|x| x * 0.25).collect();
+        for (producer, pcm) in [(&mut full, &wave), (&mut quiet, &low)] {
+            for (i, block) in pcm.chunks(160).enumerate() {
+                assert_eq!(
+                    producer.write_tagged(block, 1, (i * 160) as u64, &[]),
+                    Ok(block.len())
+                );
             }
         }
-        let check = |pairs: &[(f32, f32)]| {
-            let peak = pairs.iter().map(|(a, _)| a.abs()).fold(0.0f32, f32::max);
-            assert!((1.01..1.5).contains(&peak), "{rate} Hz, peak {peak}");
-            assert!(pairs.iter().all(|(a, b)| (a - 2.0 * b).abs() < 0.00001));
-        };
-        let mut a = [0.0; 2048];
-        let mut b = [0.0; 2048];
-        assert_eq!(high.render(&mut a), low.render(&mut b));
-        check(&a.into_iter().zip(b).collect::<Vec<_>>());
 
-        let mut direct = Vec::new();
-        let mut timed = Vec::new();
-        for _ in 0..256 {
-            direct.push((
-                high.render_sample().unwrap().unwrap(),
-                low.render_sample().unwrap().unwrap(),
-            ));
-            let a = high.render_timed_sample().unwrap();
-            let b = low.render_timed_sample().unwrap();
-            assert_eq!(a.provenance, b.provenance);
-            timed.push((a.sample, b.sample));
+        let mut actual = [0.0; 960];
+        let mut expected = [0.0; 960];
+        assert_eq!(high.render(&mut actual), reference.render(&mut expected));
+        for sample in &mut expected {
+            *sample *= 4.0;
         }
-        check(&direct);
-        check(&timed);
+        let peak = expected.iter().map(|v| v.abs()).fold(0.0_f32, f32::max);
+        assert!(peak > 1.01, "{rate} Hz reference peak {peak}");
+        let mut guard = rpt_advanced_core::audio::PeakGuard::new(48_000);
+        guard.apply(&mut expected);
+        for (a, b) in actual.iter().zip(expected) {
+            assert!(
+                a.abs() <= 1.0 && (a - b).abs() < 0.00002,
+                "{rate} Hz: {a} vs {b}"
+            );
+        }
+
+        // A scalar reader has no next sample to inspect. Its soft knee
+        // preserves rising peaks and still releases gain from the bulk read.
+        let scalar_expected = |raw: f32| {
+            let magnitude = raw.abs();
+            if magnitude <= 0.95 {
+                raw
+            } else {
+                (1.0 - 0.0025 / (0.05 + magnitude - 0.95)).copysign(raw)
+            }
+        };
+        for _ in 0..256 {
+            let sample = high.render_sample().unwrap().unwrap();
+            let mut expected = [scalar_expected(
+                reference.render_sample().unwrap().unwrap() * 4.0,
+            )];
+            guard.apply(&mut expected);
+            assert!(sample.abs() <= 1.0 && (sample - expected[0]).abs() < 0.00002);
+            let sample = high.render_timed_sample().unwrap();
+            let quiet = reference.render_timed_sample().unwrap();
+            assert_eq!(sample.provenance, quiet.provenance);
+            let mut expected = [scalar_expected(quiet.sample * 4.0)];
+            guard.apply(&mut expected);
+            assert!(sample.sample.abs() <= 1.0 && (sample.sample - expected[0]).abs() < 0.00002);
+        }
     }
 }
 
 #[test]
-fn producer_headroom_only_encodes_low_rate_links_and_retries_original_pcm() {
+fn resampler_input_retains_linear_pcm_and_smoothly_bounds_extreme_float_input() {
+    let mut scratch = [0.0; 8];
+    let encoded = InboundProducer::ring_input(
+        &mut scratch,
+        &[1.0, 2.0, 3.0, -4.0, 8.0, 16.0, f32::MAX, f32::NAN],
+    )
+    .unwrap();
+    assert_eq!(encoded[0..2], [0.125, 0.25]);
+    assert!(0.25 < encoded[2] && encoded[2] < -encoded[3]);
+    assert_eq!(encoded[3..6], [-0.375, 0.4375, 0.46875]);
+    assert!(encoded[5] < encoded[6] && encoded[6] <= 0.5);
+    assert_eq!(encoded[7], 0.0);
+}
+
+#[test]
+fn one_frame_bulk_render_does_not_apply_the_scalar_knee() {
+    let (mut producer, mut reader) = InboundRing::open(48_000, InboundPolicy::Peer).unwrap();
+    let (mut reference_producer, mut reference) =
+        InboundRing::open(48_000, InboundPolicy::Peer).unwrap();
+    for source in [&mut producer, &mut reference_producer] {
+        for block in 0..6 {
+            assert_eq!(
+                source.write_tagged(&[0.99; 960], 1, block * 960, &[]),
+                Ok(960)
+            );
+        }
+    }
+    let mut priming = [0.0; 960];
+    assert_eq!(
+        reader.render(&mut priming).unwrap(),
+        reference.render(&mut priming).unwrap(),
+    );
+    let mut single = [0.0; 1];
+    let mut pair = [0.0; 2];
+    assert_eq!(reader.render(&mut single), Ok(1));
+    assert_eq!(reference.render(&mut pair), Ok(2));
+    assert!(pair[0] > 0.98, "the reference must exercise the knee");
+    assert_eq!(single[0].to_bits(), pair[0].to_bits());
+}
+
+#[test]
+fn scalar_delivery_retains_distinct_rising_peaks_on_both_polarities() {
+    let (_, mut reader) = InboundRing::open(48_000, InboundPolicy::Peer).unwrap();
+    let mut previous = 0.0;
+    for magnitude in [
+        0.25, 0.60, 0.90, 0.95, 0.99, 1.0, 1.10, 1.35, 1.75, 2.0, 4.0,
+    ] {
+        let positive = reader.finish_scalar(magnitude / RING_HEADROOM);
+        let negative = reader.finish_scalar(-magnitude / RING_HEADROOM);
+        if magnitude <= 0.95 {
+            assert_eq!(positive, magnitude);
+        }
+        assert_eq!(negative, -positive);
+        assert!(previous < positive && positive <= 1.0);
+        previous = positive;
+    }
+}
+
+#[test]
+fn producer_headroom_preserves_float_input_and_retries_original_pcm() {
     thread_local! { static FIRST: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) }; }
     unsafe extern "C" fn accept_one(
         _: *mut ffi::rpcr3_ring,
@@ -1566,23 +1662,19 @@ fn producer_headroom_only_encodes_low_rate_links_and_retries_original_pcm() {
         unsafe { accept_one(ring, pcm, count, accepted) }
     }
 
-    for (policy, rate, encoded) in [
-        (InboundPolicy::Peer, 8_000, true),
-        (InboundPolicy::Peer, 16_000, true),
-        (InboundPolicy::Echo, 8_000, true),
-        (InboundPolicy::Echo, 16_000, true),
-        (InboundPolicy::Peer, 32_000, false),
-        (InboundPolicy::Peer, 48_000, false),
-        (InboundPolicy::Echo, 48_000, false),
-        (InboundPolicy::Phone, 8_000, false),
+    for (policy, rate) in [
+        (InboundPolicy::Peer, 8_000),
+        (InboundPolicy::Peer, 16_000),
+        (InboundPolicy::Peer, 48_000),
+        (InboundPolicy::Echo, 8_000),
+        (InboundPolicy::Phone, 8_000),
         (
             InboundPolicy::Local {
                 squelch_delay_ms: 0,
             },
-            16_000,
-            false,
+            48_000,
         ),
-        (InboundPolicy::Media, 8_000, false),
+        (InboundPolicy::Media, 44_100),
     ] {
         // The ring copies this table and retains the original create/destroy pair.
         let mut api = unsafe { *ffi::rpcr3_descriptor() };
@@ -1590,7 +1682,8 @@ fn producer_headroom_only_encodes_low_rate_links_and_retries_original_pcm() {
         api.ring_producer_push_tagged = Some(accept_tagged);
         let (mut producer, _consumer) =
             unsafe { InboundRing::from_descriptor(rate, policy, &api) }.unwrap();
-        let pcm = [0.75, -0.625];
+        let pcm = [2.0, 0.5, 8.0, -1.25, -8.0, -0.625, f32::NAN, f32::INFINITY];
+        let encoded_pcm: [f32; 8] = [0.25, 0.0625, 0.4375, -0.15625, -0.4375, -0.078125, 0.0, 0.0];
         for tagged in [false, true] {
             for i in 0..pcm.len() {
                 let accepted = if tagged {
@@ -1599,7 +1692,7 @@ fn producer_headroom_only_encodes_low_rate_links_and_retries_original_pcm() {
                     producer.write(&pcm[i..])
                 };
                 assert_eq!(accepted, Ok(1));
-                assert_eq!(FIRST.get(), if encoded { pcm[i] * 0.5 } else { pcm[i] });
+                assert_eq!(FIRST.get().to_bits(), encoded_pcm[i].to_bits());
             }
         }
     }

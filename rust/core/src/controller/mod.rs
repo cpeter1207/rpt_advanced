@@ -172,12 +172,21 @@ pub struct LocalReceiveRelease {
     pub kerchunk: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransmitClass {
+    Programme,
+    Timeout,
+    Regeneration,
+}
+
 /// Single audio-owner node aggregate; construction and media preparation belong to control.
 ///
 /// Processing consumes elapsed native samples, never callback count or wall-clock time.
 /// All configured media remains allocated until this controller is dropped off the audio path.
 pub struct NodeController {
     configuration_inhibit: Option<Arc<AtomicBool>>,
+    transmit_peak: crate::audio::PeakGuard,
+    transmit_class: TransmitClass,
     settings: ControllerSettings,
     remote_non_fm: bool,
     remote_unqualified_open: bool,
@@ -328,6 +337,8 @@ impl NodeController {
         Ok((
             Self {
                 configuration_inhibit: None,
+                transmit_peak: crate::audio::PeakGuard::new(crate::NATIVE_SAMPLE_RATE_HZ),
+                transmit_class: TransmitClass::Programme,
                 settings,
                 remote_non_fm: false,
                 remote_unqualified_open: false,
@@ -532,7 +543,7 @@ impl NodeController {
     /// Replace local receive PCM with transmit PCM; return final requested PTT.
     ///
     /// Linked PCM may be shorter than the output; missing samples are silence. Each sample
-    /// advances exactly one 48-kHz tick, so arbitrary callback partitioning has identical output.
+    /// advances exactly one 48-kHz tick. Peak protection processes the completed audio block.
     /// The caller supplies finite normalized PCM and applies the returned PTT to its adapter.
     pub fn process_audio(
         &mut self,
@@ -611,7 +622,8 @@ impl NodeController {
                     && branch.incoming_text.len() == audio.len()
                     && branch.regeneration.len() == audio.len()
             });
-        for (offset, sample) in audio.iter_mut().enumerate() {
+        let mut segment_start = 0;
+        for offset in 0..audio.len() {
             let observed = branches.as_mut().map(|branch| TransmitBranchSample {
                 voice: &mut branch.voice[offset],
                 public_telemetry_input: &mut branch.public_telemetry_input[offset],
@@ -637,17 +649,25 @@ impl NodeController {
                         .unwrap_or(0.0)
                 }),
             });
-            let rf = self.step(
+            let (rf, class) = self.step(
                 receiving,
                 linked,
                 source_activity,
-                Some(*sample),
+                Some(audio[offset]),
                 link_audio.get(offset).copied().unwrap_or(0.0),
                 parrot_sample,
             );
-            *sample = rf;
+            if class != self.transmit_class {
+                self.transmit_peak.apply(&mut audio[segment_start..offset]);
+                // Priority notices and signaling have their own calibrated level.
+                self.transmit_peak.reset();
+                self.transmit_class = class;
+                segment_start = offset;
+            }
+            audio[offset] = rf;
             self.now = self.now.saturating_add(1);
         }
+        self.transmit_peak.apply(&mut audio[segment_start..]);
         self.activity.advance_clock(self.now);
         self.keyed
     }
@@ -871,7 +891,7 @@ impl NodeController {
         input: Option<f32>,
         link_sample: f32,
         parrot_output: Option<ProgramSample<'_>>,
-    ) -> f32 {
+    ) -> (f32, TransmitClass) {
         let local_media = parrot_output.as_ref().and_then(|output| output.local_media);
         if self.telemetry.cancel_message.swap(false, Ordering::AcqRel) {
             let source = self
@@ -987,12 +1007,9 @@ impl NodeController {
         self.transmit_inhibited = inhibited;
         self.traffic_holding = false;
         if self.timeout.blocked() {
-            return self.timeout_sample(
-                receive || source_activity,
-                inhibited,
-                input,
-                parrot_output,
-            );
+            let notice =
+                self.timeout_sample(receive || source_activity, inhibited, input, parrot_output);
+            return (notice, TransmitClass::Timeout);
         }
         let may_transmit = !inhibited && (self.transmits_during_receive() || !receiving);
         let courtesy_ready = !receive && self.courtesy.ready(self.now);
@@ -1325,12 +1342,9 @@ impl NodeController {
         );
         if self.timeout.blocked() {
             self.begin_timeout();
-            return self.timeout_sample(
-                receive || source_activity,
-                inhibited,
-                input,
-                parrot_output,
-            );
+            let notice =
+                self.timeout_sample(receive || source_activity, inhibited, input, parrot_output);
+            return (notice, TransmitClass::Timeout);
         }
         self.traffic_holding = self.traffic_keyed && !transmit && (duplex_hang || tail_hang);
         if !self.traffic_keyed {
@@ -1448,16 +1462,19 @@ impl NodeController {
             }
         }
         if regeneration.is_some() {
-            regeneration_output
+            (regeneration_output, TransmitClass::Regeneration)
         } else if inhibited {
-            0.0
+            (0.0, TransmitClass::Programme)
         } else {
             let incoming_text = if text_admitted {
                 local_media.unwrap_or(0.0)
             } else {
                 0.0
             };
-            (local + link + telemetry + incoming_text).clamp(-1.0, 1.0)
+            (
+                local + link + telemetry + incoming_text,
+                TransmitClass::Programme,
+            )
         }
     }
 }

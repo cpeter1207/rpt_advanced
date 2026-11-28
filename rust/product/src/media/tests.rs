@@ -165,6 +165,37 @@ extern "C" fn ast_unreplace_sigchld() {
 }
 
 #[test]
+fn offline_media_resampling_preserves_peaks_without_clipping() {
+    let token = Cancellation::default();
+    let samples: Vec<_> = (0..4096)
+        .map(|i| if i % 16 < 8 { 0.9375 } else { -0.9375 })
+        .collect();
+    let quiet: Vec<_> = samples.iter().map(|sample| sample / 4.0).collect();
+    for rate in [22_050, 44_100] {
+        let actual = native(rate, &samples, &token).unwrap();
+        let reference = native(rate, &quiet, &token).unwrap();
+        let mut expected: Vec<_> = reference
+            .samples()
+            .iter()
+            .map(|sample| sample * 4.0)
+            .collect();
+        assert!(expected.iter().any(|sample| sample.abs() > 1.0));
+        let mut peak = rpt_advanced_core::audio::PeakGuard::new(48_000);
+        for block in expected.chunks_mut(960) {
+            peak.apply(block);
+        }
+        assert_eq!(actual.samples().len(), expected.len());
+        for (sample, expected) in actual.samples().iter().zip(expected) {
+            assert!(sample.abs() <= 1.0);
+            assert!(
+                (sample - expected).abs() < 1e-5,
+                "waveform changed at {rate} Hz"
+            );
+        }
+    }
+}
+
+#[test]
 fn finite_ring_conversion_preserves_duration_and_short_impulse_tail() {
     for (rate, input, length) in [
         (22050, vec![0.5; 2205], 4800),

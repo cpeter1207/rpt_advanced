@@ -299,8 +299,9 @@ impl PeerIo {
         if audio.len() > self.output.len() {
             return Err(Error::InvalidFrame);
         }
+        let gain = pcm::peak_gain(audio);
         for (output, input) in self.output.iter_mut().zip(audio) {
-            *output = pcm::encode(*input);
+            *output = pcm::encode(*input * gain);
         }
         // SAFETY: ast_write borrows the frame and bounded samples for this call only.
         unsafe {

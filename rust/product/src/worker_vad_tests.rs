@@ -396,7 +396,9 @@ unsafe extern "C" fn paused_render(
         // SAFETY: the caller owns count writable samples; the real render has returned.
         let samples = unsafe { std::slice::from_raw_parts(output, count as usize) };
         RENDER_HAD_AUDIO.store(
-            samples.iter().any(|sample| sample.abs() > 0.05),
+            samples
+                .iter()
+                .any(|sample| sample.abs() > 0.05 / crate::link::ring::RING_HEADROOM),
             Ordering::Release,
         );
         let gate = RENDER_GATE.get().unwrap();

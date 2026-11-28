@@ -253,8 +253,9 @@ impl Radio {
                 }
                 let keyed = render(self.receiving, pcm);
                 channel.indicate(keyed)?;
+                let gain = pcm::peak_gain(pcm);
                 for (index, sample) in pcm.iter().enumerate() {
-                    data.add(index).write_unaligned(pcm::encode(*sample));
+                    data.add(index).write_unaligned(pcm::encode(*sample * gain));
                 }
                 if ffi::ast_write(channel.pointer.as_ptr(), frame.0.as_ptr()) != 0 {
                     return Err(Error::Write);
