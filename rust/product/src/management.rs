@@ -181,6 +181,8 @@ pub enum Diagnostic {
     PrivateSettings(usize),
     /// An accepted configuration save remains in a pre-publication phase.
     SlowSave(&'static str),
+    /// The coordinator fenced TX after losing a trustworthy owner or storage observation.
+    Inhibited(Fault),
 }
 
 /// A terminal observation from the existing serialized hardware/runtime owner.

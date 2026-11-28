@@ -374,6 +374,40 @@ fn activation_reload_poll_stays_admitted_until_commit_or_safe_rollback() {
     }
 }
 
+#[test]
+fn rejected_rx_audio_commit_reports_station_phase_and_keeps_tx_inhibited() {
+    unsafe extern "C" fn staged(_: *mut c_void, _: *mut c_void, _: *const c_void) -> i32 {
+        0
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(fixture_stop(), 0);
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    let mut binding = unsafe { table.station_binding.read() };
+    // Accept the same-radio update. The fixture finish callback rejects commit.
+    binding.stage_update = Some(staged);
+    table.station_binding = Box::leak(Box::new(binding));
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start_table(active_configuration(&[]), &table) }, 0);
+    let (engine, call) = selected().unwrap();
+    clear_scheduler_notices();
+    let configuration =
+        active_configuration(&[(LOCAL, Kind::RxAudio, "", json!({"output_gain_db": -6}))]);
+    let outcome = reload(&engine, configuration);
+    let notices = scheduler_notices();
+    let ready = engine.modular_observed().status_ready;
+    drop(call);
+    assert_eq!(fixture_stop(), 0);
+    assert_eq!(outcome, Err(RuntimeError::Restore));
+    assert!(!ready);
+    assert!(
+        notices
+            .iter()
+            .any(|line| line == "configuration adoption failed during station handoff: restore")
+    );
+}
+
 fn scheduler_notices() -> Vec<String> {
     crate::fixture::SCHEDULER_NOTICES.lock().unwrap().clone()
 }

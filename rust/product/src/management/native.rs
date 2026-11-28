@@ -212,8 +212,10 @@ impl Runtime for NativeRuntime {
         self.engine.adopt_modular(prepared)
     }
 
-    fn inhibit_uncertain(&self, _revision: Option<&str>, _cause: Fault) {
+    fn inhibit_uncertain(&self, _revision: Option<&str>, cause: Fault) {
         self.engine.inhibit_modular();
+        self.engine
+            .management_diagnostic(Diagnostic::Inhibited(cause));
     }
 
     fn diagnostic(&self, event: Diagnostic) {

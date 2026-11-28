@@ -256,9 +256,32 @@ impl Engine {
             .scheduler_notice(&format!("management {event:?}"));
     }
 
+    fn adoption_error(&self, phase: &'static str, error: &RuntimeError) {
+        // Config and link errors may carry additional context. Only fixed classes go on the host log.
+        let cause = match error {
+            RuntimeError::Config(_) => "configuration",
+            RuntimeError::Preparation => "preparation",
+            RuntimeError::Busy => "busy",
+            RuntimeError::Device => "device",
+            RuntimeError::Restore => "restore",
+            RuntimeError::Clock => "clock",
+            RuntimeError::MissingNode => "missing node",
+            RuntimeError::Rejected => "rejected",
+            RuntimeError::Unavailable => "unavailable",
+            RuntimeError::Link(_) => "link",
+        };
+        self.services.scheduler_notice(&format!(
+            "configuration adoption failed during {phase}: {cause}"
+        ));
+    }
+
     pub(crate) fn adopt_modular(self: &Arc<Self>, prepared: Prepared) -> Adoption {
-        let Ok(call) = self.enter() else {
-            return Adoption::observed(AdoptionOutcome::RecoveryRequired);
+        let call = match self.enter() {
+            Ok(call) => call,
+            Err(error) => {
+                self.adoption_error("control admission", &error);
+                return Adoption::observed(AdoptionOutcome::RecoveryRequired);
+            }
         };
         let (pending, confirmation) = Adoption::pending();
         let engine = Arc::clone(self);
@@ -285,7 +308,10 @@ impl Engine {
                 jobs.push(job);
                 pending
             }
-            Err(_) => Adoption::observed(AdoptionOutcome::RecoveryRequired),
+            Err(_) => {
+                self.adoption_error("worker start", &RuntimeError::Unavailable);
+                Adoption::observed(AdoptionOutcome::RecoveryRequired)
+            }
         }
     }
 
@@ -353,60 +379,72 @@ impl Engine {
             credentials,
             fault_epoch,
         } = prepared;
-        let credentials = credentials.ok_or(RuntimeError::Rejected)?;
+        let at = |phase| move |error: &RuntimeError| self.adoption_error(phase, error);
+        let credentials = credentials
+            .ok_or(RuntimeError::Rejected)
+            .inspect_err(at("account credentials"))?;
         let attempt = radio.attempt();
         // The strong reservation spans native confirmation. A concurrent pump may
         // reap a genuinely abandoned ticket but cannot retire this one.
         let retained = radio.clone();
         let basis = radio.clone();
-        self.run(move |host| host.verify_private_basis(&basis))?;
+        self.run(move |host| host.verify_private_basis(&basis))
+            .inspect_err(at("incumbent verification"))?;
         let mut entered_core = false;
-        let result = self
-            .poll_private_accounts(attempt, false)
-            .and_then(|()| self.poll_asl(attempt, 1))
-            .and_then(|()| self.begin_modular_sites(site))
-            .and_then(|()| self.wait_sites(false))
-            .and_then(|()| {
-                self.reloading
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .map_err(|_| RuntimeError::Busy)?;
-                self.revision.fetch_add(1, Ordering::AcqRel);
-                self.lost_digits.store(true, Ordering::Release);
-                let clock = self.clock();
-                let name = revision.clone();
-                let installed = Arc::clone(&inputs);
-                entered_core = true;
-                let mut ready = self.run_inner(true, move |host| {
-                    host.begin_core_adoption(radio, name, credentials, installed, clock)
-                })?;
-                while !ready {
-                    if !self.accepting.load(Ordering::Acquire) {
-                        return Err(RuntimeError::Rejected);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                    let clock = self.clock();
-                    ready = self.run_inner(true, move |host| host.poll_reload(clock))?;
+        let mut phase = "private accounts";
+        let result = (|| {
+            self.poll_private_accounts(attempt, false)?;
+            phase = "network accounts";
+            self.poll_asl(attempt, 1)?;
+            phase = "site handoff";
+            self.begin_modular_sites(site)?;
+            self.wait_sites(false)?;
+            phase = "station handoff";
+            self.reloading
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| RuntimeError::Busy)?;
+            self.revision.fetch_add(1, Ordering::AcqRel);
+            self.lost_digits.store(true, Ordering::Release);
+            let clock = self.clock();
+            let name = revision.clone();
+            let installed = Arc::clone(&inputs);
+            entered_core = true;
+            let mut ready = self.run_inner(true, move |host| {
+                host.begin_core_adoption(radio, name, credentials, installed, clock)
+            })?;
+            while !ready {
+                if !self.accepting.load(Ordering::Acquire) {
+                    return Err(RuntimeError::Rejected);
                 }
-                Ok(())
-            });
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                let clock = self.clock();
+                ready = self.run_inner(true, move |host| host.poll_reload(clock))?;
+            }
+            Ok(())
+        })()
+        .inspect_err(at(phase));
         // Abort uncommitted site changes or collect the committed old workers outside control.
         // A failed cleanup leaves the live selection unknown even if the radio rolled back.
-        self.finish_reload_sites(result.is_ok())?;
+        self.finish_reload_sites(result.is_ok())
+            .inspect_err(at("site cleanup"))?;
         if result.is_err() {
             let attempted = revision.clone();
             let basis = retained.clone();
-            let restored = self.run(move |host| {
-                Ok(if entered_core {
-                    host.modular_rollback_confirmed(&attempted)
-                } else {
-                    host.verify_private_basis(&basis).is_ok()
+            let restored = self
+                .run(move |host| {
+                    Ok(if entered_core {
+                        host.modular_rollback_confirmed(&attempted)
+                    } else {
+                        host.verify_private_basis(&basis).is_ok()
+                    })
                 })
-            })?;
+                .inspect_err(at("rollback verification"))?;
             if !restored {
                 // Keep TX inhibited while the account providers reverse the failed attempt.
                 self.inhibit_modular();
             }
-            self.restore_accounts(attempt)?;
+            self.restore_accounts(attempt)
+                .inspect_err(at("account rollback"))?;
             return if restored {
                 Ok(AdoptionOutcome::RolledBack)
             } else {
@@ -415,6 +453,7 @@ impl Engine {
         }
         loop {
             if !self.accepting.load(Ordering::Acquire) {
+                self.adoption_error("owner confirmation", &RuntimeError::Rejected);
                 return Err(RuntimeError::Rejected);
             }
             let engine = Arc::clone(self);
@@ -485,7 +524,10 @@ impl Engine {
             match result {
                 Ok(true) => return Ok(AdoptionOutcome::Confirmed),
                 Ok(false) => std::thread::sleep(std::time::Duration::from_millis(5)),
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.adoption_error("owner confirmation", &error);
+                    return Err(error);
+                }
             }
         }
     }
