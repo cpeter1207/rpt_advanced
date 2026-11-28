@@ -29,7 +29,16 @@ impl IceRestartBasis {
 
         let text = Zeroizing::new(offer.to_sdp_string());
         let mut contract = Context::new(&SHA256);
-        for line in text.lines().filter(|line| !ice_only_line(line)) {
+        let mut data_channel = false;
+        for line in text.lines() {
+            if line.starts_with("m=") {
+                data_channel = line.starts_with("m=application ")
+                    && line.ends_with(" UDP/DTLS/SCTP webrtc-datachannel");
+            }
+            // Firefox can echo the RTP extension format flag on its SCTP section.
+            if ice_only_line(line) || (data_channel && line == "a=extmap-allow-mixed") {
+                continue;
+            }
             contract.update(line.as_bytes());
             contract.update(b"\n");
         }

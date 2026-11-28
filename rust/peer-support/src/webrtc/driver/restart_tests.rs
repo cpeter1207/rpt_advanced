@@ -88,8 +88,16 @@ fn ice_restart_keeps_authenticated_channels_and_rtp_on_the_same_driver() {
             };
             let original_fingerprint = fingerprint.clone();
             fingerprint.replace_range(digit..digit + 1, other);
+            let mixed_rtp_extensions = "a=extmap-allow-mixed\r\n";
+            let rtp_extension_change = changed.replacen(
+                "a=rtcp-mux",
+                &format!("{mixed_rtp_extensions}a=rtcp-mux"),
+                1,
+            );
+            assert_ne!(rtp_extension_change, changed);
             for invalid in [
                 initial,
+                rtp_extension_change,
                 changed.replace(&next.ufrag, &previous.ufrag),
                 changed.replace(&next.pass, &previous.pass),
                 changed.replace("a=sendrecv", "a=recvonly"),
@@ -100,6 +108,15 @@ fn ice_restart_keeps_authenticated_channels_and_rtp_on_the_same_driver() {
                 assert!(answerer.connection_state().secure_connected());
             }
 
+            // Firefox echoes the mixed RTP extension flag on the SCTP
+            // data-channel section after the first exchange.
+            let data_channel_extension = changed.replacen(
+                "a=sctp-port:",
+                &format!("{mixed_rtp_extensions}a=sctp-port:"),
+                1,
+            );
+            assert_ne!(data_channel_extension, changed);
+            let offer = SdpOffer::from_sdp_string(&data_channel_extension).unwrap();
             let answer = answerer.accept_restart_offer(&mut basis, offer).unwrap();
             assert_eq!(
                 answerer.connection_state().ice,
