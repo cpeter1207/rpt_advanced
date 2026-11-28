@@ -1904,9 +1904,26 @@ fn shared_radio_views(
         all.body["selection"],
         json!({"site":true,"all_ports":true,"ports":[],"topics":["equipment"]}),
     );
+    let stream_href = all.body["_links"]["rpt:status-stream"]["href"]
+        .as_str()
+        .unwrap();
     assert_eq!(
-        all.body["_links"]["rpt:status-stream"]["href"],
+        stream_href,
         "/api/v1/status/stream/?site=true&all_ports=true&topics=equipment",
+    );
+    let streamed = first_status_stream_frame(client, stream_href, None);
+    assert_eq!(streamed["type"], "snapshot");
+    assert_eq!(streamed["boot_id"], all.body["boot_id"]);
+    assert_eq!(streamed["data"]["selection"], all.body["selection"]);
+    let streamed_ports = streamed["data"]["status"]["ports"].as_object().unwrap();
+    assert_eq!(streamed_ports.len(), 2);
+    assert_eq!(
+        streamed_ports[&a.to_string()]["equipment"][site_id]["name"],
+        "Site gauge"
+    );
+    assert_eq!(
+        streamed_ports[&b.to_string()]["equipment"][port_id]["name"],
+        "Port gauge radio"
     );
     assert_eq!(
         all.body["status"]["site"]["equipment"][site_id]["key"],
