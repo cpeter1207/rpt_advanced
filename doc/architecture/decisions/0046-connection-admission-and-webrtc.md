@@ -27,7 +27,11 @@ with Trickle ICE, optional TURN, DTLS-SRTP, Opus RTP and two DCEP data channels.
 ICE restart keeps the negotiated track and authenticated association and retires
 the old station grant. Transmit eligibility requires a current dated sample
 lease, provenance and all normal station protection. Neither media nor keying
-depends on a status observer.
+depends on a status observer. Add public station telemetry to the authorized
+WebRTC management output after per-session voice subtraction. Preserve
+addressed reply ownership and use the configured playback audience on
+ordinary connections. Station admission and privacy isolation also apply
+to the WebRTC output.
 
 The WebSocket and REST snapshots observe the same optional meter correlation
 using an opaque media binding, track, sample span, RTP coordinate and epoch.
