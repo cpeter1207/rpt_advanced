@@ -51,15 +51,15 @@ async fn connected_audio() -> (UdpDriver, UdpDriver, Mid) {
     (station, browser, mid)
 }
 
-async fn check_resume(partial: usize, expected_packets: usize) {
-    let (mut station, mut browser, mid) = connected_audio().await;
-    let track = (mid, station.opus_payload(mid).unwrap());
-    let provider = match std::env::var_os("RPTADV_TEST_WEBRTC_OPUS") {
+fn test_provider() -> OpusProvider {
+    match std::env::var_os("RPTADV_TEST_WEBRTC_OPUS") {
         Some(path) => OpusProvider::load_from(Path::new(&path)),
         None => OpusProvider::load(),
     }
-    .unwrap();
-    let decoder = provider.decoder(provider.encoder_bytes()).unwrap();
+    .unwrap()
+}
+
+fn test_playout(provider: &OpusProvider) -> (playout::Playout, Arc<Mutex<WebRtcObservation>>) {
     let key = WorkKey {
         session: "00000000-0000-4000-8000-000000000001".parse().unwrap(),
         port: "00000000-0000-4000-8000-000000000002".parse().unwrap(),
@@ -78,9 +78,17 @@ async fn check_resume(partial: usize, expected_packets: usize) {
         sender_rate: None,
         receiver_quality: Vec::new(),
     }));
-    let mut playout =
-        playout::Playout::new(&provider, key, binding, Arc::default(), observation.clone())
-            .unwrap();
+    let playout =
+        playout::Playout::new(provider, key, binding, Arc::default(), observation.clone()).unwrap();
+    (playout, observation)
+}
+
+async fn check_resume(partial: usize, expected_packets: usize) {
+    let (mut station, mut browser, mid) = connected_audio().await;
+    let track = (mid, station.opus_payload(mid).unwrap());
+    let provider = test_provider();
+    let decoder = provider.decoder(provider.encoder_bytes()).unwrap();
+    let (mut playout, observation) = test_playout(&provider);
     let clock = Arc::new(SourceClock::new(Instant::now() - Duration::from_secs(1)));
     clock.restart();
     let (mut source, egress) = LinkAudioQueue::new(3 * FRAMES, 4).unwrap().into_endpoints();
@@ -194,4 +202,132 @@ async fn idle_full_opus_tail_resumes_at_a_new_wire_anchor() {
 #[tokio::test]
 async fn idle_partial_opus_tail_resumes_at_a_new_wire_anchor() {
     check_resume(800, 4).await;
+}
+
+#[tokio::test]
+async fn hot_station_mix_keeps_both_tones_below_clip_and_a_fresh_solo_run_at_unity() {
+    const PACKETS: usize = 22; // Warm the 400 ms meter window and cover the final codec lookahead.
+    const VOICE: f64 = 0.9375;
+    const TELEMETRY: f64 = 0.5;
+    let (mut station, mut browser, mid) = connected_audio().await;
+    let track = (mid, station.opus_payload(mid).unwrap());
+    let provider = test_provider();
+    let mut decoder = provider.decoder(provider.encoder_bytes()).unwrap();
+    let (mut playout, observation) = test_playout(&provider);
+    let clock = Arc::new(SourceClock::default());
+    let (mut source, egress) = LinkAudioQueue::new(FRAMES, 2).unwrap().into_endpoints();
+    let mut endpoint = Endpoint::for_playout_test(clock.clone(), egress);
+    let mut previous_wire = None;
+    let mut previous_anchor = None;
+    let mut next_source = 96_000;
+    let mut pcm = [0.0; FRAMES];
+    let mut decoded = [0.0; FRAMES];
+    let mut spans = [webrtc::opus::DecodeSpan::default(); 48];
+
+    for hot in [true, false] {
+        // A physical reopen retains the native sample position and creates a fresh media epoch.
+        clock.restart();
+        let run_start = next_source;
+        let telemetry = if hot { TELEMETRY } else { 0.0 };
+        for (index, value) in pcm.iter_mut().enumerate() {
+            let phase = std::f64::consts::TAU * index as f64 / 48_000.0;
+            *value = (VOICE * (1000.0 * phase).cos() + telemetry * (1500.0 * phase).cos()) as f32;
+        }
+        let mut saw_solo_rms = false;
+        for index in 0..PACKETS {
+            let span = AudioSpan {
+                generation: 4,
+                burst: 1,
+                stream: clock.stream(),
+                source_start: next_source,
+                born_ns: Some(clock.now_ns()),
+            };
+            assert_eq!(source.write(span, &pcm), 0);
+            playout.send(&mut endpoint, &mut station, track).unwrap();
+            let packet = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    tokio::select! {
+                        event = station.next_event() => { event.unwrap(); }
+                        event = browser.next_event() => {
+                            if let Event::RtpPacket(packet) = event.unwrap() { break packet; }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the receiving peer got this Opus packet");
+            assert_eq!(packet.header.payload_type, track.1);
+            assert_eq!(
+                decoder
+                    .decode(&packet.payload, &mut decoded, &mut spans)
+                    .unwrap()
+                    .frames,
+                FRAMES
+            );
+            let wire = (*packet.seq_no, packet.time.numer());
+            if let Some((sequence, timestamp)) = previous_wire {
+                assert_eq!(wire, (sequence + 1, timestamp + u64::from(PACKET_FRAMES)));
+            }
+            previous_wire = Some(wire);
+            let status = observation.lock().unwrap();
+            if index == 0 {
+                let anchor = status.anchor.as_ref().unwrap();
+                assert_eq!(anchor.ssrc, *packet.header.ssrc);
+                assert_eq!(anchor.source_generation.0, clock.stream());
+                assert_eq!(anchor.source_sample.0, run_start);
+                let lead = anchor.rtp_timestamp.0 - wire.1;
+                assert!((1..u64::from(PACKET_FRAMES)).contains(&lead));
+                if let Some((previous_epoch, previous_lead)) = previous_anchor {
+                    assert!(anchor.epoch.0 > previous_epoch);
+                    assert_eq!(lead, previous_lead);
+                }
+                previous_anchor = Some((anchor.epoch.0, lead));
+            }
+            if !hot
+                && let Some(reading) = status.codec_input
+                && let Some(rms) = reading.rms_dbfs
+            {
+                let expected = 20.0 * (VOICE / 2.0_f64.sqrt()).log10();
+                assert!(
+                    (rms - expected).abs() < 0.01,
+                    "solo RMS {rms} dBFS, expected {expected}"
+                );
+                saw_solo_rms = true;
+            }
+            next_source += u64::from(PACKET_FRAMES);
+        }
+        let reading = observation.lock().unwrap().codec_input.unwrap();
+        assert_eq!(reading.quality, crate::status_meter::Quality::Valid);
+        assert_eq!(reading.valid_samples, 19_200);
+        assert_eq!(reading.source_generation, clock.stream());
+        assert!(reading.end_sample > run_start && reading.end_sample <= next_source);
+        assert_eq!(
+            reading.clipped_samples, 0,
+            "over-range samples reached the Opus encoder input"
+        );
+        let peak = reading.peak_dbfs.unwrap();
+        if hot {
+            assert!(peak < 0.0);
+            // A flat-topped signal changes the ratio between its RMS and its peak.
+            let expected = 20.0
+                * (((VOICE * VOICE + TELEMETRY * TELEMETRY) / 2.0).sqrt() / (VOICE + TELEMETRY))
+                    .log10();
+            assert!((reading.rms_dbfs.unwrap() - peak - expected).abs() < 0.1);
+            for hz in [1000.0, 1500.0] {
+                let (mut re, mut im) = (0.0, 0.0);
+                for (i, sample) in decoded.iter().enumerate() {
+                    let phase = std::f64::consts::TAU * hz * i as f64 / 48_000.0;
+                    re += f64::from(*sample) * phase.cos();
+                    im += f64::from(*sample) * phase.sin();
+                }
+                assert!(
+                    2.0 * re.hypot(im) / FRAMES as f64 > 0.1,
+                    "{hz} Hz missing from received Opus"
+                );
+            }
+        } else {
+            assert!(saw_solo_rms);
+            assert!((peak - 20.0 * VOICE.log10()).abs() < 0.01);
+        }
+    }
 }

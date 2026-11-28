@@ -16,6 +16,8 @@ const FRAMES: usize = PACKET_FRAMES as usize;
 const EXPIRY_NS: u64 = 200_000_000;
 const FRAME_NS: u64 = 20_000_000;
 const CONTROL_BYTES: usize = 4096;
+const OVERLOAD_PEAK: f32 = 0.9;
+const GAIN_RELEASE_STEP: f32 = 1.0 / 4_800.0;
 
 pub(super) struct Playout {
     binding: String,
@@ -46,6 +48,7 @@ struct Run {
     first_packet: bool,
     rtp_start: u64,
     last_end_ns: u64,
+    gain: f32,
 }
 
 impl Playout {
@@ -261,12 +264,33 @@ impl Playout {
                 wire_position: 0,
                 first_packet: true,
                 last_end_ns: span.born_ns.ok_or(())?,
+                gain: 1.0,
             });
         }
         let run = self.run.as_mut().ok_or(())?;
+        let pcm = &mut self.pcm[..frames];
+        if !pcm.is_empty() {
+            // The float mix can exceed full scale when voice and telemetry overlap.
+            // Scale the packet together to preserve its waveform and RTP timing.
+            let peak = pcm
+                .iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+            let ceiling = if peak >= 1.0 {
+                OVERLOAD_PEAK / peak
+            } else {
+                1.0
+            };
+            run.gain = run.gain.min(ceiling);
+            if run.gain < 1.0 {
+                for sample in pcm.iter_mut() {
+                    *sample *= run.gain;
+                    run.gain = (run.gain + GAIN_RELEASE_STEP).min(ceiling);
+                }
+            }
+        }
         let result = self
             .encoder
-            .encode(&self.pcm[..frames], &mut self.encoded, flush)
+            .encode(pcm, &mut self.encoded, flush)
             .map_err(|_| ())?;
         if result.consumed_frames != frames {
             return Err(());
@@ -280,7 +304,7 @@ impl Playout {
                     first_sample: span.source_start,
                     end_ms: run.last_end_ns / 1_000_000,
                 },
-                &self.pcm[..frames],
+                pcm,
             );
             if let Some(reading) = self.readings.latest() {
                 self.measured = Some(reading);
