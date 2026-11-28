@@ -84,10 +84,8 @@ impl Playout {
     pub(super) fn discontinue(&mut self) -> Result<(), ()> {
         self.used = 0;
         self.basis = None;
-        self.anchor = None;
+        self.clear_observation();
         if self.run.take().is_some() {
-            self.clear_observation();
-
             self.encoder.reset().map_err(|_| ())?;
         }
         Ok(())
@@ -207,6 +205,17 @@ impl Playout {
             self.basis = None;
             self.used = 0;
             self.packet(endpoint, driver, track, span, count, true)?;
+            // The Opus provider retains less than one frame of lookahead.
+            // Finish any tail and the empty completion before accepting new PCM.
+            for _ in 0..2 {
+                if self.run.is_none() {
+                    break;
+                }
+                self.packet(endpoint, driver, track, span, 0, true)?;
+            }
+            if self.run.is_some() {
+                return Err(());
+            }
         }
         Ok(())
     }

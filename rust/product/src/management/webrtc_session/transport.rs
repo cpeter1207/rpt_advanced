@@ -37,6 +37,8 @@ use tokio::{
 };
 
 mod playout;
+#[cfg(test)]
+mod playout_tests;
 mod receive;
 mod turn;
 pub(crate) use turn::TurnAccess;

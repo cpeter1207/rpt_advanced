@@ -25,6 +25,19 @@ pub(crate) struct Endpoint {
     admitted: Arc<AtomicBool>,
 }
 impl Endpoint {
+    #[cfg(test)]
+    pub(crate) fn for_playout_test(clock: Arc<SourceClock>, egress: LinkAudioConsumer) -> Self {
+        let (ingress, _) = InboundRing::open(48_000, InboundPolicy::Peer).unwrap();
+        Self {
+            ingress,
+            egress,
+            clock,
+            isolation: Arc::default(),
+            installed: Arc::new(AtomicBool::new(true)),
+            admitted: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
     pub(crate) fn admitted(&self) -> bool {
         !self.ingress.signals().ended() && self.admitted.load(Ordering::Acquire)
     }
