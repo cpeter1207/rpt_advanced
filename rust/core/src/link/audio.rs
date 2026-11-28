@@ -2,7 +2,7 @@
 use super::{AdmissionError, Mode, PeerSignals, ReceivePolicy, ReceiveState};
 use crate::{
     audio::{AudioSpan, LinkAudioProducer},
-    controller::{NodeController, ParrotOutput, PeerReplySample},
+    controller::{NodeController, ParrotOutput, PeerReplySample, PublicTelemetry},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
@@ -299,7 +299,7 @@ impl<P: PeerInput> AudioPeer<P> {
 
     /// Prepare an authorized application connection using its exact reply token.
     /// Only the connection's qualified key can admit source audio.
-    /// A listening application receives ordinary peer programme and contributes none.
+    /// A listening application receives station programme and contributes no voice.
     pub fn for_application(
         reply: &super::PeerReply,
         transceive: bool,
@@ -478,12 +478,26 @@ pub struct SourcePosition {
 struct Destination {
     enabled: bool,
     broadcast: bool,
+    station_monitor: bool,
     telemetry: bool,
     eligible: bool,
     target: usize,
     span: AudioSpan,
     activity_edge: u64,
     public_peer: bool,
+}
+
+impl Destination {
+    fn public_telemetry(&self, reply: &PeerReplySample) -> Option<f32> {
+        if !self.telemetry || !self.broadcast {
+            return None;
+        }
+        match reply.broadcast? {
+            PublicTelemetry::Peers(sample) => Some(sample),
+            PublicTelemetry::StationMonitor(sample) if self.station_monitor => Some(sample),
+            PublicTelemetry::StationMonitor(_) => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -565,8 +579,8 @@ impl LinkDispatcher {
                     } else {
                         0.0
                     };
-                    if destination.telemetry && destination.broadcast {
-                        *sample += block.replies[frame].broadcast.unwrap_or(0.0);
+                    if let Some(telemetry) = destination.public_telemetry(&block.replies[frame]) {
+                        *sample += telemetry;
                     }
                     if destination.telemetry && block.replies[frame].target == destination.target {
                         *sample += block.replies[frame].sample;
@@ -1054,18 +1068,15 @@ impl<P: PeerInput> LinkAudio<P> {
                                 forwarding_sources > own_source
                             })));
             route.broadcast = !ended && peer.mode.transmits() && selected;
+            route.station_monitor =
+                !outgoing_isolation && matches!(peer.origin, AudioOrigin::Application { .. });
             route.telemetry = peer.input.signals().telemetry_allowed();
             let eligible = route.target != 0
                 && (route.enabled
                     || (route.telemetry
-                        && route.broadcast
-                        && self.reply_output[..count]
-                            .iter()
-                            .any(|sample| sample.broadcast.is_some()))
-                    || route.telemetry
-                        && self.reply_output[..count]
-                            .iter()
-                            .any(|reply| reply.target == route.target));
+                        && self.reply_output[..count].iter().any(|reply| {
+                            reply.target == route.target || route.public_telemetry(reply).is_some()
+                        })));
             if eligible && !route.eligible {
                 route.span.burst = route.span.burst.wrapping_add(1);
             }

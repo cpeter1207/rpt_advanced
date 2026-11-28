@@ -117,7 +117,7 @@ fn timeout_notice_obeys_site_inhibit_without_losing_recovery() {
 }
 
 #[test]
-fn timeout_notices_are_local_only_even_with_regeneration_and_peer_fanout() {
+fn timeout_notices_are_station_monitor_telemetry_even_with_regeneration() {
     let (mut node, _) = protected_node();
     node.process_audio(true, true, &[], &mut [0.5; 48]);
     let mut audio = [0.5; 4];
@@ -144,7 +144,8 @@ fn timeout_notices_are_local_only_even_with_regeneration_and_peer_fanout() {
     assert!(!active);
     assert!(replies.iter().all(|reply| reply.target == 0
         && reply.sample == 0.0
-        && reply.broadcast.is_none()
+        && matches!(reply.broadcast,
+            Some(PublicTelemetry::StationMonitor(sample)) if sample == 0.25)
         && !reply.suppress_repeat));
 }
 

@@ -17,6 +17,8 @@ use std::{
 const SUBJECT: &str = "webrtc-fixture-browser";
 const TIMING_LIFETIME_MS: u16 = 100;
 const RELAY_FIXTURE_HOST: &str = "127.0.0.2";
+const TELEMETRY_MESSAGE: &str = "webrtc-telemetry-marker";
+const TELEMETRY_HZ: f64 = 1450.0;
 
 pub(in super::super) fn run(scenario: &Scenario<'_>, transceive: bool) {
     let (mut provision, address) = provisioning_with_browser(scenario, true);
@@ -62,6 +64,14 @@ pub(in super::super) fn run(scenario: &Scenario<'_>, transceive: bool) {
             &format!("{port}tx/signaling/"),
             json!({"ptt":{"timing":{"settle_ms":0,"hang_ms":0}}}),
         );
+        edit(
+            &client,
+            "POST",
+            &format!("{port}telemetry/messages/"),
+            json!({"key":TELEMETRY_MESSAGE,"configuration":{
+                "tone":{"sequence":format!("{TELEMETRY_HZ}/400")}
+            }}),
+        );
     }
     let enabled = edit(
         &client,
@@ -69,11 +79,8 @@ pub(in super::super) fn run(scenario: &Scenario<'_>, transceive: bool) {
         &port,
         json!({"configuration":{"name":"Radio","inherit_from":"site","enabled":true}}),
     );
-    managed_asl::confirmed(
-        &client,
-        enabled.body["desired_revision"].as_str().unwrap(),
-        station,
-    );
+    let revision = enabled.body["desired_revision"].as_str().unwrap();
+    managed_asl::confirmed(&client, revision, station);
 
     let status = port.replacen("/configuration/", "/status/", 1);
     let discovery = client.get(&status);
@@ -90,7 +97,7 @@ pub(in super::super) fn run(scenario: &Scenario<'_>, transceive: bool) {
         .unwrap();
     let session = if transceive {
         executor.block_on(exercise_transceive(
-            &client, collection, &peers, &carrier, &ptt,
+            &client, station, revision, collection, &peers, &carrier, &ptt,
         ))
     } else {
         executor.block_on(receive_only(
@@ -845,6 +852,8 @@ async fn service(
 
 async fn exercise_transceive(
     client: &Client<'_>,
+    station: &str,
+    revision: &str,
     collection: &str,
     peers: &str,
     carrier: &Path,
@@ -1087,6 +1096,42 @@ async fn exercise_transceive(
         .await;
     }
     assert_eq!(fs::read(ptt).unwrap(), expired);
+
+    // Keep both sessions attached after the voice lease and play local public telemetry.
+    let reply = operation(
+        client,
+        json!({"submitted":true,"targets":[station],"expected_active_revision":revision,
+            "action":{"action":"message","message":format!("{{ {TELEMETRY_MESSAGE} }}"),"destination":"local"}}),
+    );
+    assert_eq!(
+        reply.code, 200,
+        "telemetry operation returned {}",
+        reply.body
+    );
+    let receipt = &reply.body["receipt"]["outcomes"][0];
+    assert_eq!(receipt["target"], station);
+    assert_eq!(receipt["outcome"], "admitted");
+    let mut heard_talker = false;
+    let mut heard_listener = false;
+    service(
+        &mut talker,
+        &mut listener,
+        Duration::from_secs(4),
+        |event| {
+            heard_talker |= self_pcm.heard(event, TELEMETRY_HZ);
+            false
+        },
+        |event| {
+            heard_listener |= listen_pcm.heard(event, TELEMETRY_HZ);
+            false
+        },
+    )
+    .await;
+    assert!(
+        heard_listener && heard_talker,
+        "local station telemetry did not reach both Opus receivers (receive-only={heard_listener}, transceive={heard_talker})"
+    );
+
     let session = talker.close(client);
 
     fs::write(carrier, b"").unwrap();

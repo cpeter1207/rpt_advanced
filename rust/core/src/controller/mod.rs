@@ -117,6 +117,13 @@ pub(crate) struct ParrotOutput<'a> {
     pub branches: Option<LocalTransmitBranches<'a>>,
 }
 
+/// A public telemetry sample can reach ordinary peer outputs or just WebRTC station monitors.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PublicTelemetry {
+    Peers(f32),
+    StationMonitor(f32),
+}
+
 /// Per-sample addressed media, independent of RF and ordinary mix-minus routing.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PeerReplySample {
@@ -124,8 +131,8 @@ pub(crate) struct PeerReplySample {
     pub sample: f32,
     /// Suppress ordinary traffic only after its input rings and detectors have advanced.
     pub suppress_repeat: bool,
-    /// Configured message PCM, separate from addressed command replies and RF signaling.
-    pub broadcast: Option<f32>,
+    /// Public station media, separate from addressed command replies and RF signaling.
+    pub broadcast: Option<PublicTelemetry>,
 }
 
 struct ProgramSample<'a> {
@@ -1417,12 +1424,19 @@ impl NodeController {
             if let Some(reply) = output.reply {
                 *reply = PeerReplySample {
                     suppress_repeat,
-                    broadcast: (made != 0
-                        && !peer_status
-                        && policy.is_some_and(|policy| {
-                            policy.destination != PlaybackDestination::Local
-                        }))
-                    .then_some(telemetry_sample[0] * gain),
+                    broadcast: if made == 0
+                        || peer_status
+                        || rendered_source == Some(Source::Parrot)
+                    {
+                        // Parrot playback already belongs to the common program.
+                        None
+                    } else if policy.is_some_and(|p| p.destination != PlaybackDestination::Local) {
+                        Some(PublicTelemetry::Peers(telemetry_sample[0] * gain))
+                    } else if local_output && regeneration.is_none() && !inhibited {
+                        Some(PublicTelemetry::StationMonitor(telemetry))
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 };
                 if let Some((target, false)) = reply_target {

@@ -1,6 +1,6 @@
-//! Sample-timed traffic watchdog and local-only, producer-backed recovery notices.
+//! Sample-timed traffic watchdog and producer-backed station recovery notices.
 
-use super::{NodeController, PeerReplySample, PreparedMedia, ProgramSample};
+use super::{NodeController, PeerReplySample, PreparedMedia, ProgramSample, PublicTelemetry};
 
 #[derive(Default)]
 enum Phase {
@@ -70,7 +70,7 @@ impl NodeController {
         self.release_hang = 0;
     }
 
-    /// Priority notices never repeat input, route to peers, duck, or select Morse on receive.
+    /// Priority notices never repeat input, broadcast to ordinary links, duck, or select Morse on receive.
     /// Detection and ring consumption have already advanced before this local RF gate.
     pub(super) fn timeout_sample(
         &mut self,
@@ -154,7 +154,10 @@ impl NodeController {
             }
             *output.parrot = 0.0;
             if let Some(reply) = output.reply {
-                *reply = PeerReplySample::default();
+                *reply = PeerReplySample {
+                    broadcast: (made != 0).then_some(PublicTelemetry::StationMonitor(sample[0])),
+                    ..Default::default()
+                };
             }
         }
         sample[0].clamp(-1.0, 1.0)
