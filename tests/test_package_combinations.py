@@ -136,7 +136,9 @@ def test_codec_packages_require_the_provenance_release() -> None:
         "dialogic",
     ):
         assert f"librptadv-codec-{codec}1 (>= {minimum})" in runtime
-    assert f"librptadv-codec-opus1 (>= {minimum})" in depends(stanzas["librptadv-product3"])
+    assert f"librptadv-codec-opus1 (>= {minimum})" in depends(
+        stanzas["librptadv-product3"]
+    )
 
 
 def test_jitter_runtime_and_development_manifests() -> None:
