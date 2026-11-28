@@ -364,9 +364,9 @@ impl Receiver {
                     start >= previous.end
                         && packet.timestamp > previous.received_at
                         && now.duration_since(previous.reported_at) >= RTP_OBSERVATION_INTERVAL
-                        && talk.next_rtp.is_some_and(|next| {
-                            start >= next && start - next < MAX_RTP_GAP
-                        })
+                        && talk
+                            .next_rtp
+                            .is_some_and(|next| start >= next && start - next < MAX_RTP_GAP)
                 }))
         {
             let reference = Reference {

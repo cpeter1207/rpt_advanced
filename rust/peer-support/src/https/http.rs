@@ -132,9 +132,9 @@ fn browser_principal(
     }
     let uri = issuer.parse::<Uri>().map_err(|_| StatusCode::BAD_REQUEST)?;
     if uri.scheme_str() != Some("https")
-        || !uri
+        || uri
             .authority()
-            .is_some_and(|authority| !authority.as_str().contains('@'))
+            .is_none_or(|authority| authority.as_str().contains('@'))
         || uri.query().is_some()
     {
         return Err(StatusCode::BAD_REQUEST);
