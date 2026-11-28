@@ -283,3 +283,90 @@ fn driver_reports_consent_loss_before_returning_disconnected() {
             drop(caller);
         });
 }
+
+#[test]
+fn unresolved_mdns_host_candidate_keeps_peer_reflexive_ice_viable() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let now = Instant::now();
+            let mut caller = webrtc::transport(now);
+            let mut change = caller.sdp_api();
+            change.add_channel_with_config(ChannelConfig {
+                label: "control".into(),
+                protocol: CHANNEL_PROTOCOL.into(),
+                ordered: true,
+                reliability: Reliability::Reliable,
+                negotiated: None,
+            });
+            let (offer, pending) = change.apply().unwrap();
+            let (answerer, answer) = webrtc::accept_offer(now, offer).unwrap();
+            caller.sdp_api().accept_answer(pending, answer).unwrap();
+
+            let socket = || UdpSocket::bind(("127.0.0.1", 0));
+            let mut caller = UdpDriver::new(caller, socket().await.unwrap()).unwrap();
+            let mut answerer = UdpDriver::new(answerer, socket().await.unwrap()).unwrap();
+            caller.add_remote_candidate(answerer.candidate()).unwrap();
+            // The answerer never receives a signaled numeric candidate for the caller.
+            let candidate = concat!(
+                "candidate:1 1 udp 2122260223 ",
+                "ba95bb85-aad2-4411-acc9-63722092397c.local 50000 typ host ",
+                "generation 0 network-cost 999"
+            );
+            assert!(Candidate::from_sdp_string(candidate).is_err());
+            answerer
+                .add_remote_candidate(candidate)
+                .expect("an unresolved mDNS host cannot retire this association");
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !caller.connection_state().secure_connected()
+                    || !answerer.connection_state().secure_connected()
+                    || caller.channels[0].is_none()
+                    || answerer.channels[0].is_none()
+                {
+                    tokio::select! {
+                        event = caller.next_event() => record_open(&mut caller, event.unwrap()),
+                        event = answerer.next_event() => record_open(&mut answerer, event.unwrap()),
+                    }
+                }
+            })
+            .await
+            .expect("authenticated peer-reflexive ICE and DCEP remain available");
+        });
+}
+
+#[test]
+fn mdns_candidate_preserves_candidate_syntax_and_restart_fences() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+            let mut driver = UdpDriver::new(webrtc::transport(Instant::now()), socket).unwrap();
+            driver.restart_remote_ufrag =
+                Some(crate::working_files::immutable::artifact_sha256(b"current"));
+
+            for candidate in [
+                "candidate:1 1 udp 1 peer.local 50000 typ host ufrag previous",
+                "candidate:1 1 udp 1 -peer.local 50000 typ host ufrag current",
+                "candidate:1 1 udp 1 peer..local 50000 typ host ufrag current",
+                "candidate:1 1 udp 1 peer.room.local 50000 typ host ufrag current",
+                "candidate:1 1 udp 1 peer.local. 50000 typ host ufrag current",
+                " candidate:1 1 udp 1 peer.local 50000 typ host ufrag current",
+                "candidate:1 1 udp 1 peer.example 50000 typ host ufrag current",
+                "candidate:1 1 udp 1 peer.local 50000 typ relay ufrag current",
+                "candidate:1 1 udp 1 peer.local invalid typ host ufrag current",
+            ] {
+                assert!(
+                    driver.add_remote_candidate(candidate).is_err(),
+                    "{candidate}"
+                );
+            }
+            driver
+                .add_remote_candidate("candidate:1 1 udp 1 peer.LOCAL 50000 typ host ufrag current")
+                .unwrap();
+        });
+}

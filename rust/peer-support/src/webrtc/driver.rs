@@ -123,6 +123,33 @@ fn invalid_transport() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid WebRTC transport state")
 }
 
+fn validate_unresolved_mdns_candidate(text: &str) -> Option<Candidate> {
+    let mut fields = text.split_whitespace();
+    let address = fields.nth(4)?;
+    let _port = fields.next()?;
+    if fields.next() != Some("typ") || fields.next() != Some("host") {
+        return None;
+    }
+    let (label, suffix) = address.split_once('.')?;
+    if !suffix.eq_ignore_ascii_case("local")
+        || label.is_empty()
+        || label.len() > 63
+        || label.starts_with('-')
+        || label.ends_with('-')
+        || !label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return None;
+    }
+    // Change only the address slice to validate the other fields with the
+    // pinned parser. The placeholder never enters the ICE agent.
+    let start = address.as_ptr().addr() - text.as_ptr().addr();
+    let mut validation = text.to_owned();
+    validation.replace_range(start..start + address.len(), "192.0.2.1");
+    Candidate::from_sdp_string(&validation).ok()
+}
+
 fn relay_error(error: RelayError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("TURN relay {error:?}"))
 }
@@ -388,13 +415,21 @@ impl UdpDriver {
 
     /// Apply already-authorized Trickle ICE input to the active transport.
     pub fn add_remote_candidate(&mut self, text: &str) -> io::Result<()> {
-        let candidate = Candidate::from_sdp_string(text).map_err(|_| invalid_transport())?;
+        let (candidate, register) = match Candidate::from_sdp_string(text) {
+            Ok(candidate) => (candidate, true),
+            Err(_) => (
+                validate_unresolved_mdns_candidate(text).ok_or_else(invalid_transport)?,
+                false,
+            ),
+        };
         if let (Some(expected), Some(ufrag)) = (self.restart_remote_ufrag, candidate.ufrag())
             && crate::working_files::immutable::artifact_sha256(ufrag.as_bytes()) != expected
         {
             return Err(invalid_transport());
         }
-        self.rtc.add_remote_candidate(candidate);
+        if register {
+            self.rtc.add_remote_candidate(candidate);
+        }
         Ok(())
     }
 
