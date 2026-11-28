@@ -1892,6 +1892,36 @@ fn shared_radio_views(
     });
     let cut = client.get(&target);
     assert_eq!(cut.code, 200);
+    let status = client.get("/api/v1/status/");
+    assert_eq!(status.code, 200);
+    let all = status.body["_links"]["rpt:status-all-ports"]["href"]
+        .as_str()
+        .expect("status root advertises the compact all-port snapshot");
+    assert_eq!(all, "/api/v1/status/snapshot/?site=true&all_ports=true");
+    let all = client.get(&format!("{all}&topics=equipment"));
+    assert_eq!(all.code, 200);
+    assert_eq!(
+        all.body["selection"],
+        json!({"site":true,"all_ports":true,"ports":[],"topics":["equipment"]}),
+    );
+    assert_eq!(
+        all.body["_links"]["rpt:status-stream"]["href"],
+        "/api/v1/status/stream/?site=true&all_ports=true&topics=equipment",
+    );
+    assert_eq!(
+        all.body["status"]["site"]["equipment"][site_id]["key"],
+        "sense"
+    );
+    let ports = all.body["status"]["ports"].as_object().unwrap();
+    assert_eq!(ports.len(), 2);
+    assert_eq!(
+        ports[&a.to_string()]["equipment"][site_id]["name"],
+        "Site gauge"
+    );
+    assert_eq!(
+        ports[&b.to_string()]["equipment"][port_id]["name"],
+        "Port gauge radio",
+    );
     let site = &cut.body["status"]["site"]["equipment"];
     let inherited = &cut.body["status"]["ports"][a.to_string()]["equipment"];
     let overridden = &cut.body["status"]["ports"][b.to_string()]["equipment"];

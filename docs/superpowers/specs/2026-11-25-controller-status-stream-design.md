@@ -61,6 +61,14 @@ JSON `null` represents exact digital silence for logarithmic readings and carrie
 
 Use `site=true` and repeat `port=<resource-id>` to request scopes. No explicit scope selects the site summary. A site summary links to all visible ports. It includes shared site equipment without embedding all port/link meters. Use `topics=radio,links,phone_patch,telemetry,equipment,resources,diagnostics,meters` to choose a subset. Default to applicable state topics. Opt in to `meters` for detailed level data. `meter_hz` applies only to the stream. Validate unknown filters and malformed selectors with `400` before upgrade. Unknown visible resource IDs use `404` under the existing authorization policy. Use HAL links emitted by the status collection to obtain actual identifiers regardless of the node name or ASL number. Publish selector defaults, capability and schemas as HAL profiles and in generated OpenAPI.
 
+For a site-wide view, follow `rpt:status-all-ports` on the HAL status root.
+Its `all_ports=true` selector includes the site and every visible radio port
+without enumerating UUIDs in the URL. It cannot be combined with `port`.
+The captured selection has `all_ports: true` and an empty `ports` list.
+Continuation links and the advertised stream preserve the compact selector.
+A live subscription receives the same ordered changes when ports are added
+or retired. The ordinary default remains the site summary.
+
 A snapshot contains the normalized selection, `boot_id`, active revision, wall-clock `observed_at` in UTC, service `monotonic_ms`, `state_cursor` and HAL links. Its `status` has `site` and/or `ports` matching the selection. The `ports` map is keyed by resource ID. Port status embeds current entities and graph descriptors and uses the same state and measurement schemas as the stream. Per-source timestamps and quality retain their own observation times. The shared capture samples changing link transport counters once per second while publishing authoritative link and key transitions as they occur. A snapshot takes one published controller view and returns the last completed measurements at that cut, even when freshness has expired. It does not poll hardware or wait for a future transition. Use `application/hal+json` and `Cache-Control: no-store`. A functioning controller without a published view can return `503` with the existing problem representation. Retired entities leave a fresh snapshot.
 
 Equipment entries retain their resource UUID as the map key. Each entry carries the public logical `key` from the active equipment configuration. A sensor also carries `name` when its configured text label resolves using the scope and current observations. A client can display the logical key when the label needs unavailable context. The identity and reading come from the same status cut.

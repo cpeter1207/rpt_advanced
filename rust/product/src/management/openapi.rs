@@ -222,6 +222,11 @@ pub(super) fn document(mount: &str, routes: &BTreeMap<String, Route>) -> Value {
                         Type::String,
                     ),
                     (
+                        "all_ports",
+                        "Use true to include the site and all visible ports. Cannot be combined with port.",
+                        Type::Boolean,
+                    ),
+                    (
                         "topics",
                         "Comma-separated topic names. Default includes applicable state. meters is opt-in.",
                         Type::String,

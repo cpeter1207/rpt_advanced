@@ -33,6 +33,7 @@ pub(super) fn profile(stream: bool) -> Value {
     let mut fields = json!({
         "default_scope":"site",
         "site_value":true,
+        "all_ports_value":true,
         "repeatable_parameters":["port"],
         "topics":query::Topic::ALL,
         "default_topics":query::Topic::STATE,
@@ -655,6 +656,7 @@ mod tests {
     fn scope(port: Id) -> Selection {
         Selection {
             site: false,
+            all_ports: false,
             ports: BTreeSet::from([port]),
             topics: BTreeSet::from(query::Topic::STATE),
         }
@@ -948,6 +950,61 @@ mod tests {
         let recovered = hub.capture(&scope(port)).unwrap();
         assert!(recovered.cursor > old.cursor);
         assert!(recovered.records.is_empty());
+    }
+
+    #[test]
+    fn all_ports_share_one_compact_selection_across_a_paged_capture() {
+        let selectors = "site=true&all_ports=true&topics=radio";
+        let selection = Query::parse(Some(selectors), false).unwrap().selection;
+        assert_eq!(selection.query(), selectors);
+        assert_eq!(
+            Query::parse(Some(selectors), true).unwrap().selection,
+            selection
+        );
+
+        let first: Id = PORT.parse().unwrap();
+        let mut captured = capture(first);
+        let samples = "x".repeat(128 * 1024);
+        for serial in 0..48 {
+            let name = format!("361c602c-7664-4600-990d-{serial:012}");
+            let id = name.parse().unwrap();
+            captured.visible_ports.push(id);
+            captured.records.insert(
+                RecordKey::new(
+                    Owner::Port(id),
+                    Some(query::Topic::Radio),
+                    &["radio"],
+                    "radio",
+                    name,
+                    None,
+                ),
+                Arc::new(json!({"test":samples})),
+            );
+        }
+        let pages = Pages::new(Arc::new(captured), selection, first).unwrap();
+        assert!(pages.len() > 1);
+        let api = Api::new("/api/v1").unwrap();
+        let mut ports = 0;
+        for index in 0..pages.len() {
+            let page = pages.document(&api, first, index, false).unwrap();
+            assert_eq!(page["snapshot_id"], PORT);
+            assert_eq!(page["selection"]["all_ports"], true);
+            assert_eq!(page["selection"]["ports"], json!([]));
+            assert_eq!(
+                page["_links"]["rpt:status-stream"]["href"],
+                format!("/api/v1/status/stream/?{selectors}")
+            );
+            if let Some(next) = page["_links"]["next"]["href"].as_str() {
+                assert!(next.len() < 2048);
+                let query = next.split_once('?').unwrap().1;
+                assert_eq!(
+                    Query::parse(Some(query), false).unwrap().selection,
+                    *pages.selection()
+                );
+            }
+            ports += page["status"]["ports"].as_object().unwrap().len();
+        }
+        assert_eq!(ports, 48);
     }
 
     #[test]

@@ -204,6 +204,7 @@ impl Api {
                 if !registered
                     && ![
                         "start-macro",
+                        "status-all-ports",
                         "lease",
                         "end-macro",
                         "warning-macro",
@@ -552,7 +553,10 @@ impl Api {
         }
         if r.view == Some(View::Status) {
             if r.path == "/status/" {
+                use super::status::{SNAPSHOT, scoped_view};
                 self.link_status_views(&mut links, "");
+                links["rpt:status-all-ports"] =
+                    self.href(&scoped_view(SNAPSHOT, "site=true&all_ports=true"));
             } else if r.target == Target::Metadata {
                 let query = p
                     .port

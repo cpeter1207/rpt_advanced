@@ -54,23 +54,31 @@ impl Topic {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct Selection {
     pub(super) site: bool,
+    pub(super) all_ports: bool,
     pub(super) ports: BTreeSet<Id>,
     pub(super) topics: BTreeSet<Topic>,
 }
 
 impl Selection {
     pub(super) fn document(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut document = serde_json::json!({
             "site": self.site,
             "ports": self.ports.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "topics": self.topics,
-        })
+        });
+        if self.all_ports {
+            document["all_ports"] = true.into();
+        }
+        document
     }
 
     pub(super) fn query(&self) -> String {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         if self.site {
             query.append_pair("site", "true");
+        }
+        if self.all_ports {
+            query.append_pair("all_ports", "true");
         }
         for port in &self.ports {
             query.append_pair("port", &port.to_string());
@@ -104,6 +112,7 @@ fn id(text: &str) -> Result<Id, Fault> {
 impl Query {
     pub(super) fn parse(query: Option<&str>, stream: bool) -> Result<Self, Fault> {
         let mut site = false;
+        let mut all_ports = false;
         let mut ports = BTreeSet::new();
         let mut topics = None;
         let mut meter_hz = None;
@@ -112,6 +121,7 @@ impl Query {
         for (name, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
             match name.as_ref() {
                 "site" if !site && value == "true" => site = true,
+                "all_ports" if !all_ports && value == "true" => all_ports = true,
                 "port" => {
                     ports.insert(id(&value)?);
                 }
@@ -152,7 +162,8 @@ impl Query {
                 _ => return Err(Fault::Malformed),
             }
         }
-        if ports.len() > 128 || cursor.is_some() != page.is_some() {
+        if ports.len() > 128 || all_ports && !ports.is_empty() || cursor.is_some() != page.is_some()
+        {
             return Err(Fault::Malformed);
         }
         let topics = topics.unwrap_or_else(|| BTreeSet::from(Topic::STATE));
@@ -163,6 +174,7 @@ impl Query {
         Ok(Self {
             selection: Selection {
                 site: site || ports.is_empty(),
+                all_ports,
                 ports,
                 topics,
             },
@@ -205,6 +217,8 @@ mod tests {
     fn unsupported_or_ambiguous_status_queries_are_rejected() {
         for query in [
             "site=false",
+            "all_ports=false",
+            "all_ports=true&all_ports=true",
             "site=true&site=true",
             "port=x",
             "topics=",
@@ -217,6 +231,7 @@ mod tests {
         ] {
             assert!(Query::parse(Some(query), false).is_err(), "{query}");
         }
+        assert!(Query::parse(Some(&format!("port={PORT}&all_ports=true")), false).is_err());
         assert!(Query::parse(Some("topics=meters&meter_hz=03"), true).is_err());
         assert_eq!(
             Query::parse(Some("meter_hz=10"), true).unwrap().meter_hz,

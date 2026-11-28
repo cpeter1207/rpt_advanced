@@ -30,7 +30,7 @@ impl Owner {
     pub(super) fn selected(self, selection: &Selection) -> bool {
         match self {
             Self::Site => selection.site,
-            Self::Port(id) => selection.ports.contains(&id),
+            Self::Port(id) => selection.all_ports || selection.ports.contains(&id),
         }
     }
 }

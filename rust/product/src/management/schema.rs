@@ -584,6 +584,7 @@ pub(super) fn response_document(route: &Route) -> Value {
         properties["complete"] = json!({"type":"boolean"});
         properties["selection"] = object(json!({
             "site":{"type":"boolean"},
+            "all_ports":{"type":"boolean","const":true},
             "ports":{"type":"array","items":id,"uniqueItems":true},
             "topics":{"type":"array","items":{"enum":["radio","links","phone_patch","telemetry","equipment","resources","diagnostics","meters"]},"uniqueItems":true}
         }));
