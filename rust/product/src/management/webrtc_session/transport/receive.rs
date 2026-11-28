@@ -18,6 +18,8 @@ pub(super) const MAX_RTP_PAYLOAD: usize = 65_527;
 const KEY_LIFETIME: Duration = Duration::from_millis(TIMING_LIFETIME_MS as u64);
 const INITIAL_KEY_WAIT: Duration = Duration::from_millis(500);
 const MAX_MEDIA_AGE: Duration = Duration::from_millis(200);
+const MAX_RTP_GAP: u64 = CLOCK_HZ as u64 / 5;
+const RTP_OBSERVATION_INTERVAL: Duration = Duration::from_millis(250);
 const FRAME_ORIGINS: usize = 48;
 
 pub(super) struct Receiver {
@@ -51,6 +53,13 @@ struct Talk {
     gate: ReceiveGate,
     reference: Option<Reference>,
     next_rtp: Option<u64>,
+    last_observation: Option<ReportedRtp>,
+}
+
+struct ReportedRtp {
+    end: u64,
+    received_at: Instant,
+    reported_at: Instant,
 }
 
 struct Pending {
@@ -195,6 +204,7 @@ impl Receiver {
                         gate: ReceiveGate::new(grant, grant, KEY_LIFETIME),
                         reference: None,
                         next_rtp: None,
+                        last_observation: None,
                     });
                 }
             }
@@ -335,7 +345,30 @@ impl Receiver {
         {
             return Ok(());
         }
-        if talk.observed && talk.reference.is_none() {
+        if talk
+            .reference
+            .as_ref()
+            .is_some_and(|reference| reference.ssrc != *packet.header.ssrc)
+        {
+            return self.release(endpoint);
+        }
+        if talk.watermark.is_some_and(|cut| start < cut) {
+            return Ok(());
+        }
+        let first_observation = talk.reference.is_none();
+        // Keep refreshes on the current audio stream even if the browser's
+        // predicted lease window no longer covers the arriving packet.
+        if talk.observed
+            && (first_observation
+                || talk.last_observation.as_ref().is_some_and(|previous| {
+                    start >= previous.end
+                        && packet.timestamp > previous.received_at
+                        && now.duration_since(previous.reported_at) >= RTP_OBSERVATION_INTERVAL
+                        && talk.next_rtp.is_some_and(|next| {
+                            start >= next && start - next < MAX_RTP_GAP
+                        })
+                }))
+        {
             let reference = Reference {
                 binding: self.binding.clone(),
                 ssrc: *packet.header.ssrc,
@@ -357,20 +390,23 @@ impl Receiver {
                 .write_channel(ChannelKind::Control, false, &observation, 4096, 4096)
                 .map_err(|_| ())?
             {
-                talk.reference = Some(reference);
-                talk.watermark = Some(end);
+                talk.last_observation = Some(ReportedRtp {
+                    end,
+                    received_at: packet.timestamp,
+                    reported_at: now,
+                });
+                if first_observation {
+                    talk.reference = Some(reference);
+                    talk.watermark = Some(end);
+                }
             }
-            return Ok(());
+            if first_observation {
+                return Ok(());
+            }
         }
         let Some(reference) = &talk.reference else {
             return Ok(());
         };
-        if reference.ssrc != *packet.header.ssrc {
-            return self.release(endpoint);
-        }
-        if talk.watermark.is_some_and(|cut| start < cut) {
-            return Ok(());
-        }
         let uncertainty = if talk.observed {
             // Relative RTP coordinates map to themselves. In this mode the
             // sender capture clock and one-way network delay are unavailable.
@@ -463,7 +499,7 @@ impl Receiver {
                             .as_ref()
                             .and_then(|talk| talk.next_rtp)
                             .map_or(0, |next| start.saturating_sub(next));
-                        if gap >= u64::from(CLOCK_HZ) / 5 {
+                        if gap >= MAX_RTP_GAP {
                             return self.release(endpoint);
                         }
                         self.waiting = Some(Pending {
