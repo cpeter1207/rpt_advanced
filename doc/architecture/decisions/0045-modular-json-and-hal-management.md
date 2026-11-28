@@ -258,6 +258,3 @@ and CSRF checks and authentication callbacks. This leaves the app, API and
 status stream on one browser origin in either deployment. WebRTC signaling
 uses that path. The media and data association retains the separate transport
 defined by ADR 0046.
-
-See the [React console design](../../../docs/superpowers/specs/2026-11-27-controller-react-management-design.md)
-and [implementation checklist](../../../docs/superpowers/plans/2026-11-27-controller-react-management-implementation.md).
