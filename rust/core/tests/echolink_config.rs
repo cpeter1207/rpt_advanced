@@ -60,7 +60,7 @@ fn echolink_defaults_are_disabled_and_have_no_identity_or_secrets() {
         (value.heartbeat_interval_ms, value.heartbeat_timeout_ms),
         (10000, 100000)
     );
-    assert_eq!((value.receive_gain_db, value.transmit_gain_db), (-3.0, 3.0));
+    assert_eq!((value.receive_gain_db, value.transmit_gain_db), (-3.0, 0.0));
     assert!(value.secrets_file.is_none());
 }
 

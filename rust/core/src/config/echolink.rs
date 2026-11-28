@@ -175,7 +175,7 @@ pub(super) fn default_value(key: &str) -> Option<&'static str> {
         "directory_retry_ms" => "20000",
         "directory_freshness_ms" => "900000",
         "receive_gain_db" => "-3",
-        "transmit_gain_db" => "3",
+        "transmit_gain_db" => "0",
         "announcement" => "node",
         "telemetry" => "demand",
         "telemetry_dynamic" => "yes",
