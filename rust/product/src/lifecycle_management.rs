@@ -211,11 +211,14 @@ impl Engine {
                 .collect()
         });
         let engine = Arc::clone(self);
+        let mut clock = self.clock();
         let _ = self.run(move |host| {
             if host.status_selection() != selection {
                 return Ok(None);
             }
-            let mut domain = host.live_domain(&owners, engine.elapsed_ms())?;
+            // Age readings at the control cut, after any queue delay.
+            clock.now_ms = engine.elapsed_ms();
+            let mut domain = host.live_domain(&owners, clock)?;
             domain.site_resources = resources;
             let mut state = engine
                 .management_state

@@ -619,7 +619,9 @@ fn review35_captured_typed_and_ordinary_values_share_the_actual_format_call() {
         time: "12:34",
     });
     assert_eq!(
-        message_forms(&settings, &values, &catalog).unwrap().text,
+        message_forms(&settings, &TextValues::Playback(&values), &catalog)
+            .unwrap()
+            .text,
         "Good day / Station"
     );
 }
@@ -649,7 +651,8 @@ fn real_argument_fallback_resolves_the_installed_forms_own_normal_binding() {
     settings.message_id = Some("no-links".into());
     let mut at_playback = snapshot();
     at_playback.port.name = "z".repeat(126);
-    let formatted = message_forms(&settings, &at_playback, &catalog).unwrap();
+    let formatted =
+        message_forms(&settings, &TextValues::Playback(&at_playback), &catalog).unwrap();
     assert_eq!(formatted.text, format!("PORT {}", at_playback.node));
 }
 #[test]
@@ -675,7 +678,9 @@ fn sparse_builtin_presentation_retains_its_captured_arguments() {
         time: "12:34",
     });
     assert_eq!(
-        message_forms(&settings, &values, &catalog).unwrap().tts,
+        message_forms(&settings, &TextValues::Playback(&values), &catalog)
+            .unwrap()
+            .tts,
         "Hello. The time is 12:34."
     );
 }
@@ -791,7 +796,9 @@ fn round_two_site_fallback_keeps_its_alias_binding() {
     let mut values = snapshot();
     values.port.name = "Z".repeat(126);
     assert_eq!(
-        message_forms(&settings, &values, &catalog).unwrap().text,
+        message_forms(&settings, &TextValues::Playback(&values), &catalog)
+            .unwrap()
+            .text,
         format!("SITE {}", values.node)
     );
 }
@@ -847,11 +854,14 @@ fn round_three_site_candidate_localizes_unavailable_readings_only_when_selected(
         );
         values.port.name = "AB".into();
         assert_eq!(
-            message_forms(&settings, &values, &catalog).unwrap().text,
+            message_forms(&settings, &TextValues::Playback(&values), &catalog)
+                .unwrap()
+                .text,
             "LONG AB"
         );
         values.port.name = "Z".repeat(126);
-        let unavailable = message_forms(&settings, &values, &catalog).unwrap();
+        let unavailable =
+            message_forms(&settings, &TextValues::Playback(&values), &catalog).unwrap();
         assert_eq!(unavailable.text, "outdoor indisponible");
         assert_eq!(unavailable.tts, "outdoor absent");
         let readings = if input {
@@ -861,7 +871,9 @@ fn round_three_site_candidate_localizes_unavailable_readings_only_when_selected(
         };
         readings.get_mut("outdoor").unwrap().quality = ReadingQuality::Valid;
         assert_eq!(
-            message_forms(&settings, &values, &catalog).unwrap().text,
+            message_forms(&settings, &TextValues::Playback(&values), &catalog)
+                .unwrap()
+                .text,
             "TEMP 7"
         );
     }

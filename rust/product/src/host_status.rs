@@ -256,8 +256,9 @@ impl Host {
     pub(crate) fn live_domain(
         &mut self,
         owners: &BTreeMap<Id, u64>,
-        now_ms: u64,
+        clock: RuntimeClock,
     ) -> Result<Domain, RuntimeError> {
+        let now_ms = clock.now_ms;
         let mut domain = Domain::default();
         for (id, generation) in owners {
             let local = id.to_string();
@@ -415,7 +416,7 @@ impl Host {
             port.calls
                 .sort_unstable_by(|a, b| a.call_id.cmp(&b.call_id));
         }
-        self.live_site_status(&mut domain, now_ms);
+        self.live_site_status(&mut domain, clock);
         Ok(domain)
     }
 }

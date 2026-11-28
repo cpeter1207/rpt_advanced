@@ -186,6 +186,33 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     echo_telemetry: crate::link::EchoTelemetryPolicy,
     echo_announcement: crate::config::EchoLinkAnnouncement,
 }
+impl crate::config::resources::generation::ScopeConfiguration {
+    /// Render a sensor's public label against this status cut. A site has equipment
+    /// and a clock even when it has no radio identity or link manager.
+    pub fn sensor_display_name<A: Send, C: Send>(
+        &self,
+        name: &str,
+        site: &crate::site::SiteSnapshot,
+        clock: RuntimeClock,
+        node: Option<&RuntimeNode<A, C>>,
+    ) -> Option<String> {
+        use crate::composition::CompositionError;
+        let recipe = self.equipment.labels.get(name)?;
+        let key = node
+            .and_then(|n| n.links.command_profile())
+            .map(|p| p.public_key.as_str());
+        let port = node
+            .and_then(|n| n.command_messages.as_ref())
+            .map(|messages| &messages.port);
+        recipe.status_label(self, site, clock, key, port, || {
+            let node = node.ok_or(CompositionError::Preparation)?;
+            render::direct_status(node.links.manager(), &self.messages.catalog)
+                .map(|(forms, _)| forms)
+                .map_err(|_| CompositionError::Preparation)
+        })
+    }
+}
+
 impl<A: Send, C: Send> RuntimeNode<A, C> {
     /// Reconcile event group holds before reserving any route operation. Verify this node's
     /// exact registered port key and link generation at the existing route owner.

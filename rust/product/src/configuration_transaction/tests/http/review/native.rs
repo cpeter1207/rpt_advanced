@@ -1236,6 +1236,7 @@ fn shared_site_without_radios(client: &Client<'_>, engine: &Arc<Engine>, opens: 
 
     fs::write(board.join("pwm1_enable"), b"1\n").unwrap();
     fs::write(board.join("pwm1"), b"0\n").unwrap();
+    let mut records = vec![("temperature", sensor.clone())];
     for (collection, key, configuration) in [
         (
             "outputs",
@@ -1257,12 +1258,13 @@ fn shared_site_without_radios(client: &Client<'_>, engine: &Arc<Engine>, opens: 
             "off_temperature":35,"output":"blower"}),
         ),
     ] {
-        edit(
+        let row = edit(
             client,
             "POST",
             &format!("{SITE_PATH}{collection}/"),
             json!({"key":key,"configuration":configuration}),
         );
+        records.push((key, row.headers["location"].clone()));
     }
     wait_until(|| {
         let text = status();
@@ -1275,6 +1277,50 @@ fn shared_site_without_radios(client: &Client<'_>, engine: &Arc<Engine>, opens: 
             })
             && fs::read(board.join("pwm1")).unwrap() == b"255\n"
     });
+    let snapshot = "/api/v1/status/snapshot/?site=true&topics=equipment";
+    let last = records
+        .last()
+        .unwrap()
+        .1
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap();
+    wait_until(|| client.get(snapshot).body["status"]["site"]["equipment"][last].is_object());
+    let cut = client.get(snapshot);
+    assert_eq!(cut.code, 200);
+    let equipment = &cut.body["status"]["site"]["equipment"];
+    for (key, location) in records {
+        let id = location.trim_end_matches('/').rsplit('/').next().unwrap();
+        let row = &equipment[id];
+        assert_eq!(
+            row["key"], key,
+            "zero-radio equipment must carry its registered key"
+        );
+        if key == "temperature" {
+            assert_eq!(row["name"], "Cabinet temperature");
+        }
+    }
+    let revision_before = cut.body["active_revision"].clone();
+    let original = client.get(&sensor).body["configuration"].take();
+    let mut fields = original.clone();
+    fields["label"] = json!("Sensor { $peer-node-number }");
+    put(client, &sensor, fields);
+    let sensor_id = sensor.trim_end_matches('/').rsplit('/').next().unwrap();
+    wait_until(|| {
+        let cut = client.get(snapshot);
+        cut.code == 200
+            && cut.body["active_revision"] != revision_before
+            && cut.body["status"]["site"]["equipment"][sensor_id].is_object()
+    });
+    let cut = client.get(snapshot);
+    let row = &cut.body["status"]["site"]["equipment"][sensor_id];
+    assert_eq!(row["key"], "temperature");
+    assert!(
+        row.get("name").is_none(),
+        "an unbound event cannot supply a sensor name"
+    );
+    put(client, &sensor, original);
     assert_eq!(fixture::RADIO_OPENS.load(Ordering::Acquire), opens);
 }
 
@@ -1803,7 +1849,7 @@ fn shared_radio_views(
         other,
         "sensors",
         "sense",
-        json!({"label":"Port gauge",
+        json!({"label":"Port gauge { $node-key }",
         "calibration":calibration(10,30),"timing":{"poll_interval_ms":10,"stale_after_ms":100}}),
     );
     equipment(other, "inputs", "door", json!({"active_level":"high"}));
@@ -1822,7 +1868,7 @@ fn shared_radio_views(
         "ptt_nodes":["selected radio"],"timing":{"run_on_ms":0}}),
     );
     let view = client.get(&effective(&override_path));
-    assert_eq!(view.body["effective"]["label"], "Port gauge");
+    assert_eq!(view.body["effective"]["label"], "Port gauge { $node-key }");
     assert_eq!(
         view.body["meta"]["sources"]["/source/property"]["href"],
         sensor
@@ -1833,6 +1879,43 @@ fn shared_radio_views(
     );
     let first_view = client.get(&effective(&sensor));
     assert_eq!(first_view.body["effective"]["label"], "Site gauge");
+    let site_id = sensor.trim_end_matches('/').rsplit('/').next().unwrap();
+    let port_id = override_path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap();
+    assert_ne!(site_id, port_id);
+    let target = format!("/api/v1/status/snapshot/?site=true&port={a}&port={b}&topics=equipment");
+    wait_until(|| {
+        client.get(&target).body["status"]["ports"][b.to_string()]["equipment"][port_id].is_object()
+    });
+    let cut = client.get(&target);
+    assert_eq!(cut.code, 200);
+    let site = &cut.body["status"]["site"]["equipment"];
+    let inherited = &cut.body["status"]["ports"][a.to_string()]["equipment"];
+    let overridden = &cut.body["status"]["ports"][b.to_string()]["equipment"];
+    assert_eq!(
+        site[site_id]["name"], "Site gauge",
+        "site sensor must carry its configured display name"
+    );
+    for (row, label) in [
+        (&site[site_id], "Site gauge"),
+        (&inherited[site_id], "Site gauge"),
+        (&overridden[port_id], "Port gauge radio"),
+    ] {
+        assert_eq!(row["key"], "sense");
+        assert_eq!(row["name"], label);
+    }
+    assert!(site.get(port_id).is_none());
+    assert!(overridden.get(site_id).is_none());
+    assert!(
+        inherited
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|row| row["key"] == "door")
+    );
 
     let inspect = |advance, sample_time, quality| {
         let mut clock = engine.clock();

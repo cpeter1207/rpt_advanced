@@ -129,7 +129,7 @@ impl Host {
     pub(super) fn live_site_status(
         &mut self,
         result: &mut crate::management::live::Domain,
-        now: u64,
+        clock: RuntimeClock,
     ) {
         use rpt_advanced_core::site::ReadingQuality;
         use serde_json::json;
@@ -147,13 +147,14 @@ impl Host {
             .keys()
             .filter_map(|scope| {
                 let site = self.runtime.site_controller(&scope_name(*scope))?;
-                Some((*scope, site.snapshot(now)))
+                Some((*scope, site.snapshot(clock.now_ms)))
             })
             .collect();
         for (scope, view) in &domain.scopes {
             if !snapshots.contains_key(scope) {
                 continue;
             }
+            let node = self.runtime.node(&scope_name(*scope));
             for ((kind, key), (binding, _)) in &view.equipment.effective {
                 let owner = match kind {
                     ResourceKind::Alarm | ResourceKind::Output | ResourceKind::Fan => binding.scope,
@@ -185,7 +186,14 @@ impl Host {
                     }),
                     _ => None,
                 };
-                if let Some(fields) = observation {
+                if let Some(mut fields) = observation {
+                    fields["key"] = json!(name);
+                    if *kind == ResourceKind::Sensor
+                        && let Some(label) =
+                            view.sensor_display_name(name, s, clock, node.as_deref())
+                    {
+                        fields["name"] = json!(label);
+                    }
                     result.resources.insert((*scope, binding.id), fields);
                 }
             }

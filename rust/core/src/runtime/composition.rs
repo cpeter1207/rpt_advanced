@@ -355,43 +355,125 @@ impl MessageValueSnapshot {
         source: &'a BindingSource,
         catalog: &MessageCatalog,
     ) -> Result<BoundValue<'a>, CompositionError> {
-        let (year, month, day, weekday, hour, minute) = self.civil.components();
-        let forms = match source {
-            BindingSource::Sensor(name) | BindingSource::Input(name) => {
-                let values = if matches!(source, BindingSource::Sensor(_)) {
-                    &self.sensors
+        TextValues::Playback(self).binding(source, catalog)
+    }
+}
+
+enum TextValues<'a> {
+    Playback(&'a MessageValueSnapshot),
+    Status {
+        site: &'a crate::site::SiteSnapshot,
+        clock: super::RuntimeClock,
+        scope: &'a crate::config::resources::generation::ScopeConfiguration,
+        node_key: Option<&'a str>,
+        port: Option<&'a MessagePortIdentity>,
+        links: &'a dyn Fn() -> Result<MessageForms, CompositionError>,
+    },
+}
+
+fn observed<T>(reading: &Observation<T>) -> Option<&T> {
+    (reading.quality == ReadingQuality::Valid && reading.observed_at_ms.is_some())
+        .then_some(reading.value.as_ref())
+        .flatten()
+}
+
+impl TextValues<'_> {
+    fn binding<'a>(
+        &self,
+        source: &'a BindingSource,
+        catalog: &MessageCatalog,
+    ) -> Result<BoundValue<'a>, CompositionError> {
+        if let BindingSource::Sensor(name) | BindingSource::Input(name) = source {
+            let sensor = matches!(source, BindingSource::Sensor(_));
+            let value = match self {
+                Self::Playback(values) => (if sensor {
+                    &values.sensors
                 } else {
-                    &self.inputs
-                };
-                let value = values.get(name).filter(|reading| {
-                    reading.quality == ReadingQuality::Valid && reading.observed_at_ms.is_some()
-                }).and_then(|reading| reading.value.as_ref()).filter(|value| {
-                    !matches!(value, MessageArgument::Number(number) if !number.is_finite())
-                }).cloned();
-                return Ok(value.map_or(BoundValue::Unavailable(name), BoundValue::Available));
+                    &values.inputs
+                })
+                .get(name)
+                .and_then(observed)
+                .cloned(),
+                Self::Status { site, .. } if sensor => site
+                    .sensors
+                    .get(name)
+                    .and_then(|s| observed(&s.current))
+                    .copied()
+                    .map(MessageArgument::Number),
+                Self::Status { site, .. } => site
+                    .inputs
+                    .get(name)
+                    .and_then(observed)
+                    .map(|&v| MessageArgument::Number(f64::from(v))),
             }
+            .filter(|value| !matches!(value, MessageArgument::Number(n) if !n.is_finite()));
+            return match (self, value) {
+                (_, Some(value)) => Ok(BoundValue::Available(value)),
+                (Self::Playback(_), None) => Ok(BoundValue::Unavailable(name)),
+                (Self::Status { .. }, None) => Err(CompositionError::Preparation),
+            };
+        }
+        let (node, callsign, port, event) = match self {
+            Self::Playback(v) => (
+                Some(v.node.as_str()),
+                v.callsign.as_str(),
+                Some(&v.port),
+                v.event.as_ref(),
+            ),
+            Self::Status {
+                scope,
+                node_key,
+                port,
+                ..
+            } => (*node_key, scope.metadata.callsign.as_str(), *port, None),
+        };
+        let calendar = || -> Result<_, CompositionError> {
+            match self {
+                Self::Playback(v) => Ok((v.civil.components(), v.time_format)),
+                Self::Status { clock, scope, .. } => Ok((
+                    clock
+                        .civil
+                        .ok_or(CompositionError::Preparation)?
+                        .0
+                        .components(),
+                    TimeFormat::try_from(scope.telemetry.time.format)
+                        .map_err(|_| CompositionError::Preparation)?,
+                )),
+            }
+        };
+        let forms = match source {
+            BindingSource::Sensor(_) | BindingSource::Input(_) => unreachable!(),
             BindingSource::TimeRemaining => {
-                return self
+                let Self::Playback(values) = self else {
+                    return Err(CompositionError::Preparation);
+                };
+                return values
                     .time_remaining
                     .clone()
                     .map(BoundValue::Available)
                     .ok_or(CompositionError::Preparation);
             }
+            BindingSource::Callsign
+                if matches!(self, Self::Status { .. }) && callsign.is_empty() =>
+            {
+                return Err(CompositionError::Preparation);
+            }
             BindingSource::Callsign => MessageForms {
-                text: self.callsign.clone(),
-                tts: spelled(&self.callsign),
-                morse: self.callsign.clone(),
+                text: callsign.to_owned(),
+                tts: spelled(callsign),
+                morse: callsign.to_owned(),
             },
             BindingSource::Identity(source) => {
                 use crate::config::IdentitySource::*;
-                let event = self.event.as_ref();
                 let (value, spell) = match source {
-                    NodeKey => (Some(self.node.as_str()), true),
-                    NodeName => (Some(self.port.name.as_str()), false),
-                    AllstarlinkNumber => (self.port.allstarlink_number.as_deref(), true),
-                    AllstarlinkCallsign => (self.port.allstarlink_callsign.as_deref(), true),
-                    EcholinkNumber => (self.port.echolink_number.as_deref(), true),
-                    EcholinkCallsign => (self.port.echolink_callsign.as_deref(), true),
+                    NodeKey => (node, true),
+                    NodeName => (port.map(|p| p.name.as_str()), false),
+                    AllstarlinkNumber => (port.and_then(|p| p.allstarlink_number.as_deref()), true),
+                    AllstarlinkCallsign => {
+                        (port.and_then(|p| p.allstarlink_callsign.as_deref()), true)
+                    }
+                    EcholinkNumber => (port.and_then(|p| p.echolink_number.as_deref()), true),
+                    EcholinkCallsign => (port.and_then(|p| p.echolink_callsign.as_deref()), true),
                     PeerNumber => (event.and_then(|e| e.peer_number.as_deref()), true),
                     PeerCallsign => (event.and_then(|e| e.peer_callsign.as_deref()), true),
                     PeerProtocol => (event.and_then(|e| e.peer_protocol.as_deref()), false),
@@ -406,32 +488,38 @@ impl MessageValueSnapshot {
                     morse: value.into(),
                 }
             }
-            BindingSource::Node => catalog
-                .format_named(
-                    "binding-node",
-                    &BTreeMap::from([
-                        ("node".into(), uniform(&self.node)),
-                        ("digits".into(), uniform(&spelled(&self.node))),
-                    ]),
-                )
-                .map_err(|_| CompositionError::Preparation)?,
-            BindingSource::Date => catalog
-                .format_named(
-                    "binding-date",
-                    &BTreeMap::from([
-                        (
-                            "date".into(),
-                            uniform(&format!("{year:04}-{month:02}-{day:02}")),
-                        ),
-                        ("year".into(), MessageArgument::Number(year.into())),
-                        ("month".into(), MessageArgument::Number(month.into())),
-                        ("day".into(), MessageArgument::Number(day.into())),
-                    ]),
-                )
-                .map_err(|_| CompositionError::Preparation)?,
+            BindingSource::Node => {
+                let node = node.ok_or(CompositionError::Preparation)?;
+                catalog
+                    .format_named(
+                        "binding-node",
+                        &BTreeMap::from([
+                            ("node".into(), uniform(node)),
+                            ("digits".into(), uniform(&spelled(node))),
+                        ]),
+                    )
+                    .map_err(|_| CompositionError::Preparation)?
+            }
+            BindingSource::Date => {
+                let ((year, month, day, _, _, _), _) = calendar()?;
+                catalog
+                    .format_named(
+                        "binding-date",
+                        &BTreeMap::from([
+                            (
+                                "date".into(),
+                                uniform(&format!("{year:04}-{month:02}-{day:02}")),
+                            ),
+                            ("year".into(), MessageArgument::Number(year.into())),
+                            ("month".into(), MessageArgument::Number(month.into())),
+                            ("day".into(), MessageArgument::Number(day.into())),
+                        ]),
+                    )
+                    .map_err(|_| CompositionError::Preparation)?
+            }
             BindingSource::Time => {
-                let clock = self
-                    .time_format
+                let ((_, _, _, _, hour, minute), format) = calendar()?;
+                let clock = format
                     .clock(hour.into(), minute.into())
                     .map_err(|_| CompositionError::Preparation)?;
                 catalog
@@ -445,19 +533,28 @@ impl MessageValueSnapshot {
                     )
                     .map_err(|_| CompositionError::Preparation)?
             }
-            BindingSource::DayOfWeek => catalog
-                .format(&Message::DayOfWeek { day: weekday })
-                .map_err(|_| CompositionError::Preparation)?,
-            BindingSource::Greeting => catalog
-                .format(&Message::Greeting {
-                    daypart: match hour {
-                        0..=11 => Daypart::Morning,
-                        12..=16 => Daypart::Afternoon,
-                        _ => Daypart::Evening,
-                    },
-                })
-                .map_err(|_| CompositionError::Preparation)?,
-            BindingSource::LinkStatus => self.links.clone(),
+            BindingSource::DayOfWeek => {
+                let ((_, _, _, weekday, _, _), _) = calendar()?;
+                catalog
+                    .format(&Message::DayOfWeek { day: weekday })
+                    .map_err(|_| CompositionError::Preparation)?
+            }
+            BindingSource::Greeting => {
+                let ((_, _, _, _, hour, _), _) = calendar()?;
+                catalog
+                    .format(&Message::Greeting {
+                        daypart: match hour {
+                            0..=11 => Daypart::Morning,
+                            12..=16 => Daypart::Afternoon,
+                            _ => Daypart::Evening,
+                        },
+                    })
+                    .map_err(|_| CompositionError::Preparation)?
+            }
+            BindingSource::LinkStatus => match self {
+                Self::Playback(v) => v.links.clone(),
+                Self::Status { links, .. } => links()?,
+            },
         };
         Ok(BoundValue::Available(MessageArgument::Forms(forms)))
     }
@@ -481,14 +578,17 @@ fn spelled(identity: &str) -> String {
 
 fn message_forms(
     settings: &ResolvedMessageSettings,
-    values: &MessageValueSnapshot,
+    values: &TextValues<'_>,
     catalog: &MessageCatalog,
 ) -> Result<MessageForms, CompositionError> {
     let id = settings
         .message_id
         .as_deref()
         .ok_or(CompositionError::MissingDefinition)?;
-    let captured = values.builtin.get(id);
+    let captured = match values {
+        TextValues::Playback(v) => v.builtin.get(id),
+        TextValues::Status { .. } => None,
+    };
     bound_forms(
         &settings.bindings,
         catalog.fallback_bindings.get(id),
@@ -513,7 +613,7 @@ fn message_forms(
 
 fn inherited_arguments(
     sources: Option<&BTreeMap<String, BindingSource>>,
-    values: &MessageValueSnapshot,
+    values: &TextValues<'_>,
     catalog: &MessageCatalog,
 ) -> crate::messages::InheritedArguments {
     let mut arguments = crate::messages::InheritedArguments::default();
@@ -533,7 +633,7 @@ fn inherited_arguments(
 
 fn fragment_forms(
     text: &crate::messages::projection::CompiledText,
-    values: &MessageValueSnapshot,
+    values: &TextValues<'_>,
     catalog: &MessageCatalog,
     spoken: bool,
 ) -> Result<MessageForms, CompositionError> {
@@ -552,7 +652,7 @@ fn fragment_forms(
 fn bound_forms(
     bindings: &BTreeMap<String, BindingSource>,
     lower: Option<&BTreeMap<String, BindingSource>>,
-    values: &MessageValueSnapshot,
+    values: &TextValues<'_>,
     catalog: &MessageCatalog,
     format: impl FnOnce(
         &BTreeMap<String, MessageArgument>,
@@ -720,7 +820,7 @@ impl Composition {
         &'a self,
         segment: &Segment,
         catalog: &MessageCatalog,
-        values: &MessageValueSnapshot,
+        values: &TextValues<'_>,
         spoken: bool,
     ) -> Result<(&'a ResolvedMessageSettings, MessageForms), CompositionError> {
         let (owner, forms) = match segment {
@@ -736,6 +836,33 @@ impl Composition {
         Ok((self.settings_for(owner.as_deref()), forms))
     }
 
+    pub(super) fn status_label(
+        &self,
+        scope: &crate::config::resources::generation::ScopeConfiguration,
+        site: &crate::site::SiteSnapshot,
+        clock: super::RuntimeClock,
+        node_key: Option<&str>,
+        port: Option<&MessagePortIdentity>,
+        links: impl Fn() -> Result<MessageForms, CompositionError>,
+    ) -> Option<String> {
+        let values = TextValues::Status {
+            scope,
+            site,
+            clock,
+            node_key,
+            port,
+            links: &links,
+        };
+        let mut label = String::new();
+        for part in self.segments() {
+            let (_, forms) = self
+                .text_part(part, &scope.messages.catalog, &values, false)
+                .ok()?;
+            label.push_str(&forms.text);
+        }
+        (!label.trim().is_empty()).then_some(label)
+    }
+
     /// Return ordered bounded text forms for a label or protocol status using this attempt's
     /// actual snapshot. A media part fails instead of being converted to a file name or tone.
     pub fn prepare_text(
@@ -746,7 +873,7 @@ impl Composition {
         self.segments()
             .iter()
             .map(|s| {
-                self.text_part(s, catalog, values, false)
+                self.text_part(s, catalog, &TextValues::Playback(values), false)
                     .map(|(_, forms)| forms)
             })
             .collect()
@@ -767,7 +894,8 @@ impl Composition {
         for segment in self.segments() {
             let source = match segment {
                 Segment::Message(_) | Segment::Fluent { .. } => {
-                    let (settings, forms) = self.text_part(segment, catalog, values, true)?;
+                    let (settings, forms) =
+                        self.text_part(segment, catalog, &TextValues::Playback(values), true)?;
                     spoken_source(forms, settings)?
                 }
                 Segment::FluentMedia {
@@ -777,10 +905,13 @@ impl Composition {
                 } => {
                     let mut media = self.settings_for(owner.as_deref()).media.clone();
                     if let (Some(source), Some(text)) = (&mut media.speech, speech) {
-                        source.text = fragment_forms(text, values, catalog, false)?.tts;
+                        source.text =
+                            fragment_forms(text, &TextValues::Playback(values), catalog, false)?
+                                .tts;
                     }
                     if let (Some(source), Some(text)) = (&mut media.morse, morse) {
-                        let forms = fragment_forms(text, values, catalog, true)?;
+                        let forms =
+                            fragment_forms(text, &TextValues::Playback(values), catalog, true)?;
                         source.text =
                             render::morse(&forms.morse).ok_or(CompositionError::Preparation)?;
                         crate::audio::MorseRenderer::new(
