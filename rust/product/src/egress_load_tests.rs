@@ -313,6 +313,12 @@ fn egress_full_path_load() {
         &[
             (
                 local,
+                ResourceKind::Interface,
+                "",
+                json!({"audio":{"device_identifier":"usb"}}),
+            ),
+            (
+                local,
                 ResourceKind::Radio,
                 "",
                 json!({"duplex_mode":"full"}),
