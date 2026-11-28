@@ -1533,6 +1533,16 @@ fn attach(
     action: LinkAction,
     mode: Mode,
 ) -> Arc<Mutex<crate::link::session::tests::State>> {
+    attach_at_rate(host, remote, action, mode, 48_000)
+}
+
+fn attach_at_rate(
+    host: &mut Host,
+    remote: &str,
+    action: LinkAction,
+    mode: Mode,
+    codec_rate: u32,
+) -> Arc<Mutex<crate::link::session::tests::State>> {
     let effect = host
         .runtime
         .command(LOCAL, operation(action, remote), clock(), false)
@@ -1545,7 +1555,7 @@ fn attach(
             .finish_connect(LOCAL, attempt, true, clock())
             .unwrap()
     );
-    let (io, state) = peer(48000);
+    let (io, state) = peer(codec_rate);
     host.attach_peer(LOCAL, remote, mode, io, clock()).unwrap();
     pump_until(host, |host| {
         named_peer_ready(host, remote)
@@ -3053,6 +3063,7 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
     let api = unsafe {
         crate::configuration_radio::RadioPreparationApi::fixture_descriptors(|ordinary, roles| {
             ordinary.link_process = Some(process);
+            ordinary.link_process_f32 = None;
             ordinary.link_destroy = Some(destroy);
             roles.prepare = Some(role);
             roles.equal = Some(role_equal);
@@ -3075,7 +3086,19 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
     host.radio_preparation.fixture_set_api(api);
     host.fixture_reload(config(-10), clock()).unwrap();
     assert!(state.prepared.lock().unwrap().is_empty());
-    let _peer = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let codec_rate = 8_000;
+    let _peer = attach_at_rate(
+        &mut host,
+        "2000",
+        LinkAction::Transceive,
+        Mode::TRANSCEIVE,
+        codec_rate,
+    );
+    assert_eq!(
+        host.peers[0].control.snapshot().unwrap().input_rate,
+        codec_rate,
+        "the ingress ring must retain the negotiated codec rate"
+    );
     pump_until(&mut host, |host| {
         host.runtime.status(10)[0].1.retiring.is_none()
     });

@@ -1,4 +1,4 @@
-//! One native graph and its preallocated signed-PCM buffer, owned by the receive path.
+//! One receive-path DSP graph with a preallocated buffer for signed-PCM-only providers.
 
 pub(super) struct Processor {
     pub(super) graph: crate::configuration_radio::PreparedPeer,
@@ -10,6 +10,9 @@ impl Processor {
         let Some(block) = self.samples.get_mut(..pcm.len()) else {
             return false;
         };
+        if let Some(result) = self.graph.process_f32(pcm) {
+            return result.is_ok();
+        }
         for (target, source) in block.iter_mut().zip(pcm.iter()) {
             *target = (*source * 32768.0).round() as i16;
         }

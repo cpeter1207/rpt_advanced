@@ -435,7 +435,7 @@ impl PeerAudio {
         let input = if let Some(plan) = graph.filter(|plan| plan.process_incoming) {
             let instance = plan
                 .incoming
-                .prepare_peer(input_rate, MAXIMUM_FRAMES as u32)
+                .prepare_peer(crate::status_meter::NATIVE_RATE, MAXIMUM_FRAMES as u32)
                 .map_err(|_| RuntimeError::Preparation)?;
             input.install_provider_observer(instance.output_observer());
             ProcessedPeer::modular(input, instance, MAXIMUM_FRAMES)

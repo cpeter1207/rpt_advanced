@@ -150,6 +150,26 @@ impl PreparedPeer {
         })
     }
 
+    /// Prefer the float callback when the admitted provider exposes it.
+    /// A missing callback allows the old signed-PCM path, but a failed call does not.
+    pub(crate) fn process_f32(&mut self, samples: &mut [f32]) -> Option<Result<()>> {
+        let process = self.product.ordinary().link_process_f32?;
+        let Ok(count) = u32::try_from(samples.len()) else {
+            return Some(Err(PreparationError::Limit));
+        };
+        // SAFETY: this exclusive graph owner retains the provider and writable PCM
+        // span throughout the call.
+        Some(succeeded(unsafe {
+            process(
+                self.peer.as_ptr(),
+                abi::URP_AST_LINK_DIRECTION_READ,
+                self.rate,
+                samples.as_mut_ptr(),
+                count,
+            )
+        }))
+    }
+
     /// Process one incoming mono PCM block. Mutable access serializes graph calls.
     pub fn process(&mut self, samples: &mut [i16]) -> Result<()> {
         let count = u32::try_from(samples.len()).map_err(|_| PreparationError::Limit)?;

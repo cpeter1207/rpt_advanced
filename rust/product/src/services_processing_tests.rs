@@ -49,6 +49,29 @@ unsafe extern "C" fn process(
     0
 }
 
+unsafe extern "C" fn process_f32(
+    context: *mut c_void,
+    direction: u32,
+    rate: u32,
+    samples: *mut f32,
+    count: u32,
+) -> i32 {
+    assert_eq!(direction, abi::URP_AST_LINK_DIRECTION_READ);
+    assert_eq!(rate, 8000);
+    // SAFETY: the typed graph keeps the transferred Arc and PCM block live.
+    let state = unsafe { &*context.cast::<State>() };
+    state.processed.fetch_add(1, Ordering::Relaxed);
+    let samples = unsafe { std::slice::from_raw_parts_mut(samples, count as usize) };
+    if state.mode == 7 {
+        samples.fill(1.0);
+        return -1;
+    }
+    for sample in samples {
+        *sample *= 0.5;
+    }
+    0
+}
+
 unsafe extern "C" fn destroy(context: *mut c_void) {
     // SAFETY: the factory transferred precisely this Arc into the typed graph.
     let state = unsafe { Arc::from_raw(context.cast::<State>()) };
@@ -56,6 +79,13 @@ unsafe extern "C" fn destroy(context: *mut c_void) {
 }
 
 fn fixture(mode: usize) -> (Arc<State>, Result<PreparedPeer, PreparationError>) {
+    fixture_with_float(mode, false)
+}
+
+fn fixture_with_float(
+    mode: usize,
+    float: bool,
+) -> (Arc<State>, Result<PreparedPeer, PreparationError>) {
     let state = Arc::new(State {
         mode,
         processed: AtomicUsize::new(0),
@@ -71,6 +101,7 @@ fn fixture(mode: usize) -> (Arc<State>, Result<PreparedPeer, PreparationError>) 
             8000,
             |table| {
                 table.link_process = Some(process);
+                table.link_process_f32 = if float { Some(process_f32) } else { None };
                 table.link_destroy = Some(destroy);
             },
             |ffmpeg, output| {
@@ -95,6 +126,7 @@ struct Source {
     signals: PeerSignals,
     real: Option<usize>,
     renders: usize,
+    block_sample: f32,
 }
 impl Source {
     fn new(real: Option<usize>) -> Self {
@@ -102,6 +134,7 @@ impl Source {
             signals: PeerSignals::default(),
             real,
             renders: 0,
+            block_sample: 0.5,
         }
     }
 }
@@ -142,7 +175,7 @@ impl Input for Source {
     }
     fn render(&mut self, samples: &mut [f32]) -> Option<usize> {
         self.renders += 1;
-        samples.fill(0.5);
+        samples.fill(self.block_sample);
         self.real
     }
 }
@@ -269,6 +302,29 @@ fn peer_processor_filters_native_ring_output_including_concealment_once() {
     assert_eq!(state.processed.load(Ordering::Relaxed), 2);
     drop(input);
     assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn peer_processor_preserves_float_headroom_before_native_dsp() {
+    let (state, graph) = fixture_with_float(0, true);
+    let mut source = Source::new(Some(4));
+    source.block_sample = 1.25;
+    let mut input = ProcessedPeer::modular(source, graph.unwrap(), 4);
+    let mut samples = [0.0; 4];
+    assert_eq!(input.render(&mut samples), Some(4));
+    assert_eq!(samples, [0.625; 4]);
+    assert_eq!(state.processed.load(Ordering::Relaxed), 1);
+
+    let mut oversized = [0.0; 5];
+    assert_eq!(input.render(&mut oversized), None);
+    assert_eq!(oversized, [0.0; 5]);
+    assert_eq!(state.processed.load(Ordering::Relaxed), 1);
+
+    let (state, graph) = fixture_with_float(7, true);
+    let mut failed = ProcessedPeer::modular(Source::new(Some(4)), graph.unwrap(), 4);
+    assert_eq!(failed.render(&mut samples), None);
+    assert_eq!(samples, [0.0; 4]);
+    assert_eq!(state.processed.load(Ordering::Relaxed), 1);
 }
 
 #[test]
